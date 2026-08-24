@@ -21,6 +21,8 @@ dependencies = [
     # --- 設定・秘匿情報 ---
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
+    # .env を os.environ を汚さずに読むため直接使う（config.py 参照）。
+    "python-dotenv>=1.0",
     "keyring>=25.0",
     # --- 運用 ---
     "structlog>=24.4",

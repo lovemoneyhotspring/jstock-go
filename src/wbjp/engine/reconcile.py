@@ -97,7 +97,7 @@ def effective_quantity(
     return quantity
 
 
-def make_client_order_id(run_id: str, symbol: str, side: Side, quantity: Decimal) -> str:
+def make_client_order_id(seed_key: str, symbol: str, side: Side, quantity: Decimal) -> str:
     """注文IDを**決定論的に**作る。
 
     同じ判断からは必ず同じIDが出る。つまり、同じ実行を2回走らせても
@@ -105,7 +105,7 @@ def make_client_order_id(run_id: str, symbol: str, side: Side, quantity: Decimal
 
     Webull の上限は32文字。ハッシュで詰める。
     """
-    seed = f"{run_id}|{symbol}|{side.value}|{quantity}"
+    seed = f"{seed_key}|{symbol}|{side.value}|{quantity}"
     return hashlib.sha256(seed.encode()).hexdigest()[:32]
 
 
@@ -115,7 +115,7 @@ def reconcile(
     open_orders: Iterable[Order],
     prices: dict[str, Decimal],
     *,
-    run_id: str,
+    order_id_seed: str,
     settings: ReconcileSettings | None = None,
     lot_sizes: dict[str, Decimal] | None = None,
     topix500: set[str] | None = None,
@@ -128,7 +128,9 @@ def reconcile(
         positions: 現在の建玉。
         open_orders: 未約定の注文。**必ず渡すこと。**
         prices: 銘柄 → 直近終値。指値の基準に使う。
-        run_id: この実行の識別子。注文IDの決定論的な生成に使う。
+        order_id_seed: 注文IDの種。**取引日**を渡すこと。実行ごとに変わる
+            値（run_id など）を渡すと、同じ日の再実行が別の注文IDになり
+            二重発注になる。
         bought_today: 当日買い付けた銘柄。差金決済の防止に使う。
 
     Returns:
@@ -185,7 +187,7 @@ def reconcile(
             side=side,
             quantity=tradable,
             price=price,
-            run_id=run_id,
+            order_id_seed=order_id_seed,
             settings=settings,
             topix500=symbol in topix500,
             reason=target.reason,
@@ -211,12 +213,12 @@ def _build_order(
     side: Side,
     quantity: Decimal,
     price: Decimal | None,
-    run_id: str,
+    order_id_seed: str,
     settings: ReconcileSettings,
     topix500: bool,
     reason: str,
 ) -> OrderRequest:
-    client_order_id = make_client_order_id(run_id, symbol, side, quantity)
+    client_order_id = make_client_order_id(order_id_seed, symbol, side, quantity)
 
     if settings.order_type == "market" or price is None:
         return OrderRequest(

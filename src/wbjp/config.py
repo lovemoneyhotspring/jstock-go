@@ -1,8 +1,9 @@
 """設定と秘匿情報の管理。
 
 方針:
-    - **秘密はリポジトリにも .env にも置かない。** App Key / Secret は
-      OS のキーチェーンに保管し、環境変数はサーバー運用向けの補助とする。
+    - **秘密はリポジトリに置かない。** ローカル開発では OS のキーチェーンに
+      保管する。キーチェーンの無いサーバー（ヘッドレスな Linux など）では
+      環境変数か、パーミッションを絞った ``.env`` を使う。
     - 環境（uat / prod）ごとに認証情報を完全に分ける。取り違えて本番に
       発注する事故を、名前空間の分離で防ぐ。
     - **実発注には ``WBJP_ENV=prod`` と ``--live`` の両方が要る。**
@@ -13,20 +14,35 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import stat
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self
 
+import structlog
+from dotenv import dotenv_values
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from wbjp.domain.models import TaxAccountType
 
+log = structlog.get_logger(__name__)
+
 #: キーチェーンのサービス名の接頭辞。環境ごとに別エントリになる。
 KEYRING_SERVICE_PREFIX = "wbjp"
+
+#: 既定の ``.env`` の場所（プロセスのカレントディレクトリ）。
+DEFAULT_ENV_FILE = Path(".env")
+
+#: ``.env`` の場所を絶対パスで上書きする環境変数。
+ENV_FILE_OVERRIDE_VAR = "WBJP_ENV_FILE"
+
+#: 認証情報を構成する項目。
+_CREDENTIAL_FIELDS = ("app_key", "app_secret", "account_id")
 
 #: Webull の API キーは既定でこの日数で失効する。
 API_KEY_VALIDITY_DAYS = 45
@@ -128,51 +144,102 @@ def _from_keyring(env: Environment) -> dict[str, str | None]:
         import keyring
     except ImportError:  # pragma: no cover - keyring は必須依存
         return {}
+
     service = _keyring_service(env)
+    try:
+        return {name: keyring.get_password(service, name) for name in _CREDENTIAL_FIELDS}
+    except Exception as exc:
+        # ヘッドレスな Linux サーバーには SecretService も D-Bus も無く、
+        # keyring は NoKeyringError を投げる（バックエンド由来の例外が
+        # そのまま漏れてくることもある）。ここで落とすと、設定方法を案内する
+        # MissingCredentialsError に到達できない。「見つからなかった」として
+        # 扱い、他のソースに任せる。
+        log.debug("keyring は利用できません", error=str(exc), service=service)
+        return {}
+
+
+def _scoped_lookup(source: Mapping[str, str | None], env: Environment) -> dict[str, str | None]:
+    """``WBJP_UAT_APP_KEY`` 形式を優先し、``WBJP_APP_KEY`` を後方互換とする。"""
+    prefix = f"WBJP_{env.value.upper()}_"
     return {
-        name: keyring.get_password(service, name)
-        for name in ("app_key", "app_secret", "account_id")
+        name: source.get(f"{prefix}{name.upper()}") or source.get(f"WBJP_{name.upper()}")
+        for name in _CREDENTIAL_FIELDS
     }
 
 
 def _from_env_vars(env: Environment) -> dict[str, str | None]:
-    """環境変数から読む。
+    """環境変数から読む。systemd の ``EnvironmentFile=`` もここに来る。"""
+    return _scoped_lookup(os.environ, env)
 
-    ``WBJP_UAT_APP_KEY`` のような環境別の名前を優先し、
-    ``WBJP_APP_KEY`` を後方互換のフォールバックとする。
+
+def _resolve_env_file(env_file: Path | None) -> Path:
+    """使う ``.env`` を決める。
+
+    cron は ``$HOME`` で起動するため、相対パスの ``.env`` は見つからない
+    （しかも黙って見つからない）。``WBJP_ENV_FILE`` に絶対パスを渡せば
+    カレントディレクトリに依存しなくなる。
     """
-    result: dict[str, str | None] = {}
-    for name in ("app_key", "app_secret", "account_id"):
-        upper = name.upper()
-        result[name] = os.environ.get(f"WBJP_{env.value.upper()}_{upper}") or os.environ.get(
-            f"WBJP_{upper}"
+    if env_file is not None:
+        return env_file
+    override = os.environ.get(ENV_FILE_OVERRIDE_VAR)
+    return Path(override) if override else DEFAULT_ENV_FILE
+
+
+def _read_dotenv(env_file: Path) -> dict[str, str | None]:
+    """``.env`` を読む。**``os.environ`` は汚さない。**
+
+    ``load_dotenv()`` を使わないのは意図的で、あれは値をプロセス環境に
+    書き込むため、秘密が子プロセスと ``/proc/<pid>/environ`` に漏れる。
+    ``dotenv_values()`` なら呼び出し元の dict に留まる。
+    """
+    if not env_file.is_file():
+        return {}
+    _warn_if_readable_by_others(env_file)
+    return dict(dotenv_values(env_file))
+
+
+def _warn_if_readable_by_others(env_file: Path) -> None:
+    """``.env`` が自分以外から読めるなら警告する。"""
+    try:
+        mode = env_file.stat().st_mode
+    except OSError:  # pragma: no cover - stat が失敗するなら読み込みも失敗する
+        return
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        log.warning(
+            "`.env` が他ユーザーから読める状態です。`chmod 600` を推奨します",
+            path=str(env_file),
+            mode=oct(stat.S_IMODE(mode)),
         )
-    return result
 
 
 def load_credentials(
     env: Environment,
     *,
     allow_public_test_account: bool = True,
+    env_file: Path | None = None,
 ) -> Credentials:
     """認証情報を解決する。
 
     優先順位:
-        1. 環境変数（CI・サーバー運用向け）
-        2. OS キーチェーン（ローカル開発の既定）
-        3. UAT のみ: Webull 公開のテスト口座
+        1. 環境変数（CI・systemd の ``EnvironmentFile=`` 向け）
+        2. ``.env``（キーチェーンの無いサーバー向け。0600 にすること）
+        3. OS キーチェーン（ローカル開発の既定）
+        4. UAT のみ: Webull 公開のテスト口座
 
     Raises:
         MissingCredentialsError: どこにも見つからないとき。
     """
-    sources = (_from_env_vars(env), _from_keyring(env))
-    resolved: dict[str, str | None] = {"app_key": None, "app_secret": None, "account_id": None}
+    dotenv = _read_dotenv(_resolve_env_file(env_file))
+
+    sources = (_from_env_vars(env), _scoped_lookup(dotenv, env), _from_keyring(env))
+    resolved: dict[str, str | None] = dict.fromkeys(_CREDENTIAL_FIELDS)
     for source in sources:
         for key, value in source.items():
             if resolved[key] is None and value:
                 resolved[key] = value
 
-    created_on = _parse_date(os.environ.get(f"WBJP_{env.value.upper()}_KEY_CREATED_ON"))
+    created_key = f"WBJP_{env.value.upper()}_KEY_CREATED_ON"
+    created_on = _parse_date(os.environ.get(created_key) or dotenv.get(created_key))
 
     if all(resolved.values()):
         return Credentials(
@@ -192,11 +259,31 @@ def load_credentials(
         )
 
     missing = [k for k, v in resolved.items() if not v]
+    upper = env.value.upper()
     raise MissingCredentialsError(
         f"{env.value} 環境の認証情報が不足しています: {', '.join(missing)}\n"
         f"  キーチェーンに登録: uv run wbjp credentials set --env {env.value}\n"
-        f"  または環境変数:     WBJP_{env.value.upper()}_APP_KEY 等を設定"
+        f"  または環境変数:     WBJP_{upper}_APP_KEY 等を設定\n"
+        f"  または .env に記載: WBJP_{upper}_APP_KEY=... （chmod 600 のこと）"
     )
+
+
+def credential_source(env: Environment, *, env_file: Path | None = None) -> str:
+    """``app_key`` がどのソースから来たかを人間向けに説明する。
+
+    どこから読まれているか分からないまま本番に発注する事故を防ぐための、
+    ``credentials check`` 用の診断。秘密そのものは返さない。
+    """
+    path = _resolve_env_file(env_file)
+    candidates = (
+        ("環境変数", _from_env_vars(env)),
+        (f"{path}", _scoped_lookup(_read_dotenv(path), env)),
+        ("OS キーチェーン", _from_keyring(env)),
+    )
+    for label, source in candidates:
+        if source.get("app_key"):
+            return label
+    return "公開テスト口座（UAT 共有）"
 
 
 def store_credentials(env: Environment, creds: Credentials) -> None:

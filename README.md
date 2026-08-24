@@ -95,8 +95,56 @@ uv sync
 
 さらに `config/settings.toml` の `risk.kill_switch = true` で全発注を即停止できる。
 
-APIキーは macOS Keychain に保管し、リポジトリにも `.env` にも秘密は置かない。
+APIキーはリポジトリに置かない。
 （SDK はエラー時にリクエストヘッダ全体をログ出力するため、ログには秘匿情報マスクを必ず通す。）
+
+---
+
+## APIキーの置き場所
+
+3つのソースを上から順に見て、**項目ごとに**最初に見つかった値を使う。
+
+| 優先 | ソース | 用途 |
+|---|---|---|
+| 1 | 環境変数 | systemd の `EnvironmentFile=` / CI（サーバー運用の推奨） |
+| 2 | `.env` | キーチェーンの無いホスト。**`chmod 600` 必須** |
+| 3 | OS キーチェーン | ローカル開発の推奨 |
+| 4 | 公開テスト口座 | UAT のみ。認証情報が無いときの自動フォールバック |
+
+変数名は `WBJP_<ENV>_APP_KEY` / `_APP_SECRET` / `_ACCOUNT_ID`（例: `WBJP_PROD_APP_KEY`）。
+どこから読まれているかは `wbjp credentials check --env prod` の「取得元」で確認できる。
+
+### ローカル開発（macOS など）
+
+```bash
+uv run wbjp credentials set --env uat   # キーチェーンに保存
+```
+
+### Linux サーバー
+
+ヘッドレスな Linux には SecretService も D-Bus も無く keyring が使えないため、
+秘密は systemd 経由で環境変数として渡すのが堅い。
+
+```bash
+sudo install -d -m 750 -o root -g wbjp /etc/wbjp
+sudo install -m 640 -o root -g wbjp /dev/null /etc/wbjp/wbjp.env
+sudo vi /etc/wbjp/wbjp.env   # WBJP_PROD_APP_KEY=... 等
+```
+
+```ini
+# /etc/systemd/system/wbjp.service
+[Service]
+User=wbjp
+EnvironmentFile=/etc/wbjp/wbjp.env
+WorkingDirectory=/opt/wbjp
+ExecStart=/opt/wbjp/.venv/bin/wbjp run --live
+```
+
+リポジトリ内の `.env` は `WBJP_ENV` やログ設定など秘密でない項目に使う。
+`.env` に秘密を書く場合は `chmod 600` すること（緩ければ起動時に警告が出る）。
+
+`.env` は `dotenv_values()` で読んでおり、値は `os.environ` に**入れない**。
+`load_dotenv()` と違って子プロセスや `/proc/<pid>/environ` から秘密が読めない。
 
 ---
 
@@ -117,11 +165,46 @@ WBJP_ENV=prod uv run wbjp run --live
 
 ---
 
+## cron で回す
+
+`wbjp run` は**1サイクルだけ**実行して終了する。定期実行はここに書く cron が担当する。
+
+日足で判断するため、走らせるのは**大引け後に1日1回**。yfinance の当日足が
+確定するまで少し待つので、16:00 JST 以降にしておく。
+
+```cron
+# 平日 16:30 に日次サイクルを実行
+CRON_TZ=Asia/Tokyo
+30 16 * * 1-5 cd /opt/wbjp && WBJP_ENV=prod /opt/wbjp/.venv/bin/wbjp run --live --yes >> /var/log/wbjp/run.log 2>&1
+```
+
+cron で詰まりやすい点:
+
+- **`--yes` が要る。** 本番の `--live` は確認プロンプトを出すが、cron には
+  stdin が無い。`--yes` が無いと理由をログに残して exit 1 で止まる
+  （黙って Abort はしない）
+- **`cd` が要る。** `config/` `data/` `.env` はカレントディレクトリ基準。
+  cron は `$HOME` で起動するので、`cd` しないと設定が見つからない。
+  `cd` を使わないなら `WBJP_ENV_FILE=/etc/wbjp/wbjp.env` で `.env` を
+  絶対パス指定できる
+- **フルパスで呼ぶ。** cron の `PATH` は最小限。`uv run` ではなく
+  `.venv/bin/wbjp` を直接叩く
+- **祝日は考慮されない。** 東証の休場日にも起動するが、新しい足が増えないため
+  基準日が前営業日のままになり、同じ注文IDが再生成されて冪等に弾かれる
+- **同じ日の二重実行は安全。** 注文IDは「取引日 × 銘柄 × 売買 × 数量」から
+  決定論的に作られるので、cron が二重に走っても、失敗後に手で再実行しても、
+  同じ注文が2回出ることはない
+
+止めたいときは `config/settings.toml` の `risk.kill_switch = true`。
+cron を消さなくても次のサイクルから発注しなくなる。
+
+---
+
 ## 構成
 
 ```
 src/wbjp/
-├── config.py            設定 + キーチェーン（秘密はここを通す）
+├── config.py            設定 + 認証情報の解決（秘密はここを通す）
 ├── logging.py           構造化ログ + 秘匿情報マスク
 ├── domain/
 │   ├── models.py        Bar / Signal / Order / Position（すべて Decimal）

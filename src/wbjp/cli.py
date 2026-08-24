@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
@@ -20,6 +21,7 @@ from wbjp.config import Credentials as Creds
 from wbjp.config import (
     Environment,
     MissingCredentialsError,
+    credential_source,
     load_config,
     load_credentials,
     store_credentials,
@@ -155,11 +157,14 @@ def run(
     as_of: Annotated[str | None, typer.Option(help="判断の基準日 YYYY-MM-DD")] = None,
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
     no_sync: Annotated[bool, typer.Option("--no-sync", help="足の更新をしない")] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="本番の確認を省く（cron など非対話実行用）")
+    ] = False,
 ) -> None:
     """日次サイクルを実行する。
 
     既定は dry-run。実発注には --live が必要で、本番では
-    WBJP_ENV=prod も同時に必要。
+    WBJP_ENV=prod も同時に必要。cron から回すときは --yes も付ける。
     """
     from wbjp.data.store import BarStore
     from wbjp.data.yfinance_provider import YFinanceProvider
@@ -170,8 +175,15 @@ def run(
     config = _load(config_dir)
     allowed, _ = config.allows_live_orders(live)
 
-    if allowed and config.env.is_production:
+    if allowed and config.env.is_production and not yes:
         console.print("[bold red]本番環境で実際に発注します[/bold red]")
+        # cron には stdin が無い。ここで確認を求めると Abort になるだけで、
+        # ログには理由が残らない。何が足りないかを明示して落とす。
+        if not sys.stdin.isatty():
+            console.print(
+                "[red]非対話環境では確認を取れません。cron から回すなら --yes を付けてください[/red]"
+            )
+            raise typer.Exit(1)
         if not typer.confirm("続行しますか?"):
             raise typer.Abort()
 
@@ -383,13 +395,23 @@ def credentials_set(
 ) -> None:
     """APIキーを OS のキーチェーンに保存する。
 
-    リポジトリにも .env にも秘密は書かない。
+    リポジトリには秘密を書かない。キーチェーンの無いサーバーでは
+    環境変数か、0600 にした .env を使う（README 参照）。
     """
     app_key = typer.prompt("App Key")
     app_secret = typer.prompt("App Secret", hide_input=True)
     account_id = typer.prompt("Account ID")
 
-    store_credentials(env, Creds(app_key, app_secret, account_id))
+    try:
+        store_credentials(env, Creds(app_key, app_secret, account_id))
+    except Exception as exc:
+        # ヘッドレスな Linux には使えるバックエンドが無いことが多い。
+        console.print(f"[red]キーチェーンに保存できませんでした: {exc}[/red]")
+        console.print(
+            "このホストにはキーチェーンが無いようです。代わりに環境変数か、"
+            f"0600 にした .env に [bold]WBJP_{env.value.upper()}_APP_KEY[/bold] 等を設定してください。"
+        )
+        raise typer.Exit(1) from exc
     console.print(f"[green]{env.value} 環境の認証情報をキーチェーンに保存しました[/green]")
 
 
@@ -406,6 +428,7 @@ def credentials_check(
 
     console.print(f"[green]{env.value}: 認証情報を解決できました[/green]")
     console.print(f"  {credentials!r}")
+    console.print(f"  取得元: {credential_source(env)}")
     if credentials.is_public_test_account:
         console.print("[yellow]  公開されている共有テスト口座です[/yellow]")
 

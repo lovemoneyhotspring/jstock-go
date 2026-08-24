@@ -129,7 +129,7 @@ def test_reconcile_creates_a_buy_for_a_new_target() -> None:
         positions={},
         open_orders=[],
         prices={"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
     )
 
     assert len(plan.orders) == 1
@@ -144,7 +144,7 @@ def test_reconcile_emits_nothing_when_already_at_target() -> None:
         positions={"7203": position(qty=100)},
         open_orders=[],
         prices={"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
     )
     assert plan.orders == []
 
@@ -159,7 +159,7 @@ def test_reconcile_does_not_reorder_what_is_already_pending() -> None:
         positions={},
         open_orders=[open_order(qty=100)],
         prices={"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
     )
     assert plan.orders == []
 
@@ -169,7 +169,7 @@ def test_reconcile_is_idempotent_across_repeated_runs() -> None:
     targets = [TargetPosition("7203", D(100))]
     prices = {"7203": D(2500)}
 
-    first = reconcile(targets, {}, [], prices, run_id="r1")
+    first = reconcile(targets, {}, [], prices, order_id_seed="r1")
     # 1回目の注文が板に残っている状態で再実行
     pending = [
         Order(
@@ -183,10 +183,37 @@ def test_reconcile_is_idempotent_across_repeated_runs() -> None:
             status=OrderStatus.SUBMITTED,
         )
     ]
-    second = reconcile(targets, {}, pending, prices, run_id="r1")
+    second = reconcile(targets, {}, pending, prices, order_id_seed="r1")
 
     assert len(first.orders) == 1
     assert second.orders == []
+
+
+def test_same_trading_day_produces_the_same_order_id() -> None:
+    """同じ取引日の同じ判断からは、必ず同じ注文IDが出る。
+
+    cron が二重に走ったり、失敗後に手で再実行したりしたときに、
+    journal の冪等チェック（``was_placed``）が効く条件。IDが実行ごとに
+    変わると、そのチェックをすり抜けて二重発注になる。
+    """
+    targets = [TargetPosition("7203", D(100))]
+    prices = {"7203": D(2500)}
+
+    first = reconcile(targets, {}, [], prices, order_id_seed="20260825")
+    second = reconcile(targets, {}, [], prices, order_id_seed="20260825")
+
+    assert first.orders[0].client_order_id == second.orders[0].client_order_id
+
+
+def test_different_trading_days_produce_different_order_ids() -> None:
+    """日が変われば別の注文になる（前日と同じIDで弾かれない）。"""
+    targets = [TargetPosition("7203", D(100))]
+    prices = {"7203": D(2500)}
+
+    monday = reconcile(targets, {}, [], prices, order_id_seed="20260824")
+    tuesday = reconcile(targets, {}, [], prices, order_id_seed="20260825")
+
+    assert monday.orders[0].client_order_id != tuesday.orders[0].client_order_id
 
 
 def test_reconcile_orders_only_the_difference() -> None:
@@ -196,7 +223,7 @@ def test_reconcile_orders_only_the_difference() -> None:
         positions={"7203": position(qty=100)},
         open_orders=[],
         prices={"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
     )
     assert plan.orders[0].quantity == D(200)
 
@@ -207,7 +234,7 @@ def test_reconcile_sells_down_to_target() -> None:
         positions={"7203": position(qty=300)},
         open_orders=[],
         prices={"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
     )
     assert (plan.orders[0].side, plan.orders[0].quantity) == (Side.SELL, D(200))
 
@@ -218,7 +245,7 @@ def test_reconcile_exits_completely_on_zero_target() -> None:
         positions={"7203": position(qty=200)},
         open_orders=[],
         prices={"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
     )
     assert (plan.orders[0].side, plan.orders[0].quantity) == (Side.SELL, D(200))
 
@@ -230,7 +257,7 @@ def test_reconcile_skips_sub_lot_differences() -> None:
         positions={"7203": position(qty=100)},
         open_orders=[],
         prices={"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
     )
     assert plan.orders == []
     assert "売買単位" in plan.skipped["7203"]
@@ -243,7 +270,7 @@ def test_reconcile_never_sells_more_than_held() -> None:
         positions={"7203": position(qty=100)},
         open_orders=[open_order(qty=100, side=Side.SELL)],
         prices={"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
     )
     # 実効ポジションは 0 なので追加の売りは出ない
     assert plan.orders == []
@@ -256,7 +283,7 @@ def test_reconcile_blocks_same_day_settlement_violation() -> None:
         positions={"7203": position(qty=100)},
         open_orders=[],
         prices={"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
         bought_today={"7203"},
     )
     assert plan.orders == []
@@ -270,7 +297,7 @@ def test_reconcile_snaps_limit_price_to_the_tick() -> None:
         positions={},
         open_orders=[],
         prices={"7203": D("3333")},
-        run_id="r1",
+        order_id_seed="r1",
         settings=ReconcileSettings(order_type="limit", limit_offset=D("0.005")),
     )
     limit = plan.orders[0].limit_price
@@ -284,7 +311,7 @@ def test_reconcile_uses_finer_tick_for_topix500() -> None:
         positions={},
         open_orders=[],
         prices={"7203": D("2000")},
-        run_id="r1",
+        order_id_seed="r1",
         topix500={"7203"},
     )
     limit = plan.orders[0].limit_price
@@ -299,7 +326,7 @@ def test_reconcile_limit_price_favours_execution() -> None:
         {},
         [],
         {"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
         settings=ReconcileSettings(limit_offset=D("0.01")),
     )
     assert buy_plan.orders[0].limit_price > D(2500)  # type: ignore[operator]
@@ -309,7 +336,7 @@ def test_reconcile_limit_price_favours_execution() -> None:
         {"7203": position(qty=100)},
         [],
         {"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
         settings=ReconcileSettings(limit_offset=D("0.01")),
     )
     assert sell_plan.orders[0].limit_price < D(2500)  # type: ignore[operator]
@@ -321,7 +348,7 @@ def test_reconcile_market_orders_carry_no_price() -> None:
         {},
         [],
         {"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
         settings=ReconcileSettings(order_type="market"),
     )
     assert plan.orders[0].order_type is OrderType.MARKET
@@ -329,7 +356,7 @@ def test_reconcile_market_orders_carry_no_price() -> None:
 
 
 def test_reconcile_skips_when_price_is_unavailable() -> None:
-    plan = reconcile([TargetPosition("9999", D(100))], {}, [], {}, run_id="r1")
+    plan = reconcile([TargetPosition("9999", D(100))], {}, [], {}, order_id_seed="r1")
     assert plan.orders == []
     assert "価格" in plan.skipped["9999"]
 
@@ -341,7 +368,7 @@ def test_reconcile_carries_the_reason_through() -> None:
         {},
         [],
         {"7203": D(2500)},
-        run_id="r1",
+        order_id_seed="r1",
     )
     assert plan.orders[0].reason == "ゴールデンクロス"
 

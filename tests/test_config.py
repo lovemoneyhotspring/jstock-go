@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from wbjp.config import (
     ENDPOINTS,
@@ -21,19 +23,32 @@ from wbjp.config import (
     FileConfig,
     MissingCredentialsError,
     RiskConfig,
+    credential_source,
     load_credentials,
     load_file_config,
 )
 
 
 @pytest.fixture(autouse=True)
-def _clear_wbjp_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """テスト間で環境変数が漏れないようにする。"""
+def _clear_wbjp_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """テスト間で環境変数が漏れないようにする。
+
+    開発者のリポジトリに実在する ``.env`` も遮断する。存在しない
+    パスを既定にしておかないと、手元にだけ通る（あるいは落ちる）
+    テストになってしまう。
+    """
     import os
 
     for key in list(os.environ):
         if key.startswith("WBJP_"):
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr("wbjp.config.DEFAULT_ENV_FILE", tmp_path / "absent.env")
+
+
+def _write_env_file(path: Path, body: str, *, mode: int = 0o600) -> Path:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(mode)
+    return path
 
 
 def _config(*, env: Environment, kill_switch: bool = False) -> Config:
@@ -149,6 +164,206 @@ def test_missing_credentials_error_names_what_is_missing(
 
     with pytest.raises(MissingCredentialsError, match="app_secret"):
         load_credentials(Environment.PROD)
+
+
+# --------------------------------------------------------------------------
+# .env — キーチェーンの無い Linux サーバー向けの経路
+# --------------------------------------------------------------------------
+
+
+def test_dotenv_supplies_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """.env に書いた鍵が実際に使われる（環境変数への export 不要）。"""
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    env_file = _write_env_file(
+        tmp_path / ".env",
+        "WBJP_PROD_APP_KEY=dotenv-key\n"
+        "WBJP_PROD_APP_SECRET=dotenv-secret\n"
+        "WBJP_PROD_ACCOUNT_ID=dotenv-acct\n",
+    )
+
+    creds = load_credentials(Environment.PROD, env_file=env_file)
+
+    assert creds.app_key == "dotenv-key"
+    assert creds.account_id == "dotenv-acct"
+
+
+def test_dotenv_does_not_leak_into_os_environ(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """.env の秘密がプロセス環境に入らない。
+
+    入ってしまうと子プロセスと /proc/<pid>/environ から読めてしまう。
+    """
+    import os
+
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    env_file = _write_env_file(
+        tmp_path / ".env",
+        "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=leaky-secret\nWBJP_PROD_ACCOUNT_ID=a\n",
+    )
+
+    load_credentials(Environment.PROD, env_file=env_file)
+
+    assert "WBJP_PROD_APP_SECRET" not in os.environ
+
+
+def test_real_env_vars_beat_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """デプロイ時の環境変数で .env を上書きできる。"""
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    monkeypatch.setenv("WBJP_PROD_APP_KEY", "from-env")
+    env_file = _write_env_file(
+        tmp_path / ".env",
+        "WBJP_PROD_APP_KEY=from-dotenv\n"
+        "WBJP_PROD_APP_SECRET=dotenv-secret\n"
+        "WBJP_PROD_ACCOUNT_ID=dotenv-acct\n",
+    )
+
+    creds = load_credentials(Environment.PROD, env_file=env_file)
+
+    assert creds.app_key == "from-env"
+    assert creds.app_secret == "dotenv-secret"  # 項目ごとに解決される
+
+
+def test_dotenv_beats_keyring(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "wbjp.config._from_keyring",
+        lambda env: {"app_key": "kr", "app_secret": "kr", "account_id": "kr"},
+    )
+    env_file = _write_env_file(
+        tmp_path / ".env",
+        "WBJP_PROD_APP_KEY=dotenv-key\n"
+        "WBJP_PROD_APP_SECRET=dotenv-secret\n"
+        "WBJP_PROD_ACCOUNT_ID=dotenv-acct\n",
+    )
+
+    assert load_credentials(Environment.PROD, env_file=env_file).app_key == "dotenv-key"
+
+
+def test_dotenv_supplies_key_created_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """失効警告が .env 運用でも効く。"""
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    env_file = _write_env_file(
+        tmp_path / ".env",
+        "WBJP_PROD_APP_KEY=k\n"
+        "WBJP_PROD_APP_SECRET=s\n"
+        "WBJP_PROD_ACCOUNT_ID=a\n"
+        "WBJP_PROD_KEY_CREATED_ON=2026-01-01\n",
+    )
+
+    creds = load_credentials(Environment.PROD, env_file=env_file)
+
+    assert creds.created_on == dt.date(2026, 1, 1)
+    assert creds.expires_on == dt.date(2026, 2, 15)
+
+
+def test_loose_permissions_on_dotenv_are_warned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    env_file = _write_env_file(
+        tmp_path / ".env",
+        "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n",
+        mode=0o644,
+    )
+
+    with capture_logs() as entries:
+        load_credentials(Environment.PROD, env_file=env_file)
+
+    assert any("chmod 600" in e["event"] for e in entries)
+
+
+def test_tight_permissions_on_dotenv_are_quiet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    env_file = _write_env_file(
+        tmp_path / ".env",
+        "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n",
+    )
+
+    with capture_logs() as entries:
+        load_credentials(Environment.PROD, env_file=env_file)
+
+    assert not any("chmod 600" in e["event"] for e in entries)
+
+
+def test_env_file_override_locates_dotenv_outside_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """cron は $HOME で起動する。相対パスに頼らず絶対パスで指定できる。"""
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    env_file = _write_env_file(
+        tmp_path / "elsewhere.env",
+        "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n",
+    )
+    monkeypatch.setenv("WBJP_ENV_FILE", str(env_file))
+
+    assert load_credentials(Environment.PROD).app_key == "k"
+
+
+def test_missing_dotenv_is_not_an_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    monkeypatch.setenv("WBJP_PROD_APP_KEY", "k")
+    monkeypatch.setenv("WBJP_PROD_APP_SECRET", "s")
+    monkeypatch.setenv("WBJP_PROD_ACCOUNT_ID", "a")
+
+    creds = load_credentials(Environment.PROD, env_file=tmp_path / "absent.env")
+
+    assert creds.app_key == "k"
+
+
+# --------------------------------------------------------------------------
+# キーチェーンの無いホスト
+# --------------------------------------------------------------------------
+
+
+def test_unavailable_keyring_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ヘッドレスな Linux では keyring が例外を投げる。
+
+    そこで落ちると、設定方法を案内する MissingCredentialsError に
+    到達できない。
+    """
+
+    class _NoBackend:
+        @staticmethod
+        def get_password(service: str, name: str) -> str:
+            raise RuntimeError("No recommended backend was available")
+
+    monkeypatch.setitem(sys.modules, "keyring", _NoBackend)
+
+    with pytest.raises(MissingCredentialsError, match="app_key"):
+        load_credentials(Environment.PROD)
+
+
+def test_unavailable_keyring_still_allows_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _NoBackend:
+        @staticmethod
+        def get_password(service: str, name: str) -> str:
+            raise RuntimeError("No recommended backend was available")
+
+    monkeypatch.setitem(sys.modules, "keyring", _NoBackend)
+    monkeypatch.setenv("WBJP_PROD_APP_KEY", "k")
+    monkeypatch.setenv("WBJP_PROD_APP_SECRET", "s")
+    monkeypatch.setenv("WBJP_PROD_ACCOUNT_ID", "a")
+
+    assert load_credentials(Environment.PROD).app_key == "k"
+
+
+# --------------------------------------------------------------------------
+# 取得元の診断
+# --------------------------------------------------------------------------
+
+
+def test_credential_source_reports_where_the_key_came_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    env_file = _write_env_file(tmp_path / ".env", "WBJP_PROD_APP_KEY=k\n")
+
+    assert credential_source(Environment.PROD, env_file=env_file) == str(env_file)
+
+    monkeypatch.setenv("WBJP_PROD_APP_KEY", "k")
+    assert credential_source(Environment.PROD, env_file=env_file) == "環境変数"
 
 
 def test_credentials_repr_hides_the_secret() -> None:

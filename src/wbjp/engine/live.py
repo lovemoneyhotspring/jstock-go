@@ -12,7 +12,9 @@
 安全装置:
     - ``--live`` と ``WBJP_ENV=prod`` の両方が揃わない限り発注しない
     - キルスイッチが有効なら即座に何もせず終了する
-    - 同じ ``client_order_id`` が journal にあれば発注しない（冪等）
+    - 同じ ``client_order_id`` が journal にあれば発注しない（冪等）。
+      注文IDの種は **基準日** なので、この冪等性は実行をまたいで効く。
+      cron が二重に走っても、失敗後に手で再実行しても二重発注にならない。
 """
 
 from __future__ import annotations
@@ -242,7 +244,11 @@ class LiveRunner:
             positions,
             self.broker.get_open_orders(),
             closes,
-            run_id=run_id,
+            # 注文IDの種は run_id ではなく **基準日**。run_id は実行ごとに
+            # 乱数を含むため、同じ日に2回走らせると別のIDが振られ、
+            # journal の冪等チェックをすり抜けて二重発注になる。基準日を
+            # 種にすれば「同じ取引日の同じ判断」は必ず同じIDになる。
+            order_id_seed=f"{as_of:%Y%m%d}",
             settings=ReconcileSettings(
                 order_type=file_config.execution.order_type,
                 limit_offset=file_config.execution.limit_offset,

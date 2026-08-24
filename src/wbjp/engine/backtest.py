@@ -246,7 +246,7 @@ class BacktestRunner:
             positions,
             self.broker.get_open_orders(),
             closes,
-            run_id=f"bt-{index}",
+            order_id_seed=f"bt-{index}",
             settings=ReconcileSettings(
                 order_type=self.config.execution.order_type,
                 limit_offset=self.config.execution.limit_offset,
