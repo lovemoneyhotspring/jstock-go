@@ -1,0 +1,47 @@
+# 戦略の有効化・重み・パラメータ。
+#
+# 各戦略は「買え/売れ」ではなく -1.0〜+1.0 の意見を返す。
+# それを combiner が1本に合成し、サイジングが株数に変換する。
+
+# 合成方式:
+#   weighted_vote … 重み付き平均。少数意見も一定量は反映される（既定）
+#   majority      … 過半数が同じ向きなら採用。割れたら見送る
+#   veto          … 全員一致のときだけ動く。最も保守的
+#   priority      … 重みが最大の戦略の意見をそのまま採る
+combiner = "weighted_vote"
+
+# 合成後の強さがこれ以上なら新規に建てる
+entry_threshold = 0.3
+# 保有中の銘柄がこれを下回ったら手仕舞う。
+# entry と分けるのは、閾値付近で売買を繰り返して手数料に削られるのを
+# 防ぐため（ヒステリシス）。
+exit_threshold = 0.1
+
+
+# 順張り。トレンドが続く相場で強く、横ばいでは往復ビンタを食らう。
+[[strategies]]
+name = "sma_cross"
+enabled = true
+weight = 1.0
+fast = 25
+slow = 75
+
+# 逆張り。レンジで機能する。ADX が max_adx を超える強トレンド時は
+# 自ら黙るので、sma_cross と正面衝突しにくい。
+[[strategies]]
+name = "rsi_reversion"
+enabled = true
+weight = 1.0
+period = 14
+oversold = 30.0
+overbought = 70.0
+max_adx = 40.0
+
+# ブレイクアウト。勝率は低いが、大きな相場の初動を取りにいく。
+[[strategies]]
+name = "atr_breakout"
+enabled = true
+weight = 1.5
+channel = 20
+atr_period = 14
+min_atr_ratio = 0.005
