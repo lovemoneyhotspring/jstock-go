@@ -77,3 +77,61 @@ def test_yes_flag_skips_the_confirmation(monkeypatch: pytest.MonkeyPatch) -> Non
     _run("--live", "--yes", env={"WBJP_ENV": "prod"})
 
     assert calls == [True], "--yes を付けても発注が許可されていない"
+
+
+# --------------------------------------------------------------------------
+# 積立
+# --------------------------------------------------------------------------
+
+
+def _accumulate(*args: str, config_dir: Path | None = None):  # type: ignore[no-untyped-def]
+    directory = config_dir or CONFIG_DIR
+    return runner.invoke(app, ["accumulate", *args, "--config-dir", str(directory)])
+
+
+def test_accumulate_list_shows_tactic_and_symbols() -> None:
+    result = _accumulate("list")
+    assert result.exit_code == 0
+    assert "bear_stack" in result.stdout
+    assert "1305.T" in result.stdout
+
+
+def test_accumulate_list_shows_disabled_entries() -> None:
+    """止めてある戦術も一覧には出す。存在を忘れると設定を二重に足してしまう。"""
+    result = _accumulate("list")
+    assert result.exit_code == 0
+    assert "—" in result.stdout
+
+
+def test_missing_accumulate_config_fails_with_a_reason(tmp_path: Path) -> None:
+    result = _accumulate("list", config_dir=tmp_path)
+    assert result.exit_code == 1
+    assert "積立の設定が見つかりません" in result.stdout
+
+
+def test_broken_accumulate_config_fails_with_a_reason(tmp_path: Path) -> None:
+    (tmp_path / "accumulate.toml").write_text(
+        '[[tactics]]\nid = "x"\ntactic = "constant"\nsymbols = ["A"]\n'
+        '[[tactics]]\nid = "y"\ntactic = "constant"\nsymbols = ["A"]\n',
+        encoding="utf-8",
+    )
+    result = _accumulate("list", config_dir=tmp_path)
+    assert result.exit_code == 1
+    assert "二重買付" in result.stdout
+
+
+def test_accumulate_backtest_without_bars_exits_with_advice(tmp_path: Path) -> None:
+    """足が無いときに黙って空表を出さない。"""
+    (tmp_path / "accumulate.toml").write_text(
+        '[[tactics]]\nid = "x"\ntactic = "constant"\nsymbols = ["NOSUCH"]\n', encoding="utf-8"
+    )
+    result = _accumulate("backtest", config_dir=tmp_path)
+    assert result.exit_code == 1
+    assert "accumulate sync" in result.stdout
+
+
+def test_accumulate_commands_are_registered() -> None:
+    result = runner.invoke(app, ["accumulate", "--help"])
+    assert result.exit_code == 0
+    for command in ("list", "sync", "plan", "backtest", "compare"):
+        assert command in result.stdout

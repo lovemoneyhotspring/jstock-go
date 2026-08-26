@@ -361,3 +361,25 @@ def test_yfinance_fetches_real_japanese_stocks() -> None:
         assert frame.height > 5
         assert frame.columns == ["date", "open", "high", "low", "close", "volume"]
         assert (frame["high"] >= frame["low"]).all()
+
+
+def test_store_accepts_index_tickers(tmp_path: Path) -> None:
+    """指数のティッカーは ^ で始まる（^N225 など）。"""
+    store = BarStore(tmp_path)
+    assert store.path_for("^N225").name == "^N225.parquet"
+    store.write("^N225", bars([100.0, 101.0]))
+    assert store.read("^N225").height == 2
+    assert "^N225" in store.symbols()
+
+
+def test_store_still_rejects_separators(tmp_path: Path) -> None:
+    for bad in ("a/b", "a\\b", "^../x"):
+        with pytest.raises(ValueError, match="使えない文字"):
+            BarStore(tmp_path).path_for(bad)
+
+
+def test_index_tickers_keep_their_caret_prefix() -> None:
+    """指数は東証銘柄ではないので .T を付けない。"""
+    assert to_yahoo_ticker("^N225") == "^N225"
+    assert to_yahoo_ticker("^GSPC") == "^GSPC"
+    assert to_yahoo_ticker(" ^IXIC ") == "^IXIC"

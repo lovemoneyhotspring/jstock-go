@@ -36,8 +36,10 @@ app = typer.Typer(
 )
 data_app = typer.Typer(help="足データの取得と確認", no_args_is_help=True)
 creds_app = typer.Typer(help="APIキーの管理", no_args_is_help=True)
+accumulate_app = typer.Typer(help="指数の積立（戦術と銘柄の対応）", no_args_is_help=True)
 app.add_typer(data_app, name="data")
 app.add_typer(creds_app, name="credentials")
+app.add_typer(accumulate_app, name="accumulate")
 
 console = Console()
 log = get_logger(__name__)
@@ -473,6 +475,269 @@ def data_status(
     for row in summary.iter_rows():
         table.add_row(*[str(v) for v in row])
     console.print(table)
+
+
+# --------------------------------------------------------------------------
+# 積立
+# --------------------------------------------------------------------------
+
+#: 積立関連で共通のオプション。
+_ConfigDir = Annotated[Path | None, typer.Option(help="設定ディレクトリ")]
+
+
+def _yen(value: float) -> str:
+    """桁が大きい金額は万円に丸める。80桁の端末で表が潰れるのを避ける。"""
+    if abs(value) >= 1_000_000:
+        return f"{value / 10_000:,.0f}万"
+    return f"{value:,.0f}"
+
+
+def _load_accumulate(config_dir: Path | None, *, allow_overlap: bool = False):  # type: ignore[no-untyped-def]
+    """config/accumulate.toml を読む。失敗したら理由を出して終了する。"""
+    from wbjp.accumulate import load
+
+    # 積立は universe.symbols を使わないので、_load ではなく load_config を呼ぶ。
+    # _load は売買用の検証（ユニバースが空なら終了）を含んでいる。
+    directory = config_dir or load_config(config_dir).settings.config_dir
+    try:
+        return load(directory, allow_overlap=allow_overlap)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    except ValueError as exc:
+        console.print(f"[red]設定が不正です: {exc}[/red]")
+        raise typer.Exit(1) from None
+
+
+def _accumulate_bars(config_dir: Path | None, symbols: list[str]):  # type: ignore[no-untyped-def]
+    """保存済みの足を読む。無い銘柄は警告して除く。"""
+    from wbjp.data.store import BarStore
+
+    store = BarStore(load_config(config_dir).settings.bars_dir)
+    bars = store.read_many(symbols)
+    missing = sorted(set(symbols) - set(bars))
+    if missing:
+        console.print(
+            f"[yellow]足データがありません: {', '.join(missing)}"
+            f"（`wbjp accumulate sync` を実行してください）[/yellow]"
+        )
+    return bars
+
+
+@accumulate_app.command("list")
+def accumulate_list(config_dir: _ConfigDir = None) -> None:
+    """戦術と銘柄の対応を一覧する。"""
+    config = _load_accumulate(config_dir, allow_overlap=True)
+
+    table = Table(title="積立戦術", title_justify="left")
+    table.add_column("id")
+    table.add_column("戦術")
+    table.add_column("銘柄")
+    table.add_column("有効", justify="center")
+    for entry in config.tactics:
+        try:
+            described = entry.build().describe()
+        except ValueError as exc:
+            described = f"[red]{exc}[/red]"
+        table.add_row(entry.id, described, ", ".join(entry.symbols), "○" if entry.enabled else "—")
+    console.print(table)
+    console.print(f"\n毎月の基本予算: {config.monthly_budget:,.0f}円 / 銘柄")
+
+    # 一覧は重複を許して読む（止めてある戦術も見せたいため）。そのぶん
+    # 衝突を検出できるのはここだけなので、必ず知らせる。
+    try:
+        config.validate_assignment()
+    except ValueError as exc:
+        console.print(f"\n[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+
+
+@accumulate_app.command("sync")
+def accumulate_sync(
+    days: Annotated[int, typer.Option(help="何日ぶん遡って取得するか")] = 10_950,
+    force: Annotated[bool, typer.Option("--force", help="保存済みを無視して取り直す")] = False,
+    config_dir: _ConfigDir = None,
+) -> None:
+    """積立対象の銘柄の足を更新する。
+
+    200日移動平均を使ううえ、増額が効くのは暴落局面なので、売買用の銘柄より
+    ずっと長い履歴が要る。既定の 10,950 日は約30年ぶん。上昇局面しか含まない
+    短い期間で検証すると、増額の効果が実際より小さく出る。
+
+    既に保存済みの銘柄は「最終日より後」しか取りに行かないので、あとから
+    期間を伸ばしたいときは ``--force`` を付けて取り直す。
+    """
+    from wbjp.data.store import BarStore
+    from wbjp.data.yfinance_provider import YFinanceProvider
+
+    config = _load_accumulate(config_dir)
+    store = BarStore(load_config(config_dir).settings.bars_dir)
+    end = dt.date.today()
+
+    counts = store.sync(
+        YFinanceProvider(), config.symbols, end - dt.timedelta(days=days), end, force=force
+    )
+    for symbol, count in sorted(counts.items()):
+        console.print(f"  {symbol}: {count} 本")
+
+
+@accumulate_app.command("plan")
+def accumulate_plan(
+    days: Annotated[int, typer.Option(help="直近何営業日ぶんを表示するか")] = 10,
+    config_dir: _ConfigDir = None,
+) -> None:
+    """直近の投下額を銘柄ごとに表示する（今いくら買うか）。"""
+    import polars as pl
+
+    from wbjp.accumulate import AccumulationSettings, build_plan
+
+    config = _load_accumulate(config_dir)
+    bars = _accumulate_bars(config_dir, config.symbols)
+    if not bars:
+        raise typer.Exit(1)
+
+    total = 0
+    for symbol, tactic in config.build().items():
+        if symbol not in bars:
+            continue
+        settings = AccumulationSettings(config.monthly_budget, tactic)
+        plan = build_plan(bars[symbol], settings).tail(days)
+
+        table = Table(title=f"{symbol} — {tactic.describe()}", title_justify="left")
+        for column in ("日付", "終値", "倍率", "投下額", "理由"):
+            table.add_column(column, justify="right" if column != "理由" else "left")
+        for row in plan.iter_rows(named=True):
+            amount = row["amount"]
+            style = "bold" if amount > 0 else "dim"
+            table.add_row(
+                str(row["date"]),
+                f"{row['close']:,.2f}",
+                f"{row['multiplier']:.2g}",
+                f"{amount:,}円" if amount else "—",
+                row["reason"],
+                style=style,
+            )
+        console.print(table)
+        total += int(plan.filter(pl.col("date") == plan["date"].max())["amount"][0])
+
+    console.print(f"\n[bold]最終日の投下額 合計: {total:,}円[/bold]")
+
+
+@accumulate_app.command("backtest")
+def accumulate_backtest(
+    from_: Annotated[str | None, typer.Option("--from", help="開始日 YYYY-MM-DD")] = None,
+    to: Annotated[str | None, typer.Option("--to", help="終了日 YYYY-MM-DD")] = None,
+    config_dir: _ConfigDir = None,
+) -> None:
+    """設定どおりに積み立てた場合の結果を銘柄ごとに出す。"""
+    from wbjp.accumulate import AccumulationSettings, build_plan, simulate
+
+    config = _load_accumulate(config_dir)
+    start = dt.date.fromisoformat(from_) if from_ else None
+    end = dt.date.fromisoformat(to) if to else None
+    bars = _accumulate_bars(config_dir, config.symbols)
+    if not bars:
+        raise typer.Exit(1)
+
+    table = Table(title="積立バックテスト", title_justify="left")
+    table.add_column("銘柄")
+    table.add_column("戦術")  # 設定の id。describe() は長すぎて表が潰れる
+    for column in ("投入", "倍率", "単価", "対照比", "期末", "ﾘﾀｰﾝ"):
+        table.add_column(column, justify="right")
+
+    for entry in config.active:
+        for symbol in entry.symbols:
+            if symbol not in bars:
+                continue
+            tactic = entry.build()
+            frame = bars[symbol]
+            if start or end:
+                import polars as pl
+
+                if start:
+                    frame = frame.filter(pl.col("date") >= start)
+                if end:
+                    frame = frame.filter(pl.col("date") <= end)
+            if frame.height < tactic.warmup_bars:
+                console.print(
+                    f"[yellow]{symbol}: 足が {frame.height} 本しかなく、"
+                    f"{tactic.warmup_bars} 本必要です。飛ばします[/yellow]"
+                )
+                continue
+
+            settings = AccumulationSettings(config.monthly_budget, tactic)
+            result = simulate(
+                frame, build_plan(frame, settings), monthly_budget=config.monthly_budget
+            )
+            edge = result.cost_edge
+            table.add_row(
+                symbol,
+                entry.id,
+                _yen(float(result.contributed)),
+                f"{result.capital_multiple:.2f}",
+                _yen(result.average_cost),
+                f"[green]{edge:+.2%}[/green]" if edge < 0 else f"[red]{edge:+.2%}[/red]",
+                _yen(result.terminal_value),
+                f"{result.total_return:+.0%}",
+            )
+
+    console.print(table)
+    console.print(
+        "\n[dim]※ 倍率＝基本予算だけの場合に対する総投入額の倍率。単価/投入/期末は万円。\n"
+        "※ 対照群＝同じ総投入額を毎月均等に投じた場合。マイナスなら安く買えた。\n"
+        "　 増額分の原資は新規資金（賞与など）を前提としている。積立予算を取り置いて\n"
+        "　 作ると待機が生じ、増額の利益を打ち消す。[/dim]"
+    )
+
+
+@accumulate_app.command("compare")
+def accumulate_compare(
+    symbol: Annotated[str, typer.Argument(help="比較したい銘柄")],
+    config_dir: _ConfigDir = None,
+) -> None:
+    """1銘柄に対して、登録済みの戦術を既定パラメータで並べて比較する。"""
+    from wbjp.accumulate import (
+        AccumulationSettings,
+        available,
+        build_plan,
+        create,
+        simulate,
+    )
+
+    config = _load_accumulate(config_dir, allow_overlap=True)
+    bars = _accumulate_bars(config_dir, [symbol])
+    if symbol not in bars:
+        raise typer.Exit(1)
+    frame = bars[symbol]
+
+    table = Table(title=f"{symbol} — 戦術の比較", title_justify="left")
+    table.add_column("戦術")
+    for column in ("倍率", "単価", "対照比", "1倍あたり", "期末"):
+        table.add_column(column, justify="right")
+
+    for name in available():
+        tactic = create(name)
+        if frame.height < tactic.warmup_bars:
+            continue
+        settings = AccumulationSettings(config.monthly_budget, tactic)
+        result = simulate(frame, build_plan(frame, settings), monthly_budget=config.monthly_budget)
+        # 追加資金1倍あたりの単価改善。効果を資金量で割った効率。
+        extra = result.capital_multiple - 1.0
+        efficiency = f"{result.cost_edge / extra:+.1%}" if extra > 0.001 else "—"
+        table.add_row(
+            tactic.describe(),
+            f"{result.capital_multiple:.2f}",
+            _yen(result.average_cost),
+            f"{result.cost_edge:+.2%}",
+            efficiency,
+            _yen(result.terminal_value),
+        )
+
+    console.print(table)
+    console.print(
+        "\n[dim]※ 既定パラメータでの比較。倍率などは config/accumulate.toml で調整する。\n"
+        "　 「1倍あたり」は追加資金1倍あたりの単価改善で、資金効率の指標。[/dim]"
+    )
 
 
 # --------------------------------------------------------------------------
