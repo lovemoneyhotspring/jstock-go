@@ -1,0 +1,43 @@
+# ETF ローテーション（デュアル・モメンタム）。
+#
+# 個別株ではなく指数・セクター ETF の中で、過去 6〜12 ヶ月に最も強かった
+# ものを等分で持ち、月初に入れ替える。「SPY より強い ETF が無ければ SPY を
+# 持つ」ので、構造的に SPY から大きく劣後しにくい。
+#
+# 使い方:  uv run wbjp data sync --config-dir config/us-etf-rotation --days 1500
+#          uv run wbjp backtest  --config-dir config/us-etf-rotation --from 2023-09-01
+
+[universe]
+market = "US"
+data_provider = "yfinance"
+symbols_file = "universe.txt"
+symbols = []
+
+[risk]
+kill_switch = false
+# 資産が増えて 1 銘柄分がこれを超えると全部の買いが弾かれて止まる。
+# 事故防止は max_position_weight に任せ、ここは十分大きく取る。
+max_order_value = "200000"
+max_orders_per_day = 20
+max_daily_loss = "1500"
+max_position_weight = "0.40"
+max_gross_exposure = "1.0"
+max_preview_deviation = "0.02"
+
+[sizing]
+# ETF は分散済みなので ATR で株数を絞らず、等分でフル投資する
+method = "equal_weight"
+risk_per_trade = "0.01"
+atr_stop_multiple = "6.0"      # 災害保険としての広い初期ストップだけ
+fixed_notional = "5000"
+max_positions = 3
+
+[stops]
+trailing = false
+
+[execution]
+tax_account_type = "SPECIFIC"
+order_type = "limit"
+limit_offset = "0.003"
+stop_mode = "auto"
+extended_hours = false

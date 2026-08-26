@@ -1,0 +1,22 @@
+combiner = "priority"
+entry_threshold = 0.3
+exit_threshold = 0.1
+
+[[strategies]]
+name = "momentum_rank"
+enabled = true
+weight = 10.0
+lookback = 126
+skip = 21
+long_lookback = 252
+vol_lookback = 63
+trend_sma = 200
+max_atr_ratio = 0.06
+min_price = 5.0
+min_dollar_volume = 20_000_000.0
+benchmark = "SPY"
+benchmark_sma = 200
+top_n = 3
+keep_multiple = 2
+rebalance = "monthly"
+core_symbol = "SPY"        # 候補が top_n に満たないとき、残り枠は SPY を持つ

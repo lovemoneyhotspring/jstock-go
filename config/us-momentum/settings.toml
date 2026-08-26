@@ -16,7 +16,10 @@ symbols = []
 
 [risk]
 kill_switch = false
-max_order_value = "10000"
+# 等分・フル投資の戦略では、資産が増えると 1 銘柄分がこの上限を超えて
+# **全部の買いが弾かれ、現金のまま止まる**（12年のバックテストで実際に起きた）。
+# 資産規模に対して十分大きく取る。事故防止の役目は max_position_weight が担う。
+max_order_value = "100000"
 max_orders_per_day = 20
 max_daily_loss = "1500"
 max_position_weight = "0.25"

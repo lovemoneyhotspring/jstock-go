@@ -33,6 +33,12 @@
     合わない。手仕舞いのうち「トレンド崩れ」「地合いオフ」は毎日判定し、
     「順位の脱落」は区切りの日だけ判定する。
 
+受け皿（``core_symbol``）:
+    条件を満たす銘柄が ``top_n`` に満たないとき、余った枠で受け皿
+    （通常はベンチマークそのもの）を持つ。「他に強いものが無いなら市場
+    平均を持つ」ことで、現金が遊んで指数に劣後するのを防ぐ。受け皿は
+    順位の最下位扱いで、区切りの日に本命の候補が枠を埋められるなら降りる。
+
 手仕舞い:
     - 終値 < SMA（``trend_sma``）              … トレンド崩れ（毎日）
     - ベンチマークが SMA 割れ                   … 地合いオフ（毎日、全建玉）
@@ -76,6 +82,7 @@ class MomentumRankStrategy(IndicatorStrategy):
         top_n: int = 5,
         keep_multiple: int = 2,
         rebalance: str = "monthly",
+        core_symbol: str | None = None,
     ) -> None:
         if lookback <= 0 or skip < 0 or long_lookback <= lookback + skip:
             raise ValueError("long_lookback > lookback + skip > 0 を満たすこと")
@@ -99,6 +106,7 @@ class MomentumRankStrategy(IndicatorStrategy):
         self.top_n = top_n
         self.keep_multiple = keep_multiple
         self.rebalance = rebalance
+        self.core_symbol = core_symbol
         self.warmup_bars = max(long_lookback, benchmark_sma, trend_sma) + skip + 2
 
     # -- 指標 ---------------------------------------------------------------
@@ -154,12 +162,19 @@ class MomentumRankStrategy(IndicatorStrategy):
         # 2) 保有中の判断（毎日）
         for symbol in ctx.held_symbols:
             held_frame = frames.get(symbol)
-            if held_frame is None or symbol == self.benchmark:
+            if held_frame is None:
+                continue
+            is_core = symbol == self.core_symbol
+            if symbol == self.benchmark and not is_core:
                 continue
             latest = held_frame.row(-1, named=True)
             reason = None
             if not market_ok:
                 reason = f"地合いオフ: {self.benchmark} が SMA{self.benchmark_sma} 割れ"
+            elif is_core:
+                # 受け皿は本命が枠を埋められるときだけ降りる
+                if rebalance_day and len(ranked) >= self.top_n:
+                    reason = f"受け皿を解除: 候補が {len(ranked)} 銘柄あり枠を埋められる"
             elif latest[f"sma_{self.trend_sma}"] is not None and (
                 latest["close"] < latest[f"sma_{self.trend_sma}"]
             ):
@@ -182,6 +197,25 @@ class MomentumRankStrategy(IndicatorStrategy):
                 )
 
         # 3) 新規建ては区切りの日だけ
+        if (
+            rebalance_day
+            and market_ok
+            and self.core_symbol
+            and self.core_symbol in frames
+            and self.core_symbol not in ctx.held_symbols
+            and len(ranked) < self.top_n
+        ):
+            # 候補が足りない分は受け皿で埋める。direction は下限（最下位）に
+            # 置くので、本命の候補が優先して枠を取る。
+            signals.append(
+                Signal(
+                    self.name,
+                    self.core_symbol,
+                    direction=_DIRECTION_FLOOR,
+                    reason=f"受け皿: 候補 {len(ranked)} 銘柄で枠 {self.top_n} に満たない",
+                    meta={"rank": len(ranked) + 1, "core": True},
+                )
+            )
         if rebalance_day and market_ok and ranked:
             top_score = ranked[0][1]
             for symbol, score, meta in ranked:
@@ -290,7 +324,8 @@ class MomentumRankStrategy(IndicatorStrategy):
     def describe(self) -> str:
         return (
             f"{self.name}(mom={self.lookback}-{self.skip}, sma={self.trend_sma}, "
-            f"rebalance={self.rebalance}, top={self.top_n}, benchmark={self.benchmark})"
+            f"rebalance={self.rebalance}, top={self.top_n}, benchmark={self.benchmark}, "
+            f"core={self.core_symbol})"
         )
 
 
