@@ -84,6 +84,12 @@ class Journal:
         }
         if "initial_stop_price" not in columns:
             self._connection.execute("ALTER TABLE stops ADD COLUMN initial_stop_price TEXT")
+        if "initial_quantity" not in columns:
+            self._connection.execute("ALTER TABLE stops ADD COLUMN initial_quantity TEXT")
+        if "scaled_out" not in columns:
+            self._connection.execute(
+                "ALTER TABLE stops ADD COLUMN scaled_out INTEGER NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         self._connection.close()
@@ -285,13 +291,25 @@ class Journal:
             ],
         )
 
-    def orders_today(self, day: dt.date) -> int:
+    @staticmethod
+    def today() -> dt.date:
+        """``placed_at`` と同じ時計（UTC）で見た今日。
+
+        ``orders_today`` にはこれを渡すこと。``dt.date.today()``（ローカル
+        時刻）を渡すと、JST の深夜〜朝 9 時は UTC がまだ前日で、当日の
+        発注が 0 件に見える。
+        """
+        return dt.datetime.now(dt.UTC).date()
+
+    def orders_today(self, day: dt.date | None = None) -> int:
         """当日**ブローカーへ送った**注文の件数。1日あたりの上限判定に使う。
 
+        ``day`` は :meth:`today` と同じ UTC 日付。省略時は今日。
         ``was_placed`` と同じく dry-run は数えない。dry-run は1件も送って
         いないのに枠を消費すると、設定を確認するために dry-run を数回
         回しただけで、その日の発注枠が尽きる。
         """
+        day = day or self.today()
         cursor = self._connection.execute(
             "SELECT count(*) AS n FROM orders WHERE date(placed_at) = ? AND status != ?",
             (day.isoformat(), self.DRY_RUN_STATUS),
@@ -310,8 +328,8 @@ class Journal:
         self._connection.executemany(
             "INSERT INTO stops "
             "(symbol, stop_price, entry_price, created_on, trailing, atr_multiple, highest_close, "
-            " initial_stop_price, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " initial_stop_price, initial_quantity, scaled_out, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     s.symbol,
@@ -322,6 +340,8 @@ class Journal:
                     str(s.atr_multiple),
                     _text(s.highest_close),
                     _text(s.initial_stop_price),
+                    _text(s.initial_quantity),
+                    int(s.scaled_out),
                     _now(),
                 )
                 for s in stops.values()
@@ -341,6 +361,8 @@ class Journal:
                 atr_multiple=Decimal(row["atr_multiple"]),
                 highest_close=_dec(row["highest_close"]),
                 initial_stop_price=_dec(row["initial_stop_price"]),
+                initial_quantity=_dec(row["initial_quantity"]),
+                scaled_out=bool(row["scaled_out"]),
             )
         return result
 

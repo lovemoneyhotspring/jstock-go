@@ -23,6 +23,11 @@
 monthly_budget = 25_000
 
 
+# market は足を取りに行くときのティッカー変換に使う（既定 "JP"）。
+#   JP … 1305 → 1305.T      US … VOO → VOO
+#   ^ で始まる指数（^GSPC など）は market に関係なくそのまま扱われる。
+# 売買（settings.toml）と違い、積立は市場をまたいで並べてよい。
+
 # 完全下降配列（終値 < MA20 < MA50 < MA200）で4倍。
 # 追加投入1円あたりの効果が最良で、必要資金も最少（年平均1.15〜1.42倍）。
 # 発動は全期間の5〜13%程度。増額の原資は賞与など新規資金を前提とする。
@@ -46,6 +51,7 @@ window = { start = "14:00", end = "15:00" }
 id = "段階型"
 tactic = "stack_ladder"
 symbols = ["^GSPC"]
+market = "US"
 multipliers = { 3 = 1.5, 5 = 2.0, 6 = 4.0 }
 
 # 高値からの下落率で増額。米国指数では強いが、新高値を作らない市場では
@@ -55,6 +61,7 @@ multipliers = { 3 = 1.5, 5 = 2.0, 6 = 4.0 }
 id = "下落率型"
 tactic = "drawdown_ladder"
 symbols = ["^IXIC"]
+market = "US"
 levels = [0.10, 0.20, 0.30]
 multipliers = [2.0, 3.0, 4.0]
 require_downtrend = true

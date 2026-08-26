@@ -1,0 +1,23 @@
+# モメンタム順位戦略。詳細は src/wbjp/strategy/samples/momentum_rank.py。
+
+combiner = "priority"
+entry_threshold = 0.3
+exit_threshold = 0.1
+
+[[strategies]]
+name = "momentum_rank"
+enabled = true
+weight = 10.0
+lookback = 126            # 6ヶ月
+skip = 21                 # 直近1ヶ月を除く（短期反転の除去）
+long_lookback = 252       # 12ヶ月もプラスを要求
+vol_lookback = 63         # リスク調整用の年率ボラ
+trend_sma = 100           # 自身のトレンド判定・トレンド崩れの手仕舞い
+max_atr_ratio = 0.06
+min_price = 5.0
+min_dollar_volume = 20_000_000.0
+benchmark = "SPY"
+benchmark_sma = 200       # 地合いフィルタ（割れたら全建玉手仕舞い）
+top_n = 5                 # sizing.max_positions と揃える
+keep_multiple = 2         # 上位 top_n×2 位までは保持（入れ替えの往復を抑える）
+rebalance = "monthly"     # 新規建て・順位脱落の判定は月初の営業日だけ

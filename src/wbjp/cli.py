@@ -459,7 +459,7 @@ def screen(
             "銘柄",
             "スコア",
             "終値",
-            "RSI",
+            "出来高比",
             "高値比",
             "ATR%",
             "売買代金",
@@ -478,7 +478,7 @@ def screen(
                 item.symbol,
                 f"{item.direction:.3f}",
                 f"{m.get('close', 0) or ctx.close(item.symbol):,.2f}",
-                f"{m['rsi']:.1f}" if "rsi" in m else "-",
+                f"{m['dryup_ratio']:.0%}" if "dryup_ratio" in m else "-",
                 f"{-m['drawdown']:.1%}" if "drawdown" in m else "-",
                 f"{m['atr_ratio']:.1%}" if "atr_ratio" in m else "-",
                 f"{m['dollar_volume'] / 1e6:,.0f}M" if "dollar_volume" in m else "-",
@@ -508,7 +508,7 @@ def screen(
 
 def _score_breakdown(meta: dict[str, object]) -> str:
     """スコアの内訳（押し目/乖離/趨勢/流動性）を1行にする。"""
-    labels = (("dip", "押し目"), ("stretch", "乖離"), ("trend", "趨勢"), ("liquid", "流動性"))
+    labels = (("dryup", "出来高枯れ"), ("rs", "RS"), ("trend", "趨勢"), ("liquid", "流動性"))
     parts = [f"{label} {float(meta[key]):.2f}" for key, label in labels if key in meta]  # type: ignore[arg-type]
     return " / ".join(parts)
 
@@ -727,10 +727,14 @@ def accumulate_sync(
     config = _load_accumulate(config_dir)
     store = BarStore(load_config(config_dir).settings.bars_dir)
     end = dt.date.today()
+    start = end - dt.timedelta(days=days)
 
-    counts = store.sync(
-        YFinanceProvider(), config.symbols, end - dt.timedelta(days=days), end, force=force
-    )
+    # ティッカー変換が市場ごとに違う（1305→1305.T / VOO→VOO）ので分けて取る。
+    # 積立は売買と違い市場をまたぐのが普通なので、universe.market は見ない。
+    counts: dict[str, int] = {}
+    for market, symbols in config.symbols_by_market().items():
+        provider = YFinanceProvider(market=market)
+        counts.update(store.sync(provider, symbols, start, end, force=force))
     for symbol, count in sorted(counts.items()):
         console.print(f"  {symbol}: {count} 本")
 

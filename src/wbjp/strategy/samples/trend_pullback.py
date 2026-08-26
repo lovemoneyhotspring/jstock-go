@@ -1,21 +1,29 @@
-"""上昇トレンド中の押し目買い（勝率重視のスイング）。
+"""上昇トレンド銘柄の「押し目からのブレイクアウト」（勝率重視のスイング）。
 
 考え方:
-    「長期上昇トレンドが確認済みの銘柄が、短期的に売られた所を拾い、
-    平均回帰で小さく取る」。ブレイクアウトより勝率が高く、利幅は小さい。
+    平均回帰（オシレーターの逆張り）ではなく、**「上昇トレンド銘柄が
+    健全な押し目をつけ、出来高が枯れた後に反発を始めた瞬間」を拾う**。
+    押し目そのもの（下落中）では買わない。出来高が細り、下値が固まって
+    から、直近高値（または保ち合いレンジ）を上抜けた日にだけ意見を出す。
 
 エントリー（全条件 AND。1つでも欠ければ意見を出さない）:
+    環境認識（母集団の選定）:
     1. 終値 > SMA200 かつ SMA50 > SMA200            … 長期上昇トレンド
-    2. SMA50 が上向き（10日前より高い）              … トレンドが生きている
-    3. 直近 ``high_lookback`` 日高値からの下落率 ≦ 上限 … 押し目であって崩れではない
-    4. RSI(3) < 閾値                                  … 短期の売られすぎ
-    5. 反転確認: 当日が陽線（終値 > 前日終値）          … 落ちるナイフを受けない
-       反転確認を使うときは、RSI は**前日**の値で判定する。反発した当日の
-       RSI(3) は必ず跳ね上がるため、当日の値で見ると条件が両立しない。
-    6. ATR/終値 が下限〜上限                          … 動かない株・荒れ過ぎの株を除外
-    7. 20日平均売買代金 ≧ 下限                        … 指値が乗る流動性
-    8. 地合い: ベンチマーク（SPY）の終値 > その SMA     … 市場全体の下げ局面では建てない
-    9. 決算ブラックアウト外                            … 日足ではギャップを避けられない
+    2. SMA200 と SMA50 がともに上向き（``slope_lookback`` 日前より高い）
+                                                       … トレンドが生きている
+    3. 相対的強さ（RS）: 過去 ``rs_lookback`` 日の騰落率がベンチマーク
+       （既定 SPY）を上回る                            … 資金が向かっている銘柄
+    4. 20日平均売買代金 ≧ 下限                        … 指値が乗る流動性
+
+    エントリートリガー（購入の合図）:
+    5. 直近 ``high_lookback`` 日高値からの下落率 ≦ 上限 … 押し目であって崩れではない
+    6. 出来高の急減: 前日の出来高が、過去 ``volume_lookback`` 日平均の
+       ``volume_dryup_max`` 倍以下                     … 売り手が尽きたサイン
+    7. 反発トリガー: 終値が「直近 ``breakout_lookback`` 日高値」を上抜けた
+                                                       … 既定 1 日 = 前日高値のブレイク
+    8. ATR/終値 が下限〜上限                          … 動かない株・荒れ過ぎの株を除外
+    9. 地合い: ベンチマークの終値 > その SMA           … 市場全体の下げ局面では建てない
+    10. 決算ブラックアウト外                           … 日足ではギャップを避けられない
 
 順位付け:
     条件を満たした銘柄には 0〜1 のスコアを付け、``direction`` に写す
@@ -23,19 +31,17 @@
     枠を埋めるので、**スコアがそのまま採用順位になる**。
 
     スコアの内訳（meta に残す）:
-        - dip     … RSI がどれだけ深いか。押し目の深さ
-        - stretch … SMA20 からの乖離を ATR で割った値。平均回帰の余地
-        - trend   … SMA200 からの距離。トレンドの強さ
-        - liquid  … 売買代金（対数）。滑りにくさ
-    重みは押し目の質（dip / stretch）を重く見る。勝率に最も効くのが
-    「どれだけ売られた所を拾えたか」だから。
+        - dryup  … 出来高がどれだけ枯れたか。押し目の質
+        - rs     … ベンチマークに対する超過リターン。資金の向かい先
+        - trend  … SMA200 からの距離。トレンドの強さ
+        - liquid … 売買代金（対数）。滑りにくさ
+    重みは押し目の質（dryup）と資金の向かい先（rs）を重く見る。
 
-手仕舞い（保有中に direction = -1 を出す）:
-    - RSI(3) が買われすぎ圏（≧ ``rsi_exit``）
-    - 含み益がある状態で終値が SMA20 を回復した（第一目標）
-    - 終値が直近高値に達した（上限目標）
-    - 決算ブラックアウトに入った
-    損切り・時間切れ・トレーリングは :mod:`wbjp.risk.stops` が担当する。
+手仕舞い:
+    損切り・建値ストップ・時間切れ・2段階利確・利確後のトレンド追従は
+    すべて :mod:`wbjp.risk.stops` が担当する（``config.stops`` で設定）。
+    この戦略が保有中に direction=-1 を出すのは、決算ブラックアウトに
+    入ったときだけ。それ以外は弱い買い（0.5）を返してストップ管理に委ねる。
 """
 
 from __future__ import annotations
@@ -44,12 +50,12 @@ import datetime as dt
 import math
 import tomllib
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import polars as pl
 
 from wbjp.domain.models import Signal
-from wbjp.indicators.ohlcv import atr, rsi, sma
+from wbjp.indicators.ohlcv import atr, donchian_high, roc, sma
 from wbjp.strategy.base import IndicatorStrategy, StrategyContext
 
 #: 意見を出すときの direction の下限。entry_threshold（既定 0.3）以上。
@@ -65,17 +71,16 @@ class TrendPullbackStrategy(IndicatorStrategy):
         sma_mid: int = 50,
         sma_short: int = 20,
         slope_lookback: int = 10,
-        rsi_period: int = 3,
-        rsi_entry: float = 20.0,
-        rsi_exit: float = 80.0,
+        rs_lookback: int = 63,
         high_lookback: int = 60,
         max_drawdown_from_high: float = 0.15,
+        breakout_lookback: int = 1,
+        volume_lookback: int = 20,
+        volume_dryup_max: float = 0.7,
         atr_period: int = 14,
         min_atr_ratio: float = 0.015,
         max_atr_ratio: float = 0.05,
         min_dollar_volume: float = 5_000_000.0,
-        volume_lookback: int = 20,
-        require_reversal_bar: bool = True,
         benchmark: str | None = "SPY",
         benchmark_sma: int = 50,
         blackout_file: str | None = None,
@@ -84,26 +89,25 @@ class TrendPullbackStrategy(IndicatorStrategy):
     ) -> None:
         if not sma_short < sma_mid < sma_long:
             raise ValueError("sma_short < sma_mid < sma_long を満たすこと")
-        if not 0 < rsi_entry < rsi_exit < 100:
-            raise ValueError("0 < rsi_entry < rsi_exit < 100 を満たすこと")
         if not 0 < min_atr_ratio < max_atr_ratio:
             raise ValueError("0 < min_atr_ratio < max_atr_ratio を満たすこと")
+        if not 0 < volume_dryup_max < 1:
+            raise ValueError("volume_dryup_max は 0 より大きく 1 未満")
 
         self.sma_long = sma_long
         self.sma_mid = sma_mid
         self.sma_short = sma_short
         self.slope_lookback = slope_lookback
-        self.rsi_period = rsi_period
-        self.rsi_entry = rsi_entry
-        self.rsi_exit = rsi_exit
+        self.rs_lookback = rs_lookback
         self.high_lookback = high_lookback
         self.max_drawdown_from_high = max_drawdown_from_high
+        self.breakout_lookback = breakout_lookback
+        self.volume_lookback = volume_lookback
+        self.volume_dryup_max = volume_dryup_max
         self.atr_period = atr_period
         self.min_atr_ratio = min_atr_ratio
         self.max_atr_ratio = max_atr_ratio
         self.min_dollar_volume = min_dollar_volume
-        self.volume_lookback = volume_lookback
-        self.require_reversal_bar = require_reversal_bar
         self.benchmark = benchmark
         self.benchmark_sma = benchmark_sma
         self.blackout_days_before = blackout_days_before
@@ -111,7 +115,9 @@ class TrendPullbackStrategy(IndicatorStrategy):
         self.blackout: dict[str, list[dt.date]] = (
             load_blackout(Path(blackout_file)) if blackout_file else {}
         )
-        self.warmup_bars = max(sma_long, high_lookback, benchmark_sma) + slope_lookback + 1
+        self.warmup_bars = (
+            max(sma_long, high_lookback, benchmark_sma, rs_lookback) + slope_lookback + 1
+        )
 
     # -- 指標 ---------------------------------------------------------------
 
@@ -120,14 +126,17 @@ class TrendPullbackStrategy(IndicatorStrategy):
             sma(self.sma_long),
             sma(self.sma_mid),
             sma(self.sma_short),
-            rsi(self.rsi_period),
             atr(self.atr_period),
+            roc(self.rs_lookback),
+            donchian_high(self.breakout_lookback),
             pl.col("high").rolling_max(self.high_lookback).alias(self._high_col),
             (pl.col("close") * pl.col("volume"))
             .rolling_mean(self.volume_lookback)
             .alias(self._dollar_volume_col),
-            pl.col("close").shift(1).alias("prev_close"),
-            rsi(self.rsi_period).shift(1).alias(f"prev_rsi_{self.rsi_period}"),
+            (
+                pl.col("volume").shift(1)
+                / pl.col("volume").rolling_mean(self.volume_lookback).shift(1)
+            ).alias(self._dryup_col),
         ]
 
     @property
@@ -138,44 +147,46 @@ class TrendPullbackStrategy(IndicatorStrategy):
     def _dollar_volume_col(self) -> str:
         return f"dollar_volume_{self.volume_lookback}"
 
+    @property
+    def _dryup_col(self) -> str:
+        return f"volume_dryup_{self.volume_lookback}"
+
+    @property
+    def _breakout_col(self) -> str:
+        return f"donchian_high_{self.breakout_lookback}"
+
+    @property
+    def _rs_col(self) -> str:
+        return f"roc_{self.rs_lookback}"
+
     # -- 判断 ---------------------------------------------------------------
 
     def on_bars(self, ctx: StrategyContext) -> list[Signal]:
         self._market_ok = self._benchmark_allows_entry(ctx)
+        self._benchmark_return = self._benchmark_rs_return(ctx)
         return super().on_bars(ctx)
 
     def evaluate(self, symbol: str, frame: pl.DataFrame, ctx: StrategyContext) -> Signal | None:
         if symbol == self.benchmark:
             return None  # ベンチマークは売買対象にしない
 
-        latest = frame.row(-1, named=True)
-        close = latest["close"]
-        rsi_value = latest[f"rsi_{self.rsi_period}"]
-        sma_short = latest[f"sma_{self.sma_short}"]
-        sma_long = latest[f"sma_{self.sma_long}"]
-        high = latest[self._high_col]
-        if None in (close, rsi_value, sma_short, sma_long, high):
-            return None
-
         in_blackout = self._in_blackout(symbol, ctx.as_of)
         position = ctx.position(symbol)
         held = position is not None and position.quantity > 0
 
         if held:
-            return self._evaluate_exit(symbol, latest, position, in_blackout)
+            return self._evaluate_exit(symbol, in_blackout)
 
         if in_blackout:
             return None
-        return self._evaluate_entry(symbol, frame, latest)
+        return self._evaluate_entry(symbol, frame)
 
-    def _evaluate_entry(
-        self, symbol: str, frame: pl.DataFrame, latest: dict[str, Any]
-    ) -> Signal | None:
+    def _evaluate_entry(self, symbol: str, frame: pl.DataFrame) -> Signal | None:
         checks = self.screen(frame)
         if not checks.passed:
             return None
 
-        score, parts = self._score(latest, checks)
+        score, parts = self._score(checks)
         direction = _DIRECTION_FLOOR + (1.0 - _DIRECTION_FLOOR) * score
         return Signal(
             self.name,
@@ -183,36 +194,26 @@ class TrendPullbackStrategy(IndicatorStrategy):
             direction=round(direction, 4),
             confidence=1.0,
             reason=(
-                f"押し目: RSI{self.rsi_period} {checks.rsi:.1f}, 高値から {checks.drawdown:.1%}, "
-                f"ATR {checks.atr_ratio:.1%}, スコア {score:.2f}"
+                f"押し目からのブレイク: 出来高比 {checks.dryup_ratio:.0%}, "
+                f"高値から {checks.drawdown:.1%}, RS +{checks.rs_margin:.1f}pt, "
+                f"スコア {score:.2f}"
             ),
             meta={"score": score, **parts, **checks.as_meta()},
         )
 
-    def _evaluate_exit(
-        self, symbol: str, latest: dict[str, Any], position: Any, in_blackout: bool
-    ) -> Signal | None:
-        close = latest["close"]
-        rsi_value = latest[f"rsi_{self.rsi_period}"]
-        sma_short = latest[f"sma_{self.sma_short}"]
-        high = latest[self._high_col]
-        cost = float(position.cost_price)
+    def _evaluate_exit(self, symbol: str, in_blackout: bool) -> Signal | None:
+        """保有中の判断。損切り・利確・時間切れは :mod:`wbjp.risk.stops` に委ねる。
 
-        reason = None
+        ここで判断するのは、日足の指標だけでは分からない決算リスクだけ。
+        """
         if in_blackout and self.exit_before_earnings:
-            reason = "決算前のため手仕舞い"
-        elif rsi_value >= self.rsi_exit:
-            reason = f"RSI{self.rsi_period} {rsi_value:.1f} が買われすぎ圏（≧{self.rsi_exit:g}）"
-        elif close >= high:
-            reason = f"直近 {self.high_lookback} 日高値に到達"
-        elif close > sma_short and close > cost:
-            reason = f"含み益で SMA{self.sma_short} を回復（第一目標）"
-
-        if reason is None:
-            # 保有継続。意見が無いと sizer が「シグナル消滅」で手仕舞うため、
-            # 明示的に弱い買いを返す。
-            return Signal(self.name, symbol, direction=0.5, reason="保有継続（押し目の回復待ち）")
-        return Signal(self.name, symbol, direction=-1.0, reason=reason, meta={"rsi": rsi_value})
+            return Signal(self.name, symbol, direction=-1.0, reason="決算前のため手仕舞い")
+        return Signal(
+            self.name,
+            symbol,
+            direction=0.5,
+            reason="保有継続（損切り・利確はストップ管理に委ねる）",
+        )
 
     # -- スクリーニング（screen コマンドからも使う） ------------------------
 
@@ -226,40 +227,64 @@ class TrendPullbackStrategy(IndicatorStrategy):
         close = latest["close"]
         sma_long = latest[f"sma_{self.sma_long}"]
         sma_mid = latest[f"sma_{self.sma_mid}"]
-        sma_short = latest[f"sma_{self.sma_short}"]
-        rsi_value = latest[f"rsi_{self.rsi_period}"]
         atr_value = latest[f"atr_{self.atr_period}"]
         high = latest[self._high_col]
         dollar_volume = latest[self._dollar_volume_col]
-        prev_close = latest["prev_close"]
-        # 反転確認を使うなら「前日に売られすぎていた」ことを見る
-        if self.require_reversal_bar:
-            rsi_value = latest[f"prev_rsi_{self.rsi_period}"]
+        dryup_ratio = latest[self._dryup_col]
+        breakout_high = latest[self._breakout_col]
+        rs_value = latest[self._rs_col]
 
         older_mid = (
             frame[f"sma_{self.sma_mid}"][-1 - self.slope_lookback]
             if frame.height > self.slope_lookback
             else None
         )
+        older_long = (
+            frame[f"sma_{self.sma_long}"][-1 - self.slope_lookback]
+            if frame.height > self.slope_lookback
+            else None
+        )
 
-        values = (close, sma_long, sma_mid, sma_short, rsi_value, atr_value, high, dollar_volume)
+        values = (
+            close,
+            sma_long,
+            sma_mid,
+            atr_value,
+            high,
+            dollar_volume,
+            dryup_ratio,
+            breakout_high,
+        )
         if any(v is None for v in values):
             return ScreenResult(failed=["指標が未計算"], close=close or 0.0)
 
         drawdown = 1.0 - close / high if high else 1.0
         atr_ratio = atr_value / close if close else 0.0
+        rs_margin = (
+            rs_value - self._benchmark_return
+            if rs_value is not None and self._benchmark_return is not None
+            else None
+        )
 
         failed = []
         if not (close > sma_long and sma_mid > sma_long):
             failed.append(f"トレンド: 終値 > SMA{self.sma_long} > … を満たさない")
+        if older_long is not None and sma_long <= older_long:
+            failed.append(f"SMA{self.sma_long} が下向き")
         if older_mid is not None and sma_mid <= older_mid:
             failed.append(f"SMA{self.sma_mid} が下向き")
+        if self.benchmark and (
+            self._benchmark_return is None or rs_margin is None or rs_margin <= 0
+        ):
+            failed.append(f"RS: {self.benchmark} に対する超過リターンが無い/マイナス")
         if drawdown > self.max_drawdown_from_high:
             failed.append(f"高値から {drawdown:.1%} 下落（上限 {self.max_drawdown_from_high:.0%}）")
-        if rsi_value >= self.rsi_entry:
-            failed.append(f"RSI{self.rsi_period} {rsi_value:.1f} ≧ {self.rsi_entry:g}")
-        if self.require_reversal_bar and (prev_close is None or close <= prev_close):
-            failed.append("反転確認なし（当日が陽線でない）")
+        if dryup_ratio > self.volume_dryup_max:
+            failed.append(
+                f"出来高比 {dryup_ratio:.0%} が枯れていない（上限 {self.volume_dryup_max:.0%}）"
+            )
+        if close <= breakout_high:
+            failed.append(f"直近{self.breakout_lookback}日高値 {breakout_high:.2f} を未達")
         if not (self.min_atr_ratio <= atr_ratio <= self.max_atr_ratio):
             failed.append(f"ATR比 {atr_ratio:.1%} が範囲外")
         if dollar_volume < self.min_dollar_volume:
@@ -270,30 +295,29 @@ class TrendPullbackStrategy(IndicatorStrategy):
         return ScreenResult(
             failed=failed,
             close=close,
-            rsi=rsi_value,
+            dryup_ratio=dryup_ratio,
             drawdown=drawdown,
             atr_ratio=atr_ratio,
             dollar_volume=dollar_volume,
             trend_distance=close / sma_long - 1.0,
-            stretch=(sma_short - close) / atr_value if atr_value else 0.0,
+            rs_margin=rs_margin or 0.0,
         )
 
-    def _score(
-        self, latest: dict[str, Any], checks: ScreenResult
-    ) -> tuple[float, dict[str, float]]:
-        dip = _clamp((self.rsi_entry - checks.rsi) / self.rsi_entry)
-        stretch = _clamp(checks.stretch / 3.0)
+    def _score(self, checks: ScreenResult) -> tuple[float, dict[str, float]]:
+        dryup = _clamp((self.volume_dryup_max - checks.dryup_ratio) / self.volume_dryup_max)
+        rs = _clamp(checks.rs_margin / 20.0)
         trend = _clamp(checks.trend_distance / 0.20)
         liquid = _clamp(
             (math.log10(max(checks.dollar_volume, 1.0)) - math.log10(self.min_dollar_volume)) / 2.0
         )
-        parts = {"dip": dip, "stretch": stretch, "trend": trend, "liquid": liquid}
-        score = 0.35 * dip + 0.30 * stretch + 0.20 * trend + 0.15 * liquid
+        parts = {"dryup": dryup, "rs": rs, "trend": trend, "liquid": liquid}
+        score = 0.35 * dryup + 0.30 * rs + 0.20 * trend + 0.15 * liquid
         return round(score, 4), parts
 
     # -- フィルタ -----------------------------------------------------------
 
     _market_ok: bool = True
+    _benchmark_return: float | None = None
 
     def _benchmark_allows_entry(self, ctx: StrategyContext) -> bool:
         if not self.benchmark:
@@ -309,6 +333,19 @@ class TrendPullbackStrategy(IndicatorStrategy):
         value = latest[col]
         return value is not None and latest["close"] > value
 
+    def _benchmark_rs_return(self, ctx: StrategyContext) -> float | None:
+        """ベンチマークの過去 ``rs_lookback`` 日騰落率。RS 比較の基準にする。"""
+        if not self.benchmark:
+            return None
+        if not ctx.has_bars(self.benchmark, self.rs_lookback + 1):
+            return None
+        frame = ctx.bars(self.benchmark)
+        col = self._rs_col
+        if col not in frame.columns:
+            frame = frame.with_columns(roc(self.rs_lookback))
+        value = frame.row(-1, named=True)[col]
+        return float(value) if value is not None else None
+
     def _in_blackout(self, symbol: str, as_of: dt.date) -> bool:
         for earnings in self.blackout.get(symbol, ()):
             if earnings - dt.timedelta(days=self.blackout_days_before) <= as_of <= earnings:
@@ -318,7 +355,7 @@ class TrendPullbackStrategy(IndicatorStrategy):
     def describe(self) -> str:
         return (
             f"{self.name}(sma={self.sma_short}/{self.sma_mid}/{self.sma_long}, "
-            f"rsi{self.rsi_period}<{self.rsi_entry:g}, benchmark={self.benchmark})"
+            f"breakout={self.breakout_lookback}日高値, benchmark={self.benchmark})"
         )
 
 
@@ -330,9 +367,9 @@ class ScreenResult:
         "close",
         "dollar_volume",
         "drawdown",
+        "dryup_ratio",
         "failed",
-        "rsi",
-        "stretch",
+        "rs_margin",
         "trend_distance",
     )
 
@@ -341,21 +378,21 @@ class ScreenResult:
         *,
         failed: list[str],
         close: float,
-        rsi: float = 0.0,
+        dryup_ratio: float = 0.0,
         drawdown: float = 0.0,
         atr_ratio: float = 0.0,
         dollar_volume: float = 0.0,
         trend_distance: float = 0.0,
-        stretch: float = 0.0,
+        rs_margin: float = 0.0,
     ) -> None:
         self.failed = failed
         self.close = close
-        self.rsi = rsi
+        self.dryup_ratio = dryup_ratio
         self.drawdown = drawdown
         self.atr_ratio = atr_ratio
         self.dollar_volume = dollar_volume
         self.trend_distance = trend_distance
-        self.stretch = stretch
+        self.rs_margin = rs_margin
 
     @property
     def passed(self) -> bool:
@@ -363,12 +400,12 @@ class ScreenResult:
 
     def as_meta(self) -> dict[str, float]:
         return {
-            "rsi": self.rsi,
+            "dryup_ratio": self.dryup_ratio,
             "drawdown": self.drawdown,
             "atr_ratio": self.atr_ratio,
             "dollar_volume": self.dollar_volume,
             "trend_distance": self.trend_distance,
-            "stretch_atr": self.stretch,
+            "rs_margin": self.rs_margin,
         }
 
 

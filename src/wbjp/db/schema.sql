@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS stops (
     atr_multiple  TEXT NOT NULL DEFAULT '2.0',
     highest_close TEXT,
     initial_stop_price TEXT,           -- 1R の基準。旧レコードは NULL（repo が移行する）
+    initial_quantity   TEXT,           -- 2段階利確の基準となる設定時の建玉数
+    scaled_out    INTEGER NOT NULL DEFAULT 0,  -- 1段目の利確が済んだか
     updated_at    TEXT
 );
 

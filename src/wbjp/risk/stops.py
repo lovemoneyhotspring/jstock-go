@@ -31,6 +31,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
+from wbjp.domain.jp_rules import round_to_lot
 from wbjp.domain.models import (
     Order,
     OrderRequest,
@@ -67,6 +68,12 @@ class Stop:
     #: 設定時の初期ストップ。1R（初期リスク）の基準として、ストップを
     #: 動かした後も変わらない。None は旧レコード（stop_price を初期値とみなす）。
     initial_stop_price: Decimal | None = None
+    #: 設定時の建玉数。2段階利確で「元の何%を売ったか」を計算する基準。
+    #: None は旧レコード（利確前に作られた・利確機能を使わない）。
+    initial_quantity: Decimal | None = None
+    #: 1段目の利確（部分手仕舞い）が済んだか。済んだ後は
+    #: :meth:`StopBook.trend_exit_targets` が残り玉の手仕舞いを判定する。
+    scaled_out: bool = False
 
     def is_triggered(self, price: Decimal) -> bool:
         return price <= self.stop_price
@@ -131,22 +138,32 @@ class StopBook:
         *,
         atr_multiple: Decimal = Decimal("2.0"),
         trailing: bool = False,
+        initial_stop_pct: Decimal | None = None,
     ) -> None:
         """建玉に対してストップを用意し、消えた建玉のぶんを片付ける。
 
         ストップを持たない建玉があるのは危険な状態なので、
-        取得価格と ATR から自動で設定する。
+        取得価格から自動で設定する。
+
+        Args:
+            initial_stop_pct: 建値からの比率でストップ幅を固定する
+                （例: ``Decimal("0.04")`` = -4%）。指定すれば ATR は使わない。
+                None なら従来通り ATR × ``atr_multiple`` を幅にする。
         """
         for symbol, position in positions.items():
             if position.quantity <= 0 or symbol in self._stops:
                 continue
 
-            distance = atr.get(symbol)
-            if distance is None or distance <= 0:
-                log.warning("ATR が無いためストップを設定できません", symbol=symbol)
-                continue
+            if initial_stop_pct is not None:
+                distance = position.cost_price * initial_stop_pct
+            else:
+                atr_value = atr.get(symbol)
+                if atr_value is None or atr_value <= 0:
+                    log.warning("ATR が無いためストップを設定できません", symbol=symbol)
+                    continue
+                distance = atr_value * atr_multiple
 
-            stop_price = position.cost_price - distance * atr_multiple
+            stop_price = position.cost_price - distance
             if stop_price <= 0:
                 continue
 
@@ -160,6 +177,7 @@ class StopBook:
                     atr_multiple=atr_multiple,
                     highest_close=position.last_price,
                     initial_stop_price=stop_price,
+                    initial_quantity=position.quantity,
                 )
             )
             log.info("ストップを設定", symbol=symbol, stop_price=str(stop_price))
@@ -291,6 +309,117 @@ class StopBook:
                     ),
                 )
             )
+        return targets
+
+    def take_profit_targets(
+        self,
+        closes: dict[str, Decimal],
+        quantities: dict[str, Decimal],
+        lot_sizes: dict[str, Decimal],
+        *,
+        target_r: Decimal | None,
+        fraction: Decimal = Decimal("0.5"),
+        default_lot_size: Decimal = Decimal(1),
+    ) -> list[TargetPosition]:
+        """2段階利確の1段目: 含み益が ``target_r`` に達した建玉の一部を利確する。
+
+        まだ利確していない建玉だけが対象（``scaled_out`` で一度きり）。
+        利確と同時にストップを建値へ引き上げる（下げることはしない）。
+        残りの手仕舞いは :meth:`trend_exit_targets` に委ねる。
+        """
+        if target_r is None:
+            return []
+
+        targets = []
+        for symbol, stop in list(self._stops.items()):
+            if stop.scaled_out or stop.initial_quantity is None:
+                continue
+            close = closes.get(symbol)
+            current_qty = quantities.get(symbol)
+            if close is None or current_qty is None or current_qty <= 0:
+                continue
+            risk = stop.initial_risk
+            if risk <= 0:
+                continue
+            gain_r = (close - stop.entry_price) / risk
+            if gain_r < target_r:
+                continue
+
+            lot = lot_sizes.get(symbol, default_lot_size)
+            remaining = round_to_lot(stop.initial_quantity * (Decimal(1) - fraction), lot)
+            remaining = min(remaining, current_qty)
+
+            self._stops[symbol] = replace(
+                stop, scaled_out=True, stop_price=max(stop.stop_price, stop.entry_price)
+            )
+            log.info(
+                "利確: 建玉の一部を手仕舞い",
+                symbol=symbol,
+                gain_r=str(gain_r),
+                remaining=str(remaining),
+            )
+            if remaining < current_qty:
+                targets.append(
+                    TargetPosition(
+                        symbol,
+                        remaining,
+                        reason=(
+                            f"利確 +{gain_r:.1f}R 到達、{fraction:.0%} を手仕舞い"
+                            "（残りはトレンド追従）"
+                        ),
+                    )
+                )
+        return targets
+
+    def runner_targets(
+        self,
+        closes: dict[str, Decimal],
+        quantities: dict[str, Decimal],
+        trend_values: dict[str, Decimal],
+    ) -> list[TargetPosition]:
+        """2段階利確の2段目: 利確済みの建玉を、トレンド追従で保有し続ける。
+
+        対象は :meth:`take_profit_targets` で既に一部を利確した建玉だけ。
+        利確前の建玉は初期ストップ・建値ストップ・時間切れが担当する
+        （押し目そのものが移動平均近辺での下落なので、利確前に当てると
+        エントリー直後に手仕舞ってしまう）。
+
+        **なぜ「保有継続」もここで明示するのか**
+            サイジング（``atr_risk`` など）は毎日、資産と ATR から目標株数を
+            計算し直す。何も言わないと、利確で減らした株数が翌日には
+            満額へ買い戻されてしまう。ここで残数をストップ優先の目標として
+            固定し、移動平均を割ったときだけ手仕舞いに切り替える。
+        """
+        targets = []
+        for symbol, stop in self._stops.items():
+            if not stop.scaled_out:
+                continue
+            close = closes.get(symbol)
+            current_qty = quantities.get(symbol)
+            if close is None or current_qty is None or current_qty <= 0:
+                continue
+
+            trend = trend_values.get(symbol)
+            if trend is not None and close < trend:
+                log.info(
+                    "トレンド割れで残りを手仕舞い",
+                    symbol=symbol,
+                    close=str(close),
+                    trend=str(trend),
+                )
+                targets.append(
+                    TargetPosition(
+                        symbol,
+                        Decimal(0),
+                        reason=f"終値 {close} が移動平均 {trend} を割り込み、残りを手仕舞い",
+                    )
+                )
+            else:
+                targets.append(
+                    TargetPosition(
+                        symbol, current_qty, reason="利確後の残り玉を維持（トレンド追従中）"
+                    )
+                )
         return targets
 
 

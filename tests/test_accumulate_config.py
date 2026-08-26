@@ -26,6 +26,8 @@ from wbjp.accumulate import (
     registry,
 )
 from wbjp.accumulate.config import FILENAME
+from wbjp.data.yfinance_provider import to_yahoo_ticker
+from wbjp.domain.models import Market
 
 CONFIG = """
 monthly_budget = 30_000
@@ -433,3 +435,54 @@ def test_window_does_not_change_the_plan() -> None:
     with_window = build_plan(bars, AccumulationSettings(budget, BearStack()))
     without = build_plan(bars, AccumulationSettings(budget, BearStack(window=False)))
     assert with_window["amount"].to_list() == without["amount"].to_list()
+
+
+# --- 市場（ティッカー変換） -----------------------------------------------
+
+
+def test_market_defaults_to_japan() -> None:
+    config = AccumulateConfig.model_validate(
+        {"tactics": [{"id": "x", "tactic": "constant", "symbols": ["1305.T"]}]}
+    )
+    assert config.tactics[0].market is Market.JP
+
+
+def test_symbols_are_grouped_by_market(tmp_path: Path) -> None:
+    body = """
+[[tactics]]
+id = "日本株"
+tactic = "constant"
+symbols = ["1305.T", "1591.T"]
+
+[[tactics]]
+id = "米国株"
+tactic = "constant"
+symbols = ["VOO", "^GSPC"]
+market = "US"
+"""
+    grouped = load(_write(tmp_path, body)).symbols_by_market()
+    assert grouped == {Market.JP: ["1305.T", "1591.T"], Market.US: ["VOO", "^GSPC"]}
+
+
+def test_us_ticker_is_not_given_the_tokyo_suffix() -> None:
+    """market を分けないと VOO が VOO.T になって取得に失敗する。"""
+    assert to_yahoo_ticker("VOO", Market.US) == "VOO"
+    assert to_yahoo_ticker("VOO", Market.JP) == "VOO.T"
+    # 指数は市場に関係なくそのまま
+    for market in (Market.JP, Market.US):
+        assert to_yahoo_ticker("^GSPC", market) == "^GSPC"
+
+
+def test_market_is_not_passed_to_the_tactic(tmp_path: Path) -> None:
+    """market は足の取得用で、戦術のパラメータではない。"""
+    body = """
+[[tactics]]
+id = "x"
+tactic = "bear_stack"
+symbols = ["VOO"]
+market = "US"
+multiplier = 2
+"""
+    entry = load(_write(tmp_path, body)).tactics[0]
+    assert entry.params == {"multiplier": 2}
+    assert entry.build().value == 2.0

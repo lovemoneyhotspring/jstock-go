@@ -363,7 +363,7 @@ def test_dry_run_does_not_consume_the_daily_order_budget(journal: Journal) -> No
     max_orders_per_day が尽き、その日の実発注が止まる。
     """
     # placed_at は挿入時の実時刻。as_of ではなく実日付で数える。
-    day = dt.date.today()
+    day = Journal.today()
     journal.start_run("r1", day, "prod", "dry_run")
     for i in range(5):
         request = OrderRequest(
@@ -388,7 +388,7 @@ def test_cancelled_orders_still_consume_the_daily_budget(journal: Journal) -> No
     ブレーキであって、約定回数の上限ではない。出して取り消す往復も
     ブローカーへの発注として数える。
     """
-    day = dt.date.today()
+    day = Journal.today()
     journal.start_run("r1", day, "prod", "live")
     request = OrderRequest("c1", "3664", Side.BUY, OrderType.LIMIT, D(100), limit_price=D(28))
     journal.record_order("r1", request, "CANCELLED")
@@ -429,7 +429,7 @@ def test_journal_counts_orders_placed_today(journal: Journal) -> None:
             "SUBMITTED",
         )
 
-    assert journal.orders_today(dt.datetime.now(dt.UTC).date()) == 3
+    assert journal.orders_today() == 3
 
 
 def test_journal_round_trips_stops(journal: Journal) -> None:

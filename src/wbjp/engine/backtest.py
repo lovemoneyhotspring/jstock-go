@@ -29,7 +29,7 @@ from wbjp.config import FileConfig
 from wbjp.domain.market_rules import rules_for
 from wbjp.domain.models import CombinedSignal, Fill, Side, Signal
 from wbjp.engine.reconcile import ReconcileSettings, reconcile
-from wbjp.indicators.ohlcv import atr
+from wbjp.indicators.ohlcv import atr, sma
 from wbjp.logging import get_logger
 from wbjp.portfolio.sizer import SizingContext, build_sizer
 from wbjp.risk.limits import RiskContext, RiskManager
@@ -186,11 +186,17 @@ class BacktestRunner:
             self.broker.mark(closes)
 
             # 2) 当日の終値までで判断する
+            trend_values = (
+                self._lookup(indexed, today, self._trend_exit_col)
+                if self.config.stops.trend_exit_sma is not None
+                else {}
+            )
             record = self._decide(
                 enriched,
                 today,
                 closes,
                 self._lookup(indexed, today, f"atr_{ATR_PERIOD}"),
+                trend_values,
                 warmup,
                 index,
                 fills,
@@ -210,12 +216,14 @@ class BacktestRunner:
         today: dt.date,
         closes: dict[str, Decimal],
         atr_values: dict[str, Decimal],
+        trend_values: dict[str, Decimal],
         warmup: int,
         index: int,
         fills: list[Fill],
     ) -> DayRecord:
         positions = self.broker.positions_by_symbol()
         equity = self.broker.equity
+        lot_sizes = {s: Decimal(v) for s, v in self.config.universe.lot_size_overrides.items()}
 
         # その日までに切り詰めた足だけを戦略に渡す（先読みの遮断）
         visible = {symbol: frame.filter(pl.col("date") <= today) for symbol, frame in bars.items()}
@@ -236,6 +244,7 @@ class BacktestRunner:
             today,
             atr_multiple=self.config.sizing.atr_stop_multiple,
             trailing=self.config.stops.trailing,
+            initial_stop_pct=self.config.stops.initial_stop_pct,
         )
         self.stops.update_breakeven(closes, self.config.stops.breakeven_after_r)
         self.stops.update_trailing(closes, atr_values)
@@ -247,9 +256,7 @@ class BacktestRunner:
                 buying_power=self.broker.get_balance().buying_power,
                 prices=closes,
                 atr=atr_values,
-                lot_sizes={
-                    s: Decimal(v) for s, v in self.config.universe.lot_size_overrides.items()
-                },
+                lot_sizes=lot_sizes,
                 positions=positions,
                 default_lot_size=self.rules.default_lot_size,
             ),
@@ -258,13 +265,24 @@ class BacktestRunner:
         )
         targets = apply_stop_priority(
             targets,
-            self.stops.exit_targets(closes)
+            self.stops.take_profit_targets(
+                closes,
+                {s: p.quantity for s, p in positions.items()},
+                lot_sizes,
+                target_r=self.config.stops.take_profit_r,
+                fraction=self.config.stops.take_profit_fraction,
+                default_lot_size=self.rules.default_lot_size,
+            )
+            + self.stops.runner_targets(
+                closes, {s: p.quantity for s, p in positions.items()}, trend_values
+            )
             + self.stops.time_exit_targets(
                 closes,
                 today,
                 stale_days=self.config.stops.stale_exit_days,
                 max_days=self.config.stops.max_hold_days,
-            ),
+            )
+            + self.stops.exit_targets(closes),
         )
 
         plan = reconcile(
@@ -278,7 +296,7 @@ class BacktestRunner:
                 limit_offset=self.config.execution.limit_offset,
                 tax_type=self.config.execution.tax_account_type,
             ),
-            lot_sizes={s: Decimal(v) for s, v in self.config.universe.lot_size_overrides.items()},
+            lot_sizes=lot_sizes,
             bought_today=self.broker.bought_today,
             rules=self.rules,
         )
@@ -372,13 +390,20 @@ class BacktestRunner:
                 expressions[expr.meta.output_name()] = expr
         # サイジングとストップが使う ATR は戦略と無関係に必要
         expressions.setdefault(f"atr_{ATR_PERIOD}", atr(ATR_PERIOD))
+        trend_exit_sma = self.config.stops.trend_exit_sma
+        if trend_exit_sma is not None:
+            expressions.setdefault(self._trend_exit_col, sma(trend_exit_sma))
 
         return {
             symbol: frame.with_columns(list(expressions.values())) for symbol, frame in bars.items()
         }
 
-    @staticmethod
+    @property
+    def _trend_exit_col(self) -> str:
+        return f"sma_{self.config.stops.trend_exit_sma}"
+
     def _index_by_date(
+        self,
         bars: dict[str, pl.DataFrame],
     ) -> dict[str, dict[dt.date, dict[str, Decimal]]]:
         """日付で引ける形に一度だけ変換する。
@@ -386,12 +411,16 @@ class BacktestRunner:
         毎日 ``filter`` を掛けると銘柄数×日数の総当たりになり、
         銘柄が増えるほど急に遅くなる。最初に索引を作っておく。
         """
+        keys = ["open", "low", "close", f"atr_{ATR_PERIOD}"]
+        if self.config.stops.trend_exit_sma is not None:
+            keys.append(self._trend_exit_col)
+
         indexed: dict[str, dict[dt.date, dict[str, Decimal]]] = {}
         for symbol, frame in bars.items():
             by_date: dict[dt.date, dict[str, Decimal]] = {}
             for row in frame.iter_rows(named=True):
                 values = {}
-                for key in ("open", "low", "close", f"atr_{ATR_PERIOD}"):
+                for key in keys:
                     value = row.get(key)
                     if value is not None:
                         values[key] = Decimal(str(value))

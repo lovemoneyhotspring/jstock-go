@@ -12,6 +12,7 @@ from typing import Any
 from wbjp.config import StrategyEntry
 from wbjp.strategy.base import Strategy
 from wbjp.strategy.samples.atr_breakout import AtrBreakoutStrategy
+from wbjp.strategy.samples.momentum_rank import MomentumRankStrategy
 from wbjp.strategy.samples.rsi_reversion import RsiReversionStrategy
 from wbjp.strategy.samples.sma_cross import SmaCrossStrategy
 from wbjp.strategy.samples.trend_pullback import TrendPullbackStrategy
@@ -76,6 +77,7 @@ _BUILTIN: tuple[type[Strategy], ...] = (
     RsiReversionStrategy,
     AtrBreakoutStrategy,
     TrendPullbackStrategy,
+    MomentumRankStrategy,
 )
 
 for _cls in _BUILTIN:

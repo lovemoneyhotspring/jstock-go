@@ -44,7 +44,7 @@ from wbjp.domain.models import (
     TargetPosition,
 )
 from wbjp.engine.reconcile import ReconcileSettings, reconcile
-from wbjp.indicators.ohlcv import atr
+from wbjp.indicators.ohlcv import atr, sma
 from wbjp.logging import get_logger
 from wbjp.portfolio.sizer import SizingContext, build_sizer
 from wbjp.risk.limits import RiskContext, RiskManager
@@ -230,6 +230,18 @@ class LiveRunner:
             for s, f in bars.items()
             if (v := f[f"atr_{ATR_PERIOD}"][-1]) is not None
         }
+        trend_exit_sma = file_config.stops.trend_exit_sma
+        trend_values = (
+            {
+                s: Decimal(str(v))
+                for s, f in bars.items()
+                if trend_exit_sma is not None
+                and f"sma_{trend_exit_sma}" in f.columns
+                and (v := f[f"sma_{trend_exit_sma}"][-1]) is not None
+            }
+            if trend_exit_sma is not None
+            else {}
+        )
 
         # 1) 戦略の判断
         ctx = StrategyContext(
@@ -256,11 +268,13 @@ class LiveRunner:
             as_of,
             atr_multiple=file_config.sizing.atr_stop_multiple,
             trailing=file_config.stops.trailing,
+            initial_stop_pct=file_config.stops.initial_stop_pct,
         )
         stops.update_breakeven(closes, file_config.stops.breakeven_after_r)
         stops.update_trailing(closes, atr_values)
 
         # 3) サイジング
+        lot_sizes = self._lot_sizes()
         targets = self.sizer.size(
             combined,
             SizingContext(
@@ -268,7 +282,7 @@ class LiveRunner:
                 buying_power=balance.buying_power,
                 prices=closes,
                 atr=atr_values,
-                lot_sizes=self._lot_sizes(),
+                lot_sizes=lot_sizes,
                 positions=positions,
                 default_lot_size=self.rules.default_lot_size,
             ),
@@ -279,13 +293,24 @@ class LiveRunner:
         # 逆指値が何かの理由で消えていた日にも、翌寄付で手仕舞える。
         targets = apply_stop_priority(
             targets,
-            stops.exit_targets(closes)
+            stops.take_profit_targets(
+                closes,
+                {s: p.quantity for s, p in positions.items()},
+                lot_sizes,
+                target_r=file_config.stops.take_profit_r,
+                fraction=file_config.stops.take_profit_fraction,
+                default_lot_size=self.rules.default_lot_size,
+            )
+            + stops.runner_targets(
+                closes, {s: p.quantity for s, p in positions.items()}, trend_values
+            )
             + stops.time_exit_targets(
                 closes,
                 as_of,
                 stale_days=file_config.stops.stale_exit_days,
                 max_days=file_config.stops.max_hold_days,
-            ),
+            )
+            + stops.exit_targets(closes),
         )
         self.journal.record_targets(run_id, targets)
 
@@ -306,7 +331,7 @@ class LiveRunner:
                 limit_offset=file_config.execution.limit_offset,
                 tax_type=file_config.execution.tax_account_type,
             ),
-            lot_sizes=self._lot_sizes(),
+            lot_sizes=lot_sizes,
             bought_today=self._bought_today(),
             rules=self.rules,
         )
@@ -318,7 +343,7 @@ class LiveRunner:
             positions=positions,
             base_prices=closes,
             pending_value=_pending_buy_value(open_orders, closes),
-            orders_today=self.journal.orders_today(dt.date.today()),
+            orders_today=self.journal.orders_today(),
         )
         approved, rejected = self.risk.check_all(plan.orders, risk_ctx)
         rejected.update(plan.skipped)
@@ -460,8 +485,12 @@ class LiveRunner:
 
     def _load_bars(self, symbols: list[str]) -> dict[str, pl.DataFrame]:
         loaded = self.store.read_many(symbols)
+        expressions = [atr(ATR_PERIOD)]
+        trend_exit_sma = self.config.file.stops.trend_exit_sma
+        if trend_exit_sma is not None:
+            expressions.append(sma(trend_exit_sma))
         return {
-            symbol: frame.with_columns(atr(ATR_PERIOD))
+            symbol: frame.with_columns(expressions)
             for symbol, frame in loaded.items()
             if frame.height > ATR_PERIOD
         }

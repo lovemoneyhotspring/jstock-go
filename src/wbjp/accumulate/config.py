@@ -26,11 +26,12 @@ from pydantic import BaseModel, Field, field_validator
 
 from wbjp.accumulate.registry import create
 from wbjp.accumulate.tactics import Tactic
+from wbjp.domain.models import Market
 
 #: 既定の設定ファイル名。
 FILENAME = "accumulate.toml"
 
-_RESERVED = frozenset({"id", "tactic", "symbols", "enabled"})
+_RESERVED = frozenset({"id", "tactic", "symbols", "enabled", "market"})
 
 
 class TacticEntry(BaseModel):
@@ -40,6 +41,9 @@ class TacticEntry(BaseModel):
         id: 比較表の行名になる自由なラベル。日本語でよい。
         tactic: 登録簿の鍵（``bear_stack`` など）。機構の名前。
         symbols: この戦術で積み立てる銘柄コード。
+        market: 銘柄の市場。足を取りに行くときのティッカー変換に使う
+            （日本株の ``1305`` は ``1305.T``、米国株の ``VOO`` はそのまま）。
+            ``^`` で始まる指数は市場に関係なくそのまま扱われる。
     """
 
     model_config = {"extra": "allow"}  # 戦術固有パラメータを受け取る
@@ -48,6 +52,7 @@ class TacticEntry(BaseModel):
     tactic: str
     symbols: list[str] = Field(min_length=1)
     enabled: bool = True
+    market: Market = Market.JP
 
     @field_validator("symbols")
     @classmethod
@@ -120,6 +125,17 @@ class AccumulateConfig(BaseModel):
     def tactic_for(self, symbol: str) -> Tactic | None:
         """銘柄に割り当てられた戦術。無ければ None。"""
         return self.build().get(symbol)
+
+    def symbols_by_market(self) -> dict[Market, list[str]]:
+        """市場 → 銘柄。足の取得はティッカー変換が市場ごとに違うので分ける。
+
+        銘柄が複数の戦術に現れないことは :meth:`validate_assignment` が
+        保証しているので、ここで市場が衝突することはない。
+        """
+        grouped: dict[Market, list[str]] = defaultdict(list)
+        for entry in self.active:
+            grouped[entry.market].extend(entry.symbols)
+        return {market: sorted(set(symbols)) for market, symbols in grouped.items()}
 
     @property
     def symbols(self) -> list[str]:

@@ -492,19 +492,37 @@ class StopsConfig(BaseModel):
     stale_exit_days: int | None = None
     #: 最大保有営業日数。None で無効
     max_hold_days: int | None = None
+    #: 初期ストップ幅を建値からの比率で固定する（例: 0.04 = -4%）。
+    #: None なら ``sizing.atr_stop_multiple`` による ATR ベースのまま。
+    initial_stop_pct: Decimal | None = None
+    #: 含み益がこの R 倍に達したら、建玉の一部を利確する（2段階利確の1段目）。
+    #: None で無効。
+    take_profit_r: Decimal | None = None
+    #: 1段目の利確で手仕舞う比率（既定 50%）。残りは ``trend_exit_sma`` に委ねる。
+    take_profit_fraction: Decimal = Decimal("0.5")
+    #: 1段目の利確後、残りの建玉を手仕舞う移動平均の期間（例: 20 = 20日MA）。
+    #: 終値がこの移動平均を割り込んだら残り全部を手仕舞う。None で無効。
+    trend_exit_sma: int | None = None
 
-    @field_validator("breakeven_after_r")
+    @field_validator("breakeven_after_r", "take_profit_r")
     @classmethod
     def _positive_r(cls, v: Decimal | None) -> Decimal | None:
         if v is not None and v <= 0:
-            raise ValueError("breakeven_after_r は正の数")
+            raise ValueError("R 倍率は正の数")
         return v
 
-    @field_validator("stale_exit_days", "max_hold_days")
+    @field_validator("stale_exit_days", "max_hold_days", "trend_exit_sma")
     @classmethod
     def _positive_days(cls, v: int | None) -> int | None:
         if v is not None and v <= 0:
             raise ValueError("日数は正の整数")
+        return v
+
+    @field_validator("initial_stop_pct", "take_profit_fraction")
+    @classmethod
+    def _ratio(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and not 0 < v < 1:
+            raise ValueError("比率は 0 より大きく 1 未満")
         return v
 
     @model_validator(mode="after")

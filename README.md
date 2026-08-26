@@ -89,6 +89,26 @@ uv run wbjp screen --config-dir config/us --show-failed   # 落ちた銘柄と�
 
 手仕舞いは3層: 戦略（RSI(3) ≧ 80 / 含み益で SMA20 回復 / 60日高値到達）、`[stops]`（+1R で建値移動 → ATR トレーリング、5営業日で含み益なし、最大10営業日）、そして初期ストップ（1.5×ATR、米国株は逆指値として板に置く）。
 
+### モメンタム順位戦略（`momentum_rank`、`config/us-momentum/`）
+
+押し目買いとは別の、**損益比型**の戦略。過去 6 ヶ月（直近 1 ヶ月を除く）のリターンをボラティリティで割った順位で上位 `top_n` 銘柄を持ち、月初にだけ入れ替える。数十年・複数市場で生き残っているモメンタム効果に、地合いフィルタ（SPY > SMA200 でなければ全建玉手仕舞い）を重ねてモメンタムクラッシュを避ける。
+
+```bash
+uv run wbjp data sync --config-dir config/us-momentum --days 1500   # 12ヶ月の履歴＋ウォームアップが要る
+uv run wbjp screen   --config-dir config/us-momentum
+uv run wbjp backtest --config-dir config/us-momentum --from 2023-09-01
+```
+
+| | 押し目買い（`config/us`） | モメンタム（`config/us-momentum`） |
+|---|---|---|
+| 狙い | 勝率（小さく多く） | 損益比（大きく少なく） |
+| 建て | 条件成立日に毎日 | 月初の営業日だけ |
+| 降り | RSI 過熱・SMA20 回復・時間切れ | 終値 < SMA100・順位脱落・地合いオフ |
+| 損切り | 1.5×ATR（＋建値移動・利確） | 3×ATR トレーリングのみ |
+| 想定勝率 / 損益比 | 60% / 1:1 | 45% / 2.5:1 |
+
+> 押し目買いの検証では、戦略の手仕舞い自体は勝率 90% で機能した一方、タイトな損切りと時間切れが利益を刈っていた（出口の非対称性）。モメンタムはその逆で、出口を広く取って勝ちを伸ばす。
+
 > **UAT で未確認の点**: 米国株の発注ペイロード（`trade_currency` / `extended_hours_trading` / `support_trading_session` の値）と、Webull 市場データ API の応答形式は SDK と公開ドキュメントから組んであり、実機での疎通確認がまだ。最初は必ず `WBJP_ENV=uat` の dry-run で `wbjp account` と `wbjp run` を通し、ログの発注ペイロードを確認すること。
 
 ---

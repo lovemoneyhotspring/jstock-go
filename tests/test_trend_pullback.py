@@ -12,7 +12,7 @@ import pytest
 
 from wbjp.config import StopsConfig, load_file_config
 from wbjp.db.repo import Journal
-from wbjp.domain.models import Position
+from wbjp.domain.models import Position, TargetPosition
 from wbjp.risk.stops import Stop, StopBook
 from wbjp.strategy.base import StrategyContext
 from wbjp.strategy.registry import create
@@ -35,17 +35,12 @@ def _dates(n: int, start: dt.date = dt.date(2025, 1, 1)) -> list[dt.date]:
     return out
 
 
-def frame_from(
-    closes: list[float], *, volume: float = 2_000_000.0, reversal: bool = True
-) -> pl.DataFrame:
+def frame_from(closes: list[float], *, volume: float | list[float] = 2_000_000.0) -> pl.DataFrame:
     n = len(closes)
     opens = [closes[0], *closes[:-1]]
     highs = [max(o, c) * 1.01 for o, c in zip(opens, closes, strict=True)]
     lows = [min(o, c) * 0.99 for o, c in zip(opens, closes, strict=True)]
-    if reversal:
-        # 当日を陽線にする（前日終値より少し上で引ける）
-        closes = [*closes[:-1], closes[-2] * 1.008]
-        highs[-1] = max(highs[-1], closes[-1] * 1.001)
+    volumes = volume if isinstance(volume, list) else [volume] * n
     return pl.DataFrame(
         {
             "date": _dates(n),
@@ -53,7 +48,7 @@ def frame_from(
             "high": highs,
             "low": lows,
             "close": closes,
-            "volume": [volume] * n,
+            "volume": volumes,
         }
     )
 
@@ -65,16 +60,37 @@ def uptrend_with_dip(n: int = 260, dip_days: int = 4, dip: float = 0.02) -> list
     return [round(c, 2) for c in closes]
 
 
+def pullback_with_breakout(
+    n: int = 280,
+    pullback_days: int = 5,
+    dip: float = 0.03,
+    dryup: float = 0.3,
+    breakout: bool = True,
+    base_volume: float = 2_000_000.0,
+) -> tuple[list[float], list[float]]:
+    """上昇トレンド → 出来高の枯れた押し目 → （breakout なら）前日高値を上抜け。"""
+    closes = [100.0 * (1.0012**i) * (1 + 0.004 * math.sin(i / 5)) for i in range(n)]
+    volumes = [base_volume] * n
+    peak = closes[n - pullback_days - 1]
+    for k in range(pullback_days):
+        closes[n - pullback_days + k] = peak * (1 - dip * (k + 1) / pullback_days)
+        volumes[n - pullback_days + k] = base_volume * dryup
+    if breakout:
+        closes[-1] = closes[-2] * 1.03
+        volumes[-1] = base_volume
+    return [round(c, 2) for c in closes], volumes
+
+
 def downtrend(n: int = 260) -> list[float]:
     return [round(200.0 * (0.998**i), 2) for i in range(n)]
 
 
 def benchmark_up(n: int = 260) -> pl.DataFrame:
-    return frame_from([round(400.0 * (1.0006**i), 2) for i in range(n)], reversal=False)
+    return frame_from([round(400.0 * (1.0006**i), 2) for i in range(n)])
 
 
 def benchmark_down(n: int = 260) -> pl.DataFrame:
-    return frame_from(downtrend(n), reversal=False)
+    return frame_from(downtrend(n))
 
 
 def context(
@@ -97,14 +113,15 @@ def test_registered_under_its_name() -> None:
     assert isinstance(create("trend_pullback"), TrendPullbackStrategy)
 
 
-def test_signals_a_pullback_in_an_uptrend() -> None:
-    bars = {"AAA": frame_from(uptrend_with_dip()), "SPY": benchmark_up()}
+def test_signals_a_pullback_breakout_in_an_uptrend() -> None:
+    closes, volumes = pullback_with_breakout()
+    bars = {"AAA": frame_from(closes, volume=volumes), "SPY": benchmark_up()}
     signals = strategy().on_bars(context(bars))
 
     assert [s.symbol for s in signals] == ["AAA"]
     sig = signals[0]
     assert 0.3 <= sig.direction <= 1.0
-    assert sig.meta["rsi"] < 20
+    assert sig.meta["dryup_ratio"] <= 0.7
     assert "score" in sig.meta
 
 
@@ -113,52 +130,62 @@ def test_no_signal_in_a_downtrend() -> None:
     assert strategy().on_bars(context(bars)) == []
 
 
-def test_no_signal_without_a_dip() -> None:
+def test_no_signal_without_volume_dryup() -> None:
+    """出来高が枯れないまま上げ続けても、押し目の質が無いので見送る。"""
     bars = {"AAA": frame_from(uptrend_with_dip(dip_days=0)), "SPY": benchmark_up()}
     assert strategy().on_bars(context(bars)) == []
 
 
-def test_no_signal_without_reversal_bar() -> None:
-    bars = {"AAA": frame_from(uptrend_with_dip(), reversal=False), "SPY": benchmark_up()}
+def test_no_signal_without_breakout() -> None:
+    """出来高は枯れても、前日高値を上抜けていなければ見送る。"""
+    closes, volumes = pullback_with_breakout(breakout=False)
+    bars = {"AAA": frame_from(closes, volume=volumes), "SPY": benchmark_up()}
     assert strategy().on_bars(context(bars)) == []
-    assert strategy(require_reversal_bar=False).on_bars(context(bars))
 
 
 def test_market_filter_blocks_entries_when_benchmark_is_weak() -> None:
-    bars = {"AAA": frame_from(uptrend_with_dip()), "SPY": benchmark_down()}
+    closes, volumes = pullback_with_breakout()
+    bars = {"AAA": frame_from(closes, volume=volumes), "SPY": benchmark_down()}
     assert strategy().on_bars(context(bars)) == []
 
 
 def test_missing_benchmark_blocks_entries_rather_than_guessing() -> None:
-    bars = {"AAA": frame_from(uptrend_with_dip())}
+    closes, volumes = pullback_with_breakout()
+    bars = {"AAA": frame_from(closes, volume=volumes)}
     assert strategy().on_bars(context(bars)) == []
     assert strategy(benchmark=None).on_bars(context(bars))
 
 
 def test_benchmark_itself_is_never_a_candidate() -> None:
-    bars = {"SPY": frame_from(uptrend_with_dip())}
+    closes, volumes = pullback_with_breakout()
+    bars = {"SPY": frame_from(closes, volume=volumes)}
     assert strategy().on_bars(context(bars)) == []
 
 
 def test_illiquid_symbols_are_screened_out() -> None:
-    bars = {"AAA": frame_from(uptrend_with_dip(), volume=1_000.0), "SPY": benchmark_up()}
+    closes, _ = pullback_with_breakout()
+    bars = {"AAA": frame_from(closes, volume=1_000.0), "SPY": benchmark_up()}
     assert strategy().on_bars(context(bars)) == []
 
 
 def test_deep_drawdown_is_a_breakdown_not_a_pullback() -> None:
-    bars = {"AAA": frame_from(uptrend_with_dip(dip_days=6, dip=0.04)), "SPY": benchmark_up()}
+    closes, volumes = pullback_with_breakout(pullback_days=6, dip=0.20)
+    bars = {"AAA": frame_from(closes, volume=volumes), "SPY": benchmark_up()}
     assert strategy(max_drawdown_from_high=0.10).on_bars(context(bars)) == []
 
 
 def test_screen_explains_every_failed_condition() -> None:
     s = strategy()
     s._market_ok = True
-    frame = frame_from(downtrend(), volume=1_000.0, reversal=False).with_columns(s.indicators())
+    s._benchmark_return = (
+        100.0  # ベンチマークが好調で、下降トレンド銘柄が RS で確実に落ちるようにする
+    )
+    frame = frame_from(downtrend(), volume=1_000.0).with_columns(s.indicators())
     result = s.screen(frame)
     assert not result.passed
     assert any("トレンド" in f for f in result.failed)
     assert any("売買代金" in f for f in result.failed)
-    assert any("陽線" in f for f in result.failed)
+    assert any("出来高比" in f for f in result.failed)
 
 
 # --------------------------------------------------------------------------
@@ -166,22 +193,26 @@ def test_screen_explains_every_failed_condition() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_deeper_dip_ranks_higher() -> None:
+def test_deeper_volume_dryup_ranks_higher() -> None:
+    shallow_closes, shallow_volumes = pullback_with_breakout(dryup=0.65)
+    deep_closes, deep_volumes = pullback_with_breakout(dryup=0.2)
     bars = {
-        "SHALLOW": frame_from(uptrend_with_dip(dip=0.012)),
-        "DEEP": frame_from(uptrend_with_dip(dip=0.03)),
+        "SHALLOW": frame_from(shallow_closes, volume=shallow_volumes),
+        "DEEP": frame_from(deep_closes, volume=deep_volumes),
         "SPY": benchmark_up(),
     }
     signals = {s.symbol: s for s in strategy().on_bars(context(bars))}
     assert set(signals) == {"SHALLOW", "DEEP"}
     assert signals["DEEP"].direction > signals["SHALLOW"].direction
-    assert signals["DEEP"].meta["dip"] > signals["SHALLOW"].meta["dip"]
+    assert signals["DEEP"].meta["dryup"] > signals["SHALLOW"].meta["dryup"]
 
 
 def test_more_liquid_symbol_ranks_higher_all_else_equal() -> None:
+    thin_closes, thin_volumes = pullback_with_breakout(base_volume=9_000.0)
+    thick_closes, thick_volumes = pullback_with_breakout(base_volume=50_000_000.0)
     bars = {
-        "THIN": frame_from(uptrend_with_dip(), volume=9_000.0),  # 売買代金 ≈ 110万ドル
-        "THICK": frame_from(uptrend_with_dip(), volume=50_000_000.0),
+        "THIN": frame_from(thin_closes, volume=thin_volumes),  # 売買代金 ≈ 110万ドル
+        "THICK": frame_from(thick_closes, volume=thick_volumes),
         "SPY": benchmark_up(),
     }
     signals = {s.symbol: s for s in strategy().on_bars(context(bars))}
@@ -197,39 +228,11 @@ def held(symbol: str = "AAA", cost: str = "100") -> dict[str, Position]:
     return {symbol: Position(symbol, D(10), D(10), D(cost), D(cost), currency="USD")}
 
 
-def test_holds_while_the_dip_is_recovering() -> None:
-    bars = {"AAA": frame_from(uptrend_with_dip()), "SPY": benchmark_up()}
+def test_holds_open_positions_deferring_exits_to_the_stop_book() -> None:
+    """損切り・利確・時間切れはすべて wbjp.risk.stops の仕事。ここでは何もしない。"""
+    closes, volumes = pullback_with_breakout()
+    bars = {"AAA": frame_from(closes, volume=volumes), "SPY": benchmark_up()}
     signals = strategy().on_bars(context(bars, held(cost="200")))
-    assert signals[0].direction == 0.5
-
-
-def test_exits_on_overbought_rsi() -> None:
-    closes = uptrend_with_dip(dip_days=0)
-    closes[-3:] = [closes[-4] * 1.03, closes[-4] * 1.06, closes[-4] * 1.09]
-    bars = {"AAA": frame_from(closes, reversal=False), "SPY": benchmark_up()}
-    signals = strategy().on_bars(context(bars, held(cost="50")))
-    assert signals[0].direction == -1.0
-    assert "買われすぎ" in signals[0].reason or "高値" in signals[0].reason
-
-
-def recovered_above_sma20() -> list[float]:
-    """SMA20 の少し上で、RSI が中立圏、直近高値には届いていない足。"""
-    closes = uptrend_with_dip(dip_days=0)
-    base = closes[-5]
-    closes[-4:] = [base * 1.02, base * 1.01, base * 1.025, base * 1.02]
-    return closes
-
-
-def test_exits_when_profitable_and_back_above_short_sma() -> None:
-    bars = {"AAA": frame_from(recovered_above_sma20(), reversal=False), "SPY": benchmark_up()}
-    signals = strategy(rsi_exit=99.0).on_bars(context(bars, held(cost="1")))
-    assert signals[0].direction == -1.0
-    assert "第一目標" in signals[0].reason
-
-
-def test_does_not_take_first_target_at_a_loss() -> None:
-    bars = {"AAA": frame_from(recovered_above_sma20(), reversal=False), "SPY": benchmark_up()}
-    signals = strategy(rsi_exit=99.0).on_bars(context(bars, held(cost="100000")))
     assert signals[0].direction == 0.5
 
 
@@ -301,8 +304,20 @@ def test_shipped_us_config_loads() -> None:
 TODAY = dt.date(2026, 8, 25)  # 火曜
 
 
-def a_stop(entry: str = "100", stop: str = "95", created: dt.date = TODAY) -> Stop:
-    return Stop("AAA", D(stop), D(entry), created, initial_stop_price=D(stop))
+def a_stop(
+    entry: str = "100",
+    stop: str = "95",
+    created: dt.date = TODAY,
+    initial_quantity: str | None = None,
+) -> Stop:
+    return Stop(
+        "AAA",
+        D(stop),
+        D(entry),
+        created,
+        initial_stop_price=D(stop),
+        initial_quantity=D(initial_quantity) if initial_quantity is not None else None,
+    )
 
 
 def test_initial_risk_survives_stop_moves() -> None:
@@ -352,6 +367,83 @@ def test_max_hold_exits_regardless_of_profit() -> None:
     book = StopBook({"AAA": a_stop(created=dt.date(2026, 8, 11))})  # 10営業日前
     targets = book.time_exit_targets({"AAA": D("130")}, TODAY, max_days=10)
     assert targets and targets[0].quantity == 0
+
+
+def test_initial_stop_pct_overrides_atr_when_given() -> None:
+    """固定比率のストップ（-3%〜-4.5%の目安）が ATR より優先される。"""
+    book = StopBook()
+    positions = {"AAA": Position("AAA", D(100), D(100), D(100), D(100), currency="USD")}
+    book.ensure(positions, {"AAA": D(10)}, TODAY, initial_stop_pct=D("0.04"))
+    stop = book.get("AAA")
+    assert stop is not None
+    assert stop.stop_price == D(96)  # 100 * (1 - 0.04)
+    assert stop.initial_quantity == D(100)
+
+
+# --------------------------------------------------------------------------
+# 2段階利確: +2R で半分を利確、残りはトレンド追従
+# --------------------------------------------------------------------------
+
+
+def test_take_profit_scales_out_half_at_target_r() -> None:
+    book = StopBook({"AAA": a_stop(entry="100", stop="95", initial_quantity="100")})  # 1R = 5
+    targets = book.take_profit_targets(
+        {"AAA": D("111")},  # (111-100)/5 = 2.2R ≥ 2R
+        {"AAA": D(100)},
+        {},
+        target_r=D("2.0"),
+    )
+    assert targets == [TargetPosition("AAA", D(50), reason=targets[0].reason)]
+    stop = book.get("AAA")
+    assert stop is not None
+    assert stop.scaled_out is True
+    assert stop.stop_price == stop.entry_price  # 建値に引き上げ済み
+
+
+def test_take_profit_does_not_fire_below_target_r() -> None:
+    book = StopBook({"AAA": a_stop(entry="100", stop="95", initial_quantity="100")})
+    targets = book.take_profit_targets(
+        {"AAA": D("105")},  # 1R ちょうど。2R にはまだ届かない
+        {"AAA": D(100)},
+        {},
+        target_r=D("2.0"),
+    )
+    assert targets == []
+    assert book.get("AAA").scaled_out is False  # type: ignore[union-attr]
+
+
+def test_take_profit_disabled_when_target_r_is_none() -> None:
+    book = StopBook({"AAA": a_stop()})
+    assert book.take_profit_targets({"AAA": D("200")}, {"AAA": D(100)}, {}, target_r=None) == []
+
+
+def test_take_profit_only_fires_once() -> None:
+    book = StopBook({"AAA": a_stop(entry="100", stop="95", initial_quantity="100")})
+    book.take_profit_targets({"AAA": D("111")}, {"AAA": D(100)}, {}, target_r=D("2.0"))
+    again = book.take_profit_targets({"AAA": D("130")}, {"AAA": D(50)}, {}, target_r=D("2.0"))
+    assert again == []  # 既に利確済みなので二重に減らさない
+
+
+def test_runner_holds_the_remaining_half_above_trend() -> None:
+    """利確後の残り玉は、サイジングに戻し縮小されないよう毎日ピン止めする。"""
+    book = StopBook({"AAA": a_stop(entry="100", stop="95", initial_quantity="100")})
+    book.take_profit_targets({"AAA": D("111")}, {"AAA": D(100)}, {}, target_r=D("2.0"))
+
+    targets = book.runner_targets({"AAA": D("120")}, {"AAA": D(50)}, {"AAA": D("110")})
+    assert targets == [TargetPosition("AAA", D(50), reason=targets[0].reason)]
+
+
+def test_runner_exits_when_close_breaks_the_trend_average() -> None:
+    book = StopBook({"AAA": a_stop(entry="100", stop="95", initial_quantity="100")})
+    book.take_profit_targets({"AAA": D("111")}, {"AAA": D(100)}, {}, target_r=D("2.0"))
+
+    targets = book.runner_targets({"AAA": D("108")}, {"AAA": D(50)}, {"AAA": D("110")})
+    assert targets == [TargetPosition("AAA", D(0), reason=targets[0].reason)]
+
+
+def test_runner_ignores_positions_not_yet_scaled_out() -> None:
+    book = StopBook({"AAA": a_stop(entry="100", stop="95", initial_quantity="100")})
+    assert book.runner_targets({"AAA": D("80")}, {"AAA": D(100)}, {"AAA": D("110")}) == []
 
 
 def test_journal_persists_initial_stop_and_migrates_old_db(tmp_path: Path) -> None:

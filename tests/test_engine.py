@@ -565,6 +565,24 @@ def test_sizer_prefers_the_strongest_signals() -> None:
     assert [t.symbol for t in targets if t.quantity > 0] == ["strong"]
 
 
+def test_sizer_never_resizes_a_held_position() -> None:
+    """保有中に ATR や資産が変わっても株数を計算し直さない。
+
+    計算し直すと、その差分が「意図しない部分売買」として毎日板に出る。
+    建玉の増減はストップ管理だけが決める。
+    """
+    sizer = AtrRiskSizer(SizingConfig(method="atr_risk", risk_per_trade=D("0.01")))
+    ctx = sizing_ctx(
+        prices={"7203": D(2500)},
+        atr={"7203": D(200)},  # 目標は 1,000,000×1% / (200×2) = 25株 → 単元未満
+        positions={"7203": position(qty=300)},
+    )
+    targets = sizer.size(
+        {"7203": signal("7203", 0.9)}, ctx, entry_threshold=0.3, exit_threshold=0.1
+    )
+    assert [(t.symbol, t.quantity) for t in targets] == [("7203", D(300))]
+
+
 def test_build_sizer_from_config() -> None:
     assert isinstance(build_sizer(SizingConfig(method="atr_risk")), AtrRiskSizer)
     assert isinstance(build_sizer(SizingConfig(method="equal_weight")), EqualWeightSizer)

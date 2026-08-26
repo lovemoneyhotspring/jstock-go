@@ -106,6 +106,16 @@ class PositionSizer(ABC):
             if symbol not in candidates and held == 0:
                 continue  # 保有上限に達しており、新規には建てない
 
+            # 保有中は株数を計算し直さない。ATR や資産の変化で目標株数が
+            # 日々ずれ、その差分が「意図しない部分売買」として板に出る
+            # （実測: 保有継続シグナルに対する部分売却が30回/年）。
+            # 建玉の増減はストップ管理（利確・手仕舞い）だけが決める。
+            if held > 0:
+                targets.append(
+                    TargetPosition(symbol, held, reason=f"保有継続 (強さ {direction:.2f})")
+                )
+                continue
+
             quantity = self._quantity(symbol, signal, ctx)
             quantity = round_to_lot(quantity, ctx.lot_size(symbol))
 
