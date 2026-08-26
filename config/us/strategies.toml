@@ -1,33 +1,52 @@
-# 米国株の戦略。日本株（config/strategies.toml）と同じ戦略を、
-# 勝率重視の押し目買い向きに組み直してある。
+# 米国株の戦略 — 勝率重視の押し目買い。
 #
-# 米国市場はトレンドの持続性が日本より高く、順張り＋押し目が効きやすい。
-# ブレイクアウト（勝率30〜40%）は勝率を下げる方向に働くので既定で切る。
+# trend_pullback が「スクリーニング＋順位付け」を兼ねる。条件を満たした
+# 銘柄にスコア（direction 0.3〜1.0）を付け、サイジングが高い順に
+# max_positions の枠を埋める。順位表は `wbjp screen --config-dir config/us`。
+#
+# combiner = "priority" は「重みが最大の戦略の意見をそのまま採る」。
+# 押し目買いの順位を他の戦略に薄められないための選択。
 
-combiner = "weighted_vote"
+combiner = "priority"
 entry_threshold = 0.3
 exit_threshold = 0.1
 
 [[strategies]]
-name = "sma_cross"
+name = "trend_pullback"
 enabled = true
+weight = 10.0
+sma_long = 200
+sma_mid = 50
+sma_short = 20
+rsi_period = 3
+rsi_entry = 20.0
+rsi_exit = 80.0
+high_lookback = 60
+max_drawdown_from_high = 0.15
+min_atr_ratio = 0.015
+max_atr_ratio = 0.05
+min_dollar_volume = 5_000_000.0     # 20日平均売買代金（USD）
+require_reversal_bar = true
+benchmark = "SPY"                   # universe.txt に含めること
+benchmark_sma = 50
+blackout_file = "config/us/earnings.toml"
+blackout_days_before = 3
+exit_before_earnings = true
+
+# 比較用。有効にしても priority 合成では trend_pullback が勝つ。
+[[strategies]]
+name = "sma_cross"
+enabled = false
 weight = 1.0
 fast = 25
 slow = 75
 
 [[strategies]]
 name = "rsi_reversion"
-enabled = true
+enabled = false
 weight = 1.0
-period = 14
-oversold = 30.0
-overbought = 70.0
-max_adx = 40.0
 
 [[strategies]]
 name = "atr_breakout"
 enabled = false
 weight = 1.5
-channel = 20
-atr_period = 14
-min_atr_ratio = 0.005

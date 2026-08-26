@@ -235,7 +235,9 @@ class BacktestRunner:
             atr_values,
             today,
             atr_multiple=self.config.sizing.atr_stop_multiple,
+            trailing=self.config.stops.trailing,
         )
+        self.stops.update_breakeven(closes, self.config.stops.breakeven_after_r)
         self.stops.update_trailing(closes, atr_values)
 
         targets = self.sizer.size(
@@ -254,7 +256,16 @@ class BacktestRunner:
             entry_threshold=self.config.strategies.entry_threshold,
             exit_threshold=self.config.strategies.exit_threshold,
         )
-        targets = apply_stop_priority(targets, self.stops.exit_targets(closes))
+        targets = apply_stop_priority(
+            targets,
+            self.stops.exit_targets(closes)
+            + self.stops.time_exit_targets(
+                closes,
+                today,
+                stale_days=self.config.stops.stale_exit_days,
+                max_days=self.config.stops.max_hold_days,
+            ),
+        )
 
         plan = reconcile(
             targets,

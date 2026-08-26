@@ -67,6 +67,28 @@ uv run wbjp run --config-dir config/us            # dry-run
 
 同じ口座に日本株と米国株が混在するため、`WebullBroker` は **設定された市場の通貨の行だけ**を残高・建玉として読む。日本株と米国株を両方回すなら、設定ディレクトリを分けて別プロセスで動かす。
 
+### スクリーニングと順位付け（`trend_pullback`）
+
+米国株の設定は `trend_pullback` 戦略が「スクリーニング＋順位付け」を兼ねる。`config/us/universe.txt` の銘柄（＝allowlist）を毎サイクル全件評価し、条件を満たした銘柄にスコア（`direction` 0.3〜1.0）を付ける。サイジングは direction の高い順に `sizing.max_positions` の枠を埋めるので、**スコアがそのまま採用順位**になる。
+
+```bash
+uv run wbjp screen --config-dir config/us                 # 順位表
+uv run wbjp screen --config-dir config/us --show-failed   # 落ちた銘柄と理由
+```
+
+| 条件 | 意図 |
+|---|---|
+| 終値 > SMA200 かつ SMA50 > SMA200、SMA50 が上向き | 長期上昇トレンドのみ |
+| 60日高値からの下落 ≦ 15% | 押し目であって崩れではない |
+| 前日の RSI(3) < 20 ＋ 当日が陽線 | 売られすぎ ＋ 反転確認（落ちるナイフを受けない） |
+| ATR/終値 1.5〜5%、20日平均売買代金 ≧ 500万ドル | 動く・滑らない銘柄 |
+| SPY > SMA50 | 地合いフィルタ |
+| 決算 3 営業日前〜当日は新規建てせず、保有中なら手仕舞い | 日足ではギャップを避けられない（`config/us/earnings.toml` を手動更新） |
+
+スコア = 0.35×押し目の深さ（RSI） + 0.30×SMA20 からの乖離（ATR 単位） + 0.20×トレンドの強さ + 0.15×流動性。内訳は `signals.meta_json` に残る。
+
+手仕舞いは3層: 戦略（RSI(3) ≧ 80 / 含み益で SMA20 回復 / 60日高値到達）、`[stops]`（+1R で建値移動 → ATR トレーリング、5営業日で含み益なし、最大10営業日）、そして初期ストップ（1.5×ATR、米国株は逆指値として板に置く）。
+
 > **UAT で未確認の点**: 米国株の発注ペイロード（`trade_currency` / `extended_hours_trading` / `support_trading_session` の値）と、Webull 市場データ API の応答形式は SDK と公開ドキュメントから組んであり、実機での疎通確認がまだ。最初は必ず `WBJP_ENV=uat` の dry-run で `wbjp account` と `wbjp run` を通し、ログの発注ペイロードを確認すること。
 
 ---

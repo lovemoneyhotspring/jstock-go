@@ -14,6 +14,7 @@ from wbjp.strategy.base import Strategy
 from wbjp.strategy.samples.atr_breakout import AtrBreakoutStrategy
 from wbjp.strategy.samples.rsi_reversion import RsiReversionStrategy
 from wbjp.strategy.samples.sma_cross import SmaCrossStrategy
+from wbjp.strategy.samples.trend_pullback import TrendPullbackStrategy
 
 _REGISTRY: dict[str, type[Strategy]] = {}
 
@@ -74,6 +75,7 @@ _BUILTIN: tuple[type[Strategy], ...] = (
     SmaCrossStrategy,
     RsiReversionStrategy,
     AtrBreakoutStrategy,
+    TrendPullbackStrategy,
 )
 
 for _cls in _BUILTIN:

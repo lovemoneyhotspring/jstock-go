@@ -255,7 +255,9 @@ class LiveRunner:
             atr_values,
             as_of,
             atr_multiple=file_config.sizing.atr_stop_multiple,
+            trailing=file_config.stops.trailing,
         )
+        stops.update_breakeven(closes, file_config.stops.breakeven_after_r)
         stops.update_trailing(closes, atr_values)
 
         # 3) サイジング
@@ -275,7 +277,16 @@ class LiveRunner:
         )
         # ブローカーに逆指値を置いていても、日足の判定は保険として残す。
         # 逆指値が何かの理由で消えていた日にも、翌寄付で手仕舞える。
-        targets = apply_stop_priority(targets, stops.exit_targets(closes))
+        targets = apply_stop_priority(
+            targets,
+            stops.exit_targets(closes)
+            + stops.time_exit_targets(
+                closes,
+                as_of,
+                stale_days=file_config.stops.stale_exit_days,
+                max_days=file_config.stops.max_hold_days,
+            ),
+        )
         self.journal.record_targets(run_id, targets)
 
         # 4) 差分だけを注文にする

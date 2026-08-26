@@ -64,13 +64,34 @@ class Stop:
     trailing: bool = False
     atr_multiple: Decimal = Decimal("2.0")
     highest_close: Decimal | None = None
+    #: 設定時の初期ストップ。1R（初期リスク）の基準として、ストップを
+    #: 動かした後も変わらない。None は旧レコード（stop_price を初期値とみなす）。
+    initial_stop_price: Decimal | None = None
 
     def is_triggered(self, price: Decimal) -> bool:
         return price <= self.stop_price
 
     @property
     def risk_per_share(self) -> Decimal:
+        """現在のストップまでの距離。"""
         return self.entry_price - self.stop_price
+
+    @property
+    def initial_risk(self) -> Decimal:
+        """1R = 建値 − 初期ストップ。利確目標・建値移動の基準。"""
+        return self.entry_price - (self.initial_stop_price or self.stop_price)
+
+    def trading_days_held(self, as_of: dt.date) -> int:
+        """建ててからの営業日数（土日を除く。祝日は数える）。"""
+        if as_of <= self.created_on:
+            return 0
+        days = 0
+        current = self.created_on
+        while current < as_of:
+            current += dt.timedelta(days=1)
+            if current.weekday() < 5:
+                days += 1
+        return days
 
 
 class StopBook:
@@ -138,6 +159,7 @@ class StopBook:
                     trailing=trailing,
                     atr_multiple=atr_multiple,
                     highest_close=position.last_price,
+                    initial_stop_price=stop_price,
                 )
             )
             log.info("ストップを設定", symbol=symbol, stop_price=str(stop_price))
@@ -176,7 +198,65 @@ class StopBook:
             elif highest != stop.highest_close:
                 self._stops[symbol] = replace(stop, highest_close=highest)
 
+    def update_breakeven(self, closes: dict[str, Decimal], after_r: Decimal | None) -> None:
+        """含み益が ``after_r`` R に達した建玉のストップを建値に引き上げる。
+
+        「勝ちトレードを負けに変えない」ための一手。建値より上には
+        動かさない（それはトレーリングの仕事）。下げることは絶対にしない。
+        """
+        if after_r is None:
+            return
+        for symbol, stop in list(self._stops.items()):
+            close = closes.get(symbol)
+            if close is None or stop.stop_price >= stop.entry_price:
+                continue
+            risk = stop.initial_risk
+            if risk <= 0:
+                continue
+            highest = max(stop.highest_close or close, close)
+            if (highest - stop.entry_price) / risk >= after_r:
+                self._stops[symbol] = replace(
+                    stop, stop_price=stop.entry_price, highest_close=highest
+                )
+                log.info(
+                    "ストップを建値に引き上げ",
+                    symbol=symbol,
+                    entry=str(stop.entry_price),
+                    before=str(stop.stop_price),
+                )
+
     # -- 判定 ---------------------------------------------------------------
+
+    def time_exit_targets(
+        self,
+        closes: dict[str, Decimal],
+        as_of: dt.date,
+        *,
+        stale_days: int | None = None,
+        max_days: int | None = None,
+    ) -> list[TargetPosition]:
+        """時間切れの手仕舞い目標。
+
+        - ``stale_days`` 営業日たっても含み益ゼロ以下 → 前提が崩れている
+        - ``max_days`` 営業日 → 資金効率のため強制決済
+        """
+        targets = []
+        for symbol, stop in self._stops.items():
+            close = closes.get(symbol)
+            if close is None:
+                continue
+            held = stop.trading_days_held(as_of)
+            reason = None
+            if max_days is not None and held >= max_days:
+                reason = f"最大保有期間 {max_days} 営業日に到達"
+            elif stale_days is not None and held >= stale_days and close <= stop.entry_price:
+                reason = (
+                    f"{held} 営業日たっても含み益なし（終値 {close} ≦ 建値 {stop.entry_price}）"
+                )
+            if reason:
+                log.info("時間切れで手仕舞い", symbol=symbol, reason=reason)
+                targets.append(TargetPosition(symbol, Decimal(0), reason=reason))
+        return targets
 
     def triggered(self, closes: dict[str, Decimal]) -> dict[str, Stop]:
         """抵触したストップを返す。"""

@@ -444,6 +444,9 @@ class UniverseConfig(BaseModel):
     #: 足データの取得元。"yfinance"（両市場）| "webull"（米国株のみ）
     data_provider: str = "yfinance"
     symbols: list[str] = Field(default_factory=list)
+    #: 銘柄リストのファイル（1行1銘柄、# はコメント）。設定ディレクトリからの相対パス。
+    #: 読み込んだ銘柄は ``symbols`` に合流し、allowlist にもなる。
+    symbols_file: str | None = None
     #: TOPIX500 構成銘柄（呼値が細かくなる）。日本株のみ意味を持つ。
     topix500_symbols: list[str] = Field(default_factory=list)
     #: 売買単位が既定と異なる銘柄の例外 {銘柄コード: 単元株数}
@@ -470,6 +473,49 @@ class UniverseConfig(BaseModel):
     @property
     def currency(self) -> str:
         return self.market.currency
+
+
+class StopsConfig(BaseModel):
+    """損切り・利確の管理。
+
+    ストップ価格は :mod:`wbjp.risk.stops` が持つ。ここはその動かし方。
+    初期ストップ幅は ``sizing.atr_stop_multiple`` で決まる（= 1R）。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    #: ATR トレーリングストップを使うか（上げるだけ、下げない）
+    trailing: bool = False
+    #: 含み益が初期リスクの何倍に達したらストップを建値に上げるか。None で無効
+    breakeven_after_r: Decimal | None = None
+    #: 建ててから何営業日で含み益ゼロ以下なら手仕舞うか。None で無効
+    stale_exit_days: int | None = None
+    #: 最大保有営業日数。None で無効
+    max_hold_days: int | None = None
+
+    @field_validator("breakeven_after_r")
+    @classmethod
+    def _positive_r(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and v <= 0:
+            raise ValueError("breakeven_after_r は正の数")
+        return v
+
+    @field_validator("stale_exit_days", "max_hold_days")
+    @classmethod
+    def _positive_days(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("日数は正の整数")
+        return v
+
+    @model_validator(mode="after")
+    def _stale_before_max(self) -> Self:
+        if (
+            self.stale_exit_days is not None
+            and self.max_hold_days is not None
+            and self.stale_exit_days > self.max_hold_days
+        ):
+            raise ValueError("stale_exit_days は max_hold_days 以下にしてください")
+        return self
 
 
 class StrategyEntry(BaseModel):
@@ -554,6 +600,7 @@ class FileConfig(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     sizing: SizingConfig = Field(default_factory=SizingConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    stops: StopsConfig = Field(default_factory=StopsConfig)
     strategies: StrategiesConfig = Field(default_factory=StrategiesConfig)
 
     @model_validator(mode="after")
@@ -665,7 +712,30 @@ def load_file_config(config_dir: Path) -> FileConfig:
     if strategies_path.exists():
         merged["strategies"] = _read_toml(strategies_path)
 
+    universe = merged.get("universe")
+    if isinstance(universe, dict) and universe.get("symbols_file"):
+        listed = read_symbols_file(config_dir / str(universe["symbols_file"]))
+        existing = [str(s) for s in universe.get("symbols", [])]
+        universe["symbols"] = existing + [s for s in listed if s not in existing]
+
     return FileConfig.model_validate(merged)
+
+
+def read_symbols_file(path: Path) -> list[str]:
+    """銘柄リストを読む。1行1銘柄、``#`` 以降はコメント、重複は最初の1つ。
+
+    Raises:
+        FileNotFoundError: ファイルが無いとき。黙って空にすると
+            「対象銘柄ゼロ」で静かに何も起きなくなる。
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"銘柄リストが見つかりません: {path}")
+    symbols: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line and line not in symbols:
+            symbols.append(line)
+    return symbols
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

@@ -395,6 +395,125 @@ def backtest(
 
 
 @app.command()
+def screen(
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+    as_of: Annotated[str | None, typer.Option(help="判断の基準日 YYYY-MM-DD")] = None,
+    top: Annotated[int, typer.Option(help="表示する件数")] = 20,
+    show_failed: Annotated[
+        bool, typer.Option("--show-failed", help="条件を満たさなかった銘柄も理由付きで表示")
+    ] = False,
+) -> None:
+    """保存済みの足で銘柄をスクリーニングし、エントリー条件の合致度順に並べる。
+
+    上位 sizing.max_positions 件が、次のサイクルで新規に建てる候補。
+    ブローカーには接続しない（建玉は空として評価する）。
+    """
+    from wbjp.data.store import BarStore
+    from wbjp.strategy.base import StrategyContext
+    from wbjp.strategy.combiner import build_combiner
+    from wbjp.strategy.registry import build_all
+    from wbjp.strategy.samples.trend_pullback import TrendPullbackStrategy
+
+    config = _load(config_dir)
+    store = BarStore(config.settings.bars_dir)
+    bars = store.read_many(config.file.universe.symbols)
+    if not bars:
+        console.print("[red]足データがありません。先に `wbjp data sync` を実行してください[/red]")
+        raise typer.Exit(1)
+
+    cutoff = dt.date.fromisoformat(as_of) if as_of else None
+    if cutoff:
+        import polars as pl
+
+        bars = {s: f.filter(pl.col("date") <= cutoff) for s, f in bars.items()}
+        bars = {s: f for s, f in bars.items() if f.height > 0}
+    latest = max(f["date"].max() for f in bars.values())  # type: ignore[type-var]
+    if not isinstance(latest, dt.date):
+        raise TypeError(f"足の日付が date ではありません: {type(latest)}")
+
+    strategies = build_all(config.file.strategies.enabled)
+    ctx = StrategyContext(as_of=latest, _bars=bars)
+    signals = [sig for strategy in strategies for sig in strategy.on_bars(ctx)]
+    combiner = build_combiner(
+        config.file.strategies.combiner,
+        {s.name: s.weight for s in config.file.strategies.enabled},
+    )
+    combined = combiner.combine(signals)
+    threshold = config.file.strategies.entry_threshold
+    ranked = sorted(
+        (c for c in combined.values() if c.direction >= threshold),
+        key=lambda c: -c.direction,
+    )
+    meta = {sig.symbol: sig.meta for sig in signals if sig.meta}
+    reasons = {sig.symbol: sig.reason for sig in signals}
+
+    console.print(
+        f"\n[bold]スクリーニング[/bold]  基準日 {latest}  市場 {config.file.universe.market.value}"
+        f"  対象 {len(bars)} 銘柄  合致 {len(ranked)} 銘柄"
+    )
+    if ranked:
+        limit = config.file.sizing.max_positions
+        table = Table(title=f"順位（上位 {limit} 件が採用候補）", title_justify="left")
+        for column in (
+            "順位",
+            "銘柄",
+            "スコア",
+            "終値",
+            "RSI",
+            "高値比",
+            "ATR%",
+            "売買代金",
+            "内訳",
+        ):
+            table.add_column(
+                column,
+                justify="right" if column not in ("銘柄", "内訳") else "left",
+                no_wrap=column != "内訳",
+            )
+        for rank, item in enumerate(ranked[:top], start=1):
+            m = meta.get(item.symbol, {})
+            style = "green" if rank <= limit else ""
+            table.add_row(
+                f"[{style}]{rank}[/{style}]" if style else str(rank),
+                item.symbol,
+                f"{item.direction:.3f}",
+                f"{m.get('close', 0) or ctx.close(item.symbol):,.2f}",
+                f"{m['rsi']:.1f}" if "rsi" in m else "-",
+                f"{-m['drawdown']:.1%}" if "drawdown" in m else "-",
+                f"{m['atr_ratio']:.1%}" if "atr_ratio" in m else "-",
+                f"{m['dollar_volume'] / 1e6:,.0f}M" if "dollar_volume" in m else "-",
+                _score_breakdown(m) or reasons.get(item.symbol, item.reason)[:50],
+            )
+        console.print(table)
+    else:
+        console.print("  条件を満たす銘柄はありません")
+
+    if show_failed:
+        pullbacks = [s for s in strategies if isinstance(s, TrendPullbackStrategy)]
+        if not pullbacks:
+            console.print("[yellow]--show-failed は trend_pullback 戦略でのみ使えます[/yellow]")
+            return
+        strategy = pullbacks[0]
+        console.print("\n[bold]条件を満たさなかった銘柄[/bold]")
+        for symbol in sorted(bars):
+            if symbol in combined or symbol == strategy.benchmark:
+                continue
+            if not ctx.has_bars(symbol, strategy.warmup_bars):
+                console.print(f"  {symbol}: 足が {strategy.warmup_bars} 本に満たない")
+                continue
+            frame = ctx.bars(symbol).with_columns(strategy.indicators())
+            result = strategy.screen(frame)
+            console.print(f"  {symbol}: " + " / ".join(result.failed))
+
+
+def _score_breakdown(meta: dict[str, object]) -> str:
+    """スコアの内訳（押し目/乖離/趨勢/流動性）を1行にする。"""
+    labels = (("dip", "押し目"), ("stretch", "乖離"), ("trend", "趨勢"), ("liquid", "流動性"))
+    parts = [f"{label} {float(meta[key]):.2f}" for key, label in labels if key in meta]  # type: ignore[arg-type]
+    return " / ".join(parts)
+
+
+@app.command()
 def explain(
     run_id: Annotated[str, typer.Argument(help="調べたい実行ID")],
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,

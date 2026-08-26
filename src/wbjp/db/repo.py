@@ -71,6 +71,19 @@ class Journal:
 
     def _create_schema(self) -> None:
         self._connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """後から足した列を既存 DB に追加する。
+
+        ``CREATE TABLE IF NOT EXISTS`` は既存テーブルの列を増やさない。
+        列が無いまま INSERT すると毎サイクル落ちるので、起動時に埋める。
+        """
+        columns = {
+            row["name"] for row in self._connection.execute("PRAGMA table_info(stops)").fetchall()
+        }
+        if "initial_stop_price" not in columns:
+            self._connection.execute("ALTER TABLE stops ADD COLUMN initial_stop_price TEXT")
 
     def close(self) -> None:
         self._connection.close()
@@ -296,8 +309,9 @@ class Journal:
         self._connection.execute("DELETE FROM stops")
         self._connection.executemany(
             "INSERT INTO stops "
-            "(symbol, stop_price, entry_price, created_on, trailing, atr_multiple, highest_close, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(symbol, stop_price, entry_price, created_on, trailing, atr_multiple, highest_close, "
+            " initial_stop_price, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     s.symbol,
@@ -307,6 +321,7 @@ class Journal:
                     int(s.trailing),
                     str(s.atr_multiple),
                     _text(s.highest_close),
+                    _text(s.initial_stop_price),
                     _now(),
                 )
                 for s in stops.values()
@@ -325,6 +340,7 @@ class Journal:
                 trailing=bool(row["trailing"]),
                 atr_multiple=Decimal(row["atr_multiple"]),
                 highest_close=_dec(row["highest_close"]),
+                initial_stop_price=_dec(row["initial_stop_price"]),
             )
         return result
 
