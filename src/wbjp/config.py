@@ -212,6 +212,31 @@ def _warn_if_readable_by_others(env_file: Path) -> None:
         )
 
 
+def _resolve_fields(
+    env: Environment,
+    dotenv: dict[str, str | None],
+    env_file: Path,
+) -> tuple[dict[str, str | None], dict[str, str]]:
+    """項目ごとに値と、その取得元のラベルを返す。
+
+    ``load_credentials`` と ``credential_source`` が**同じ**解決を見るための
+    土台。別々に判定すると、実際に使われた認証情報と診断表示がずれる。
+    """
+    candidates = (
+        ("環境変数", _from_env_vars(env)),
+        (str(env_file), _scoped_lookup(dotenv, env)),
+        ("OS キーチェーン", _from_keyring(env)),
+    )
+    resolved: dict[str, str | None] = dict.fromkeys(_CREDENTIAL_FIELDS)
+    origins: dict[str, str] = {}
+    for label, source in candidates:
+        for key, value in source.items():
+            if resolved[key] is None and value:
+                resolved[key] = value
+                origins[key] = label
+    return resolved, origins
+
+
 def load_credentials(
     env: Environment,
     *,
@@ -229,14 +254,9 @@ def load_credentials(
     Raises:
         MissingCredentialsError: どこにも見つからないとき。
     """
-    dotenv = _read_dotenv(_resolve_env_file(env_file))
-
-    sources = (_from_env_vars(env), _scoped_lookup(dotenv, env), _from_keyring(env))
-    resolved: dict[str, str | None] = dict.fromkeys(_CREDENTIAL_FIELDS)
-    for source in sources:
-        for key, value in source.items():
-            if resolved[key] is None and value:
-                resolved[key] = value
+    path = _resolve_env_file(env_file)
+    dotenv = _read_dotenv(path)
+    resolved, _ = _resolve_fields(env, dotenv, path)
 
     created_key = f"WBJP_{env.value.upper()}_KEY_CREATED_ON"
     created_on = _parse_date(os.environ.get(created_key) or dotenv.get(created_key))
@@ -269,21 +289,30 @@ def load_credentials(
 
 
 def credential_source(env: Environment, *, env_file: Path | None = None) -> str:
-    """``app_key`` がどのソースから来たかを人間向けに説明する。
+    """認証情報がどこから来たかを人間向けに説明する。
 
     どこから読まれているか分からないまま本番に発注する事故を防ぐための、
     ``credentials check`` 用の診断。秘密そのものは返さない。
+
+    **``load_credentials`` が実際に採用したものを説明すること。** 1項目でも
+    欠けていれば全体が公開テスト口座にフォールバックするので、``app_key``
+    だけを見て「.env から読んだ」と表示すると嘘になる。
     """
     path = _resolve_env_file(env_file)
-    candidates = (
-        ("環境変数", _from_env_vars(env)),
-        (f"{path}", _scoped_lookup(_read_dotenv(path), env)),
-        ("OS キーチェーン", _from_keyring(env)),
-    )
-    for label, source in candidates:
-        if source.get("app_key"):
-            return label
-    return "公開テスト口座（UAT 共有）"
+    resolved, origins = _resolve_fields(env, _read_dotenv(path), path)
+
+    missing = [k for k, v in resolved.items() if not v]
+    if missing:
+        detail = f"{', '.join(missing)} が未設定"
+        if env is Environment.UAT:
+            return f"公開テスト口座（UAT 共有）— {detail}のため"
+        return f"解決できません（{detail}）"
+
+    labels = set(origins.values())
+    if len(labels) == 1:
+        return labels.pop()
+    # 項目ごとにソースが違うのは事故のもと。どれがどこから来たかを出す。
+    return ", ".join(f"{k}={origins[k]}" for k in _CREDENTIAL_FIELDS)
 
 
 def store_credentials(env: Environment, creds: Credentials) -> None:

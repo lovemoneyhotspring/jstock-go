@@ -26,13 +26,23 @@ class Side(StrEnum):
 class OrderType(StrEnum):
     """注文種別。
 
-    日本株は MARKET と LIMIT のみ対応。STOP_LOSS 系は Webull JP が
-    サポートしていないため、この enum には意図的に含めていない。
-    損切りは :mod:`wbjp.risk.stops` がエンジン側で合成する。
+    **発注できるのは MARKET と LIMIT だけ。** 日本株の STOP_LOSS 系は
+    Webull JP がサポートしていないため、損切りは
+    :mod:`wbjp.risk.stops` がエンジン側で合成する。
+
+    ``OTHER`` は**読み取り専用**。口座に他の経路で置かれた注文
+    （UAT の共有テスト口座には他人の STOP_LOSS が並ぶ）を読んだときに、
+    未知の種別で落ちないための受け皿。これを発注に使ってはいけない。
     """
 
     MARKET = "MARKET"
     LIMIT = "LIMIT"
+    OTHER = "OTHER"
+
+    @property
+    def is_placeable(self) -> bool:
+        """このシステムが発注してよい種別か。"""
+        return self in {OrderType.MARKET, OrderType.LIMIT}
 
 
 class TimeInForce(StrEnum):

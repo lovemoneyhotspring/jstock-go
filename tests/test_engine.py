@@ -678,6 +678,50 @@ def test_risk_blocks_excessive_concentration() -> None:
     assert "比率" in decision.reason
 
 
+def test_position_cap_counts_orders_still_on_the_book() -> None:
+    """建玉比率は「約定分＋発注中」で見る。
+
+    板に残っている買い注文を無視すると、上限ぎりぎりの注文を出した直後に
+    同額をもう一度出せてしまい、両方約定した瞬間に上限を大きく超える。
+    """
+    manager = RiskManager(
+        RiskConfig(max_position_weight=D("0.25"), max_order_value_jpy=D(10_000_000)), ["7203"]
+    )
+    # 総資産100万・上限25% → 1銘柄あたり25万円まで。
+    # すでに20万円ぶんが板に残っている状態で、さらに20万円を出そうとする。
+    ctx = risk_ctx(pending_value={"7203": D(200_000)})
+
+    decision = manager.check(order(qty=80, price="2500"), ctx)
+
+    assert not decision.approved
+    assert "発注中" in decision.reason
+
+
+def test_position_cap_still_allows_room_below_the_limit() -> None:
+    """発注中を数えるようにしても、上限内なら通す。"""
+    manager = RiskManager(
+        RiskConfig(max_position_weight=D("0.25"), max_order_value_jpy=D(10_000_000)), ["7203"]
+    )
+    ctx = risk_ctx(pending_value={"7203": D(200_000)})
+
+    # 20万 + 2.5万 = 22.5万 < 25万
+    assert manager.check(order(qty=10, price="2500"), ctx).approved
+
+
+def test_position_cap_accumulates_within_one_cycle() -> None:
+    """同一サイクルで同じ銘柄に2件出るとき、1件目を勘定に入れて2件目を見る。"""
+    manager = RiskManager(
+        RiskConfig(max_position_weight=D("0.25"), max_order_value_jpy=D(10_000_000)), ["7203"]
+    )
+    first = order(qty=80, price="2500")  # 20万円
+    second = OrderRequest("o2", "7203", Side.BUY, OrderType.LIMIT, D(80), limit_price=D(2500))
+
+    approved, rejected = manager.check_all([first, second], risk_ctx())
+
+    assert [o.client_order_id for o in approved] == ["o1"]
+    assert "7203" in rejected
+
+
 def test_risk_blocks_limit_outside_the_daily_price_band() -> None:
     """ストップ高を超える指値は取引所に弾かれる。"""
     manager = RiskManager(RiskConfig(max_order_value_jpy=D(10_000_000)), ["7203"])
@@ -832,3 +876,68 @@ def test_stop_priority_keeps_unrelated_targets() -> None:
     )
     by_symbol = {t.symbol: t.quantity for t in merged}
     assert by_symbol == {"7203": D(0), "6758": D(100)}
+
+
+def test_pending_buy_value_ignores_sells_and_closed_orders() -> None:
+    """売り注文と終了済みの注文は「これから増える建玉」ではない。"""
+    from wbjp.engine.live import _pending_buy_value
+
+    orders = [
+        Order(
+            "a",
+            "b",
+            "7203",
+            Side.BUY,
+            OrderType.LIMIT,
+            D(100),
+            D(0),
+            OrderStatus.SUBMITTED,
+            limit_price=D(2500),
+        ),
+        Order(
+            "b",
+            "b",
+            "7203",
+            Side.SELL,
+            OrderType.LIMIT,
+            D(100),
+            D(0),
+            OrderStatus.SUBMITTED,
+            limit_price=D(2500),
+        ),
+        Order(
+            "c",
+            "b",
+            "7203",
+            Side.BUY,
+            OrderType.LIMIT,
+            D(100),
+            D(0),
+            OrderStatus.CANCELLED,
+            limit_price=D(2500),
+        ),
+    ]
+
+    assert _pending_buy_value(orders, {}) == {"7203": D(250_000)}
+
+
+def test_pending_buy_value_counts_only_the_unfilled_remainder() -> None:
+    """一部約定した注文は、残りだけが「これから増える建玉」。
+
+    約定済みの分は建玉として別途数えられるので、ここで足すと二重計上になる。
+    """
+    from wbjp.engine.live import _pending_buy_value
+
+    partially = Order(
+        "a",
+        "b",
+        "7203",
+        Side.BUY,
+        OrderType.LIMIT,
+        D(100),
+        D(60),
+        OrderStatus.PARTIALLY_FILLED,
+        limit_price=D(2500),
+    )
+
+    assert _pending_buy_value([partially], {}) == {"7203": D(100_000)}  # 残40株ぶん

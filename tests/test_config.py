@@ -354,16 +354,53 @@ def test_unavailable_keyring_still_allows_env_vars(monkeypatch: pytest.MonkeyPat
 # --------------------------------------------------------------------------
 
 
+_FULL_SET = "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n"
+
+
 def test_credential_source_reports_where_the_key_came_from(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
-    env_file = _write_env_file(tmp_path / ".env", "WBJP_PROD_APP_KEY=k\n")
+    env_file = _write_env_file(tmp_path / ".env", _FULL_SET)
 
     assert credential_source(Environment.PROD, env_file=env_file) == str(env_file)
 
-    monkeypatch.setenv("WBJP_PROD_APP_KEY", "k")
-    assert credential_source(Environment.PROD, env_file=env_file) == "環境変数"
+
+def test_credential_source_matches_what_was_actually_used(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """1項目でも欠ければ公開テスト口座に落ちる。診断もそう言うこと。
+
+    「.env から読んだ」と表示しながら実際は共有テスト口座、という
+    食い違いが起きると、他人の口座を自分の口座だと思って眺めることになる。
+    """
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    env_file = _write_env_file(
+        tmp_path / ".env",
+        "WBJP_UAT_APP_KEY=k\nWBJP_UAT_APP_SECRET=s\n",  # account_id が無い
+    )
+
+    creds = load_credentials(Environment.UAT, env_file=env_file)
+    source = credential_source(Environment.UAT, env_file=env_file)
+
+    assert creds.is_public_test_account is True
+    assert "公開テスト口座" in source
+    assert "account_id" in source
+    assert str(env_file) not in source
+
+
+def test_credential_source_flags_mixed_origins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """項目ごとにソースが違うなら、その内訳を出す。"""
+    monkeypatch.setattr("wbjp.config._from_keyring", lambda env: {})
+    monkeypatch.setenv("WBJP_PROD_APP_KEY", "from-env")
+    env_file = _write_env_file(tmp_path / ".env", _FULL_SET)
+
+    source = credential_source(Environment.PROD, env_file=env_file)
+
+    assert "app_key=環境変数" in source
+    assert f"account_id={env_file}" in source
 
 
 def test_credentials_repr_hides_the_secret() -> None:

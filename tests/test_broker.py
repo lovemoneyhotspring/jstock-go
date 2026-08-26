@@ -8,13 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from wbjp.broker.base import InsufficientFundsError, OrderRejectedError
+from wbjp.broker.base import BrokerError, InsufficientFundsError, OrderRejectedError
 from wbjp.broker.paper import PaperBroker
 from wbjp.broker.ratelimit import Cached, Limit, RateLimiter
 from wbjp.broker.webull import (
     _plain,
     _suppress_sdk_own_logging,
     flatten_order_legs,
+    parse_order_type,
+    parse_side,
     parse_status,
 )
 from wbjp.domain.models import (
@@ -87,6 +89,40 @@ def test_order_status_openness() -> None:
 def test_unknown_status_is_treated_as_still_open() -> None:
     """未知の状態を「終了」と誤認すると二重発注につながる。安全側に倒す。"""
     assert OrderStatus.UNKNOWN.is_open is True
+
+
+def test_unknown_order_type_does_not_crash() -> None:
+    """口座には自分が出した注文以外も並ぶ。
+
+    実際に UAT の共有テスト口座は STOP_LOSS を返してきて、日次サイクルが
+    毎回落ちていた。種別は建玉計算に使わないので OTHER に倒す。
+    """
+    assert parse_order_type("STOP_LOSS") is OrderType.OTHER
+    assert parse_order_type("STOP_LOSS_LIMIT") is OrderType.OTHER
+    assert parse_order_type(None) is OrderType.OTHER
+    assert parse_order_type("limit") is OrderType.LIMIT
+    assert parse_order_type(" MARKET ") is OrderType.MARKET
+
+
+def test_other_order_type_can_never_be_placed() -> None:
+    """OTHER は読み取り専用。発注経路に流れてはいけない。"""
+    assert OrderType.OTHER.is_placeable is False
+    assert OrderType.MARKET.is_placeable is True
+    assert OrderType.LIMIT.is_placeable is True
+
+
+def test_unreadable_side_is_an_error_not_a_guess() -> None:
+    """売買区分だけは推測してはいけない。
+
+    符号が反転すると、未約定注文を打ち消すはずの計算が積み増す方向に
+    働く。読めないなら止まる方が安全。
+    """
+    assert parse_side("BUY") is Side.BUY
+    assert parse_side(" sell ") is Side.SELL
+
+    for bad in (None, "", "SHORT"):
+        with pytest.raises(BrokerError, match="売買区分"):
+            parse_side(bad)
 
 
 # --------------------------------------------------------------------------

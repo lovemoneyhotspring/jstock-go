@@ -43,6 +43,10 @@ class RiskContext:
         balance: 残高と買付余力。
         positions: 現在の建玉。
         base_prices: 銘柄 → 前日終値。値幅制限の基準値段。
+        pending_value: 銘柄 → **未約定の買い注文**の想定約定代金。
+            建玉比率は「約定分＋発注中」で見る必要がある。約定分だけを
+            数えると、板に残っている注文が無視され、全部約定した瞬間に
+            上限を突破する。
         orders_today: 当日すでに発注した件数。
         realized_pnl_today: 当日の実現損益。マイナスが大きいと停止する。
     """
@@ -51,6 +55,7 @@ class RiskContext:
     balance: Balance
     positions: dict[str, Position] = field(default_factory=dict)
     base_prices: dict[str, Decimal] = field(default_factory=dict)
+    pending_value: dict[str, Decimal] = field(default_factory=dict)
     orders_today: int = 0
     realized_pnl_today: Decimal = Decimal(0)
 
@@ -105,13 +110,16 @@ class RiskManager:
     ) -> tuple[list[OrderRequest], dict[str, str]]:
         """まとめて検査し、通ったものと拒否理由に分ける。
 
-        当日の発注件数と買付余力は、承認するたびに消費したものとして
-        数える。1回のサイクルで上限を超えるのを防ぐため。
+        当日の発注件数・買付余力・**銘柄ごとの発注中金額**は、承認する
+        たびに消費したものとして数える。1回のサイクルで上限を超えるのを
+        防ぐため。同じ銘柄に2件出るような場合、1件目を勘定に入れずに
+        2件目を判定すると、合計で上限を超える。
         """
         approved: list[OrderRequest] = []
         rejected: dict[str, str] = {}
         orders_today = ctx.orders_today
         remaining_power = ctx.balance.buying_power
+        pending_value = dict(ctx.pending_value)
 
         for request in requests:
             running = RiskContext(
@@ -125,6 +133,7 @@ class RiskManager:
                 ),
                 positions=ctx.positions,
                 base_prices=ctx.base_prices,
+                pending_value=pending_value,
                 orders_today=orders_today,
                 realized_pnl_today=ctx.realized_pnl_today,
             )
@@ -140,6 +149,9 @@ class RiskManager:
                     spent = self._notional(request, ctx)
                     if spent is not None:
                         remaining_power -= spent
+                        pending_value[request.symbol] = (
+                            pending_value.get(request.symbol, Decimal(0)) + spent
+                        )
             else:
                 rejected[request.symbol] = decision.reason
                 log.warning(
@@ -243,7 +255,13 @@ class RiskManager:
         return RiskDecision(True)
 
     def _position_weight(self, request: OrderRequest, ctx: RiskContext) -> RiskDecision:
-        """1銘柄がポートフォリオを占めすぎないようにする。"""
+        """1銘柄がポートフォリオを占めすぎないようにする。
+
+        **約定分と発注中を合算して見る。** 板に残っている買い注文は
+        「もうすぐ建玉になる株数」なので、これを無視すると、上限ぎりぎりの
+        注文を出したあとに同額をもう一度出せてしまい、両方約定した時点で
+        上限を大きく超える。
+        """
         if request.side is not Side.BUY or ctx.equity <= 0:
             return RiskDecision(True)
 
@@ -253,13 +271,18 @@ class RiskManager:
 
         position = ctx.positions.get(request.symbol)
         existing = position.market_value if position else Decimal(0)
-        weight = (existing + notional) / ctx.equity
+        pending = ctx.pending_value.get(request.symbol, Decimal(0))
+        weight = (existing + pending + notional) / ctx.equity
 
         if weight > self.config.max_position_weight:
+            detail = f"{request.symbol} の比率 {weight:.1%}"
+            if pending > 0:
+                detail += (
+                    f"（建玉 {existing:,.0f}円 + 発注中 {pending:,.0f}円 + 今回 {notional:,.0f}円）"
+                )
             return RiskDecision(
                 False,
-                f"{request.symbol} の比率 {weight:.1%} が上限 "
-                f"{self.config.max_position_weight:.1%} を超える",
+                f"{detail} が上限 {self.config.max_position_weight:.1%} を超える",
             )
         return RiskDecision(True)
 

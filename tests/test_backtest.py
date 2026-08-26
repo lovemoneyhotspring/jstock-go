@@ -337,6 +337,65 @@ def test_journal_detects_already_placed_orders(journal: Journal) -> None:
     assert journal.was_placed("coid1") is True
 
 
+def test_dry_run_does_not_count_as_placed(journal: Journal) -> None:
+    """dry-run はブローカーに何も送っていない。発注済みに数えてはいけない。
+
+    注文IDは取引日から作られるため、dry-run と実発注は同じIDになる。
+    dry-run を「発注済み」と数えると、README が勧める「まず dry-run で
+    確認する」手順を踏んだ日は、実発注が丸ごと抑止される。
+    """
+    journal.start_run("r1", dt.date(2026, 8, 25), "prod", "dry_run")
+    request = OrderRequest("coid1", "7203", Side.BUY, OrderType.LIMIT, D(100), limit_price=D(2500))
+    journal.record_order("r1", request, Journal.DRY_RUN_STATUS)
+
+    assert journal.was_placed("coid1") is False
+
+    # 同じ日に実発注すると、dry-run の記録を上書きして発注済みになる
+    journal.start_run("r2", dt.date(2026, 8, 25), "prod", "live")
+    journal.record_order("r2", request, "SUBMITTED")
+    assert journal.was_placed("coid1") is True
+
+
+def test_dry_run_does_not_consume_the_daily_order_budget(journal: Journal) -> None:
+    """dry-run は1件もブローカーに送っていない。発注枠を減らしてはいけない。
+
+    減らすと、設定確認のために dry-run を数回回しただけで
+    max_orders_per_day が尽き、その日の実発注が止まる。
+    """
+    # placed_at は挿入時の実時刻。as_of ではなく実日付で数える。
+    day = dt.date.today()
+    journal.start_run("r1", day, "prod", "dry_run")
+    for i in range(5):
+        request = OrderRequest(
+            f"c{i}", "3664", Side.BUY, OrderType.LIMIT, D(100), limit_price=D(28)
+        )
+        journal.record_order("r1", request, Journal.DRY_RUN_STATUS)
+
+    assert journal.orders_today(day) == 0
+
+    journal.record_order(
+        "r1",
+        OrderRequest("live1", "3664", Side.BUY, OrderType.LIMIT, D(100), limit_price=D(28)),
+        "SUBMITTED",
+    )
+    assert journal.orders_today(day) == 1
+
+
+def test_cancelled_orders_still_consume_the_daily_budget(journal: Journal) -> None:
+    """取り消した注文も枠を消費する。
+
+    max_orders_per_day は「暴走した戦略が API を叩き続ける」ことへの
+    ブレーキであって、約定回数の上限ではない。出して取り消す往復も
+    ブローカーへの発注として数える。
+    """
+    day = dt.date.today()
+    journal.start_run("r1", day, "prod", "live")
+    request = OrderRequest("c1", "3664", Side.BUY, OrderType.LIMIT, D(100), limit_price=D(28))
+    journal.record_order("r1", request, "CANCELLED")
+
+    assert journal.orders_today(day) == 1
+
+
 def test_journal_updates_order_status(journal: Journal) -> None:
     journal.start_run("r1", dt.date(2026, 8, 25), "uat", "live")
     request = OrderRequest("coid1", "7203", Side.BUY, OrderType.LIMIT, D(100), limit_price=D(2500))

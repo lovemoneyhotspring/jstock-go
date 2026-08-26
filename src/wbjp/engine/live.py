@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
 import polars as pl
@@ -34,8 +35,10 @@ from wbjp.db.repo import Journal
 from wbjp.domain.models import (
     Balance,
     CombinedSignal,
+    Order,
     OrderRequest,
     Position,
+    Side,
     Signal,
     TargetPosition,
 )
@@ -51,6 +54,31 @@ from wbjp.strategy.combiner import build_combiner
 log = get_logger(__name__)
 
 ATR_PERIOD = 14
+
+
+def _pending_buy_value(
+    open_orders: Iterable[Order], prices: dict[str, Decimal]
+) -> dict[str, Decimal]:
+    """銘柄ごとの「板に残っている買い注文」の想定約定代金。
+
+    建玉比率の判定を「約定分＋発注中」で行うために要る。未約定を無視すると、
+    上限ぎりぎりの注文を出した直後に同額をもう一度出せてしまう。
+
+    指値があればそれを、成行なら直近終値を使う。値段が分からない注文は
+    黙って0円扱いにせず、除外したことが分かるよう呼び出し側には現れない。
+    """
+    pending: dict[str, Decimal] = {}
+    for order in open_orders:
+        if order.side is not Side.BUY or not order.status.is_open:
+            continue
+        price = order.limit_price or prices.get(order.symbol)
+        if price is None:
+            continue
+        pending[order.symbol] = (
+            pending.get(order.symbol, Decimal(0)) + order.remaining_quantity * price
+        )
+    return pending
+
 
 #: ウォームアップに加えて余分に読む日数。祝日と欠測を吸収する。
 HISTORY_PADDING_DAYS = 200
@@ -239,10 +267,11 @@ class LiveRunner:
         self.journal.record_targets(run_id, targets)
 
         # 4) 差分だけを注文にする
+        open_orders = self.broker.get_open_orders()
         plan = reconcile(
             targets,
             positions,
-            self.broker.get_open_orders(),
+            open_orders,
             closes,
             # 注文IDの種は run_id ではなく **基準日**。run_id は実行ごとに
             # 乱数を含むため、同じ日に2回走らせると別のIDが振られ、
@@ -260,20 +289,19 @@ class LiveRunner:
         )
 
         # 5) リスク判定
-        approved, rejected = self.risk.check_all(
-            plan.orders,
-            RiskContext(
-                equity=equity,
-                balance=balance,
-                positions=positions,
-                base_prices=closes,
-                orders_today=self.journal.orders_today(dt.date.today()),
-            ),
+        risk_ctx = RiskContext(
+            equity=equity,
+            balance=balance,
+            positions=positions,
+            base_prices=closes,
+            pending_value=_pending_buy_value(open_orders, closes),
+            orders_today=self.journal.orders_today(dt.date.today()),
         )
+        approved, rejected = self.risk.check_all(plan.orders, risk_ctx)
         rejected.update(plan.skipped)
 
         # 6) 発注
-        placed = self._place(run_id, approved, rejected, live=allowed)
+        placed = self._place(run_id, approved, rejected, risk_ctx, live=allowed)
 
         self.journal.record_risk_events(run_id, rejected)
         self.journal.record_snapshot(run_id, as_of, positions.values())
@@ -306,6 +334,7 @@ class LiveRunner:
         run_id: str,
         requests: list[OrderRequest],
         rejected: dict[str, str],
+        risk_ctx: RiskContext,
         *,
         live: bool,
     ) -> list[OrderRequest]:
@@ -330,19 +359,19 @@ class LiveRunner:
                     limit_price=str(request.limit_price) if request.limit_price else None,
                     reason=request.reason,
                 )
-                self.journal.record_order(run_id, request, "DRY_RUN")
+                self.journal.record_order(run_id, request, Journal.DRY_RUN_STATUS)
                 continue
 
             try:
                 # 発注前にブローカーの見積りと突き合わせる
                 preview = self.broker.preview(request)
+                # サイクル本体と**同じ**判断材料で見る。ここで equity=0 や
+                # 空の建玉を渡すと、_position_weight が無条件に通過し、
+                # 実弾の直前にある最後の関門が実質無効になる。
+                # 残高だけは、直前の発注で減っている可能性があるため取り直す。
                 decision = self.risk.check(
                     request,
-                    RiskContext(
-                        equity=Decimal(0),
-                        balance=self.broker.get_balance(),
-                        base_prices={},
-                    ),
+                    replace(risk_ctx, balance=self.broker.get_balance()),
                     preview=preview,
                 )
                 if not decision.approved:

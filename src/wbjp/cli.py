@@ -17,6 +17,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from wbjp.broker.base import BrokerError
 from wbjp.config import Credentials as Creds
 from wbjp.config import (
     Environment,
@@ -144,6 +145,96 @@ def account(
                 order.status.value,
             )
         console.print(table)
+
+
+@app.command()
+def orders(
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+) -> None:
+    """未約定注文を client_order_id 付きで一覧する。
+
+    ``account`` の表には ID が出ないため、取り消したい注文を指定できない。
+    """
+    config = load_config(config_dir)
+    broker = _build_broker(config, live=False)
+
+    open_orders = broker.get_open_orders()
+    if not open_orders:
+        console.print(f"[dim]未約定注文はありません ({config.env.value})[/dim]")
+        return
+
+    table = Table(title=f"未約定注文 ({config.env.value})", title_justify="left")
+    for column in ("client_order_id", "銘柄", "売買", "種別", "数量", "未約定", "指値", "状態"):
+        table.add_column(column)
+    for order in open_orders:
+        table.add_row(
+            order.client_order_id or "[dim]-[/dim]",
+            order.symbol,
+            order.side.value,
+            order.order_type.value,
+            f"{order.quantity:,}",
+            f"{order.remaining_quantity:,}",
+            str(order.limit_price or "-"),
+            order.status.value,
+        )
+    console.print(table)
+
+
+@app.command("order")
+def order_show(
+    client_order_id: Annotated[str, typer.Argument(help="調べたい注文の client_order_id")],
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+) -> None:
+    """1件の注文の現在の状態を照会する。
+
+    取り消し後の確認にも使う。取り消された注文は未約定一覧から消えるが、
+    ここでは CANCELLED として残る。
+    """
+    config = load_config(config_dir)
+    broker = _build_broker(config, live=False)
+
+    found = broker.get_order(client_order_id)
+    if found is None:
+        console.print(f"[yellow]注文が見つかりません: {client_order_id}[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold]注文[/bold] {found.client_order_id} ({config.env.value})")
+    console.print(f"  銘柄      {found.symbol}")
+    console.print(f"  売買/種別 {found.side.value} / {found.order_type.value}")
+    console.print(f"  数量      {found.quantity:,}（約定 {found.filled_quantity:,}）")
+    console.print(f"  指値      {found.limit_price or '成行'}")
+    console.print(f"  状態      {found.status.value}")
+    if found.avg_fill_price:
+        console.print(f"  約定単価  {found.avg_fill_price:,}")
+    if found.broker_order_id:
+        console.print(f"  broker_order_id {found.broker_order_id}")
+
+
+@app.command()
+def cancel(
+    client_order_id: Annotated[str, typer.Argument(help="取り消す注文の client_order_id")],
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+) -> None:
+    """未約定の注文を取り消す。
+
+    取消は注文を減らす方向の操作なので、``run --live`` のような
+    二重ロックは課さない。
+    """
+    config = load_config(config_dir)
+    broker = _build_broker(config, live=True)
+
+    try:
+        broker.cancel(client_order_id)
+    except BrokerError as exc:
+        console.print(f"[red]取消に失敗しました: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]取消を送信しました: {client_order_id}[/green]")
+
+    # 取消は非同期のことがある。実際にどうなったかを見て返す。
+    found = broker.get_order(client_order_id)
+    if found is not None:
+        console.print(f"  現在の状態: {found.status.value}")
 
 
 # --------------------------------------------------------------------------

@@ -195,14 +195,23 @@ class Journal:
 
     # -- 注文 ---------------------------------------------------------------
 
-    def was_placed(self, client_order_id: str) -> bool:
-        """すでに発注済みか。
+    #: dry-run で組み立てただけの注文に付く状態。ブローカーには送っていない。
+    DRY_RUN_STATUS = "DRY_RUN"
 
-        ``client_order_id`` は決定論的に作られるので、これが True なら
-        同じ判断からの再発注。冪等性の最後の砦になる。
+    def was_placed(self, client_order_id: str) -> bool:
+        """すでに**ブローカーへ送った**注文か。
+
+        ``client_order_id`` は取引日から決定論的に作られるので、これが
+        True なら同じ判断からの再発注。冪等性の最後の砦になる。
+
+        **dry-run の記録は数えない。** dry-run は1件もブローカーに送って
+        いない。これを「発注済み」と数えると、確認のために dry-run した日は
+        本発注が丸ごと抑止される（README が勧める手順そのものが、その日の
+        取引を潰すことになる）。
         """
         cursor = self._connection.execute(
-            "SELECT 1 FROM orders WHERE client_order_id = ?", (client_order_id,)
+            "SELECT 1 FROM orders WHERE client_order_id = ? AND status != ?",
+            (client_order_id, self.DRY_RUN_STATUS),
         )
         return cursor.fetchone() is not None
 
@@ -264,9 +273,15 @@ class Journal:
         )
 
     def orders_today(self, day: dt.date) -> int:
-        """当日の発注件数。1日あたりの上限判定に使う。"""
+        """当日**ブローカーへ送った**注文の件数。1日あたりの上限判定に使う。
+
+        ``was_placed`` と同じく dry-run は数えない。dry-run は1件も送って
+        いないのに枠を消費すると、設定を確認するために dry-run を数回
+        回しただけで、その日の発注枠が尽きる。
+        """
         cursor = self._connection.execute(
-            "SELECT count(*) AS n FROM orders WHERE date(placed_at) = ?", (day.isoformat(),)
+            "SELECT count(*) AS n FROM orders WHERE date(placed_at) = ? AND status != ?",
+            (day.isoformat(), self.DRY_RUN_STATUS),
         )
         return int(cursor.fetchone()["n"])
 

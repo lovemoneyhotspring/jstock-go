@@ -84,6 +84,38 @@ def parse_status(value: str | None) -> OrderStatus:
     return _STATUS_MAP.get(value.strip().upper(), OrderStatus.UNKNOWN)
 
 
+def parse_order_type(value: str | None) -> OrderType:
+    """API の注文種別を解釈する。未知の値は OTHER にする。
+
+    口座には自分が出した注文以外も並ぶ（UAT の共有テスト口座には他人の
+    ``STOP_LOSS`` が入っている）。未知の種別で例外を投げると、
+    ``get_open_orders`` を通る日次サイクルが毎回落ちる。種別は建玉計算に
+    使わない（:func:`~wbjp.engine.reconcile.effective_quantity` が見るのは
+    銘柄・売買・数量・状態）ので、読めない種別は OTHER に倒して問題ない。
+    """
+    if not value:
+        return OrderType.OTHER
+    try:
+        return OrderType(value.strip().upper())
+    except ValueError:
+        return OrderType.OTHER
+
+
+def parse_side(value: Any) -> Side:
+    """API の売買区分を解釈する。
+
+    ここは **推測してはいけない。** 売買を取り違えると
+    :func:`~wbjp.engine.reconcile.effective_quantity` の符号が反転し、
+    未約定注文を打ち消すはずが積み増す方向に働く。読めなければ落とす。
+    """
+    try:
+        return Side(str(value).strip().upper())
+    except ValueError as exc:
+        raise BrokerError(
+            f"注文の売買区分を解釈できません: {value!r}。建玉計算が狂うため処理を中止します"
+        ) from exc
+
+
 def _decimal(value: Any, default: Decimal = Decimal(0)) -> Decimal:
     """API の数値（文字列で返ってくる）を Decimal にする。
 
@@ -343,6 +375,10 @@ class WebullBroker(Broker):
         価格・数量は **文字列** で渡す。float を経由すると
         ``2500.0000000001`` のような値になり、呼値に乗らず弾かれる。
         """
+        # OTHER は他人の注文を読むための受け皿。発注経路には絶対に流さない。
+        if not request.order_type.is_placeable:
+            raise ValueError(f"発注できない注文種別です: {request.order_type.value}")
+
         payload = {
             "combo_type": JP_COMBO_TYPE,
             "client_order_id": request.client_order_id,
@@ -367,8 +403,8 @@ class WebullBroker(Broker):
             client_order_id=str(entry.get("client_order_id", "")),
             broker_order_id=entry.get("order_id") or entry.get("orderId"),
             symbol=str(entry.get("symbol", "")),
-            side=Side(str(entry.get("side", "BUY")).upper()),
-            order_type=OrderType(str(entry.get("order_type", "LIMIT")).upper()),
+            side=parse_side(entry.get("side")),
+            order_type=parse_order_type(entry.get("order_type")),
             quantity=_decimal(entry.get("total_quantity") or entry.get("quantity")),
             filled_quantity=_decimal(entry.get("filled_quantity")),
             status=parse_status(entry.get("status") or entry.get("order_status")),
@@ -383,6 +419,11 @@ class WebullBroker(Broker):
         """SDK を呼び、応答を JSON にして返す。"""
         try:
             response = operation()
+        except BrokerError:
+            # すでに翻訳済み（遅延接続がここで失敗した場合など）。もう一度
+            # _translate に通すと、BrokerError には error_code も http_status
+            # も無いため「残高照会に失敗しました（）」まで情報が削れる。
+            raise
         except Exception as exc:
             raise self._translate(exc, description) from exc
 
