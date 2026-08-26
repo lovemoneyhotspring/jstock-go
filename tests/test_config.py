@@ -486,7 +486,8 @@ slow = 20
 
     assert config.universe.symbols == ["7203", "6758"]
     assert config.risk.kill_switch is True
-    assert config.risk.max_order_value_jpy == Decimal("300000")
+    # 旧名 max_order_value_jpy でも読める（後方互換）
+    assert config.risk.max_order_value == Decimal("300000")
     assert config.strategies.combiner == "majority"
 
     entry = config.strategies.strategies[0]
@@ -519,8 +520,8 @@ def test_exit_threshold_must_not_exceed_entry_threshold(tmp_path: Path) -> None:
 
 def test_unknown_config_key_is_rejected(tmp_path: Path) -> None:
     """設定ミスを黙って無視しない（typo で上限が効かなくなるのを防ぐ）。"""
-    (tmp_path / "settings.toml").write_text("[risk]\nmax_order_value = 100\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="max_order_value"):
+    (tmp_path / "settings.toml").write_text("[risk]\nmax_order_valeu = 100\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="max_order_valeu"):
         load_file_config(tmp_path)
 
 

@@ -1,7 +1,7 @@
 """ポジションサイジング。合成シグナルを「目標株数」に変換する。
 
 重要な前提:
-    Webull JP の日本株 API は **現物のみ**。空売りはできない。
+    このシステムは **現物のみ**を扱う。空売りはしない。
     したがって弱気シグナルは「売り建て」ではなく「保有していれば手仕舞う」
     という意味になる。目標株数は常に 0 以上。
 
@@ -34,7 +34,8 @@ class SizingContext:
         buying_power: 買付余力。これを超える目標は作らない。
         prices: 銘柄 → 直近終値。
         atr: 銘柄 → ATR。``atr_risk`` 方式で損切り幅の見積りに使う。
-        lot_sizes: 銘柄 → 売買単位。既定は100株。
+        lot_sizes: 銘柄 → 売買単位の例外。
+        default_lot_size: 例外の無い銘柄の売買単位。東証は100株、米国は1株。
     """
 
     equity: Decimal
@@ -43,9 +44,10 @@ class SizingContext:
     atr: dict[str, Decimal] = field(default_factory=dict)
     lot_sizes: dict[str, Decimal] = field(default_factory=dict)
     positions: dict[str, Position] = field(default_factory=dict)
+    default_lot_size: Decimal = DEFAULT_LOT_SIZE
 
     def lot_size(self, symbol: str) -> Decimal:
-        return self.lot_sizes.get(symbol, DEFAULT_LOT_SIZE)
+        return self.lot_sizes.get(symbol, self.default_lot_size)
 
     def held_quantity(self, symbol: str) -> Decimal:
         position = self.positions.get(symbol)
@@ -178,7 +180,7 @@ class FixedNotionalSizer(PositionSizer):
         price = self._price(symbol, ctx)
         if price is None:
             return Decimal(0)
-        return self.config.fixed_notional_jpy / price
+        return self.config.fixed_notional / price
 
 
 class AtrRiskSizer(PositionSizer):

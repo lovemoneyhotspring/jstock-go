@@ -27,13 +27,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from wbjp.domain.jp_rules import (
-    DEFAULT_LOT_SIZE,
-    PriceRounding,
-    round_to_lot,
-    snap_to_tick,
-    violates_same_day_settlement,
-)
+from wbjp.domain.jp_rules import PriceRounding, violates_same_day_settlement
+from wbjp.domain.market_rules import JpMarketRules, MarketRules
 from wbjp.domain.models import (
     Order,
     OrderRequest,
@@ -91,10 +86,22 @@ def effective_quantity(
     quantity = position.quantity if position else Decimal(0)
 
     for order in open_orders:
-        if order.symbol == symbol and order.status.is_open:
-            quantity += order.signed_remaining
+        if order.symbol != symbol or not order.status.is_open:
+            continue
+        # 逆指値は「トリガーに達したら売る」保険であって、これから約定する
+        # 注文ではない。数えると「建玉が消える予定」と誤認して買い直す。
+        if order.order_type.is_stop:
+            continue
+        quantity += order.signed_remaining
 
     return quantity
+
+
+def open_stop_orders(symbol: str, open_orders: Iterable[Order]) -> list[Order]:
+    """銘柄に置かれている生きた逆指値。"""
+    return [
+        o for o in open_orders if o.symbol == symbol and o.status.is_open and o.order_type.is_stop
+    ]
 
 
 def make_client_order_id(seed_key: str, symbol: str, side: Side, quantity: Decimal) -> str:
@@ -120,6 +127,7 @@ def reconcile(
     lot_sizes: dict[str, Decimal] | None = None,
     topix500: set[str] | None = None,
     bought_today: set[str] | None = None,
+    rules: MarketRules | None = None,
 ) -> ReconcilePlan:
     """目標と現状の差だけを注文にする。
 
@@ -132,13 +140,14 @@ def reconcile(
             値（run_id など）を渡すと、同じ日の再実行が別の注文IDになり
             二重発注になる。
         bought_today: 当日買い付けた銘柄。差金決済の防止に使う。
+        rules: 市場の取引ルール。省略時は東証（``topix500`` を反映）。
 
     Returns:
         発注すべき注文と、見送った理由。
     """
     settings = settings or ReconcileSettings()
     lot_sizes = lot_sizes or {}
-    topix500 = topix500 or set()
+    rules = rules or JpMarketRules(topix500)
     bought_today = bought_today or set()
     open_orders = list(open_orders)
 
@@ -153,9 +162,9 @@ def reconcile(
         if delta == 0:
             continue
 
-        lot = lot_sizes.get(symbol, DEFAULT_LOT_SIZE)
+        lot = lot_sizes.get(symbol, rules.default_lot_size)
         # 単元株に満たない差分は発注できない。切り捨てて0になるなら見送る。
-        tradable = round_to_lot(abs(delta), lot)
+        tradable = rules.round_to_lot(abs(delta), lot)
         if tradable == 0:
             skipped[symbol] = f"差分 {abs(delta)} 株が売買単位 {lot} 株に満たない"
             continue
@@ -164,7 +173,9 @@ def reconcile(
 
         if side is Side.SELL:
             # 現物の差金決済を避ける（同一資金での同日の買い→売り→買い）
-            if violates_same_day_settlement(side, symbol, bought_today):
+            if rules.blocks_same_day_sale and violates_same_day_settlement(
+                side, symbol, bought_today
+            ):
                 skipped[symbol] = "当日買い付けた銘柄のため、差金決済回避で売却を見送り"
                 continue
 
@@ -172,7 +183,7 @@ def reconcile(
             position = positions.get(symbol)
             available = position.available_quantity if position else Decimal(0)
             if tradable > available:
-                tradable = round_to_lot(available, lot)
+                tradable = rules.round_to_lot(available, lot)
                 if tradable == 0:
                     skipped[symbol] = "売却可能数量が単元株に満たない"
                     continue
@@ -189,7 +200,7 @@ def reconcile(
             price=price,
             order_id_seed=order_id_seed,
             settings=settings,
-            topix500=symbol in topix500,
+            rules=rules,
             reason=target.reason,
         )
         orders.append(request)
@@ -215,7 +226,7 @@ def _build_order(
     price: Decimal | None,
     order_id_seed: str,
     settings: ReconcileSettings,
-    topix500: bool,
+    rules: MarketRules,
     reason: str,
 ) -> OrderRequest:
     client_order_id = make_client_order_id(order_id_seed, symbol, side, quantity)
@@ -241,11 +252,11 @@ def _build_order(
     raw_price = price * offset
 
     # 呼値に乗っていない指値は取引所に弾かれるため、必ずスナップする
-    limit_price = snap_to_tick(
+    limit_price = rules.snap_to_tick(
         raw_price,
         side,
-        topix500=topix500,
         rounding=PriceRounding.AGGRESSIVE,
+        symbol=symbol,
     )
 
     return OrderRequest(

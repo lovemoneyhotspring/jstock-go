@@ -1,4 +1,4 @@
-"""yfinance から日本株の日足を取得する。
+"""yfinance から日足を取得する（日本株・米国株）。
 
 注意点:
     - **非公式**。Yahoo Finance をスクレイピングしているため、予告なく
@@ -8,6 +8,7 @@
       :class:`~wbjp.data.store.BarStore` にキャッシュし、増分だけ取りに行く。
     - 東証銘柄は ``7203`` ではなく ``7203.T`` で問い合わせる。この変換を
       忘れると米国の別銘柄が返ってくることがあり、実害が大きい。
+      米国株（``market=US``）は接尾辞を付けずにそのまま渡す。
     - 株式分割を反映した価格を使う（``auto_adjust=True``）。未調整のまま
       バックテストすると、分割日に巨大な偽の下落が現れる。
 """
@@ -21,6 +22,7 @@ import polars as pl
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from wbjp.data.provider import MarketDataError, MarketDataProvider, normalize_bars
+from wbjp.domain.models import Market
 from wbjp.logging import get_logger
 
 log = get_logger(__name__)
@@ -29,12 +31,14 @@ log = get_logger(__name__)
 TSE_SUFFIX = ".T"
 
 
-def to_yahoo_ticker(symbol: str) -> str:
+def to_yahoo_ticker(symbol: str, market: Market = Market.JP) -> str:
     """銘柄コードを Yahoo Finance の表記に変換する。
 
-    すでに接尾辞が付いていればそのまま返すので、``7203`` と ``7203.T``
-    のどちらを渡しても動く。``^`` で始まる指数のティッカーは東証銘柄では
-    ないので、接尾辞を付けずにそのまま通す。
+    日本株はすでに接尾辞が付いていればそのまま返すので、``7203`` と
+    ``7203.T`` のどちらを渡しても動く。``^`` で始まる指数のティッカーは
+    東証銘柄ではないので、接尾辞を付けずにそのまま通す。
+    米国株は Yahoo もティッカーそのままなので変換しない（``BRK.B`` は
+    Yahoo では ``BRK-B``。この置換だけ行う）。
 
     >>> to_yahoo_ticker("7203")
     '7203.T'
@@ -42,12 +46,18 @@ def to_yahoo_ticker(symbol: str) -> str:
     '7203.T'
     >>> to_yahoo_ticker("^N225")
     '^N225'
+    >>> to_yahoo_ticker("AAPL", Market.US)
+    'AAPL'
+    >>> to_yahoo_ticker("BRK.B", Market.US)
+    'BRK-B'
     """
     symbol = symbol.strip()
     if not symbol:
         raise ValueError("銘柄コードが空です")
     if symbol.startswith("^"):
         return symbol
+    if market is Market.US:
+        return symbol.replace(".", "-")
     return symbol if "." in symbol else f"{symbol}{TSE_SUFFIX}"
 
 
@@ -61,7 +71,10 @@ class YFinanceProvider(MarketDataProvider):
 
     name = "yfinance"
 
-    def __init__(self, *, max_attempts: int = 3, timeout: int = 30) -> None:
+    def __init__(
+        self, *, market: Market = Market.JP, max_attempts: int = 3, timeout: int = 30
+    ) -> None:
+        self.market = market
         self.max_attempts = max_attempts
         self.timeout = timeout
 
@@ -76,7 +89,7 @@ class YFinanceProvider(MarketDataProvider):
         if start > end:
             raise ValueError(f"start が end より後です: {start} > {end}")
 
-        tickers = [to_yahoo_ticker(s) for s in symbols]
+        tickers = [to_yahoo_ticker(s, self.market) for s in symbols]
         log.info(
             "日足を取得します",
             provider=self.name,

@@ -32,6 +32,7 @@ from wbjp.config import Config
 from wbjp.data.provider import MarketDataProvider
 from wbjp.data.store import BarStore
 from wbjp.db.repo import Journal
+from wbjp.domain.market_rules import rules_for
 from wbjp.domain.models import (
     Balance,
     CombinedSignal,
@@ -47,7 +48,7 @@ from wbjp.indicators.ohlcv import atr
 from wbjp.logging import get_logger
 from wbjp.portfolio.sizer import SizingContext, build_sizer
 from wbjp.risk.limits import RiskContext, RiskManager
-from wbjp.risk.stops import StopBook, apply_stop_priority
+from wbjp.risk.stops import StopBook, apply_stop_priority, sync_broker_stops
 from wbjp.strategy.base import Strategy, StrategyContext
 from wbjp.strategy.combiner import build_combiner
 
@@ -129,7 +130,10 @@ class LiveRunner:
             {s.name: s.weight for s in file_config.strategies.enabled},
         )
         self.sizer = build_sizer(file_config.sizing)
-        self.risk = RiskManager(file_config.risk, file_config.universe.symbols)
+        self.rules = rules_for(
+            file_config.universe.market, topix500=set(file_config.universe.topix500_symbols)
+        )
+        self.risk = RiskManager(file_config.risk, file_config.universe.symbols, self.rules)
 
     def run_once(
         self,
@@ -167,6 +171,11 @@ class LiveRunner:
                 raise TypeError(f"足の日付が date ではありません: {type(latest)}")
             as_of = latest
         balance = self.broker.get_balance()
+        if balance.currency != self.rules.currency:
+            raise ValueError(
+                f"ブローカーの残高通貨 {balance.currency} が市場 {self.rules.market.value} "
+                f"の通貨 {self.rules.currency} と一致しません。設定とブローカーの市場を揃えてください"
+            )
         positions = self.broker.positions_by_symbol()
         equity = balance.cash_balance + sum(
             (p.market_value for p in positions.values()), start=Decimal(0)
@@ -259,10 +268,13 @@ class LiveRunner:
                 atr=atr_values,
                 lot_sizes=self._lot_sizes(),
                 positions=positions,
+                default_lot_size=self.rules.default_lot_size,
             ),
             entry_threshold=file_config.strategies.entry_threshold,
             exit_threshold=file_config.strategies.exit_threshold,
         )
+        # ブローカーに逆指値を置いていても、日足の判定は保険として残す。
+        # 逆指値が何かの理由で消えていた日にも、翌寄付で手仕舞える。
         targets = apply_stop_priority(targets, stops.exit_targets(closes))
         self.journal.record_targets(run_id, targets)
 
@@ -284,8 +296,8 @@ class LiveRunner:
                 tax_type=file_config.execution.tax_account_type,
             ),
             lot_sizes=self._lot_sizes(),
-            topix500=set(file_config.universe.topix500_symbols),
             bought_today=self._bought_today(),
+            rules=self.rules,
         )
 
         # 5) リスク判定
@@ -300,8 +312,27 @@ class LiveRunner:
         approved, rejected = self.risk.check_all(plan.orders, risk_ctx)
         rejected.update(plan.skipped)
 
-        # 6) 発注
+        # 6) 逆指値をブローカーに置く市場では、戦略の注文より先に古い逆指値を
+        #    片付ける。手仕舞いの売りと逆指値が両方板に乗ると二重売却になる。
+        stop_requests: list[OrderRequest] = []
+        if self.config.file.uses_broker_stops and self.rules.broker_stop_order_type:
+            stop_plan = sync_broker_stops(
+                stops.all(),
+                positions,
+                open_orders,
+                order_type=self.rules.broker_stop_order_type,
+                order_id_seed=f"{as_of:%Y%m%d}",
+                tax_type=file_config.execution.tax_account_type,
+                pending_exits={o.symbol for o in approved if o.side is Side.SELL},
+            )
+            self._cancel_stops(stop_plan.cancel, live=allowed)
+            stop_approved, stop_rejected = self.risk.check_all(stop_plan.place, risk_ctx)
+            rejected.update({f"{k} (逆指値)": v for k, v in stop_rejected.items()})
+            stop_requests = stop_approved
+
+        # 7) 発注
         placed = self._place(run_id, approved, rejected, risk_ctx, live=allowed)
+        placed += self._place(run_id, stop_requests, rejected, risk_ctx, live=allowed)
 
         self.journal.record_risk_events(run_id, rejected)
         self.journal.record_snapshot(run_id, as_of, positions.values())
@@ -315,7 +346,7 @@ class LiveRunner:
             signals=signals,
             combined=combined,
             targets=targets,
-            planned=plan.orders,
+            planned=plan.orders + stop_requests,
             placed=placed,
             rejected=rejected,
         )
@@ -386,6 +417,27 @@ class LiveRunner:
                 log.error("発注に失敗", symbol=request.symbol, error=str(exc))
 
         return placed
+
+    def _cancel_stops(self, orders: list[Order], *, live: bool) -> None:
+        for order in orders:
+            if not live:
+                log.info(
+                    "[dry-run] 逆指値を取り消しません",
+                    symbol=order.symbol,
+                    client_order_id=order.client_order_id,
+                    stop_price=str(order.stop_price),
+                )
+                continue
+            try:
+                self.broker.cancel(order.client_order_id)
+                log.info(
+                    "古い逆指値を取り消し",
+                    symbol=order.symbol,
+                    client_order_id=order.client_order_id,
+                    stop_price=str(order.stop_price),
+                )
+            except BrokerError as exc:
+                log.error("逆指値の取消に失敗", symbol=order.symbol, error=str(exc))
 
     def _refresh_bars(self, symbols: list[str]) -> None:
         if self.provider is None:

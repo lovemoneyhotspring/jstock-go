@@ -12,12 +12,17 @@
     翌日の寄付が指値より不利なら約定しない。当日中に指値に届いた
     かどうかは日足では分からないため、寄付だけで判定する。
     実運用より保守的（＝約定しにくい）側に倒している。
+
+逆指値の扱い（米国株）:
+    寄付がトリガー以下なら寄付で（ギャップダウンをそのまま食らう）、
+    そうでなくその日の安値がトリガーに届けばトリガー価格で約定する。
+    安値を渡さなければ寄付だけで判定する（＝エンジン合成と同じ遅れ）。
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import ROUND_HALF_UP, Decimal
 
 from wbjp.broker.base import Broker, InsufficientFundsError, OrderRejectedError
@@ -33,6 +38,7 @@ from wbjp.domain.models import (
     Position,
     Side,
     TaxAccountType,
+    TimeInForce,
 )
 from wbjp.logging import get_logger
 
@@ -57,14 +63,15 @@ class _Holding:
 class PaperBroker(Broker):
     """現金口座のシミュレータ。
 
-    信用取引は扱わない（Webull JP の日本株 API が現物のみのため）。
-    空売りもできない: 保有数を超える売り注文は拒否する。
+    信用取引は扱わない。空売りもできない: 保有数を超える売り注文は拒否する。
+    ``currency`` は表示と手数料の丸め単位にだけ効く（円は整数、ドルはセント）。
     """
 
     initial_cash: Decimal = Decimal(1_000_000)
     commission_rate: Decimal = DEFAULT_COMMISSION_RATE
     slippage_rate: Decimal = DEFAULT_SLIPPAGE_RATE
     tax_type: TaxAccountType = TaxAccountType.SPECIFIC
+    currency: str = "JPY"
 
     name: str = "paper"
 
@@ -85,9 +92,13 @@ class PaperBroker(Broker):
     def account_id(self) -> str:
         return "PAPER"
 
+    @property
+    def _cent(self) -> Decimal:
+        return Decimal("1") if self.currency == "JPY" else Decimal("0.01")
+
     def get_balance(self) -> Balance:
         return Balance(
-            currency="JPY",
+            currency=self.currency,
             cash_balance=self._cash,
             buying_power=self._cash,
             market_value=self.market_value,
@@ -102,6 +113,7 @@ class PaperBroker(Broker):
                 available_quantity=holding.quantity,
                 cost_price=holding.cost_price,
                 last_price=self._marks.get(symbol, holding.cost_price),
+                currency=self.currency,
                 tax_type=self.tax_type,
             )
             for symbol, holding in sorted(self._holdings.items())
@@ -146,7 +158,7 @@ class PaperBroker(Broker):
 
     def preview(self, request: OrderRequest) -> OrderPreview:
         price = self._reference_price(request)
-        cost = (price * request.quantity).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        cost = (price * request.quantity).quantize(self._cent, rounding=ROUND_HALF_UP)
         return OrderPreview(estimated_cost=cost, estimated_fee=self._commission(cost))
 
     def place(self, request: OrderRequest) -> OrderAck:
@@ -163,12 +175,14 @@ class PaperBroker(Broker):
                 raise OrderRejectedError(
                     f"{request.symbol}: 保有 {available} 株に対し {request.quantity} 株の売り注文"
                 )
+        elif request.order_type.is_stop:
+            raise OrderRejectedError("買いの逆指値はこのシステムでは扱わない")
         else:
             estimate = self.preview(request)
             if estimate.estimated_cost + estimate.estimated_fee > self._cash:
                 raise InsufficientFundsError(
-                    f"{request.symbol}: 必要 {estimate.estimated_cost + estimate.estimated_fee}円 "
-                    f"に対し買付余力 {self._cash}円"
+                    f"{request.symbol}: 必要 {estimate.estimated_cost + estimate.estimated_fee} "
+                    f"に対し買付余力 {self._cash} ({self.currency})"
                 )
 
         order = Order(
@@ -181,6 +195,8 @@ class PaperBroker(Broker):
             filled_quantity=Decimal(0),
             status=OrderStatus.SUBMITTED,
             limit_price=request.limit_price,
+            stop_price=request.stop_price,
+            time_in_force=request.time_in_force,
         )
         self._orders[order.client_order_id] = order
         return OrderAck(order.client_order_id, order.broker_order_id, order.status)
@@ -210,28 +226,34 @@ class PaperBroker(Broker):
         self._bought_today.clear()
 
     def expire_open_orders(self) -> None:
-        """約定しなかった DAY 注文を失効させる。
+        """約定しなかった DAY 注文を失効させる。GTC（逆指値）は残す。
 
         呼ぶのは **:meth:`settle` のあと**。1日の正しい順序は
         「寄付で約定 → 未約定を失効 → 当日の終値で判断して新規発注」。
         """
         for client_order_id, order in list(self._orders.items()):
-            if order.status.is_open:
+            if order.status.is_open and order.time_in_force is not TimeInForce.GTC:
                 self._orders[client_order_id] = _replace_status(order, OrderStatus.EXPIRED)
 
     def settle(
-        self, open_prices: dict[str, Decimal], when: dt.datetime | None = None
+        self,
+        open_prices: dict[str, Decimal],
+        when: dt.datetime | None = None,
+        *,
+        low_prices: dict[str, Decimal] | None = None,
     ) -> list[Fill]:
         """未約定の注文を寄付価格で約定させる。
 
         Args:
             open_prices: 銘柄 → その日の寄付。
             when: 約定時刻（記録用）。
+            low_prices: 銘柄 → その日の安値。逆指値の場中トリガー判定に使う。
 
         Returns:
             この呼び出しで発生した約定。
         """
         filled: list[Fill] = []
+        low_prices = low_prices or {}
 
         for client_order_id, order in list(self._orders.items()):
             if not order.status.is_open:
@@ -241,7 +263,7 @@ class PaperBroker(Broker):
             if open_price is None:
                 continue  # その日に値がつかなかった
 
-            price = self._execution_price(order, open_price)
+            price = self._execution_price(order, open_price, low_prices.get(order.symbol))
             if price is None:
                 continue  # 指値に届かず約定せず
 
@@ -263,8 +285,10 @@ class PaperBroker(Broker):
                 filled_quantity=order.quantity,
                 status=OrderStatus.FILLED,
                 limit_price=order.limit_price,
+                stop_price=order.stop_price,
                 avg_fill_price=price,
                 created_at=order.created_at,
+                time_in_force=order.time_in_force,
             )
 
         self._fills.extend(filled)
@@ -272,12 +296,17 @@ class PaperBroker(Broker):
 
     # -- 内部 ---------------------------------------------------------------
 
-    def _execution_price(self, order: Order, open_price: Decimal) -> Decimal | None:
+    def _execution_price(
+        self, order: Order, open_price: Decimal, low_price: Decimal | None = None
+    ) -> Decimal | None:
         """約定価格。約定しない場合は None。"""
         if order.order_type is OrderType.MARKET:
             # 成行は不利な方向に滑る
             direction = Decimal(1) if order.side is Side.BUY else Decimal(-1)
             return open_price * (Decimal(1) + direction * self.slippage_rate)
+
+        if order.order_type.is_stop:
+            return self._stop_execution_price(order, open_price, low_price)
 
         limit = order.limit_price
         assert limit is not None  # OrderRequest が保証している
@@ -287,14 +316,39 @@ class PaperBroker(Broker):
             return open_price if open_price <= limit else None
         return open_price if open_price >= limit else None
 
+    def _stop_execution_price(
+        self, order: Order, open_price: Decimal, low_price: Decimal | None
+    ) -> Decimal | None:
+        """売りの逆指値の約定価格。
+
+        寄付がトリガー以下ならギャップダウンで寄付約定（成行なので滑る）。
+        そうでなくても安値がトリガーに届いていれば、トリガー価格で
+        成行に変わったとみなす。STOP_LOSS_LIMIT は指値が寄付より
+        不利なら約定しない。
+        """
+        stop = order.stop_price
+        assert stop is not None
+        if open_price <= stop:
+            trigger_price = open_price
+        elif low_price is not None and low_price <= stop:
+            trigger_price = stop
+        else:
+            return None
+
+        if order.order_type is OrderType.STOP_LOSS_LIMIT:
+            limit = order.limit_price
+            assert limit is not None
+            return trigger_price if trigger_price >= limit else None
+        return trigger_price * (Decimal(1) - self.slippage_rate)
+
     def _execute(self, order: Order, price: Decimal, when: dt.datetime | None) -> Fill:
-        gross = (price * order.quantity).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        gross = (price * order.quantity).quantize(self._cent, rounding=ROUND_HALF_UP)
         fee = self._commission(gross)
 
         if order.side is Side.BUY:
             if gross + fee > self._cash:
                 raise InsufficientFundsError(
-                    f"{order.symbol}: 必要 {gross + fee}円 に対し残高 {self._cash}円"
+                    f"{order.symbol}: 必要 {gross + fee} に対し残高 {self._cash} ({self.currency})"
                 )
             self._cash -= gross + fee
             holding = self._holdings.setdefault(order.symbol, _Holding(Decimal(0), Decimal(0)))
@@ -338,20 +392,8 @@ class PaperBroker(Broker):
         return mark
 
     def _commission(self, gross: Decimal) -> Decimal:
-        return (gross * self.commission_rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return (gross * self.commission_rate).quantize(self._cent, rounding=ROUND_HALF_UP)
 
 
 def _replace_status(order: Order, status: OrderStatus) -> Order:
-    return Order(
-        client_order_id=order.client_order_id,
-        broker_order_id=order.broker_order_id,
-        symbol=order.symbol,
-        side=order.side,
-        order_type=order.order_type,
-        quantity=order.quantity,
-        filled_quantity=order.filled_quantity,
-        status=status,
-        limit_price=order.limit_price,
-        avg_fill_price=order.avg_fill_price,
-        created_at=order.created_at,
-    )
+    return replace(order, status=status)

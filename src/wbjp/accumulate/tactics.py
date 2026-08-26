@@ -23,6 +23,7 @@ from typing import ClassVar
 import polars as pl
 
 from wbjp.accumulate.stack import FAST, MID, SLOW, bear_stack, stack_score
+from wbjp.accumulate.window import TradingWindow
 from wbjp.indicators.ohlcv import sma
 
 #: 倍率列の名前。
@@ -38,6 +39,11 @@ class Tactic(ABC):
 
     #: 設定ファイルから引く識別子。サブクラスで必ず定義する。
     name: ClassVar[str] = ""
+
+    def __init__(self, *, window: object = None) -> None:
+        # 発注時間帯は倍率の決め方とは独立なので、全戦術で共通に持つ。
+        # 既定は 14:00〜15:00（理由は wbjp.accumulate.window の説明）。
+        self.window = TradingWindow.parse(window)
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -57,11 +63,15 @@ class Tactic(ABC):
     def warmup_bars(self) -> int:
         """倍率が意味を持つまでに必要な足の本数。"""
 
+    def allows_order(self, moment: object = None) -> bool:
+        """その時刻に発注してよいか。投下額そのものには影響しない。"""
+        return self.window.allows(moment)  # type: ignore[arg-type]
+
     def describe(self) -> str:
         return self.name
 
     def __repr__(self) -> str:
-        return f"<{type(self).__name__} {self.describe()}>"
+        return f"<{type(self).__name__} {self.describe()} 発注 {self.window.describe()}>"
 
 
 class Constant(Tactic):
@@ -87,8 +97,15 @@ class BearStack(Tactic):
     name: ClassVar[str] = "bear_stack"
 
     def __init__(
-        self, multiplier: float = 4.0, fast: int = FAST, mid: int = MID, slow: int = SLOW
+        self,
+        multiplier: float = 4.0,
+        fast: int = FAST,
+        mid: int = MID,
+        slow: int = SLOW,
+        *,
+        window: object = None,
     ) -> None:
+        super().__init__(window=window)
         _check_multiplier(multiplier)
         self.value = float(multiplier)
         self.fast, self.mid, self.slow = fast, mid, slow
@@ -123,7 +140,10 @@ class StackLadder(Tactic):
         fast: int = FAST,
         mid: int = MID,
         slow: int = SLOW,
+        *,
+        window: object = None,
     ) -> None:
+        super().__init__(window=window)
         raw = self.DEFAULT if multipliers is None else multipliers
         # TOML のキーは文字列になるため int へ寄せる
         table = {int(k): float(v) for k, v in raw.items()}
@@ -175,7 +195,9 @@ class DrawdownLadder(Tactic):
         *,
         require_downtrend: bool = False,
         slow: int = SLOW,
+        window: object = None,
     ) -> None:
+        super().__init__(window=window)
         if len(levels) != len(multipliers):
             raise ValueError(
                 f"levels と multipliers の長さが違います: {len(levels)}, {len(multipliers)}"

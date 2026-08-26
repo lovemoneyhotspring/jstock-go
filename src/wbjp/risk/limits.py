@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from wbjp.config import RiskConfig
-from wbjp.domain.jp_rules import is_within_price_limit
+from wbjp.domain.market_rules import JpMarketRules, MarketRules
 from wbjp.domain.models import Balance, OrderPreview, OrderRequest, Position, Side
 from wbjp.logging import get_logger
 
@@ -63,9 +63,16 @@ class RiskContext:
 class RiskManager:
     """発注前の検査。"""
 
-    def __init__(self, config: RiskConfig, allowlist: Iterable[str]) -> None:
+    def __init__(
+        self,
+        config: RiskConfig,
+        allowlist: Iterable[str],
+        rules: MarketRules | None = None,
+    ) -> None:
         self.config = config
         self.allowlist = set(allowlist)
+        self.rules = rules or JpMarketRules()
+        self.currency = self.rules.currency
         if not self.allowlist:
             log.warning(
                 "銘柄 allowlist が空です。すべての発注が拒否されます。"
@@ -195,23 +202,31 @@ class RiskManager:
         if request.side is Side.SELL:
             return RiskDecision(True)
         loss = -ctx.realized_pnl_today
-        if loss >= self.config.max_daily_loss_jpy:
+        if loss >= self.config.max_daily_loss:
             return RiskDecision(
                 False,
-                f"当日の損失 {loss:,.0f}円 が上限 "
-                f"{self.config.max_daily_loss_jpy:,.0f}円 に達している",
+                f"当日の損失 {self._money(loss)} が上限 "
+                f"{self._money(self.config.max_daily_loss)} に達している",
             )
         return RiskDecision(True)
 
     def _order_value(self, request: OrderRequest, ctx: RiskContext) -> RiskDecision:
+        """1注文の約定代金の上限。**新規建て（買い）だけに掛ける。**
+
+        手仕舞いと逆指値は止めない。建玉は複数日に分けて積み上がるので、
+        まとめて売る注文が上限を超えるのは普通に起きる。ここで弾くと
+        損切りが出せず、上限が「損失を膨らませる装置」に変わる。
+        """
+        if request.side is Side.SELL:
+            return RiskDecision(True)
         notional = self._notional(request, ctx)
         if notional is None:
             return RiskDecision(False, "約定代金を見積れないため見送り")
-        if notional > self.config.max_order_value_jpy:
+        if notional > self.config.max_order_value:
             return RiskDecision(
                 False,
-                f"約定代金 {notional:,.0f}円 が1注文の上限 "
-                f"{self.config.max_order_value_jpy:,.0f}円 を超える",
+                f"約定代金 {self._money(notional)} が1注文の上限 "
+                f"{self._money(self.config.max_order_value)} を超える",
             )
         return RiskDecision(True)
 
@@ -222,7 +237,7 @@ class RiskManager:
         base = ctx.base_prices.get(request.symbol)
         if base is None or base <= 0:
             return RiskDecision(True)  # 基準値段が無ければ判定しない
-        if not is_within_price_limit(request.limit_price, base):
+        if not self.rules.is_within_price_limit(request.limit_price, base):
             return RiskDecision(
                 False,
                 f"指値 {request.limit_price} が基準値段 {base} の値幅制限を外れている",
@@ -250,7 +265,8 @@ class RiskManager:
         if notional > ctx.balance.buying_power:
             return RiskDecision(
                 False,
-                f"必要 {notional:,.0f}円 に対し買付余力 {ctx.balance.buying_power:,.0f}円",
+                f"必要 {self._money(notional)} に対し買付余力 "
+                f"{self._money(ctx.balance.buying_power)}",
             )
         return RiskDecision(True)
 
@@ -278,7 +294,8 @@ class RiskManager:
             detail = f"{request.symbol} の比率 {weight:.1%}"
             if pending > 0:
                 detail += (
-                    f"（建玉 {existing:,.0f}円 + 発注中 {pending:,.0f}円 + 今回 {notional:,.0f}円）"
+                    f"（建玉 {self._money(existing)} + 発注中 {self._money(pending)}"
+                    f" + 今回 {self._money(notional)}）"
                 )
             return RiskDecision(
                 False,
@@ -300,10 +317,16 @@ class RiskManager:
         if deviation > self.config.max_preview_deviation:
             return RiskDecision(
                 False,
-                f"ブローカー見積り {preview.estimated_cost:,.0f}円 が "
-                f"自前計算 {expected:,.0f}円 と {deviation:.1%} 乖離している",
+                f"ブローカー見積り {self._money(preview.estimated_cost)} が "
+                f"自前計算 {self._money(expected)} と {deviation:.1%} 乖離している",
             )
         return RiskDecision(True, "全項目を通過")
+
+    def _money(self, value: Decimal) -> str:
+        """口座通貨で金額を表示する。円は整数、ドルはセントまで。"""
+        if self.currency == "JPY":
+            return f"{value:,.0f}円"
+        return f"{value:,.2f} {self.currency}"
 
     def _notional(self, request: OrderRequest, ctx: RiskContext) -> Decimal | None:
         """概算約定代金。成行は基準値段で見積る。"""

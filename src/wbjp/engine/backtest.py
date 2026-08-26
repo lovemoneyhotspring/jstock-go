@@ -26,13 +26,14 @@ import polars as pl
 
 from wbjp.broker.paper import PaperBroker
 from wbjp.config import FileConfig
-from wbjp.domain.models import CombinedSignal, Fill, Signal
+from wbjp.domain.market_rules import rules_for
+from wbjp.domain.models import CombinedSignal, Fill, Side, Signal
 from wbjp.engine.reconcile import ReconcileSettings, reconcile
 from wbjp.indicators.ohlcv import atr
 from wbjp.logging import get_logger
 from wbjp.portfolio.sizer import SizingContext, build_sizer
 from wbjp.risk.limits import RiskContext, RiskManager
-from wbjp.risk.stops import StopBook, apply_stop_priority
+from wbjp.risk.stops import StopBook, apply_stop_priority, sync_broker_stops
 from wbjp.strategy.base import Strategy, StrategyContext
 from wbjp.strategy.combiner import build_combiner
 
@@ -127,11 +128,21 @@ class BacktestRunner:
             {s.name: s.weight for s in config.strategies.enabled},
         )
         self.sizer = build_sizer(config.sizing)
-        self.risk = RiskManager(config.risk, config.universe.symbols)
+        self.rules = rules_for(
+            config.universe.market, topix500=set(config.universe.topix500_symbols)
+        )
+        self.risk = RiskManager(config.risk, config.universe.symbols, self.rules)
 
-        broker_kwargs: dict[str, object] = {"initial_cash": initial_cash}
+        broker_kwargs: dict[str, object] = {
+            "initial_cash": initial_cash,
+            "currency": self.rules.currency,
+        }
         if commission_rate is not None:
             broker_kwargs["commission_rate"] = commission_rate
+        elif config.universe.market.value == "US":
+            # 米国株の売買手数料は 2026-07-27 から無料。SEC/FINRA 手数料は
+            # 約定代金の 0.01% 未満なので、丸めて 0 とみなす。
+            broker_kwargs["commission_rate"] = Decimal(0)
         self.broker = PaperBroker(**broker_kwargs)  # type: ignore[arg-type]
 
         self.stops = StopBook()
@@ -165,7 +176,10 @@ class BacktestRunner:
             # 1) 前日の注文を当日の寄付で約定させ、残ったものを失効させる。
             #    失効を約定より先に行うと、注文が約定する機会を永遠に失う。
             self.broker.begin_day()
-            fills = self.broker.settle(self._lookup(indexed, today, "open"))
+            fills = self.broker.settle(
+                self._lookup(indexed, today, "open"),
+                low_prices=self._lookup(indexed, today, "low"),
+            )
             self.broker.expire_open_orders()
 
             closes = self._lookup(indexed, today, "close")
@@ -235,6 +249,7 @@ class BacktestRunner:
                     s: Decimal(v) for s, v in self.config.universe.lot_size_overrides.items()
                 },
                 positions=positions,
+                default_lot_size=self.rules.default_lot_size,
             ),
             entry_threshold=self.config.strategies.entry_threshold,
             exit_threshold=self.config.strategies.exit_threshold,
@@ -253,8 +268,8 @@ class BacktestRunner:
                 tax_type=self.config.execution.tax_account_type,
             ),
             lot_sizes={s: Decimal(v) for s, v in self.config.universe.lot_size_overrides.items()},
-            topix500=set(self.config.universe.topix500_symbols),
             bought_today=self.broker.bought_today,
+            rules=self.rules,
         )
 
         approved, rejected = self.risk.check_all(
@@ -267,6 +282,31 @@ class BacktestRunner:
                 realized_pnl_today=Decimal(0),
             ),
         )
+
+        # ブローカーに逆指値を置く市場では、本番と同じ手順で置き直す
+        if self.config.uses_broker_stops and self.rules.broker_stop_order_type:
+            stop_plan = sync_broker_stops(
+                self.stops.all(),
+                positions,
+                self.broker.get_open_orders(),
+                order_type=self.rules.broker_stop_order_type,
+                order_id_seed=f"bt-{index}",
+                tax_type=self.config.execution.tax_account_type,
+                pending_exits={o.symbol for o in approved if o.side is Side.SELL},
+            )
+            for stale in stop_plan.cancel:
+                self.broker.cancel(stale.client_order_id)
+            stop_approved, stop_rejected = self.risk.check_all(
+                stop_plan.place,
+                RiskContext(
+                    equity=equity,
+                    balance=self.broker.get_balance(),
+                    positions=positions,
+                    base_prices=closes,
+                ),
+            )
+            approved = approved + stop_approved
+            rejected.update({f"{k} (逆指値)": v for k, v in stop_rejected.items()})
 
         placed = []
         for request in approved:
@@ -340,7 +380,7 @@ class BacktestRunner:
             by_date: dict[dt.date, dict[str, Decimal]] = {}
             for row in frame.iter_rows(named=True):
                 values = {}
-                for key in ("open", "close", f"atr_{ATR_PERIOD}"):
+                for key in ("open", "low", "close", f"atr_{ATR_PERIOD}"):
                     value = row.get(key)
                     if value is not None:
                         values[key] = Decimal(str(value))

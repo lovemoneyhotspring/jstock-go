@@ -7,6 +7,10 @@
 # symbols は allowlist としても働く。ここに無い銘柄には、戦略が何を
 # 言おうと絶対に発注されない。戦略のバグに対する最後の防波堤。
 [universe]
+# 取引市場。"JP"（東証）か "US"（NYSE/NASDAQ）。米国株の設定例は config/us/ を参照。
+# 1つの設定ディレクトリは1つの市場だけを扱う。
+market = "JP"
+
 symbols = [
     "7203",  # トヨタ自動車
     "6758",  # ソニーグループ
@@ -30,9 +34,10 @@ topix500_symbols = ["7203", "6758", "9984", "8306", "6861"]
 # 異常に気付いたら、まずこれを true にする。
 kill_switch = false
 
-max_order_value_jpy = "500000"    # 1注文あたりの上限
+# 金額は口座通貨建て（JP なら円、US ならドル）。
+max_order_value = "500000"        # 1注文あたりの上限
 max_orders_per_day = 20           # 1日あたりの発注件数
-max_daily_loss_jpy = "100000"     # 当日の損失がこれを超えたら新規建てを止める
+max_daily_loss = "100000"         # 当日の損失がこれを超えたら新規建てを止める
 max_position_weight = "0.25"      # 1銘柄が総資産に占める上限
 max_gross_exposure = "0.90"       # 建玉合計の上限
 max_preview_deviation = "0.02"    # ブローカー見積りと自前計算の許容乖離
@@ -48,7 +53,7 @@ method = "atr_risk"
 
 risk_per_trade = "0.01"      # 1トレードの許容損失（総資産比）
 atr_stop_multiple = "2.0"    # 損切り幅 = ATR × この倍率
-fixed_notional_jpy = "300000"
+fixed_notional = "300000"
 max_positions = 5
 
 # --------------------------------------------------------------------------
@@ -64,3 +69,7 @@ order_type = "limit"
 
 # 指値を直近終値からどれだけずらすか。約定しやすい方向にずらす。
 limit_offset = "0.005"
+
+# 損切りの置き場所。auto = 市場が逆指値に対応していればブローカーに置く。
+# 日本株は API 非対応なので auto でもエンジン合成になる。
+stop_mode = "auto"

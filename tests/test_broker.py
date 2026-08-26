@@ -94,11 +94,13 @@ def test_unknown_status_is_treated_as_still_open() -> None:
 def test_unknown_order_type_does_not_crash() -> None:
     """口座には自分が出した注文以外も並ぶ。
 
-    実際に UAT の共有テスト口座は STOP_LOSS を返してきて、日次サイクルが
-    毎回落ちていた。種別は建玉計算に使わないので OTHER に倒す。
+    実際に UAT の共有テスト口座は他人の注文を返してきて、日次サイクルが
+    毎回落ちていた。読めない種別は OTHER に倒す。逆指値は米国株対応で
+    自前の種別になったので、正しく解釈される。
     """
-    assert parse_order_type("STOP_LOSS") is OrderType.OTHER
-    assert parse_order_type("STOP_LOSS_LIMIT") is OrderType.OTHER
+    assert parse_order_type("STOP_LOSS") is OrderType.STOP_LOSS
+    assert parse_order_type("STOP_LOSS_LIMIT") is OrderType.STOP_LOSS_LIMIT
+    assert parse_order_type("TRAILING_STOP_LOSS") is OrderType.OTHER
     assert parse_order_type(None) is OrderType.OTHER
     assert parse_order_type("limit") is OrderType.LIMIT
     assert parse_order_type(" MARKET ") is OrderType.MARKET

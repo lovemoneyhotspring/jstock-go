@@ -12,9 +12,14 @@ SDK がやってくれないこと（＝ここで引き受けること）:
     4. **秘匿情報の登録** — 読み込んだ App Key / Secret をログのマスク対象に
        登録する。SDK はエラー時にヘッダを丸ごと出力するため、これが無いと漏れる。
 
-日本株の制約:
-    - 注文種別は成行と指値のみ。逆指値は :mod:`wbjp.risk.stops` で合成する。
-    - 発注には ``market="JP"`` と ``account_tax_type`` の指定が要る。
+市場ごとの違い:
+    - 日本株: 注文種別は成行と指値のみ。逆指値は :mod:`wbjp.risk.stops` で
+      合成する。発注には ``market="JP"`` と ``account_tax_type`` が要る。
+    - 米国株: STOP_LOSS / STOP_LOSS_LIMIT を置ける。``market="US"`` で発注し、
+      残高・建玉は USD の行を読む。時間外取引は設定で明示しない限り使わない。
+
+同じ口座に日本株と米国株が混在するため、このクラスは **1つの市場だけ**を
+見る。残高も建玉も、その市場の通貨の行以外は無視する。
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from wbjp.broker.ratelimit import LIMITS, Cached, RateLimiter
 from wbjp.config import Credentials, Environment
 from wbjp.domain.models import (
     Balance,
+    Market,
     Order,
     OrderAck,
     OrderPreview,
@@ -43,17 +49,24 @@ from wbjp.domain.models import (
     Position,
     Side,
     TaxAccountType,
+    TimeInForce,
 )
 from wbjp.logging import get_logger, harden_third_party_logging, register_secret
 
 log = get_logger(__name__)
 
-#: 日本株の発注に固定で入れる値。
-JP_MARKET = "JP"
-JP_INSTRUMENT_TYPE = "EQUITY"
-JP_COMBO_TYPE = "NORMAL"
-JP_ENTRUST_TYPE = "QTY"
-JP_TRADING_SESSION = "CORE"
+#: 発注に固定で入れる値（市場共通）。
+INSTRUMENT_TYPE = "EQUITY"
+COMBO_TYPE = "NORMAL"
+ENTRUST_TYPE = "QTY"
+
+#: 取引セッション。CORE は立会時間のみ。
+#: 米国株で時間外を許す場合の値は UAT で要確認（SDK に列挙が無い）。
+TRADING_SESSION_CORE = "CORE"
+TRADING_SESSION_EXTENDED = "ALL"
+
+#: API から返る文字列 → ドメインの有効期限。
+_TIF_MAP = {"DAY": TimeInForce.DAY, "GTC": TimeInForce.GTC}
 
 #: API が返す状態文字列 → ドメインの状態。
 _STATUS_MAP = {
@@ -88,10 +101,10 @@ def parse_order_type(value: str | None) -> OrderType:
     """API の注文種別を解釈する。未知の値は OTHER にする。
 
     口座には自分が出した注文以外も並ぶ（UAT の共有テスト口座には他人の
-    ``STOP_LOSS`` が入っている）。未知の種別で例外を投げると、
-    ``get_open_orders`` を通る日次サイクルが毎回落ちる。種別は建玉計算に
-    使わない（:func:`~wbjp.engine.reconcile.effective_quantity` が見るのは
-    銘柄・売買・数量・状態）ので、読めない種別は OTHER に倒して問題ない。
+    ``TRAILING_STOP_LOSS`` などが入っている）。未知の種別で例外を投げると、
+    ``get_open_orders`` を通る日次サイクルが毎回落ちる。読めない種別は
+    OTHER に倒す。OTHER は :attr:`OrderType.is_stop` が False なので
+    建玉計算では「板に乗っている普通の注文」として保守的に数えられる。
     """
     if not value:
         return OrderType.OTHER
@@ -140,13 +153,17 @@ class WebullBroker(Broker):
         env: Environment,
         endpoint: str,
         *,
+        market: Market = Market.JP,
         tax_type: TaxAccountType = TaxAccountType.SPECIFIC,
+        extended_hours: bool = False,
         balance_cache_ttl: float = 2.0,
     ) -> None:
         self._credentials = credentials
         self._env = env
         self._endpoint = endpoint
+        self._market = market
         self._tax_type = tax_type
+        self._extended_hours = extended_hours
         self._client: Any = None
 
         # SDK がエラー時にヘッダを吐くので、実値をマスク対象に入れておく
@@ -214,6 +231,14 @@ class WebullBroker(Broker):
     def account_id(self) -> str:
         return self._credentials.account_id
 
+    @property
+    def market(self) -> Market:
+        return self._market
+
+    @property
+    def currency(self) -> str:
+        return self._market.currency
+
     def check_key_expiry(self, today: dt.date | None = None) -> int | None:
         """API キーの残り有効日数を確認し、近ければ警告する。
 
@@ -243,16 +268,24 @@ class WebullBroker(Broker):
             lambda: self.client.account_v2.get_account_balance(self.account_id), "残高照会"
         )
 
-        # 円建ての明細を優先する（JP 口座でも USD の行が混ざる）
+        # この市場の通貨の明細だけを見る（同じ口座に JPY と USD の行が並ぶ）
         for entry in payload.get("account_currency_assets", []):
-            if entry.get("currency") == "JPY":
+            if entry.get("currency") == self.currency:
                 return Balance(
-                    currency="JPY",
+                    currency=self.currency,
                     cash_balance=_decimal(entry.get("cash_balance")),
                     buying_power=_decimal(entry.get("buying_power")),
                     market_value=_decimal(entry.get("market_value")),
                     unrealized_pnl=_decimal(entry.get("unrealized_profit_loss")),
                 )
+
+        if self._market is not Market.JP:
+            # 通貨別の行が無いのに合計だけ返すと、円の残高でドル建ての
+            # 買付余力を見積もることになる。黙って0にせず落とす。
+            raise BrokerError(
+                f"残高照会に {self.currency} 建ての明細がありません。"
+                "口座で米国株取引が有効か、為替振替が済んでいるか確認してください"
+            )
 
         return Balance(
             currency=payload.get("total_asset_currency", "JPY"),
@@ -270,8 +303,8 @@ class WebullBroker(Broker):
 
         positions = []
         for entry in payload if isinstance(payload, list) else []:
-            # 日本株だけを対象にする（同じ口座に米国株が混在しうる）
-            if entry.get("currency") not in (None, "JPY"):
+            # この市場の建玉だけを対象にする（同じ口座に日本株と米国株が混在する）
+            if not self._belongs_to_market(entry):
                 continue
             quantity = _decimal(entry.get("quantity"))
             if quantity == 0:
@@ -283,11 +316,25 @@ class WebullBroker(Broker):
                     available_quantity=_decimal(entry.get("available_quantity"), quantity),
                     cost_price=_decimal(entry.get("cost_price")),
                     last_price=_decimal(entry.get("last_price")),
-                    currency=entry.get("currency") or "JPY",
+                    currency=entry.get("currency") or self.currency,
                     tax_type=_parse_tax_type(entry.get("account_tax_type")),
                 )
             )
         return positions
+
+    def _belongs_to_market(self, entry: dict[str, Any]) -> bool:
+        """建玉・注文の明細がこの市場のものか。
+
+        ``market`` があればそれを、無ければ通貨で判断する。どちらも無い
+        行は日本株口座の既定（JP）として扱う。
+        """
+        market = entry.get("market")
+        if market:
+            return str(market).upper() == self._market.value
+        currency = entry.get("currency")
+        if currency:
+            return str(currency).upper() == self.currency
+        return self._market is Market.JP
 
     def invalidate_cache(self) -> None:
         """残高・建玉のキャッシュを捨てる。発注後に呼ぶ。"""
@@ -301,7 +348,11 @@ class WebullBroker(Broker):
         payload = self._call(
             lambda: self.client.order_v3.get_order_open(self.account_id), "未約定照会"
         )
-        return [self._to_order(leg) for leg in flatten_order_legs(payload)]
+        return [
+            self._to_order(leg)
+            for leg in flatten_order_legs(payload)
+            if self._belongs_to_market(leg)
+        ]
 
     def get_order(self, client_order_id: str) -> Order | None:
         self._order_read_limiter.acquire()
@@ -378,23 +429,33 @@ class WebullBroker(Broker):
         # OTHER は他人の注文を読むための受け皿。発注経路には絶対に流さない。
         if not request.order_type.is_placeable:
             raise ValueError(f"発注できない注文種別です: {request.order_type.value}")
+        if request.order_type.is_stop and self._market is Market.JP:
+            raise ValueError("日本株では逆指値を発注できません（API 非対応）")
 
+        extended = self._extended_hours and self._market is Market.US
         payload = {
-            "combo_type": JP_COMBO_TYPE,
+            "combo_type": COMBO_TYPE,
             "client_order_id": request.client_order_id,
             "symbol": request.symbol,
-            "instrument_type": JP_INSTRUMENT_TYPE,
-            "market": JP_MARKET,
+            "instrument_type": INSTRUMENT_TYPE,
+            "market": self._market.value,
             "order_type": request.order_type.value,
             "quantity": _plain(request.quantity),
             "side": request.side.value,
             "time_in_force": request.time_in_force.value,
-            "entrust_type": JP_ENTRUST_TYPE,
-            "support_trading_session": JP_TRADING_SESSION,
+            "entrust_type": ENTRUST_TYPE,
+            "support_trading_session": (
+                TRADING_SESSION_EXTENDED if extended else TRADING_SESSION_CORE
+            ),
             "account_tax_type": (request.tax_type or self._tax_type).value,
         }
+        if self._market is Market.US:
+            payload["trade_currency"] = self.currency
+            payload["extended_hours_trading"] = "true" if extended else "false"
         if request.limit_price is not None:
             payload["limit_price"] = _plain(request.limit_price)
+        if request.stop_price is not None:
+            payload["stop_price"] = _plain(request.stop_price)
         return payload
 
     def _to_order(self, entry: dict[str, Any]) -> Order:
@@ -409,8 +470,12 @@ class WebullBroker(Broker):
             filled_quantity=_decimal(entry.get("filled_quantity")),
             status=parse_status(entry.get("status") or entry.get("order_status")),
             limit_price=(_decimal(entry["limit_price"]) if entry.get("limit_price") else None),
+            stop_price=(_decimal(entry["stop_price"]) if entry.get("stop_price") else None),
             avg_fill_price=filled_price if filled_price > 0 else None,
             created_at=_parse_epoch_ms(entry.get("place_time")),
+            time_in_force=_TIF_MAP.get(
+                str(entry.get("time_in_force") or "").upper(), TimeInForce.DAY
+            ),
         )
 
     # -- 呼び出しと例外 -----------------------------------------------------

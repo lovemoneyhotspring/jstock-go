@@ -28,7 +28,7 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from wbjp.domain.models import TaxAccountType
+from wbjp.domain.models import Market, TaxAccountType
 
 log = structlog.get_logger(__name__)
 
@@ -339,19 +339,50 @@ def _parse_date(value: str | None) -> dt.date | None:
 # --------------------------------------------------------------------------
 
 
+def _rename_legacy_keys(data: Any, mapping: dict[str, str]) -> Any:
+    """旧フィールド名（``*_jpy``）を新名に読み替える。
+
+    金額の項目は米国株対応で通貨を含まない名前になった。既存の設定
+    ファイルを壊さないため、旧名も受け付ける。両方書かれていれば
+    設定ミスなので落とす。
+    """
+    if not isinstance(data, dict):
+        return data
+    renamed = dict(data)
+    for old, new in mapping.items():
+        if old in renamed:
+            if new in renamed:
+                raise ValueError(f"{old} と {new} は同時に指定できません")
+            renamed[new] = renamed.pop(old)
+    return renamed
+
+
 class RiskConfig(BaseModel):
-    """リスク上限。発注前に全項目をチェックする。"""
+    """リスク上限。発注前に全項目をチェックする。
+
+    金額の項目は**口座通貨建て**（日本株なら円、米国株ならドル）。
+    ``max_order_value_jpy`` など旧名も読めるが、新しい設定では
+    通貨を含まない名前を使う。
+    """
 
     model_config = {"extra": "forbid"}
 
     #: true で全発注を即停止する。ファイル1行で止められる緊急停止装置。
     kill_switch: bool = False
-    #: 1注文あたりの最大約定代金（円）
-    max_order_value_jpy: Decimal = Decimal(500_000)
+    #: 1注文あたりの最大約定代金（口座通貨）
+    max_order_value: Decimal = Decimal(500_000)
     #: 1日あたりの最大発注件数
     max_orders_per_day: int = 20
-    #: 1日あたりの最大損失額（円）。超過で当日の新規発注を停止
-    max_daily_loss_jpy: Decimal = Decimal(100_000)
+    #: 1日あたりの最大損失額（口座通貨）。超過で当日の新規発注を停止
+    max_daily_loss: Decimal = Decimal(100_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_names(cls, data: Any) -> Any:
+        return _rename_legacy_keys(
+            data, {"max_order_value_jpy": "max_order_value", "max_daily_loss_jpy": "max_daily_loss"}
+        )
+
     #: 1銘柄あたりのポートフォリオ比率の上限
     max_position_weight: Decimal = Decimal("0.25")
     #: 建玉合計が総資産に占める比率の上限
@@ -374,8 +405,14 @@ class SizingConfig(BaseModel):
 
     #: "equal_weight" | "fixed_notional" | "atr_risk"
     method: str = "atr_risk"
-    #: fixed_notional のときの1銘柄あたり投入額
-    fixed_notional_jpy: Decimal = Decimal(300_000)
+    #: fixed_notional のときの1銘柄あたり投入額（口座通貨）
+    fixed_notional: Decimal = Decimal(300_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_names(cls, data: Any) -> Any:
+        return _rename_legacy_keys(data, {"fixed_notional_jpy": "fixed_notional"})
+
     #: atr_risk のときの1トレードあたり許容損失（総資産比）
     risk_per_trade: Decimal = Decimal("0.01")
     #: 損切り幅を ATR の何倍に置くか
@@ -401,10 +438,15 @@ class UniverseConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    #: 取引市場。1つの設定ディレクトリは1つの市場だけを扱う。
+    #: 日本株と米国株を両方回すなら、設定ディレクトリを分けて別プロセスで動かす。
+    market: Market = Market.JP
+    #: 足データの取得元。"yfinance"（両市場）| "webull"（米国株のみ）
+    data_provider: str = "yfinance"
     symbols: list[str] = Field(default_factory=list)
-    #: TOPIX500 構成銘柄（呼値が細かくなる）
+    #: TOPIX500 構成銘柄（呼値が細かくなる）。日本株のみ意味を持つ。
     topix500_symbols: list[str] = Field(default_factory=list)
-    #: 売買単位が 100 株でない銘柄の例外 {銘柄コード: 単元株数}
+    #: 売買単位が既定と異なる銘柄の例外 {銘柄コード: 単元株数}
     lot_size_overrides: dict[str, int] = Field(default_factory=dict)
 
     @field_validator("symbols", "topix500_symbols")
@@ -417,7 +459,17 @@ class UniverseConfig(BaseModel):
         unknown = set(self.topix500_symbols) - set(self.symbols)
         if unknown:
             raise ValueError(f"topix500_symbols が symbols に含まれていません: {sorted(unknown)}")
+        if self.market is not Market.JP and self.topix500_symbols:
+            raise ValueError('topix500_symbols は market = "JP" のときだけ指定できます')
+        if self.data_provider not in {"yfinance", "webull"}:
+            raise ValueError(f"data_provider は yfinance か webull: {self.data_provider}")
+        if self.data_provider == "webull" and self.market is not Market.US:
+            raise ValueError('data_provider = "webull" は米国株（market = "US"）専用です')
         return self
+
+    @property
+    def currency(self) -> str:
+        return self.market.currency
 
 
 class StrategyEntry(BaseModel):
@@ -469,12 +521,27 @@ class ExecutionConfig(BaseModel):
     order_type: str = "limit"
     #: 指値を直近終値から何%ずらすか（買いは上、売りは下＝約定しやすい方向）
     limit_offset: Decimal = Decimal("0.005")
+    #: 損切りの置き場所。
+    #:   "auto"   … 市場が逆指値に対応していればブローカーに置き、無ければエンジン合成
+    #:   "engine" … 常にエンジン側で日足判定する（米国株でも）
+    #:   "broker" … 常にブローカーに置く。対応しない市場では設定エラー
+    stop_mode: str = "auto"
+    #: 米国株の時間外（プレ・アフター）取引を許すか。日本株では無視される。
+    #: 時間外は板が薄く、指値でも想定外の価格で約定しやすいので既定は無効。
+    extended_hours: bool = False
 
     @field_validator("order_type")
     @classmethod
     def _known_order_type(cls, v: str) -> str:
         if v not in {"market", "limit"}:
             raise ValueError(f"order_type は market か limit: {v}")
+        return v
+
+    @field_validator("stop_mode")
+    @classmethod
+    def _known_stop_mode(cls, v: str) -> str:
+        if v not in {"auto", "engine", "broker"}:
+            raise ValueError(f"stop_mode は auto / engine / broker のいずれか: {v}")
         return v
 
 
@@ -488,6 +555,35 @@ class FileConfig(BaseModel):
     sizing: SizingConfig = Field(default_factory=SizingConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     strategies: StrategiesConfig = Field(default_factory=StrategiesConfig)
+
+    @model_validator(mode="after")
+    def _stop_mode_is_possible(self) -> Self:
+        from wbjp.domain.market_rules import rules_for
+
+        rules = rules_for(self.universe.market)
+        if self.execution.stop_mode == "broker" and not rules.supports_broker_stops:
+            raise ValueError(
+                f'execution.stop_mode = "broker" は {self.universe.market.value} 市場では'
+                "使えません（逆指値 API 非対応）。auto か engine にしてください"
+            )
+        return self
+
+    @property
+    def market(self) -> Market:
+        return self.universe.market
+
+    @property
+    def uses_broker_stops(self) -> bool:
+        """損切りをブローカーの逆指値として置くか。"""
+        from wbjp.domain.market_rules import rules_for
+
+        match self.execution.stop_mode:
+            case "engine":
+                return False
+            case "broker":
+                return True
+            case _:
+                return rules_for(self.universe.market).supports_broker_stops
 
 
 # --------------------------------------------------------------------------

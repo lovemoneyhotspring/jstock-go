@@ -12,14 +12,15 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from wbjp.broker.base import BrokerError
-from wbjp.config import Credentials as Creds
 from wbjp.config import (
+    Config,
     Environment,
     MissingCredentialsError,
     credential_source,
@@ -27,6 +28,8 @@ from wbjp.config import (
     load_credentials,
     store_credentials,
 )
+from wbjp.config import Credentials as Creds
+from wbjp.data.provider import MarketDataProvider
 from wbjp.logging import configure_logging, get_logger, register_secret
 
 app = typer.Typer(
@@ -78,10 +81,27 @@ def _build_broker(config, live: bool):  # type: ignore[no-untyped-def]
         credentials,
         config.env,
         config.settings.endpoints.trade,
+        market=config.file.universe.market,
         tax_type=config.file.execution.tax_account_type,
+        extended_hours=config.file.execution.extended_hours,
     )
     broker.check_key_expiry()
     return broker
+
+
+def _build_provider(config: Config) -> MarketDataProvider:
+    """設定に応じた足データの取得元を作る。"""
+    from wbjp.data.yfinance_provider import YFinanceProvider
+
+    market = config.file.universe.market
+    if config.file.universe.data_provider == "webull":
+        from wbjp.data.webull_provider import WebullMarketDataProvider
+
+        credentials = load_credentials(config.env)
+        return WebullMarketDataProvider(
+            credentials, config.env, config.settings.endpoints.market_data, market=market
+        )
+    return YFinanceProvider(market=market)
 
 
 def _load(config_dir: Path | None):  # type: ignore[no-untyped-def]
@@ -260,7 +280,6 @@ def run(
     WBJP_ENV=prod も同時に必要。cron から回すときは --yes も付ける。
     """
     from wbjp.data.store import BarStore
-    from wbjp.data.yfinance_provider import YFinanceProvider
     from wbjp.db.repo import Journal
     from wbjp.engine.live import LiveRunner
     from wbjp.strategy.registry import build_all
@@ -289,25 +308,30 @@ def run(
         broker=broker,
         store=BarStore(config.settings.bars_dir),
         journal=journal,
-        provider=None if no_sync else YFinanceProvider(),
+        provider=None if no_sync else _build_provider(config),
     )
 
     result = runner.run_once(live=live, as_of=dt.date.fromisoformat(as_of) if as_of else None)
 
     mode = "[green]実発注[/green]" if result.live else f"[yellow]dry-run[/yellow] ({result.reason})"
-    console.print(f"\n[bold]サイクル {result.run_id}[/bold]  基準日 {result.as_of}  {mode}")
+    console.print(
+        f"\n[bold]サイクル {result.run_id}[/bold]  基準日 {result.as_of}  "
+        f"市場 {config.file.universe.market.value}  {mode}"
+    )
 
     if result.planned:
         table = Table(title="注文", title_justify="left")
-        for column in ("銘柄", "売買", "数量", "指値", "状態", "理由"):
+        for column in ("銘柄", "売買", "種別", "数量", "価格", "状態", "理由"):
             table.add_column(column)
         placed_ids = {r.client_order_id for r in result.placed}
         for request in result.planned:
+            price = request.limit_price or request.stop_price
             table.add_row(
                 request.symbol,
                 request.side.value,
+                request.order_type.value,
                 f"{request.quantity:,}",
-                str(request.limit_price or "成行"),
+                str(price) if price is not None else "成行",
                 "発注" if request.client_order_id in placed_ids else "見送り",
                 request.reason[:40],
             )
@@ -327,7 +351,9 @@ def run(
 def backtest(
     from_: Annotated[str, typer.Option("--from", help="開始日 YYYY-MM-DD")] = "2024-01-01",
     to: Annotated[str | None, typer.Option("--to", help="終了日 YYYY-MM-DD")] = None,
-    cash: Annotated[int, typer.Option(help="初期資金（円）")] = 3_000_000,
+    cash: Annotated[
+        int | None, typer.Option(help="初期資金（口座通貨。既定は円300万/ドル3万）")
+    ] = None,
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
 ) -> None:
     """保存済みの足でバックテストする。"""
@@ -344,6 +370,8 @@ def backtest(
         console.print("[red]足データがありません。先に `wbjp data sync` を実行してください[/red]")
         raise typer.Exit(1)
 
+    if cash is None:
+        cash = 3_000_000 if config.file.universe.market.value == "JP" else 30_000
     runner = BacktestRunner(
         build_all(config.file.strategies.enabled), config.file, initial_cash=Decimal(cash)
     )
@@ -438,14 +466,13 @@ def data_sync(
 ) -> None:
     """足データを更新する（保存済みの続きだけ取得）。"""
     from wbjp.data.store import BarStore
-    from wbjp.data.yfinance_provider import YFinanceProvider
 
     config = _load(config_dir)
     store = BarStore(config.settings.bars_dir)
     end = dt.date.today()
 
     counts = store.sync(
-        YFinanceProvider(),
+        _build_provider(config),
         config.file.universe.symbols,
         end - dt.timedelta(days=days),
         end,
@@ -533,13 +560,21 @@ def accumulate_list(config_dir: _ConfigDir = None) -> None:
     table.add_column("id")
     table.add_column("戦術")
     table.add_column("銘柄")
+    table.add_column("発注時間帯")
     table.add_column("有効", justify="center")
     for entry in config.tactics:
         try:
-            described = entry.build().describe()
+            tactic = entry.build()
+            described, window = tactic.describe(), tactic.window.describe()
         except ValueError as exc:
-            described = f"[red]{exc}[/red]"
-        table.add_row(entry.id, described, ", ".join(entry.symbols), "○" if entry.enabled else "—")
+            described, window = f"[red]{exc}[/red]", "—"
+        table.add_row(
+            entry.id,
+            described,
+            ", ".join(entry.symbols),
+            window,
+            "○" if entry.enabled else "—",
+        )
     console.print(table)
     console.print(f"\n毎月の基本予算: {config.monthly_budget:,.0f}円 / 銘柄")
 
@@ -597,13 +632,20 @@ def accumulate_plan(
         raise typer.Exit(1)
 
     total = 0
+    blocked: list[str] = []
     for symbol, tactic in config.build().items():
         if symbol not in bars:
             continue
         settings = AccumulationSettings(config.monthly_budget, tactic)
         plan = build_plan(bars[symbol], settings).tail(days)
 
-        table = Table(title=f"{symbol} — {tactic.describe()}", title_justify="left")
+        window = tactic.window
+        if window.enabled and not window.allows():
+            blocked.append(f"{symbol}（{window.describe()}）")
+        table = Table(
+            title=f"{symbol} — {tactic.describe()}  発注 {window.describe()}",
+            title_justify="left",
+        )
         for column in ("日付", "終値", "倍率", "投下額", "理由"):
             table.add_column(column, justify="right" if column != "理由" else "left")
         for row in plan.iter_rows(named=True):
@@ -621,6 +663,13 @@ def accumulate_plan(
         total += int(plan.filter(pl.col("date") == plan["date"].max())["amount"][0])
 
     console.print(f"\n[bold]最終日の投下額 合計: {total:,}円[/bold]")
+    if blocked:
+        now = dt.datetime.now(ZoneInfo("Asia/Tokyo"))
+        console.print(
+            f"[yellow]いまは発注時間帯の外です（{now:%H:%M} JST）: {'、'.join(blocked)}[/yellow]\n"
+            "[dim]※ 時間帯は投下額を変えない。日足で決まる金額を、"
+            "いつ発注してよいかだけを制御する。[/dim]"
+        )
 
 
 @accumulate_app.command("backtest")

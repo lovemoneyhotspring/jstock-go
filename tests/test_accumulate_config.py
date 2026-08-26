@@ -18,6 +18,7 @@ from wbjp.accumulate import (
     DrawdownLadder,
     StackLadder,
     Tactic,
+    TradingWindow,
     available,
     build_plan,
     create,
@@ -331,3 +332,104 @@ def test_deepest_matching_rung_wins() -> None:
     settled = frame.tail(400)
     assert settled["multiplier"].max() == 4.0
     assert set(settled["multiplier"].unique().to_list()) <= {1.0, 1.5, 2.0, 4.0}
+
+
+# --- 発注時間帯 ---------------------------------------------------------
+
+JST = dt.timezone(dt.timedelta(hours=9))
+
+
+def test_window_defaults_to_the_afternoon_slot() -> None:
+    for tactic in (Constant(), BearStack(), StackLadder(), DrawdownLadder()):
+        assert tactic.window.enabled
+        assert tactic.window.describe() == "14:00〜15:00"
+
+
+def test_window_gates_only_the_configured_hour() -> None:
+    tactic = BearStack()
+    day = dt.date(2026, 8, 26)
+    assert not tactic.allows_order(dt.datetime.combine(day, dt.time(9, 30)))
+    assert not tactic.allows_order(dt.datetime.combine(day, dt.time(13, 59)))
+    assert tactic.allows_order(dt.datetime.combine(day, dt.time(14, 0)))
+    assert tactic.allows_order(dt.datetime.combine(day, dt.time(14, 59)))
+    assert not tactic.allows_order(dt.datetime.combine(day, dt.time(15, 0)))
+
+
+def test_window_can_be_switched_off() -> None:
+    tactic = BearStack(window=False)
+    assert not tactic.window.enabled
+    assert tactic.allows_order(dt.datetime(2026, 8, 26, 3, 0))
+    assert tactic.window.describe() == "制限なし"
+
+
+def test_window_is_read_from_config(tmp_path: Path) -> None:
+    body = """
+[[tactics]]
+id = "既定"
+tactic = "bear_stack"
+symbols = ["A"]
+
+[[tactics]]
+id = "制限なし"
+tactic = "bear_stack"
+symbols = ["B"]
+window = false
+
+[[tactics]]
+id = "後場寄り"
+tactic = "bear_stack"
+symbols = ["C"]
+window = { start = "12:30", end = "13:00" }
+"""
+    built = load(_write(tmp_path, body)).build()
+    assert built["A"].window.describe() == "14:00〜15:00"
+    assert built["B"].window.describe() == "制限なし"
+    assert built["C"].window.describe() == "12:30〜13:00"
+
+
+def test_naive_datetimes_are_treated_as_tokyo_time() -> None:
+    tactic = BearStack()
+    naive = dt.datetime(2026, 8, 26, 14, 30)
+    aware_utc = dt.datetime(2026, 8, 26, 5, 30, tzinfo=dt.UTC)  # = 14:30 JST
+    assert tactic.allows_order(naive)
+    assert tactic.allows_order(aware_utc)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ({"start": "16:00", "end": "17:00"}, "立会時間外"),
+        ({"start": "11:00", "end": "12:00"}, "立会時間外"),
+        ({"start": "15:00", "end": "14:00"}, "開始が終了以降"),
+        ({"start": "25:00", "end": "15:00"}, "HH:MM"),
+        ({"start": "afternoon", "end": "15:00"}, "HH:MM"),
+        ({"start": 14, "end": "15:00"}, "文字列で"),
+        ({"strat": "14:00"}, "未知のキー"),
+        ("14:00-15:00", "false か"),
+    ],
+)
+def test_invalid_window_is_rejected(value: object, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        TradingWindow.parse(value)
+
+
+def test_next_open_skips_to_the_window_start() -> None:
+    window = TradingWindow()
+    morning = dt.datetime(2026, 8, 26, 9, 30, tzinfo=JST)
+    assert window.next_open(morning).time() == dt.time(14, 0)
+    assert window.next_open(morning).date() == dt.date(2026, 8, 26)
+    # 時間帯を過ぎていれば翌日
+    evening = dt.datetime(2026, 8, 26, 16, 0, tzinfo=JST)
+    assert window.next_open(evening).date() == dt.date(2026, 8, 27)
+    # 時間内ならその時刻自身
+    inside = dt.datetime(2026, 8, 26, 14, 30, tzinfo=JST)
+    assert window.next_open(inside) == inside
+
+
+def test_window_does_not_change_the_plan() -> None:
+    """時間帯は投下額に影響しない。日足では時間内を再現できないため。"""
+    bars = _bars("down", 900)
+    budget = Decimal(25_000)
+    with_window = build_plan(bars, AccumulationSettings(budget, BearStack()))
+    without = build_plan(bars, AccumulationSettings(budget, BearStack(window=False)))
+    assert with_window["amount"].to_list() == without["amount"].to_list()

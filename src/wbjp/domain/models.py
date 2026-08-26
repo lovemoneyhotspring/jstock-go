@@ -16,6 +16,21 @@ from enum import StrEnum
 from typing import Any
 
 
+class Market(StrEnum):
+    """取引市場。値は Webull API の ``market`` にそのまま渡る。
+
+    市場ごとの取引ルール（呼値・単元・値幅制限・逆指値の可否・通貨）は
+    :mod:`wbjp.domain.market_rules` に集約する。ここは識別子だけ。
+    """
+
+    JP = "JP"
+    US = "US"
+
+    @property
+    def currency(self) -> str:
+        return {Market.JP: "JPY", Market.US: "USD"}[self]
+
+
 class Side(StrEnum):
     """売買方向。値は Webull API がそのまま受け取る文字列。"""
 
@@ -26,23 +41,36 @@ class Side(StrEnum):
 class OrderType(StrEnum):
     """注文種別。
 
-    **発注できるのは MARKET と LIMIT だけ。** 日本株の STOP_LOSS 系は
-    Webull JP がサポートしていないため、損切りは
-    :mod:`wbjp.risk.stops` がエンジン側で合成する。
+    - 日本株で発注できるのは MARKET と LIMIT だけ。STOP_LOSS 系は
+      Webull JP が日本株でサポートしていないため、損切りは
+      :mod:`wbjp.risk.stops` がエンジン側で合成する。
+    - 米国株では STOP_LOSS / STOP_LOSS_LIMIT をブローカーに置ける。
+      どちらを使うかは :class:`~wbjp.domain.market_rules.MarketRules`
+      が決め、エンジンはそれに従う。
 
-    ``OTHER`` は**読み取り専用**。口座に他の経路で置かれた注文
-    （UAT の共有テスト口座には他人の STOP_LOSS が並ぶ）を読んだときに、
-    未知の種別で落ちないための受け皿。これを発注に使ってはいけない。
+    ``OTHER`` は**読み取り専用**。口座に他の経路で置かれた注文を読んだ
+    ときに、未知の種別で落ちないための受け皿。発注に使ってはいけない。
     """
 
     MARKET = "MARKET"
     LIMIT = "LIMIT"
+    STOP_LOSS = "STOP_LOSS"
+    STOP_LOSS_LIMIT = "STOP_LOSS_LIMIT"
     OTHER = "OTHER"
 
     @property
     def is_placeable(self) -> bool:
-        """このシステムが発注してよい種別か。"""
-        return self in {OrderType.MARKET, OrderType.LIMIT}
+        """このシステムが発注してよい種別か（市場が許すかは別途見る）。"""
+        return self is not OrderType.OTHER
+
+    @property
+    def is_stop(self) -> bool:
+        """トリガー価格に達するまで板に乗らない条件付き注文か。
+
+        条件付き注文は「もうすぐ約定する」注文ではないので、
+        :func:`~wbjp.engine.reconcile.effective_quantity` は数えない。
+        """
+        return self in {OrderType.STOP_LOSS, OrderType.STOP_LOSS_LIMIT}
 
 
 class TimeInForce(StrEnum):
@@ -234,6 +262,7 @@ class OrderRequest:
     order_type: OrderType
     quantity: Decimal
     limit_price: Decimal | None = None
+    stop_price: Decimal | None = None
     time_in_force: TimeInForce = TimeInForce.DAY
     tax_type: TaxAccountType = TaxAccountType.GENERAL
     reason: str = ""
@@ -241,12 +270,22 @@ class OrderRequest:
     def __post_init__(self) -> None:
         if self.quantity <= 0:
             raise ValueError(f"quantity は正の数: {self.quantity}")
-        if self.order_type is OrderType.LIMIT and self.limit_price is None:
-            raise ValueError("指値注文には limit_price が必要")
-        if self.order_type is OrderType.MARKET and self.limit_price is not None:
-            raise ValueError("成行注文に limit_price は指定できない")
         if len(self.client_order_id) > 32:
             raise ValueError(f"client_order_id は32文字以内: {self.client_order_id!r}")
+
+        needs_limit = self.order_type in {OrderType.LIMIT, OrderType.STOP_LOSS_LIMIT}
+        needs_stop = self.order_type.is_stop
+        if needs_limit and self.limit_price is None:
+            raise ValueError(f"{self.order_type.value} には limit_price が必要")
+        if not needs_limit and self.limit_price is not None:
+            raise ValueError(f"{self.order_type.value} に limit_price は指定できない")
+        if needs_stop and self.stop_price is None:
+            raise ValueError(f"{self.order_type.value} には stop_price が必要")
+        if not needs_stop and self.stop_price is not None:
+            raise ValueError(f"{self.order_type.value} に stop_price は指定できない")
+        for label, price in (("limit_price", self.limit_price), ("stop_price", self.stop_price)):
+            if price is not None and price <= 0:
+                raise ValueError(f"{label} は正の数: {price}")
 
     @property
     def notional(self) -> Decimal | None:
@@ -286,8 +325,10 @@ class Order:
     filled_quantity: Decimal
     status: OrderStatus
     limit_price: Decimal | None = None
+    stop_price: Decimal | None = None
     avg_fill_price: Decimal | None = None
     created_at: dt.datetime | None = None
+    time_in_force: TimeInForce = TimeInForce.DAY
 
     @property
     def remaining_quantity(self) -> Decimal:

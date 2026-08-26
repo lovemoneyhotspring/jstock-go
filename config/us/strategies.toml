@@ -1,0 +1,33 @@
+# 米国株の戦略。日本株（config/strategies.toml）と同じ戦略を、
+# 勝率重視の押し目買い向きに組み直してある。
+#
+# 米国市場はトレンドの持続性が日本より高く、順張り＋押し目が効きやすい。
+# ブレイクアウト（勝率30〜40%）は勝率を下げる方向に働くので既定で切る。
+
+combiner = "weighted_vote"
+entry_threshold = 0.3
+exit_threshold = 0.1
+
+[[strategies]]
+name = "sma_cross"
+enabled = true
+weight = 1.0
+fast = 25
+slow = 75
+
+[[strategies]]
+name = "rsi_reversion"
+enabled = true
+weight = 1.0
+period = 14
+oversold = 30.0
+overbought = 70.0
+max_adx = 40.0
+
+[[strategies]]
+name = "atr_breakout"
+enabled = false
+weight = 1.5
+channel = 20
+atr_period = 14
+min_atr_ratio = 0.005

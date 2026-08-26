@@ -34,6 +34,7 @@ from wbjp.accumulate.tactics import (
     StackLadder,
     Tactic,
 )
+from wbjp.accumulate.window import TradingWindow
 
 __all__ = [
     "PLAN_COLUMNS",
@@ -46,6 +47,7 @@ __all__ = [
     "StackLadder",
     "Tactic",
     "TacticEntry",
+    "TradingWindow",
     "available",
     "bear_stack",
     "build_plan",
