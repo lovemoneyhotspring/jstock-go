@@ -1,0 +1,34 @@
+# 元版 RSI(3) 押し目買い（rsi_pullback）の出口検証用。config/us と同じ 91 銘柄。
+#   uv run wbjp backtest --config-dir config/us-rsi --from 2019-01-01
+[universe]
+market = "US"
+data_provider = "yfinance"
+symbols_file = "universe.txt"
+symbols = []
+
+[risk]
+kill_switch = false
+max_order_value = "1000000"   # 等分では資産成長で 1 銘柄分が上限を超えると全買いが止まる罠があるため大きく
+max_orders_per_day = 20
+max_daily_loss = "100000"
+max_position_weight = "0.25"
+max_gross_exposure = "1.0"
+max_preview_deviation = "0.02"
+
+[sizing]
+method = "equal_weight"       # L2 と同じ等分 5 枠
+risk_per_trade = "0.01"
+atr_stop_multiple = "4.0"     # 初期ストップ = 買値 − 4ATR（L2）
+fixed_notional = "3000"
+max_positions = 5
+
+[stops]
+trailing = true               # 終値判定の 4ATR トレーリング（L2）
+# 時間切れ・建値移動・部分利確なし（L2）
+
+[regime]
+enabled = false
+
+[execution]
+order_type = "market"
+extended_hours = false

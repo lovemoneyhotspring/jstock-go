@@ -1,0 +1,29 @@
+# 第3層: 上昇トレンド銘柄の押し目からのブレイクアウト（config/us と同じ機構）。
+# 地合いは [regime] が担うので、戦略側の benchmark_sma ゲートは緩めに残す。
+
+combiner = "priority"
+entry_threshold = 0.3
+exit_threshold = 0.1
+
+[[strategies]]
+name = "trend_pullback"
+enabled = true
+weight = 10.0
+sma_long = 200
+sma_mid = 50
+sma_short = 20
+slope_lookback = 10
+rs_lookback = 63
+high_lookback = 60
+max_drawdown_from_high = 0.15
+breakout_lookback = 1
+volume_lookback = 20
+volume_dryup_max = 0.7
+min_atr_ratio = 0.010
+max_atr_ratio = 0.05
+min_dollar_volume = 5_000_000.0
+benchmark = "SPY"
+benchmark_sma = 200
+blackout_file = "config/us-quality/earnings.toml"
+blackout_days_before = 3
+exit_before_earnings = false

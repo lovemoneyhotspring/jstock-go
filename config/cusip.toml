@@ -1,0 +1,85 @@
+# CUSIP → ティッカーの対応表。13F（機関投資家の保有報告）は銘柄を CUSIP で
+# 書くため、足を取りに行くにはこの変換が要る。
+#
+#   値が空文字 "" … 買収・上場廃止などで足が取れない（比率から除外する）
+#   表に無い CUSIP … 警告を出して除外する。`wbjp accumulate basket` の
+#                     出力に出てきたら、ここに追記する。
+#
+# バークシャー・ハサウェイ（CIK 0001067983）の 2013 年以降の上位保有を網羅。
+# 同じ会社の別 CUSIP（GOOGL/GOOG、株式併合前後）は同じティッカーに寄せてよい。
+
+[map]
+037833100 = "AAPL"   # Apple
+949746101 = "WFC"    # Wells Fargo
+500754106 = "KHC"    # Kraft Heinz
+025816109 = "AXP"    # American Express
+191216100 = "KO"     # Coca-Cola
+060505104 = "BAC"    # Bank of America
+459200101 = "IBM"    # IBM
+166764100 = "CVX"    # Chevron
+02079K305 = "GOOGL"  # Alphabet A
+02079K107 = "GOOG"   # Alphabet C
+674599105 = "OXY"    # Occidental Petroleum
+718546104 = "PSX"    # Phillips 66
+615369105 = "MCO"    # Moody's
+931142103 = "WMT"    # Walmart
+742718109 = "PG"     # Procter & Gamble
+H1467J104 = "CB"     # Chubb
+30231G102 = "XOM"    # Exxon Mobil
+902973304 = "USB"    # U.S. Bancorp
+46625H100 = "JPM"    # JPMorgan
+92343V104 = "VZ"     # Verizon
+23918K108 = "DVA"    # DaVita
+25490A309 = ""       # DirecTV（2015 年 AT&T が買収）
+38141G104 = "GS"     # Goldman Sachs
+064058100 = "BNY"    # BNY（旧 Bank of New York Mellon、旧ティッカー BK）
+247361702 = "DAL"    # Delta Air Lines
+16119P108 = "CHTR"   # Charter Communications
+16117M305 = "CHTR"   # Charter Communications（旧 CUSIP）
+844741108 = "LUV"    # Southwest Airlines
+00507V109 = ""       # Activision Blizzard（2023 年 Microsoft が買収）
+20825C104 = "COP"    # ConocoPhillips
+244199105 = "DE"     # Deere
+37045V100 = "GM"     # General Motors
+00206R102 = "T"      # AT&T
+92343E102 = "VRSN"   # VeriSign
+02376R102 = "AAL"    # American Airlines
+910047109 = "UAL"    # United Airlines
+501044101 = "KR"     # Kroger
+874039100 = "TSM"    # Taiwan Semiconductor ADR
+172967424 = "C"      # Citigroup
+829933100 = "SIRI"   # Sirius XM
+61166W101 = ""       # Monsanto（2018 年 Bayer が買収）
+384637104 = "GHC"    # Graham Holdings
+939640108 = "GHC"    # Washington Post（現 Graham Holdings）
+92826C839 = "V"      # Visa
+40434L105 = "HPQ"    # HP
+903293405 = ""       # USG（2019 年 Knauf が買収）
+00287Y109 = "ABBV"   # AbbVie
+68389X105 = "ORCL"   # Oracle
+531229102 = ""       # Liberty Media A（再編で追跡不能）
+531229607 = ""       # Liberty SiriusXM C（2024 年 SIRI に統合）
+531229789 = ""       # Liberty SiriusXM A（同上）
+530909308 = ""       # Liberty Live C
+57636Q104 = "MA"     # Mastercard
+58933Y105 = "MRK"    # Merck
+023135106 = "AMZN"   # Amazon
+21036P108 = "STZ"    # Constellation Brands
+740189105 = ""       # Precision Castparts（2016 年バークシャーが完全買収）
+110122108 = "BMY"    # Bristol-Myers Squibb
+167250109 = ""       # Chicago Bridge & Iron（2018 年 McDermott が買収）
+637071101 = "NOV"    # NOV
+92556H206 = ""       # Paramount Global B（2025 年 Skydance と統合）
+92553P201 = ""       # Viacom B（2019 年 CBS と統合）
+22160K105 = "COST"   # Costco
+867224107 = "SU"     # Suncor Energy
+55261F104 = "MTB"    # M&T Bank
+833445109 = "SNOW"   # Snowflake
+91324P102 = "UNH"    # UnitedHealth
+G0403H108 = "AON"    # Aon
+14040H105 = "COF"    # Capital One
+25754A201 = "DPZ"    # Domino's Pizza
+G6683N103 = "NU"     # Nu Holdings
+650111107 = "NYT"    # New York Times
+02005N100 = "ALLY"   # Ally Financial
+526057104 = "LEN"    # Lennar

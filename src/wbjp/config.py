@@ -503,6 +503,24 @@ class StopsConfig(BaseModel):
     #: 1段目の利確後、残りの建玉を手仕舞う移動平均の期間（例: 20 = 20日MA）。
     #: 終値がこの移動平均を割り込んだら残り全部を手仕舞う。None で無効。
     trend_exit_sma: int | None = None
+    #: True なら ``trend_exit_sma`` 割れを利確前の建玉にも適用する（移動平均そのものを
+    #: 利確・損切りの合図にする）。False（既定）は 1 段目の利確後だけ。
+    trend_exit_always: bool = False
+    #: トレーリングストップの幅（ATR 倍率）。None なら初期ストップと同じ
+    #: ``sizing.atr_stop_multiple``。初期は狭く（1.5）、追従は広く（2.5 =
+    #: Chandelier Exit）としたいときに使う。
+    trailing_atr_multiple: Decimal | None = None
+    #: %トレーリング（例: 0.08 = 最高終値から −8%）。設定すると ATR 追従の代わりに使う
+    trailing_pct: Decimal | None = None
+    #: ``trend_exit_sma`` の線の種類: sma / ema / donchian（N 日安値割れ＝タートル型）
+    trend_exit_kind: str = "sma"
+
+    @field_validator("trend_exit_kind")
+    @classmethod
+    def _known_kind(cls, v: str) -> str:
+        if v not in ("sma", "ema", "donchian"):
+            raise ValueError(f"trend_exit_kind は sma / ema / donchian: {v}")
+        return v
 
     @field_validator("breakeven_after_r", "take_profit_r")
     @classmethod
@@ -518,7 +536,7 @@ class StopsConfig(BaseModel):
             raise ValueError("日数は正の整数")
         return v
 
-    @field_validator("initial_stop_pct", "take_profit_fraction")
+    @field_validator("initial_stop_pct", "take_profit_fraction", "trailing_pct")
     @classmethod
     def _ratio(cls, v: Decimal | None) -> Decimal | None:
         if v is not None and not 0 < v < 1:
@@ -533,6 +551,51 @@ class StopsConfig(BaseModel):
             and self.stale_exit_days > self.max_hold_days
         ):
             raise ValueError("stale_exit_days は max_hold_days 以下にしてください")
+        return self
+
+
+class RegimeConfig(BaseModel):
+    """相場レジーム（指数の環境認識）による露出の制御。
+
+    S&P500 の買い持ちの弱点は暴落時に全額被弾すること。指数の位置で
+    3 段階に分け、弱気では全建玉を手仕舞って現金（短期国債の利息）に退避する。
+
+    - 強気:   終値 > SMA長期 かつ SMA長期が上向き        → exposure_bull
+    - 警戒:   終値 > SMA長期 だが 終値 < SMA中期（または長期線が下向き） → exposure_caution
+    - 弱気:   終値 < SMA長期                              → exposure_bear（0 なら全手仕舞い）
+
+    露出は「サイジングに渡す総資産」を比率で縮めることで実現する。
+    新規建ては、建玉比率が露出上限に達していれば見送る。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    #: 環境認識に使う指数（universe.symbols に含めること）
+    benchmark: str = "SPY"
+    sma_long: int = 200
+    sma_mid: int = 50
+    #: 長期線の傾きを測る日数
+    slope_lookback: int = 20
+    exposure_bull: Decimal = Decimal("1.0")
+    exposure_caution: Decimal = Decimal("0.5")
+    exposure_bear: Decimal = Decimal("0")
+    #: 待機資金の利回りに使う系列（^IRX = 13 週 T-Bill 利回り、%）。None で無利息
+    cash_yield_symbol: str | None = None
+
+    @field_validator("exposure_bull", "exposure_caution", "exposure_bear")
+    @classmethod
+    def _exposure_range(cls, v: Decimal) -> Decimal:
+        if not 0 <= v <= 1:
+            raise ValueError("露出は 0〜1")
+        return v
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        if not self.exposure_bear <= self.exposure_caution <= self.exposure_bull:
+            raise ValueError("露出は 弱気 ≤ 警戒 ≤ 強気 の順")
+        if self.sma_mid >= self.sma_long:
+            raise ValueError("sma_mid は sma_long より短く")
         return self
 
 
@@ -620,6 +683,7 @@ class FileConfig(BaseModel):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     stops: StopsConfig = Field(default_factory=StopsConfig)
     strategies: StrategiesConfig = Field(default_factory=StrategiesConfig)
+    regime: RegimeConfig = Field(default_factory=RegimeConfig)
 
     @model_validator(mode="after")
     def _stop_mode_is_possible(self) -> Self:

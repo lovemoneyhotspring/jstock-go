@@ -14,6 +14,16 @@
 
 判断は終値、約定は翌日の寄付。この1日のずれが実運用の姿であり、
 同日終値で約定させると取れない価格で売買できることになる。
+
+構成:
+    :class:`DecisionPipeline`
+        「終値までの足 + 口座の状態 → 出す注文・取り消す注文」の純粋な判断。
+        ブローカーを知らない。
+    :class:`BacktestRunner`
+        :class:`~wbjp.broker.paper.PaperBroker` で約定させる自前エンジン。
+    :class:`~wbjp.engine.bt_engine.BacktraderRunner`
+        同じ :class:`DecisionPipeline` を Backtrader の Cerebro/Broker に
+        つないだ第2エンジン。約定モデルを第三者実装に差し替えて突き合わせる。
 """
 
 from __future__ import annotations
@@ -26,10 +36,20 @@ import polars as pl
 
 from wbjp.broker.paper import PaperBroker
 from wbjp.config import FileConfig
-from wbjp.domain.market_rules import rules_for
-from wbjp.domain.models import CombinedSignal, Fill, Side, Signal
+from wbjp.domain.market_rules import MarketRules, rules_for
+from wbjp.domain.models import (
+    Balance,
+    CombinedSignal,
+    Fill,
+    Order,
+    OrderRequest,
+    Position,
+    Side,
+    Signal,
+    TargetPosition,
+)
 from wbjp.engine.reconcile import ReconcileSettings, reconcile
-from wbjp.indicators.ohlcv import atr, sma
+from wbjp.indicators.ohlcv import atr, donchian_low, ema, sma
 from wbjp.logging import get_logger
 from wbjp.portfolio.sizer import SizingContext, build_sizer
 from wbjp.risk.limits import RiskContext, RiskManager
@@ -41,6 +61,9 @@ log = get_logger(__name__)
 
 #: サイジングとストップに使う ATR の期間。
 ATR_PERIOD = 14
+
+#: 銘柄 → 日付 → 列名 → 値。日付で引ける形に変換した足。
+BarIndex = dict[str, dict[dt.date, dict[str, Decimal]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +89,9 @@ class BacktestResult:
     initial_equity: Decimal = Decimal(0)
     final_equity: Decimal = Decimal(0)
     fills: list[Fill] = field(default_factory=list)
+    #: エンジン固有の追加統計（Backtrader のアナライザ出力など）。
+    #: 自前エンジンでは空。
+    analysis: dict[str, object] = field(default_factory=dict)
 
     @property
     def total_return(self) -> Decimal:
@@ -110,17 +136,48 @@ class BacktestResult:
         }
 
 
-class BacktestRunner:
-    """日足のバックテスト。"""
+# --------------------------------------------------------------------------
+# 判断パイプライン（エンジン非依存）
+# --------------------------------------------------------------------------
 
-    def __init__(
-        self,
-        strategies: list[Strategy],
-        config: FileConfig,
-        *,
-        initial_cash: Decimal = Decimal(1_000_000),
-        commission_rate: Decimal | None = None,
-    ) -> None:
+
+@dataclass(frozen=True, slots=True)
+class AccountSnapshot:
+    """判断時点の口座の状態。ブローカーの実装から切り離した最小限の写し。"""
+
+    positions: dict[str, Position]
+    balance: Balance
+    open_orders: list[Order]
+    bought_today: set[str] = field(default_factory=set)
+
+    @property
+    def equity(self) -> Decimal:
+        return self.balance.cash_balance + self.balance.market_value
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionPlan:
+    """1日の判断の結果。エンジンはこれを機械的にブローカーへ流すだけ。"""
+
+    signals: list[Signal]
+    combined: dict[str, CombinedSignal]
+    targets: list[TargetPosition]
+    #: リスク判定を通った発注（戦略由来 + 逆指値の置き直し）。
+    place: list[OrderRequest]
+    #: 取り消すべき既存注文（古い逆指値など）。
+    cancel: list[Order]
+    rejected: dict[str, str]
+
+
+class DecisionPipeline:
+    """終値までの足と口座の状態から、出す注文と取り消す注文を決める。
+
+    ライブとバックテストが共有する売買判断の全部。ブローカーには触らず、
+    「どの注文を出すか・消すか」を返すだけなので、約定モデルを差し替えても
+    判断そのものは 1 bit も変わらない。
+    """
+
+    def __init__(self, strategies: list[Strategy], config: FileConfig) -> None:
         self.strategies = strategies
         self.config = config
         self.combiner = build_combiner(
@@ -132,246 +189,63 @@ class BacktestRunner:
             config.universe.market, topix500=set(config.universe.topix500_symbols)
         )
         self.risk = RiskManager(config.risk, config.universe.symbols, self.rules)
-
-        broker_kwargs: dict[str, object] = {
-            "initial_cash": initial_cash,
-            "currency": self.rules.currency,
-        }
-        if commission_rate is not None:
-            broker_kwargs["commission_rate"] = commission_rate
-        elif config.universe.market.value == "US":
-            # 米国株の売買手数料は 2026-07-27 から無料。SEC/FINRA 手数料は
-            # 約定代金の 0.01% 未満なので、丸めて 0 とみなす。
-            broker_kwargs["commission_rate"] = Decimal(0)
-        self.broker = PaperBroker(**broker_kwargs)  # type: ignore[arg-type]
-
         self.stops = StopBook()
+        self.warmup = max((s.warmup_bars for s in strategies), default=1)
 
-    def run(
-        self,
-        bars: dict[str, pl.DataFrame],
-        start: dt.date | None = None,
-        end: dt.date | None = None,
-    ) -> BacktestResult:
-        """バックテストを実行する。
+    # -- 足の前処理 ---------------------------------------------------------
 
-        Args:
-            bars: 銘柄 → 日足（``date`` 昇順）。
-            start: この日以降を売買対象にする。前の足はウォームアップに使う。
+    @property
+    def trend_exit_col(self) -> str:
+        return f"trend_exit_{self.config.stops.trend_exit_kind}_{self.config.stops.trend_exit_sma}"
+
+    def _trend_exit_expr(self, period: int) -> pl.Expr:
+        kind = self.config.stops.trend_exit_kind
+        if kind == "ema":
+            expr = ema(period)
+        elif kind == "donchian":
+            expr = donchian_low(period)  # 当日を除く N 日安値
+        else:
+            expr = sma(period)
+        return expr.alias(self.trend_exit_col)
+
+    @property
+    def lookup_keys(self) -> list[str]:
+        keys = ["open", "high", "low", "close", f"atr_{ATR_PERIOD}"]
+        if self.config.stops.trend_exit_sma is not None:
+            keys.append(self.trend_exit_col)
+        if self.config.regime.enabled:
+            keys.extend(self._regime_cols)
+        return keys
+
+    @property
+    def _regime_cols(self) -> list[str]:
+        r = self.config.regime
+        return [f"sma_{r.sma_long}", f"sma_{r.sma_mid}", f"_regime_slope_{r.sma_long}"]
+
+    def regime_exposure(self, indexed: BarIndex, day: dt.date) -> tuple[str, Decimal]:
+        """その日の相場レジームと露出上限。無効なら常に強気・1.0。
+
+        指数の足が無い日（ウォームアップ中）は判断できないので、
+        **弱気扱い** にして建てない。判断材料が無いときに全力で建てるのは
+        レジーム制御を入れた意図に反する。
         """
-        if not bars:
-            raise ValueError("足データが空です")
+        r = self.config.regime
+        if not r.enabled:
+            return "bull", Decimal(1)
+        row = indexed.get(r.benchmark, {}).get(day)
+        if not row:
+            return "bear", r.exposure_bear
+        close = row.get("close")
+        long_ma, mid_ma, slope = (row.get(c) for c in self._regime_cols)
+        if close is None or long_ma is None or mid_ma is None or slope is None:
+            return "bear", r.exposure_bear
+        if close < long_ma:
+            return "bear", r.exposure_bear
+        if close < mid_ma or slope <= 0:
+            return "caution", r.exposure_caution
+        return "bull", r.exposure_bull
 
-        enriched = self._precompute_indicators(bars)
-        trading_days = self._trading_days(enriched, start, end)
-        if not trading_days:
-            raise ValueError("対象期間に取引日がありません")
-
-        indexed = self._index_by_date(enriched)
-
-        warmup = max((s.warmup_bars for s in self.strategies), default=1)
-        result = BacktestResult(initial_equity=self.broker.equity)
-
-        for index, today in enumerate(trading_days):
-            # 1) 前日の注文を当日の寄付で約定させ、残ったものを失効させる。
-            #    失効を約定より先に行うと、注文が約定する機会を永遠に失う。
-            self.broker.begin_day()
-            fills = self.broker.settle(
-                self._lookup(indexed, today, "open"),
-                low_prices=self._lookup(indexed, today, "low"),
-            )
-            self.broker.expire_open_orders()
-
-            closes = self._lookup(indexed, today, "close")
-            self.broker.mark(closes)
-
-            # 2) 当日の終値までで判断する
-            trend_values = (
-                self._lookup(indexed, today, self._trend_exit_col)
-                if self.config.stops.trend_exit_sma is not None
-                else {}
-            )
-            record = self._decide(
-                enriched,
-                today,
-                closes,
-                self._lookup(indexed, today, f"atr_{ATR_PERIOD}"),
-                trend_values,
-                warmup,
-                index,
-                fills,
-            )
-            result.records.append(record)
-            result.fills.extend(fills)
-
-        result.final_equity = self.broker.equity
-        log.info("バックテスト完了", **{k: str(v) for k, v in result.summary().items()})
-        return result
-
-    # -- 内部 ---------------------------------------------------------------
-
-    def _decide(
-        self,
-        bars: dict[str, pl.DataFrame],
-        today: dt.date,
-        closes: dict[str, Decimal],
-        atr_values: dict[str, Decimal],
-        trend_values: dict[str, Decimal],
-        warmup: int,
-        index: int,
-        fills: list[Fill],
-    ) -> DayRecord:
-        positions = self.broker.positions_by_symbol()
-        equity = self.broker.equity
-        lot_sizes = {s: Decimal(v) for s, v in self.config.universe.lot_size_overrides.items()}
-
-        # その日までに切り詰めた足だけを戦略に渡す（先読みの遮断）
-        visible = {symbol: frame.filter(pl.col("date") <= today) for symbol, frame in bars.items()}
-        visible = {s: f for s, f in visible.items() if f.height >= warmup}
-
-        ctx = StrategyContext(as_of=today, _bars=visible, _positions=positions, equity=equity)
-
-        signals: list[Signal] = []
-        for strategy in self.strategies:
-            signals.extend(strategy.on_bars(ctx))
-
-        combined = self.combiner.combine(signals)
-
-        # ストップを整備し、抵触分は戦略より優先して手仕舞う
-        self.stops.ensure(
-            positions,
-            atr_values,
-            today,
-            atr_multiple=self.config.sizing.atr_stop_multiple,
-            trailing=self.config.stops.trailing,
-            initial_stop_pct=self.config.stops.initial_stop_pct,
-        )
-        self.stops.update_breakeven(closes, self.config.stops.breakeven_after_r)
-        self.stops.update_trailing(closes, atr_values)
-
-        targets = self.sizer.size(
-            combined,
-            SizingContext(
-                equity=equity,
-                buying_power=self.broker.get_balance().buying_power,
-                prices=closes,
-                atr=atr_values,
-                lot_sizes=lot_sizes,
-                positions=positions,
-                default_lot_size=self.rules.default_lot_size,
-            ),
-            entry_threshold=self.config.strategies.entry_threshold,
-            exit_threshold=self.config.strategies.exit_threshold,
-        )
-        targets = apply_stop_priority(
-            targets,
-            self.stops.take_profit_targets(
-                closes,
-                {s: p.quantity for s, p in positions.items()},
-                lot_sizes,
-                target_r=self.config.stops.take_profit_r,
-                fraction=self.config.stops.take_profit_fraction,
-                default_lot_size=self.rules.default_lot_size,
-            )
-            + self.stops.runner_targets(
-                closes, {s: p.quantity for s, p in positions.items()}, trend_values
-            )
-            + self.stops.time_exit_targets(
-                closes,
-                today,
-                stale_days=self.config.stops.stale_exit_days,
-                max_days=self.config.stops.max_hold_days,
-            )
-            + self.stops.exit_targets(closes),
-        )
-
-        plan = reconcile(
-            targets,
-            positions,
-            self.broker.get_open_orders(),
-            closes,
-            order_id_seed=f"bt-{index}",
-            settings=ReconcileSettings(
-                order_type=self.config.execution.order_type,
-                limit_offset=self.config.execution.limit_offset,
-                tax_type=self.config.execution.tax_account_type,
-            ),
-            lot_sizes=lot_sizes,
-            bought_today=self.broker.bought_today,
-            rules=self.rules,
-        )
-
-        approved, rejected = self.risk.check_all(
-            plan.orders,
-            RiskContext(
-                equity=equity,
-                balance=self.broker.get_balance(),
-                positions=positions,
-                base_prices=closes,
-                realized_pnl_today=Decimal(0),
-            ),
-        )
-
-        # ブローカーに逆指値を置く市場では、本番と同じ手順で置き直す
-        if self.config.uses_broker_stops and self.rules.broker_stop_order_type:
-            stop_plan = sync_broker_stops(
-                self.stops.all(),
-                positions,
-                self.broker.get_open_orders(),
-                order_type=self.rules.broker_stop_order_type,
-                order_id_seed=f"bt-{index}",
-                tax_type=self.config.execution.tax_account_type,
-                pending_exits={o.symbol for o in approved if o.side is Side.SELL},
-            )
-            for stale in stop_plan.cancel:
-                self.broker.cancel(stale.client_order_id)
-            stop_approved, stop_rejected = self.risk.check_all(
-                stop_plan.place,
-                RiskContext(
-                    equity=equity,
-                    balance=self.broker.get_balance(),
-                    positions=positions,
-                    base_prices=closes,
-                ),
-            )
-            approved = approved + stop_approved
-            rejected.update({f"{k} (逆指値)": v for k, v in stop_rejected.items()})
-
-        placed = []
-        for request in approved:
-            try:
-                self.broker.place(request)
-                placed.append(request.client_order_id)
-            except Exception as exc:
-                rejected[request.symbol] = str(exc)
-
-        return DayRecord(
-            date=today,
-            equity=equity,
-            cash=self.broker.get_balance().cash_balance,
-            signals=signals,
-            combined=combined,
-            targets={t.symbol: t.quantity for t in targets},
-            orders=placed,
-            fills=fills,
-            rejected={**plan.skipped, **rejected},
-        )
-
-    @staticmethod
-    def _trading_days(
-        bars: dict[str, pl.DataFrame], start: dt.date | None, end: dt.date | None
-    ) -> list[dt.date]:
-        days: set[dt.date] = set()
-        for frame in bars.values():
-            days.update(frame["date"].to_list())
-        selected = sorted(days)
-        if start:
-            selected = [d for d in selected if d >= start]
-        if end:
-            selected = [d for d in selected if d <= end]
-        return selected
-
-    def _precompute_indicators(self, bars: dict[str, pl.DataFrame]) -> dict[str, pl.DataFrame]:
+    def precompute_indicators(self, bars: dict[str, pl.DataFrame]) -> dict[str, pl.DataFrame]:
         """全期間ぶんの指標を一度だけ計算する。
 
         **なぜ先回りしてよいのか**
@@ -392,30 +266,29 @@ class BacktestRunner:
         expressions.setdefault(f"atr_{ATR_PERIOD}", atr(ATR_PERIOD))
         trend_exit_sma = self.config.stops.trend_exit_sma
         if trend_exit_sma is not None:
-            expressions.setdefault(self._trend_exit_col, sma(trend_exit_sma))
+            expressions.setdefault(self.trend_exit_col, self._trend_exit_expr(trend_exit_sma))
+        if self.config.regime.enabled:
+            r = self.config.regime
+            long_col, mid_col, slope_col = self._regime_cols
+            expressions.setdefault(long_col, sma(r.sma_long))
+            expressions.setdefault(mid_col, sma(r.sma_mid))
+            expressions[slope_col] = (
+                pl.col("close").rolling_mean(r.sma_long)
+                - pl.col("close").rolling_mean(r.sma_long).shift(r.slope_lookback)
+            ).alias(slope_col)
 
         return {
             symbol: frame.with_columns(list(expressions.values())) for symbol, frame in bars.items()
         }
 
-    @property
-    def _trend_exit_col(self) -> str:
-        return f"sma_{self.config.stops.trend_exit_sma}"
-
-    def _index_by_date(
-        self,
-        bars: dict[str, pl.DataFrame],
-    ) -> dict[str, dict[dt.date, dict[str, Decimal]]]:
+    def index_by_date(self, bars: dict[str, pl.DataFrame]) -> BarIndex:
         """日付で引ける形に一度だけ変換する。
 
         毎日 ``filter`` を掛けると銘柄数×日数の総当たりになり、
         銘柄が増えるほど急に遅くなる。最初に索引を作っておく。
         """
-        keys = ["open", "low", "close", f"atr_{ATR_PERIOD}"]
-        if self.config.stops.trend_exit_sma is not None:
-            keys.append(self._trend_exit_col)
-
-        indexed: dict[str, dict[dt.date, dict[str, Decimal]]] = {}
+        keys = self.lookup_keys
+        indexed: BarIndex = {}
         for symbol, frame in bars.items():
             by_date: dict[dt.date, dict[str, Decimal]] = {}
             for row in frame.iter_rows(named=True):
@@ -429,11 +302,328 @@ class BacktestRunner:
         return indexed
 
     @staticmethod
-    def _lookup(
-        indexed: dict[str, dict[dt.date, dict[str, Decimal]]], day: dt.date, key: str
-    ) -> dict[str, Decimal]:
+    def lookup(indexed: BarIndex, day: dt.date, key: str) -> dict[str, Decimal]:
         return {
             symbol: values[key]
             for symbol, by_date in indexed.items()
             if (values := by_date.get(day)) is not None and key in values
         }
+
+    @staticmethod
+    def trading_days(
+        bars: dict[str, pl.DataFrame], start: dt.date | None, end: dt.date | None
+    ) -> list[dt.date]:
+        days: set[dt.date] = set()
+        for frame in bars.values():
+            days.update(frame["date"].to_list())
+        selected = sorted(days)
+        if start:
+            selected = [d for d in selected if d >= start]
+        if end:
+            selected = [d for d in selected if d <= end]
+        return selected
+
+    def trend_values(self, indexed: BarIndex, day: dt.date) -> dict[str, Decimal]:
+        if self.config.stops.trend_exit_sma is None:
+            return {}
+        return self.lookup(indexed, day, self.trend_exit_col)
+
+    # -- 判断 ---------------------------------------------------------------
+
+    def decide(
+        self,
+        bars: dict[str, pl.DataFrame],
+        indexed: BarIndex,
+        today: dt.date,
+        account: AccountSnapshot,
+        *,
+        order_id_seed: str,
+    ) -> DecisionPlan:
+        """当日の終値までで判断し、発注・取消の計画を返す。"""
+        closes = self.lookup(indexed, today, "close")
+        atr_values = self.lookup(indexed, today, f"atr_{ATR_PERIOD}")
+        trend_values = self.trend_values(indexed, today)
+
+        positions = account.positions
+        equity = account.equity
+        lot_sizes = {s: Decimal(v) for s, v in self.config.universe.lot_size_overrides.items()}
+
+        # その日までに切り詰めた足だけを戦略に渡す（先読みの遮断）
+        visible = {symbol: frame.filter(pl.col("date") <= today) for symbol, frame in bars.items()}
+        visible = {s: f for s, f in visible.items() if f.height >= self.warmup}
+
+        ctx = StrategyContext(as_of=today, _bars=visible, _positions=positions, equity=equity)
+
+        signals: list[Signal] = []
+        for strategy in self.strategies:
+            signals.extend(strategy.on_bars(ctx))
+
+        combined = self.combiner.combine(signals)
+
+        # 相場レジーム: 弱気なら全手仕舞い＋新規禁止、警戒なら露出を絞る
+        regime, exposure = self.regime_exposure(indexed, today)
+        held_symbols = {s for s, p in positions.items() if p.quantity > 0}
+        if exposure == 0:
+            combined = {
+                s: CombinedSignal(s, -1.0, reason=f"レジーム {regime}: 全手仕舞い")
+                for s in held_symbols
+            }
+        elif exposure < 1:
+            gross = sum((p.market_value for p in positions.values()), start=Decimal(0))
+            if equity > 0 and gross / equity >= exposure:
+                combined = {s: c for s, c in combined.items() if s in held_symbols}
+        sizing_equity = equity * exposure
+
+        # ストップを整備し、抵触分は戦略より優先して手仕舞う
+        self.stops.ensure(
+            positions,
+            atr_values,
+            today,
+            atr_multiple=self.config.sizing.atr_stop_multiple,
+            trailing=self.config.stops.trailing,
+            initial_stop_pct=self.config.stops.initial_stop_pct,
+            trailing_atr_multiple=self.config.stops.trailing_atr_multiple,
+            trailing_pct=self.config.stops.trailing_pct,
+        )
+        self.stops.update_breakeven(closes, self.config.stops.breakeven_after_r)
+        self.stops.update_trailing(closes, atr_values)
+
+        quantities = {s: p.quantity for s, p in positions.items()}
+        targets = self.sizer.size(
+            combined,
+            SizingContext(
+                equity=sizing_equity,
+                buying_power=account.balance.buying_power,
+                prices=closes,
+                atr=atr_values,
+                lot_sizes=lot_sizes,
+                positions=positions,
+                default_lot_size=self.rules.default_lot_size,
+            ),
+            entry_threshold=self.config.strategies.entry_threshold,
+            exit_threshold=self.config.strategies.exit_threshold,
+        )
+        targets = apply_stop_priority(
+            targets,
+            self.stops.take_profit_targets(
+                closes,
+                quantities,
+                lot_sizes,
+                target_r=self.config.stops.take_profit_r,
+                fraction=self.config.stops.take_profit_fraction,
+                default_lot_size=self.rules.default_lot_size,
+            )
+            + self.stops.runner_targets(
+                closes, quantities, trend_values, always=self.config.stops.trend_exit_always
+            )
+            + self.stops.time_exit_targets(
+                closes,
+                today,
+                stale_days=self.config.stops.stale_exit_days,
+                max_days=self.config.stops.max_hold_days,
+            )
+            + self.stops.exit_targets(closes),
+        )
+
+        plan = reconcile(
+            targets,
+            positions,
+            account.open_orders,
+            closes,
+            order_id_seed=order_id_seed,
+            settings=ReconcileSettings(
+                order_type=self.config.execution.order_type,
+                limit_offset=self.config.execution.limit_offset,
+                tax_type=self.config.execution.tax_account_type,
+            ),
+            lot_sizes=lot_sizes,
+            bought_today=account.bought_today,
+            rules=self.rules,
+        )
+
+        risk_ctx = RiskContext(
+            equity=equity,
+            balance=account.balance,
+            positions=positions,
+            base_prices=closes,
+            realized_pnl_today=Decimal(0),
+        )
+        approved, rejected = self.risk.check_all(plan.orders, risk_ctx)
+
+        cancel: list[Order] = []
+        # ブローカーに逆指値を置く市場では、本番と同じ手順で置き直す
+        if self.config.uses_broker_stops and self.rules.broker_stop_order_type:
+            stop_plan = sync_broker_stops(
+                self.stops.all(),
+                positions,
+                account.open_orders,
+                order_type=self.rules.broker_stop_order_type,
+                order_id_seed=order_id_seed,
+                tax_type=self.config.execution.tax_account_type,
+                pending_exits={o.symbol for o in approved if o.side is Side.SELL},
+            )
+            cancel = list(stop_plan.cancel)
+            stop_approved, stop_rejected = self.risk.check_all(stop_plan.place, risk_ctx)
+            approved = approved + stop_approved
+            rejected.update({f"{k} (逆指値)": v for k, v in stop_rejected.items()})
+
+        return DecisionPlan(
+            signals=signals,
+            combined=combined,
+            targets=targets,
+            place=approved,
+            cancel=cancel,
+            rejected={**plan.skipped, **rejected},
+        )
+
+
+# --------------------------------------------------------------------------
+# 自前エンジン
+# --------------------------------------------------------------------------
+
+
+class BacktestRunner:
+    """日足のバックテスト（:class:`~wbjp.broker.paper.PaperBroker` で約定）。"""
+
+    def __init__(
+        self,
+        strategies: list[Strategy],
+        config: FileConfig,
+        *,
+        initial_cash: Decimal = Decimal(1_000_000),
+        commission_rate: Decimal | None = None,
+    ) -> None:
+        self.strategies = strategies
+        self.config = config
+        self.pipeline = DecisionPipeline(strategies, config)
+
+        broker_kwargs: dict[str, object] = {
+            "initial_cash": initial_cash,
+            "currency": self.rules.currency,
+        }
+        if commission_rate is not None:
+            broker_kwargs["commission_rate"] = commission_rate
+        elif config.universe.market.value == "US":
+            # 米国株の売買手数料は 2026-07-27 から無料。SEC/FINRA 手数料は
+            # 約定代金の 0.01% 未満なので、丸めて 0 とみなす。
+            broker_kwargs["commission_rate"] = Decimal(0)
+        self.broker = PaperBroker(**broker_kwargs)  # type: ignore[arg-type]
+
+    # 旧来の属性名を残す（テスト・ツールからの参照用）
+    @property
+    def rules(self) -> MarketRules:
+        return self.pipeline.rules
+
+    @property
+    def stops(self) -> StopBook:
+        return self.pipeline.stops
+
+    @property
+    def risk(self) -> RiskManager:
+        return self.pipeline.risk
+
+    def run(
+        self,
+        bars: dict[str, pl.DataFrame],
+        start: dt.date | None = None,
+        end: dt.date | None = None,
+        *,
+        cash_yield: pl.DataFrame | None = None,
+    ) -> BacktestResult:
+        """バックテストを実行する。
+
+        Args:
+            bars: 銘柄 → 日足（``date`` 昇順）。
+            start: この日以降を売買対象にする。前の足はウォームアップに使う。
+        """
+        if not bars:
+            raise ValueError("足データが空です")
+        # 待機資金の年利（%）の日足。^IRX など。与えると現金に日割りで利息を付ける
+        yields: dict[dt.date, Decimal] = {}
+        if cash_yield is not None and cash_yield.height:
+            yields = {
+                d: Decimal(str(c)) / 100
+                for d, c in cash_yield.select("date", "close").iter_rows()
+                if c is not None
+            }
+        last_yield = Decimal(0)
+
+        enriched = self.pipeline.precompute_indicators(bars)
+        trading_days = self.pipeline.trading_days(enriched, start, end)
+        if not trading_days:
+            raise ValueError("対象期間に取引日がありません")
+
+        indexed = self.pipeline.index_by_date(enriched)
+        lookup = self.pipeline.lookup
+
+        result = BacktestResult(initial_equity=self.broker.equity)
+
+        previous: dt.date | None = None
+        for index, today in enumerate(trading_days):
+            # 0) 待機資金の利息（前営業日からの暦日ぶん）
+            if yields:
+                last_yield = yields.get(today, last_yield)
+                if previous is not None:
+                    self.broker.accrue_interest(last_yield, (today - previous).days)
+            previous = today
+
+            # 1) 前日の注文を当日の寄付で約定させ、残ったものを失効させる。
+            #    失効を約定より先に行うと、注文が約定する機会を永遠に失う。
+            self.broker.begin_day()
+            fills = self.broker.settle(
+                lookup(indexed, today, "open"),
+                low_prices=lookup(indexed, today, "low"),
+            )
+            self.broker.expire_open_orders()
+            self.broker.mark(lookup(indexed, today, "close"))
+
+            # 2) 当日の終値までで判断する
+            record = self._decide(enriched, indexed, today, index, fills)
+            result.records.append(record)
+            result.fills.extend(fills)
+
+        result.final_equity = self.broker.equity
+        log.info("バックテスト完了", **{k: str(v) for k, v in result.summary().items()})
+        return result
+
+    # -- 内部 ---------------------------------------------------------------
+
+    def _decide(
+        self,
+        bars: dict[str, pl.DataFrame],
+        indexed: BarIndex,
+        today: dt.date,
+        index: int,
+        fills: list[Fill],
+    ) -> DayRecord:
+        account = AccountSnapshot(
+            positions=self.broker.positions_by_symbol(),
+            balance=self.broker.get_balance(),
+            open_orders=self.broker.get_open_orders(),
+            bought_today=self.broker.bought_today,
+        )
+        plan = self.pipeline.decide(bars, indexed, today, account, order_id_seed=f"bt-{index}")
+
+        for stale in plan.cancel:
+            self.broker.cancel(stale.client_order_id)
+
+        rejected = dict(plan.rejected)
+        placed = []
+        for request in plan.place:
+            try:
+                self.broker.place(request)
+                placed.append(request.client_order_id)
+            except Exception as exc:
+                rejected[request.symbol] = str(exc)
+
+        return DayRecord(
+            date=today,
+            equity=account.equity,
+            cash=account.balance.cash_balance,
+            signals=plan.signals,
+            combined=plan.combined,
+            targets={t.symbol: t.quantity for t in plan.targets},
+            orders=placed,
+            fills=fills,
+            rejected=rejected,
+        )

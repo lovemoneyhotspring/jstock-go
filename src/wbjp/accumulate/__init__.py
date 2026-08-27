@@ -22,7 +22,16 @@
                           monthly_budget=config.monthly_budget)
 """
 
-from wbjp.accumulate.config import AccumulateConfig, TacticEntry, load
+from wbjp.accumulate.basket import (
+    BasketResult,
+    BasketSettings,
+    DrawdownTilt,
+    WeightSchedule,
+    build_basket_plan,
+    simulate_basket,
+    xirr,
+)
+from wbjp.accumulate.config import AccumulateConfig, BasketEntry, TacticEntry, load
 from wbjp.accumulate.plan import PLAN_COLUMNS, AccumulationSettings, build_plan
 from wbjp.accumulate.registry import available, create, get, register
 from wbjp.accumulate.simulate import AccumulationResult, simulate
@@ -41,20 +50,28 @@ __all__ = [
     "AccumulateConfig",
     "AccumulationResult",
     "AccumulationSettings",
+    "BasketEntry",
+    "BasketResult",
+    "BasketSettings",
     "BearStack",
     "Constant",
     "DrawdownLadder",
+    "DrawdownTilt",
     "StackLadder",
     "Tactic",
     "TacticEntry",
     "TradingWindow",
+    "WeightSchedule",
     "available",
     "bear_stack",
+    "build_basket_plan",
     "build_plan",
     "create",
     "get",
     "load",
     "register",
     "simulate",
+    "simulate_basket",
     "stack_score",
+    "xirr",
 ]

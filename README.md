@@ -109,6 +109,25 @@ uv run wbjp backtest --config-dir config/us-momentum --from 2023-09-01
 
 > 押し目買いの検証では、戦略の手仕舞い自体は勝率 90% で機能した一方、タイトな損切りと時間切れが利益を刈っていた（出口の非対称性）。モメンタムはその逆で、出口を広く取って勝ちを伸ばす。
 
+### ロス・キャメロン流モメンタム（`ross_cameron`、`config/us-cameron/`）
+
+Warrior Trading のロス・キャメロンの手法（Gap & Go / マイクロプルバック、9EMA トレーリング、損益比 2:1）を**日足のスイングに翻訳**したもの。本家は分足のデイトレードなので、翻訳の対応表と条件の一覧は [ross_cameron.py](src/wbjp/strategy/samples/ross_cameron.py) の冒頭にまとめてある。
+
+```bash
+uv run wbjp data sync --config-dir config/us-cameron --days 400
+uv run wbjp screen   --config-dir config/us-cameron
+uv run wbjp backtest --config-dir config/us-cameron --from 2019-01-01
+```
+
+| 入口 | 条件 |
+|---|---|
+| Gap & Go（材料日に乗る） | 始値が前日終値比 ≧ 3%、RVOL ≧ 2x、終値がレンジ上位 30% の陽線、直近 20 日高値を上抜け、終値 > EMA9 > EMA20 |
+| マイクロプルバック（材料日のあと） | 直近 5 日以内に材料日 → 1〜3 日の押し目（安値が EMA9 の上）→ 前日高値を出来高伴って陽線で抜ける |
+
+スコア = 0.35×RVOL + 0.30×ギャップ + 0.20×引け強度 + 0.15×ブレイク幅（ATR 単位）。出口は戦略側の終値 < EMA9 と、`[stops]` の -5% 初期ストップ／+1R 建値移動／+2R 半分利確／3 営業日で含み益なし。決算は本家にとって「材料」なのでブラックアウトは既定で無効。
+
+> 戦略は名前で呼び分ける。`config/<dir>/strategies.toml` の `name` を変えれば、既存の戦略を上書きせずに別の手法を試せる（`wbjp.strategy.registry.available()` で一覧）。
+
 > **UAT で未確認の点**: 米国株の発注ペイロード（`trade_currency` / `extended_hours_trading` / `support_trading_session` の値）と、Webull 市場データ API の応答形式は SDK と公開ドキュメントから組んであり、実機での疎通確認がまだ。最初は必ず `WBJP_ENV=uat` の dry-run で `wbjp account` と `wbjp run` を通し、ログの発注ペイロードを確認すること。
 
 ---
@@ -234,6 +253,10 @@ WBJP_ENV=uat uv run wbjp run --live
 
 # バックテスト
 uv run wbjp backtest --from 2023-01-01 --to 2026-06-30
+# 約定を Backtrader（Cerebro/Broker）に任せた第2エンジンで突き合わせる。
+# 判断ロジックは同一なので、成行なら自前エンジンと約定が一致するはず。
+# 差が出たらどちらかの約定モデルにバグがある（指値だけは判定基準が違うので差が出る）
+uv run wbjp backtest --from 2023-01-01 --to 2026-06-30 --engine backtrader
 
 # 本番（--live なしは常に dry-run）
 WBJP_ENV=prod uv run wbjp run
@@ -308,11 +331,12 @@ src/wbjp/
 | `indicators/ohlcv.py` | `diff()` の先頭 null は `pl.when` で明示的に通す。0 に化けると Wilder 平滑化の種が汚れて TA-Lib と値がずれる |
 | `engine/backtest.py` | 指標は全期間で一度だけ計算する（指標が因果的なので等価）。毎日再計算すると約50倍遅い |
 | `broker/paper.py` | 注文の失効は**約定処理のあと**。先に失効させると注文が一度も約定しない |
+| `engine/bt_engine.py` | Backtrader の DAY 注文は日足だと翌バーの前に失効して一度も約定しないため、GTC で出して橋渡し側が翌日に取り消す。指値はバー内の高安で約定判定される（PaperBroker は寄付だけ）ので、突き合わせは成行で行う |
 
 ## 開発
 
 ```bash
-uv run pytest              # 375件（ネットワークを使うものは既定でスキップ）
+uv run pytest              # 457件（ネットワークを使うものは既定でスキップ）
 uv run pytest -m network   # yfinance 実接続
 uv run ruff check .
 uv run mypy                # strict

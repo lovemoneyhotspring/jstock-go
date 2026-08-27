@@ -175,7 +175,11 @@ class EqualWeightSizer(PositionSizer):
         if price is None:
             return Decimal(0)
         budget = ctx.equity / Decimal(self.config.max_positions)
-        return budget / price
+        # 評価額ベースの予算は、含み益があると現金を超える。最後の 1 枠が
+        # 「買付余力不足」で毎回弾かれ、資金が遊んだまま止まる（実測で 7 年に
+        # 900 件超）。手数料の余裕を残して買付余力に収める。
+        budget = min(budget, ctx.buying_power * Decimal("0.99"))
+        return max(budget, Decimal(0)) / price
 
 
 class FixedNotionalSizer(PositionSizer):

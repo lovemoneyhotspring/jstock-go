@@ -215,6 +215,18 @@ class PaperBroker(Broker):
         """時価を更新する。評価額の計算に使う。"""
         self._marks.update(prices)
 
+    def accrue_interest(self, annual_rate: Decimal, days: int = 1) -> Decimal:
+        """待機資金に利息を付ける（短期国債・MMF に置いた想定）。
+
+        ``annual_rate`` は年率（0.05 = 5%）。日割りは 360 日（T-Bill の慣行）。
+        返り値は付いた利息。
+        """
+        if annual_rate <= 0 or self._cash <= 0:
+            return Decimal(0)
+        interest = (self._cash * annual_rate * days / 360).quantize(self._cent)
+        self._cash += interest
+        return interest
+
     def begin_day(self) -> None:
         """新しい取引日を開始する。差金決済の判定に使う当日買付を空にする。
 

@@ -28,6 +28,8 @@ dependencies = [
     "structlog>=24.4",
     "typer>=0.15",
     "tenacity>=9.0",
+    "backtrader>=1.9.78.123",
+    "pandas>=2.2",
 ]
 
 [project.scripts]
@@ -73,13 +75,17 @@ mypy_path = "src"
 strict = true
 # SDK は型情報を持たないため
 [[tool.mypy.overrides]]
-module = ["webull.*", "yfinance.*", "duckdb.*", "keyring.*"]
+module = ["webull.*", "yfinance.*", "duckdb.*", "keyring.*", "backtrader.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q -m 'not network'"  # 既定ではネットワークを使わない
+filterwarnings = [
+    # backtrader の docstring にある未エスケープの \* （こちらでは直せない）
+    "ignore:.*invalid escape sequence.*:SyntaxWarning:backtrader.*",
+]
 markers = [
     "network: 外部ネットワークに接続するテスト（既定でスキップ）",
     "uat: Webull UAT 環境に接続するテスト",

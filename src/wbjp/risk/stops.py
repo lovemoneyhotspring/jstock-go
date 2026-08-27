@@ -64,6 +64,8 @@ class Stop:
     created_on: dt.date
     trailing: bool = False
     atr_multiple: Decimal = Decimal("2.0")
+    #: 設定されていれば ATR ではなく「最高終値 × (1 − 比率)」で追従する（%トレーリング）
+    trailing_pct: Decimal | None = None
     highest_close: Decimal | None = None
     #: 設定時の初期ストップ。1R（初期リスク）の基準として、ストップを
     #: 動かした後も変わらない。None は旧レコード（stop_price を初期値とみなす）。
@@ -139,6 +141,8 @@ class StopBook:
         atr_multiple: Decimal = Decimal("2.0"),
         trailing: bool = False,
         initial_stop_pct: Decimal | None = None,
+        trailing_atr_multiple: Decimal | None = None,
+        trailing_pct: Decimal | None = None,
     ) -> None:
         """建玉に対してストップを用意し、消えた建玉のぶんを片付ける。
 
@@ -149,6 +153,8 @@ class StopBook:
             initial_stop_pct: 建値からの比率でストップ幅を固定する
                 （例: ``Decimal("0.04")`` = -4%）。指定すれば ATR は使わない。
                 None なら従来通り ATR × ``atr_multiple`` を幅にする。
+            trailing_atr_multiple: トレーリング時の幅（ATR 倍率）。None なら
+                ``atr_multiple`` と同じ。
         """
         for symbol, position in positions.items():
             if position.quantity <= 0 or symbol in self._stops:
@@ -174,7 +180,8 @@ class StopBook:
                     entry_price=position.cost_price,
                     created_on=today,
                     trailing=trailing,
-                    atr_multiple=atr_multiple,
+                    atr_multiple=trailing_atr_multiple or atr_multiple,
+                    trailing_pct=trailing_pct,
                     highest_close=position.last_price,
                     initial_stop_price=stop_price,
                     initial_quantity=position.quantity,
@@ -198,12 +205,16 @@ class StopBook:
                 continue
 
             close = closes.get(symbol)
-            distance = atr.get(symbol)
-            if close is None or distance is None or distance <= 0:
+            if close is None:
                 continue
-
             highest = max(stop.highest_close or close, close)
-            candidate = highest - distance * stop.atr_multiple
+            if stop.trailing_pct is not None:
+                candidate = highest * (1 - stop.trailing_pct)
+            else:
+                distance = atr.get(symbol)
+                if distance is None or distance <= 0:
+                    continue
+                candidate = highest - distance * stop.atr_multiple
 
             if candidate > stop.stop_price:
                 self._stops[symbol] = replace(stop, stop_price=candidate, highest_close=highest)
@@ -376,8 +387,13 @@ class StopBook:
         closes: dict[str, Decimal],
         quantities: dict[str, Decimal],
         trend_values: dict[str, Decimal],
+        *,
+        always: bool = False,
     ) -> list[TargetPosition]:
         """2段階利確の2段目: 利確済みの建玉を、トレンド追従で保有し続ける。
+
+        ``always=True`` なら利確前の建玉にも適用し、移動平均割れそのものを
+        利確・損切りの合図にする（短い移動平均で頂点近くで降りる検証用）。
 
         対象は :meth:`take_profit_targets` で既に一部を利確した建玉だけ。
         利確前の建玉は初期ストップ・建値ストップ・時間切れが担当する
@@ -392,7 +408,7 @@ class StopBook:
         """
         targets = []
         for symbol, stop in self._stops.items():
-            if not stop.scaled_out:
+            if not stop.scaled_out and not always:
                 continue
             close = closes.get(symbol)
             current_qty = quantities.get(symbol)

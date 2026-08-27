@@ -11,7 +11,7 @@ import datetime as dt
 import sys
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from zoneinfo import ZoneInfo
 
 import typer
@@ -31,6 +31,10 @@ from wbjp.config import (
 from wbjp.config import Credentials as Creds
 from wbjp.data.provider import MarketDataProvider
 from wbjp.logging import configure_logging, get_logger, register_secret
+
+if TYPE_CHECKING:
+    from wbjp.engine.backtest import BacktestRunner
+    from wbjp.engine.bt_engine import BacktraderRunner
 
 app = typer.Typer(
     help="Webull証券 日本株 自動売買システム",
@@ -355,11 +359,25 @@ def backtest(
         int | None, typer.Option(help="初期資金（口座通貨。既定は円300万/ドル3万）")
     ] = None,
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+    engine: Annotated[
+        str,
+        typer.Option(
+            help="約定エンジン: native（自前の PaperBroker）/ backtrader（Cerebro で約定）"
+        ),
+    ] = "native",
 ) -> None:
-    """保存済みの足でバックテストする。"""
+    """保存済みの足でバックテストする。
+
+    判断ロジックはどちらのエンジンでも同一。--engine backtrader は約定と
+    口座管理を Backtrader に任せ、自前エンジンとの突き合わせに使う。
+    """
     from wbjp.data.store import BarStore
     from wbjp.engine.backtest import BacktestRunner
     from wbjp.strategy.registry import build_all
+
+    if engine not in {"native", "backtrader"}:
+        console.print(f"[red]--engine は native か backtrader: {engine}[/red]")
+        raise typer.Exit(2)
 
     config = _load(config_dir)
     store = BarStore(config.settings.bars_dir)
@@ -372,26 +390,144 @@ def backtest(
 
     if cash is None:
         cash = 3_000_000 if config.file.universe.market.value == "JP" else 30_000
-    runner = BacktestRunner(
-        build_all(config.file.strategies.enabled), config.file, initial_cash=Decimal(cash)
-    )
+    strategies = build_all(config.file.strategies.enabled)
+    runner: BacktestRunner | BacktraderRunner
+    if engine == "backtrader":
+        from wbjp.engine.bt_engine import BacktraderRunner
+
+        runner = BacktraderRunner(strategies, config.file, initial_cash=Decimal(cash))
+    else:
+        runner = BacktestRunner(strategies, config.file, initial_cash=Decimal(cash))
+    cash_yield = None
+    yield_symbol = config.file.regime.cash_yield_symbol
+    if yield_symbol and engine == "native":
+        cash_yield = store.read(yield_symbol)
+        if cash_yield.height == 0:
+            console.print(
+                f"[yellow]待機資金の利回り {yield_symbol} の足がありません。無利息で続けます[/yellow]"
+            )
+            cash_yield = None
     result = runner.run(
         bars,
         start=dt.date.fromisoformat(from_),
         end=dt.date.fromisoformat(to) if to else None,
+        **({"cash_yield": cash_yield} if engine == "native" else {}),
     )
 
-    table = Table(title="バックテスト結果", title_justify="left")
+    table = Table(title=f"バックテスト結果 ({engine})", title_justify="left")
     table.add_column("項目")
     table.add_column("値", justify="right")
     for key, value in result.summary().items():
         table.add_row(str(key), str(value))
+    for key, value in result.analysis.items():
+        table.add_row(str(key), str(value))
     console.print(table)
 
+    if engine == "backtrader" and config.file.execution.order_type == "limit":
+        console.print(
+            "\n[yellow]※ 指値は Backtrader がバー内の高安で約定判定するため、"
+            "自前エンジン（寄付だけで判定）より約定しやすく、結果は一致しません。"
+            '突き合わせには execution.order_type = "market" を使ってください[/yellow]'
+        )
     console.print(
         "\n[dim]※ 過去の成績は将来を保証しません。"
         "少数銘柄・短期間の結果は特に当てになりません[/dim]"
     )
+
+
+@app.command()
+def quality(
+    candidates: Annotated[
+        Path | None, typer.Option(help="候補ティッカーのファイル（1行1銘柄）。省略時はユニバース")
+    ] = None,
+    out: Annotated[Path | None, typer.Option(help="合格銘柄を書き出す universe ファイル")] = None,
+    refresh: Annotated[bool, typer.Option("--refresh", help="財務データを取り直す")] = False,
+    relaxed: Annotated[
+        bool, typer.Option("--relaxed", help="緩めの閾値（30〜50 銘柄に収める）")
+    ] = False,
+    show_failed: Annotated[
+        bool, typer.Option("--show-failed", help="不合格も理由付きで表示")
+    ] = False,
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+) -> None:
+    """財務の質（ROE・粗利率・負債・FCF）で母集団を絞る（バフェット流スクリーニング）。
+
+    yfinance の年次財務（直近 4 期）で判定する。過去時点の財務は取れないため、
+    書き出した母集団でバックテストすると **今日の情報で過去を選ぶ** 生存者バイアスが乗る。
+    """
+    from wbjp.config import read_symbols_file
+    from wbjp.data.fundamentals import FundamentalsStore, QualityThresholds, evaluate
+
+    config = load_config(config_dir)
+    symbols = read_symbols_file(candidates) if candidates else list(config.file.universe.symbols)
+    symbols = [
+        s for s in dict.fromkeys(symbols) if not s.startswith("^") and s not in ("SPY", "QQQ")
+    ]
+    store = FundamentalsStore(config.settings.data_dir / "fundamentals")
+    thresholds = QualityThresholds.relaxed() if relaxed else QualityThresholds()
+
+    reports = []
+    with console.status(f"財務データを取得中（{len(symbols)} 銘柄）"):
+        for symbol in symbols:
+            data = store.get(symbol, refresh=refresh)
+            if data is None:
+                continue
+            reports.append(evaluate(data, thresholds))
+
+    passed = [r for r in reports if r.passed]
+    table = Table(
+        title=f"質のスクリーニング: 合格 {len(passed)} / {len(reports)}", title_justify="left"
+    )
+    for column in (
+        "銘柄",
+        "ROE最小",
+        "粗利最小",
+        "営業利益率",
+        "D/E",
+        "利払余力",
+        "FCF/NI",
+        "FCF成長",
+    ):
+        table.add_column(column, justify="right" if column != "銘柄" else "left")
+    if show_failed:
+        table.add_column("不合格の理由")
+
+    def fmt(m: dict[str, float], key: str, pct: bool = True) -> str:
+        v = m.get(key)
+        if v is None:
+            return "—"
+        if v == float("inf"):
+            return "∞"
+        return f"{v:.0%}" if pct else f"{v:.1f}"
+
+    for r in sorted(reports, key=lambda r: (not r.passed, r.symbol)):
+        if not r.passed and not show_failed:
+            continue
+        row = [
+            r.symbol if r.passed else f"[dim]{r.symbol}[/dim]",
+            fmt(r.metrics, "roe_min"),
+            fmt(r.metrics, "gross_margin_min"),
+            fmt(r.metrics, "operating_margin"),
+            fmt(r.metrics, "debt_to_equity", pct=False),
+            fmt(r.metrics, "interest_coverage", pct=False),
+            fmt(r.metrics, "fcf_to_net_income", pct=False),
+            fmt(r.metrics, "fcf_growth"),
+        ]
+        if show_failed:
+            row.append("; ".join(r.failed))
+        table.add_row(*row)
+    console.print(table)
+
+    if out:
+        lines = [
+            "# 財務の質で絞った母集団（`wbjp quality` が生成）。",
+            f"# 生成日 {dt.date.today()}。閾値: {thresholds}",
+            "# 注意: 今日の財務で選んでいるため、過去のバックテストには生存者バイアスが乗る。",
+            "SPY",
+            *[r.symbol for r in passed],
+        ]
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        console.print(f"\n{len(passed)} 銘柄 ＋ SPY を {out} に書き出しました")
 
 
 @app.command()
@@ -590,9 +726,15 @@ def data_sync(
     store = BarStore(config.settings.bars_dir)
     end = dt.date.today()
 
+    symbols = list(config.file.universe.symbols)
+    # レジーム判定の指数と待機資金の利回り系列も一緒に取る
+    if config.file.regime.enabled:
+        for extra in (config.file.regime.benchmark, config.file.regime.cash_yield_symbol):
+            if extra and extra not in symbols:
+                symbols.append(extra)
     counts = store.sync(
         _build_provider(config),
-        config.file.universe.symbols,
+        symbols,
         end - dt.timedelta(days=days),
         end,
         force=force,
@@ -633,7 +775,7 @@ _ConfigDir = Annotated[Path | None, typer.Option(help="設定ディレクトリ"
 
 def _yen(value: float) -> str:
     """桁が大きい金額は万円に丸める。80桁の端末で表が潰れるのを避ける。"""
-    if abs(value) >= 1_000_000:
+    if abs(value) >= 100_000:
         return f"{value / 10_000:,.0f}万"
     return f"{value:,.0f}"
 
@@ -732,7 +874,18 @@ def accumulate_sync(
     # ティッカー変換が市場ごとに違う（1305→1305.T / VOO→VOO）ので分けて取る。
     # 積立は売買と違い市場をまたぐのが普通なので、universe.market は見ない。
     counts: dict[str, int] = {}
-    for market, symbols in config.symbols_by_market().items():
+    grouped = config.symbols_by_market()
+    # バスケットの構成銘柄（13F なら過去に登場した全銘柄）と基準銘柄も取る
+    for entry in config.active_baskets:
+        try:
+            symbols = _basket_schedule(entry, config_dir).symbols
+        except (ValueError, FileNotFoundError) as exc:
+            console.print(f"[yellow]{entry.id}: {exc}[/yellow]")
+            symbols = list(entry.weights)
+        if entry.benchmark:
+            symbols.append(entry.benchmark)
+        grouped[entry.market] = sorted(set(grouped.get(entry.market, [])) | set(symbols))
+    for market, symbols in grouped.items():
         provider = YFinanceProvider(market=market)
         counts.update(store.sync(provider, symbols, start, end, force=force))
     for symbol, count in sorted(counts.items()):
@@ -859,6 +1012,144 @@ def accumulate_backtest(
         "※ 対照群＝同じ総投入額を毎月均等に投じた場合。マイナスなら安く買えた。\n"
         "　 増額分の原資は新規資金（賞与など）を前提としている。積立予算を取り置いて\n"
         "　 作ると待機が生じ、増額の利益を打ち消す。[/dim]"
+    )
+
+
+@accumulate_app.command("sync-13f")
+def accumulate_sync_13f(config_dir: _ConfigDir = None) -> None:
+    """バスケットが参照する 13F（機関投資家の保有報告）を EDGAR から取る。"""
+    from wbjp.data.edgar_13f import Edgar13F
+
+    config = _load_accumulate(config_dir)
+    settings = load_config(config_dir).settings
+    ciks = sorted({b.cik for b in config.active_baskets if b.source == "13f"})
+    if not ciks:
+        console.print("[yellow]13F を使うバスケットがありません[/yellow]")
+        return
+    for cik in ciks:
+        client = Edgar13F(cik, settings.data_dir / "13f", _edgar_user_agent())
+        frame = client.sync()
+        periods = frame["period"].n_unique()
+        console.print(
+            f"  CIK {cik}: {periods} 四半期、{frame.height} 行 "
+            f"({frame['period'].min()} 〜 {frame['period'].max()}) → {client.holdings_path}"
+        )
+
+
+def _edgar_user_agent() -> str:
+    """SEC が要求する連絡先入りの User-Agent。環境変数で上書きできる。"""
+    import os
+
+    return os.environ.get("WBJP_EDGAR_USER_AGENT", "wbjp research m.feat.ta@gmail.com")
+
+
+def _basket_schedule(entry, config_dir: Path | None):  # type: ignore[no-untyped-def]
+    """バスケットの配分表を組み立てる。13F は保存済みの保有一覧から作る。"""
+    from wbjp.data.edgar_13f import Edgar13F, load_cusip_map, weight_schedule
+
+    if entry.source != "13f":
+        return entry.build_schedule()
+    settings = load_config(config_dir).settings
+    holdings = Edgar13F(entry.cik, settings.data_dir / "13f", _edgar_user_agent()).load()
+    if holdings.height == 0:
+        return entry.build_schedule(None)
+    pairs = weight_schedule(holdings, load_cusip_map(settings.config_dir), top=entry.top)
+    return entry.build_schedule(pairs)
+
+
+@accumulate_app.command("basket")
+def accumulate_basket(
+    from_: Annotated[str | None, typer.Option("--from", help="開始日 YYYY-MM-DD")] = None,
+    to: Annotated[str | None, typer.Option("--to", help="終了日 YYYY-MM-DD")] = None,
+    show_weights: Annotated[
+        bool, typer.Option("--weights", help="いま有効な配分を表示する")
+    ] = False,
+    config_dir: _ConfigDir = None,
+) -> None:
+    """バスケット（複数銘柄への配分）で積み立てた結果を基準銘柄と比べる。
+
+    足は ``wbjp accumulate sync``、13F は ``wbjp accumulate sync-13f`` で先に取る。
+    """
+    import polars as pl
+
+    from wbjp.accumulate import BasketSettings, build_basket_plan, simulate_basket
+
+    config = _load_accumulate(config_dir, allow_overlap=True)
+    if not config.active_baskets:
+        console.print("[yellow]有効なバスケットがありません[/yellow]")
+        raise typer.Exit(1)
+    start = dt.date.fromisoformat(from_) if from_ else None
+    end = dt.date.fromisoformat(to) if to else None
+
+    table = Table(title="バスケット積立（万円）", title_justify="left")
+    table.add_column("id")
+    table.add_column("開始")
+    for column in ("投入", "期末", "XIRR", "DD", "基準期末", "基準XIRR", "基準DD"):
+        table.add_column(column, justify="right")
+
+    for entry in config.active_baskets:
+        try:
+            schedule = _basket_schedule(entry, config_dir)
+        except (ValueError, FileNotFoundError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            continue
+        symbols = schedule.symbols
+        needed = symbols + ([entry.benchmark] if entry.benchmark else [])
+        bars = _accumulate_bars(config_dir, needed)
+        if start or end:
+            bars = {
+                s: f.filter(
+                    (pl.col("date") >= (start or dt.date.min))
+                    & (pl.col("date") <= (end or dt.date.max))
+                )
+                for s, f in bars.items()
+            }
+        benchmark = bars.pop(entry.benchmark, None) if entry.benchmark else None
+        if entry.benchmark and benchmark is not None and entry.benchmark in symbols:
+            bars[entry.benchmark] = benchmark  # 基準が構成銘柄でもある場合（VOO単独など）
+        bars = {s: f for s, f in bars.items() if s in symbols and f.height > 0}
+        if not bars:
+            continue
+
+        if show_weights:
+            latest = schedule.at(dt.date.today())
+            console.print(
+                f"[bold]{entry.id}[/bold] いま有効な配分: "
+                + ", ".join(f"{s} {w:.1%}" for s, w in sorted(latest.items(), key=lambda x: -x[1]))
+            )
+
+        settings = BasketSettings(
+            entry.monthly_budget or config.monthly_budget,
+            schedule,
+            entry.build_tactic(),
+            entry.build_tilt(),
+        )
+        try:
+            result = simulate_basket(bars, build_basket_plan(bars, settings), benchmark=benchmark)
+        except ValueError as exc:
+            console.print(f"[yellow]{entry.id}: {exc}[/yellow]")
+            continue
+        b, bm = result.basket, result.benchmark
+        better = bm is None or b.xirr >= bm.xirr
+        table.add_row(
+            entry.id,
+            f"{result.start:%Y-%m}",
+            _yen(float(b.contributed)),
+            _yen(b.terminal_value),
+            f"[green]{b.xirr:+.1%}[/green]" if better else f"[red]{b.xirr:+.1%}[/red]",
+            f"{b.max_drawdown:.0%}",
+            _yen(bm.terminal_value) if bm else "—",
+            f"{bm.xirr:+.1%}" if bm else "—",
+            f"{bm.max_drawdown:.0%}" if bm else "—",
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[dim]※ 終了 {result.end}。基準＝同じ日に同じ額を benchmark に投じた場合。"
+        "XIRR は年率の内部収益率。\n"
+        "※ 最大DD は時間加重の評価額指数から。投下額の増減による見かけの変動は含まない。\n"
+        "※ 13F の配分は提出日の翌営業日から反映。買収・上場廃止で足の無い銘柄は除いて\n"
+        "　 正規化しており、成績はやや控えめに出る（買収は通常プレミアム付き）。[/dim]"
     )
 
 

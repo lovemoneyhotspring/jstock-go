@@ -24,6 +24,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from wbjp.accumulate.basket import DrawdownTilt, WeightSchedule
 from wbjp.accumulate.registry import create
 from wbjp.accumulate.tactics import Tactic
 from wbjp.domain.models import Market
@@ -88,10 +89,17 @@ class AccumulateConfig(BaseModel):
     """1銘柄あたりの毎月の基本予算（円）。比較の前提を揃えるため全戦術で共通。"""
 
     tactics: list[TacticEntry] = Field(default_factory=list)
+    baskets: list[BasketEntry] = Field(default_factory=list)
+    """複数銘柄への配分。戦術と違い1銘柄が複数のバスケットに現れてもよい
+    （バスケットは比較検証が主用途で、実発注は id を指定して行う）。"""
 
     @property
     def active(self) -> list[TacticEntry]:
         return [t for t in self.tactics if t.enabled]
+
+    @property
+    def active_baskets(self) -> list[BasketEntry]:
+        return [b for b in self.baskets if b.enabled]
 
     def validate_assignment(self, *, allow_overlap: bool = False) -> None:
         """id の重複と、1銘柄への複数割り当てを検出する。
@@ -100,7 +108,7 @@ class AccumulateConfig(BaseModel):
             ValueError: id が重複、または ``allow_overlap`` が False のときに
                 同じ銘柄が複数の戦術に現れた場合。
         """
-        ids = [t.id for t in self.tactics]
+        ids = [t.id for t in self.tactics] + [b.id for b in self.baskets]
         dup_ids = sorted({i for i in ids if ids.count(i) > 1})
         if dup_ids:
             raise ValueError(f"id が重複しています: {dup_ids}")
@@ -164,3 +172,93 @@ def load(
     config = AccumulateConfig.model_validate(raw)
     config.validate_assignment(allow_overlap=allow_overlap)
     return config
+
+
+# -- バスケット ---------------------------------------------------------
+
+
+class BasketEntry(BaseModel):
+    """複数銘柄への配分（:mod:`wbjp.accumulate.basket`）。
+
+    Attributes:
+        id: 表の行名。
+        source: ``"static"`` は ``weights`` をそのまま使う。``"13f"`` は
+            EDGAR の 13F（``cik`` の運用会社）から四半期ごとの比率を作る。
+        weights: ``source = "static"`` の配分。``13f`` のときはコア（固定部分）
+            として使い、``satellite_share`` の残りをこれに振る。
+        cik: 13F を取る運用会社。既定はバークシャー。
+        top: 13F の上位何銘柄を採るか。
+        satellite_share: 13F 部分の比率。``weights`` が空なら 1。
+        benchmark: 同じ資金の流れを投じて比較する銘柄。
+        monthly_budget: バスケット全体の毎月の予算。省略時は共通設定。
+        tactic: 各銘柄に掛ける倍率戦術と、その固有パラメータ。
+        tilt_strength: 高値からの下落率に応じて配分を寄せる強さ。0 なら無効。
+        tilt_lookback: 下落率を測る高値の期間（足の本数）。
+    """
+
+    model_config = {"extra": "allow"}
+
+    id: str
+    source: str = "static"
+    weights: dict[str, float] = Field(default_factory=dict)
+    cik: str = "0001067983"
+    top: int = Field(default=15, ge=1)
+    satellite_share: float = Field(default=1.0, gt=0, le=1)
+    benchmark: str | None = "VOO"
+    monthly_budget: Decimal | None = None
+    tactic: str = "constant"
+    tilt_strength: float = Field(default=0.0, ge=0)
+    tilt_lookback: int = Field(default=252, ge=2)
+    enabled: bool = True
+    market: Market = Market.US
+
+    def build_tilt(self) -> DrawdownTilt | None:
+        if self.tilt_strength <= 0:
+            return None
+        return DrawdownTilt(self.tilt_strength, self.tilt_lookback)
+
+    @field_validator("source")
+    @classmethod
+    def _source(cls, value: str) -> str:
+        if value not in ("static", "13f"):
+            raise ValueError(f"source は static か 13f: {value!r}")
+        return value
+
+    @field_validator("weights")
+    @classmethod
+    def _weights(cls, value: dict[str, float]) -> dict[str, float]:
+        bad = {k: v for k, v in value.items() if v <= 0}
+        if bad:
+            raise ValueError(f"比率は正の値: {bad}")
+        return value
+
+    @property
+    def params(self) -> dict[str, Any]:
+        extra = self.__pydantic_extra__ or {}
+        return {k: v for k, v in extra.items() if k not in _BASKET_RESERVED}
+
+    def build_tactic(self) -> Tactic:
+        try:
+            return create(self.tactic, self.params)
+        except ValueError as exc:
+            raise ValueError(f"[{self.id}] {exc}") from None
+
+    def build_schedule(
+        self, schedule_13f: list[tuple[Any, dict[str, float]]] | None = None
+    ) -> WeightSchedule:
+        """配分表を組み立てる。``13f`` のときは取得済みの比率列を渡す。"""
+        if self.source == "static":
+            if not self.weights:
+                raise ValueError(f"[{self.id}] static には weights が必要です")
+            return WeightSchedule.static(self.weights)
+        if not schedule_13f:
+            raise ValueError(
+                f"[{self.id}] 13F の保有一覧がありません（`wbjp accumulate sync-13f` を実行）"
+            )
+        schedule = WeightSchedule.from_pairs(schedule_13f)
+        if self.weights:
+            return schedule.blend(self.weights, self.satellite_share)
+        return schedule
+
+
+_BASKET_RESERVED = frozenset(BasketEntry.model_fields)

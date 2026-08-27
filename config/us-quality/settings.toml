@@ -1,0 +1,60 @@
+# wbjp の設定 — 「バフェット流スクリーニング × トレンド押し目スイング × レジーム制御」検証用。
+#
+#   uv run wbjp quality  --config-dir config/us-quality --candidates config/us-quality/candidates.txt --relaxed --out config/us-quality/universe.txt
+#   uv run wbjp data sync --config-dir config/us-quality --days 4400
+#   uv run wbjp backtest --config-dir config/us-quality --from 2015-09-01
+#
+# config/us との違い:
+#   - 母集団は財務の質（ROE・粗利率・負債・FCF）で絞った銘柄（第1層）
+#   - regime 節で SPY の位置により露出を 100/50/0% に切り替え、弱気は全手仕舞い（第2層）
+#   - 待機資金に ^IRX（13週 T-Bill）の利息を付ける（第4層）
+#   - 出口: 初期 1.5ATR、+3R で半分利確＋建値、残りは 4ATR 追従と 50日MA（第3層、格子探索の結果）
+
+[universe]
+market = "US"
+data_provider = "yfinance"
+symbols_file = "universe.txt"
+symbols = []
+
+[risk]
+kill_switch = false
+max_order_value = "50000"
+max_orders_per_day = 20
+max_daily_loss = "3000"
+max_position_weight = "0.25"
+max_gross_exposure = "1.0"
+max_preview_deviation = "0.02"
+
+[sizing]
+method = "atr_risk"
+risk_per_trade = "0.01"       # 1トレードの許容損失 = 総資産の 1%
+atr_stop_multiple = "1.5"     # 初期ストップ = 買値 − 1.5ATR
+fixed_notional = "3000"
+max_positions = 6             # 同時保有 4〜8 の中央
+
+[stops]
+# 2026-08-27 の出口格子探索の結果（docs/research/2026-08-buffett-quality-swing-regime.md 追記）。
+# 短い移動平均（5〜20日）で降りるほど悪化し、追従幅を広げるほど改善した。
+trailing = true
+trailing_atr_multiple = "4.0" # 最高値 − 4ATR（2.5 → 4.0 で CAGR 7% → 11%）
+breakeven_after_r = "3.0"
+take_profit_r = "3.0"         # +3R で半分利確（2R より伸ばす）
+take_profit_fraction = "0.5"
+trend_exit_sma = 50           # 残りは 50日MA 割れまで（20日は早すぎた）
+trend_exit_kind = "sma"
+trend_exit_always = false
+
+[regime]
+enabled = true
+benchmark = "SPY"
+sma_long = 200
+sma_mid = 50
+slope_lookback = 20
+exposure_bull = "1.0"
+exposure_caution = "0.5"
+exposure_bear = "0"
+cash_yield_symbol = "^IRX"
+
+[execution]
+order_type = "market"
+extended_hours = false
