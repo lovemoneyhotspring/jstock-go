@@ -28,7 +28,7 @@ def test_placed_order_is_remembered_across_instances(tmp_path: Path) -> None:
         ledger.record(_request(), "SUBMITTED", broker_order_id="B1")
     with Ledger(path) as ledger:
         assert ledger.was_placed("a" * 32)
-        assert ledger.recent()[0]["broker_order_id"] == "B1"
+        assert ledger.recent()[0].broker_order_id == "B1"
 
 
 def test_dry_run_does_not_block_the_real_order(tmp_path: Path) -> None:

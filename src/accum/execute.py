@@ -21,13 +21,16 @@ from decimal import Decimal
 import polars as pl
 
 from accum.config import AccumConfig
+from accum.ledger import Ledger
 from accum.plan import AccumulationSettings, build_plan
 from accum.tactics import Tactic
+from wbcore.broker.base import Broker
 from wbcore.clock import to_zone
 from wbcore.domain.market_rules import rules_for
 from wbcore.domain.models import (
     Market,
     OrderRequest,
+    OrderStatus,
     OrderType,
     Side,
     TaxAccountType,
@@ -219,6 +222,72 @@ def pending_contributions(
                 )
             )
     return Pending(out, stale)
+
+
+@dataclass(frozen=True, slots=True)
+class StatusChange:
+    """照会で分かった注文の変化。"""
+
+    client_order_id: str
+    symbol: str
+    before: str
+    after: OrderStatus
+    filled_quantity: Decimal
+    quantity: Decimal
+
+    @property
+    def lost_amount_ratio(self) -> Decimal:
+        """未約定のまま終わった割合（0 なら全部約定）。"""
+        if self.after not in {OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.EXPIRED}:
+            return Decimal(0)
+        if self.quantity <= 0:
+            return Decimal(1)
+        return (self.quantity - self.filled_quantity) / self.quantity
+
+    def describe(self) -> str:
+        if self.lost_amount_ratio == 0:
+            return (
+                f"{self.symbol}: {self.after.value}（{self.filled_quantity}/{self.quantity} 約定）"
+            )
+        return (
+            f"{self.symbol}: {self.after.value}（{self.filled_quantity}/{self.quantity} 約定、"
+            f"未約定 {self.lost_amount_ratio:.0%} は次回に持ち越し）"
+        )
+
+
+def sync_order_status(ledger: Ledger, broker_for: Callable[[Market], Broker]) -> list[StatusChange]:
+    """結果が確定していない注文をブローカーに照会し、台帳を更新する。
+
+    見つからない注文（ブローカー側に無い）は UNKNOWN のまま残す。
+    勝手に「失効」にすると、実は板に残っていた注文と二重になる。
+    """
+    changes: list[StatusChange] = []
+    for row in ledger.open_orders():
+        if row.market is None:
+            continue
+        order = broker_for(row.market).get_order(row.client_order_id)
+        if order is None:
+            continue
+        if order.status.value == row.status and order.filled_quantity == row.filled_quantity:
+            continue
+        ledger.update_status(
+            row.client_order_id,
+            order.status,
+            filled_quantity=order.filled_quantity,
+            avg_fill_price=order.avg_fill_price,
+            broker_order_id=order.broker_order_id,
+        )
+        changes.append(
+            StatusChange(
+                row.client_order_id,
+                row.symbol,
+                row.status,
+                order.status,
+                order.filled_quantity,
+                order.quantity,
+            )
+        )
+    return changes
 
 
 def to_order(

@@ -361,7 +361,7 @@ def run(
     既定は dry-run。実発注には --live が必要で、本番では WBJP_ENV=prod も
     同時に必要。cron から回すときは --yes も付ける。
     """
-    from accum.execute import build_orders, pending_contributions
+    from accum.execute import build_orders, pending_contributions, sync_order_status
     from accum.ledger import DRY_RUN_STATUS, Ledger
     from wbcore.broker.base import Broker, BrokerError
     from wbcore.broker.registry import connect
@@ -375,6 +375,39 @@ def run(
     bars = _bars(settings, config.all_symbols)
     now = now_utc()
     ledger = Ledger(settings.data_dir / f"accum-{settings.env.value}.db")
+
+    # 市場ごとにブローカーを1つ。積立は市場をまたぐのが普通。
+    brokers: dict[Market, Broker] = {}
+
+    def broker_for(market: Market) -> Broker:
+        if market not in brokers:
+            brokers[market] = connect(
+                config.execution.broker,
+                settings.env,
+                market=market,
+                tax_type=config.execution.tax_account_type,
+                extended_hours=config.execution.extended_hours,
+                notify=lambda message: console.print(f"[yellow]{message}[/yellow]"),
+            )
+        return brokers[market]
+
+    # 前回までに送った注文がどうなったかを先に確かめる。失効・拒否なら
+    # 「発注済み」から外れ、この後の差額の計算で自動的に埋め直される
+    if ledger.open_orders():
+        try:
+            changes = sync_order_status(ledger, broker_for)
+        except BrokerError as exc:
+            console.print(f"[yellow]注文の照会に失敗（前回の状態のまま続けます）: {exc}[/yellow]")
+            changes = []
+        lost = [c for c in changes if c.lost_amount_ratio > 0]
+        for change in changes:
+            style = "red" if change.lost_amount_ratio > 0 else "dim"
+            console.print(f"[{style}]前回の注文: {change.describe()}[/{style}]")
+        if lost:
+            alert(
+                f"積立: {len(lost)} 件の注文が未約定のまま終了",
+                "\n".join(c.describe() for c in lost),
+            )
     pending = pending_contributions(
         config,
         bars,
@@ -413,8 +446,6 @@ def run(
         if not typer.confirm("続行しますか?"):
             raise typer.Abort()
 
-    # 市場ごとにブローカーを1つ。積立は市場をまたぐのが普通。
-    brokers: dict[Market, Broker] = {}
     status: dict[str, str] = {}
     failures: list[str] = []
     try:
@@ -429,21 +460,17 @@ def run(
                 status[key] = "[dim]発注済み（冪等）[/dim]"
                 continue
             if not allowed:
-                ledger.record(item.request, DRY_RUN_STATUS, plan_month=c.month, amount=c.amount)
+                ledger.record(
+                    item.request,
+                    DRY_RUN_STATUS,
+                    plan_month=c.month,
+                    amount=c.amount,
+                    market=c.market,
+                )
                 status[key] = "[yellow]dry-run[/yellow]"
                 continue
-            broker = brokers.get(c.market)
-            if broker is None:
-                broker = connect(
-                    config.execution.broker,
-                    settings.env,
-                    market=c.market,
-                    tax_type=config.execution.tax_account_type,
-                    extended_hours=config.execution.extended_hours,
-                    notify=lambda message: console.print(f"[yellow]{message}[/yellow]"),
-                )
-                brokers[c.market] = broker
             try:
+                broker = broker_for(c.market)
                 # 発注前にブローカーの見積りと買付余力を突き合わせる。
                 # 余力不足で拒否されるより、こちらで止めて理由を残す方が追える。
                 preview = broker.preview(item.request)
@@ -466,6 +493,7 @@ def run(
                     ack.broker_order_id,
                     plan_month=c.month,
                     amount=c.amount,
+                    market=c.market,
                 )
                 status[key] = "[green]発注[/green]"
     finally:
@@ -497,6 +525,94 @@ def run(
             c.reason,
         )
     console.print(table)
+
+
+@app.command("orders")
+def orders(
+    limit: Annotated[int, typer.Option(help="表示件数")] = 20,
+    check: Annotated[
+        bool, typer.Option("--check", help="結果が確定していない注文をブローカーに照会して更新する")
+    ] = False,
+    config_dir: _ConfigDir = None,
+) -> None:
+    """送った注文とその約定状況（台帳）を表示する。
+
+    「発注済み」に数える額は、生きている注文と約定した分だけ。失効・拒否の
+    未約定分は数えず、次の `run` で差額として埋め直される。
+    """
+    from accum.execute import sync_order_status
+    from accum.ledger import Ledger
+    from wbcore.broker.base import Broker, BrokerError
+    from wbcore.broker.registry import connect
+    from wbcore.clock import fmt_iso
+    from wbcore.domain.models import Market
+
+    settings = AppSettings()
+    config = _load(config_dir, allow_overlap=True)
+    ledger = Ledger(settings.data_dir / f"accum-{settings.env.value}.db")
+    try:
+        if check:
+            brokers: dict[Market, Broker] = {}
+
+            def broker_for(market: Market) -> Broker:
+                if market not in brokers:
+                    brokers[market] = connect(
+                        config.execution.broker,
+                        settings.env,
+                        market=market,
+                        tax_type=config.execution.tax_account_type,
+                        notify=lambda message: console.print(f"[yellow]{message}[/yellow]"),
+                    )
+                return brokers[market]
+
+            try:
+                for change in sync_order_status(ledger, broker_for):
+                    console.print(f"更新: {change.describe()}")
+            except BrokerError as exc:
+                console.print(f"[red]照会に失敗: {exc}[/red]")
+                raise typer.Exit(1) from None
+
+        rows = ledger.recent(limit)
+        if not rows:
+            console.print("[dim]台帳に注文はありません[/dim]")
+            return
+        table = Table(title=f"積立の注文（{settings.env.value}）", title_justify="left")
+        for column in (
+            "送信",
+            "銘柄",
+            "月",
+            "投下額",
+            "株数",
+            "約定",
+            "平均価格",
+            "状態",
+            "有効額",
+        ):
+            table.add_column(
+                column,
+                justify="right"
+                if column in ("投下額", "株数", "約定", "平均価格", "有効額")
+                else "left",
+            )
+        for o in rows:
+            dead = o.status in {"CANCELLED", "REJECTED", "EXPIRED"}
+            table.add_row(
+                fmt_iso(o.placed_at, settings.timezone),
+                o.symbol,
+                f"{o.plan_month:%Y-%m}" if o.plan_month else "—",
+                f"{o.amount:,.0f}" if o.amount is not None else "—",
+                f"{o.quantity:,}",
+                f"{o.filled_quantity:,}",
+                f"{o.avg_fill_price:,.2f}" if o.avg_fill_price is not None else "—",
+                f"[red]{o.status}[/red]" if dead else o.status,
+                f"{o.effective_amount:,.0f}",
+            )
+        console.print(table)
+        console.print(
+            "[dim]有効額＝「発注済み」に数える額。失効・拒否は約定ぶんだけ。dry-run は 0[/dim]"
+        )
+    finally:
+        ledger.close()
 
 
 # --------------------------------------------------------------------------
