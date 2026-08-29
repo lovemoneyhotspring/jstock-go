@@ -236,6 +236,21 @@ uv run wbjp data status --config-dir config/collect --interval 1m
 
 1 分足は 7 日しか遡れないので cron は毎営業日、取りこぼしに備えて 1 日 2 回。**`wbjp run` は使わない**（戦略が無くても建玉のストップ判定まで進む）。
 
+取り込みが止まっていることに 7 日以上気づかないと、その穴は永久に残る。`data check` が「最後にいつ取れたか」と「取れているべき日に穴が無いか」を調べて、問題があれば exit 1 と通知を出す。取引日は「その銘柄の日足があった日」で決めるので、祝日の一覧は要らない。
+
+```bash
+uv run wbjp data check --config-dir config/collect            # 問題があれば exit 1
+uv run wbjp data check --config-dir config/collect --notify   # WBJP_ALERT_WEBHOOK_URL に通知
+```
+
+```cron
+CRON_TZ=Asia/Tokyo
+0 12,16 * * 1-5 cd /opt/wbjp && .venv/bin/wbjp data sync --config-dir config/collect --days 7 >> /var/log/wbjp/collect.log 2>&1
+15 16 * * 1-5   cd /opt/wbjp && .venv/bin/wbjp data check --config-dir config/collect --notify >> /var/log/wbjp/collect.log 2>&1
+```
+
+`data sync` 自体が失敗したとき（取得元の障害など）も同じ Webhook に通知する。Webhook は Slack / Discord の Incoming Webhook URL を `WBJP_ALERT_WEBHOOK_URL` に置く。未設定ならエラーログに残るだけ。
+
 ### 日中足で判断する
 
 戦略とバックテストは足の間隔に依存しない。設定の `universe.interval` を変えるだけで、同じ経路が 5 分足でも回る。

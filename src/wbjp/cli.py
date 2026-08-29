@@ -767,12 +767,82 @@ def data_sync(
                 symbols.append(extra)
     provider = _build_provider(config)
     start = end - dt.timedelta(days=days)
-    if feed is not None:
-        counts = feed.sync(provider, symbols, start, end, chosen, force=force)
-    else:
-        counts = store.sync(provider, symbols, start, end, force=force)
+    try:
+        if feed is not None:
+            counts = feed.sync(provider, symbols, start, end, chosen, force=force)
+        else:
+            counts = store.sync(provider, symbols, start, end, force=force)
+    except Exception as exc:
+        # cron の中で黙って落ちると、分足の穴に気づくのが遅れる
+        from wbcore.notify import alert
+
+        alert("足の取り込みに失敗", f"{directory_label(config)} / {chosen.value}: {exc}")
+        console.print(f"[red]足の取り込みに失敗しました: {exc}[/red]")
+        raise typer.Exit(1) from None
     for symbol, count in sorted(counts.items()):
         console.print(f"  {symbol}: {count} 本")
+
+
+def directory_label(config: Config) -> str:
+    return str(config.settings.config_dir)
+
+
+@data_app.command("check")
+def data_check(
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+    days: Annotated[int, typer.Option(help="穴を探す範囲（暦日）")] = 30,
+    notify: Annotated[
+        bool, typer.Option("--notify", help="問題があれば WBJP_ALERT_WEBHOOK_URL に通知する")
+    ] = False,
+) -> None:
+    """足の蓄積が止まっていないか、穴が無いかを調べる。問題があれば exit 1。
+
+    cron から `data sync` の直後に回す。取引日は「日足があった日」で決める
+    ので祝日の一覧は要らない。分足は 7 日で取れなくなるので、止まっている
+    ことに早く気づくのが目的。
+    """
+    from wbcore.data.health import check
+    from wbcore.data.provider import Interval
+
+    config = load_config(config_dir)
+    universe = config.file.universe
+    intervals: list[Interval] = []
+    for candidate in (universe.base_bar_interval, universe.bar_interval, Interval.D1):
+        if candidate is not None and candidate not in intervals:
+            intervals.append(candidate)
+    symbols = list(universe.symbols)
+    if not symbols:
+        console.print("[red]universe.symbols が空です[/red]")
+        raise typer.Exit(2)
+
+    results = check(config.settings.bars_dir, symbols, intervals, lookback_days=days)
+    problems = [c for c in results if not c.healthy]
+
+    table = Table(title=f"足の蓄積状況 ({directory_label(config)})", title_justify="left")
+    for column in ("銘柄", "間隔", "本数", "最初", "最終", "状態"):
+        table.add_column(column, justify="right" if column == "本数" else "left")
+    for c in results:
+        state = c.describe()
+        table.add_row(
+            c.symbol,
+            c.interval.value,
+            f"{c.bars:,}",
+            str(c.first or "—"),
+            str(c.last or "—"),
+            state if c.healthy else f"[red]{state}[/red]",
+        )
+    console.print(table)
+
+    if not problems:
+        console.print("[green]すべて正常[/green]")
+        return
+    lines = [f"{c.symbol} {c.interval.value}: {c.describe()}" for c in problems]
+    console.print(f"\n[red]{len(problems)} 件の問題[/red]")
+    if notify:
+        from wbcore.notify import alert
+
+        alert(f"足の蓄積に {len(problems)} 件の問題（{directory_label(config)}）", "\n".join(lines))
+    raise typer.Exit(1)
 
 
 @data_app.command("status")
