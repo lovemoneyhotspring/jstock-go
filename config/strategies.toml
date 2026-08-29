@@ -1,7 +1,19 @@
-# 戦略の有効化・重み・パラメータ。
+# 戦略の設定。売買型と積立型をここに並べる。
 #
-# 各戦略は「買え/売れ」ではなく -1.0〜+1.0 の意見を返す。
-# それを combiner が1本に合成し、サイジングが株数に変換する。
+# どちらも取引に使う戦略で、登録簿（`wbjp strategies` で一覧できる）も
+# 共通。違うのは判断の出力と、それに続く実行の仕組みだけ。
+#
+#   [[strategies]] … 売買型（signal）。-1.0〜+1.0 の意見を返す。
+#                     combiner が1本に合成し、サイジングが株数に変換する。
+#                     売りも損切りもする。
+#   [[tactics]]    … 積立型（accumulate）。その日の購入倍率を返す。
+#                     銘柄ごとに1つだけ割り当て、予算×倍率で買い増す。売らない。
+#   [[baskets]]    … 積立型の配分版。予算を複数銘柄にどう振るかを決める。
+
+
+# ===========================================================================
+# 売買型（signal）
+# ===========================================================================
 
 # 合成方式:
 #   weighted_vote … 重み付き平均。少数意見も一定量は反映される（既定）
@@ -45,3 +57,168 @@ weight = 1.5
 channel = 20
 atr_period = 14
 min_atr_ratio = 0.005
+
+
+# ===========================================================================
+# 積立型（accumulate）
+# ===========================================================================
+# 命名の方針:
+#   tactic … 機構の名前。登録簿の鍵。倍率などの数値は含めない
+#   id     … 比較表の行名になる自由なラベル。日本語でよい
+#   同じ tactic をパラメータ違いで何度でも並べられる。
+#
+# 1つの銘柄を複数の積立型戦略に書くと二重買付になるため、既定でエラーになる。
+# 比較検証したいときは load_strategies(allow_overlap=True) を使う。
+#
+# 発注時間帯（window）:
+#   既定は 14:00〜15:00。省略すればこれが適用される。
+#   window = false                          … 時間帯を制限しない
+#   window = { start = "12:30", end = "13:00" } … 任意の時間帯（立会時間内のみ）
+#   投下額は変わらない。日足で決まった金額を「いつ発注してよいか」だけを決める。
+#   14時台を既定にしたのは安いからではなく、大引けに対するぶれが寄り付きの
+#   約1/3だから。60分足3年の実測では時間帯による平均取得単価の差は ±0.03%。
+
+# 1銘柄あたりの毎月の基本予算（円）。比較の前提を揃えるため全戦略で共通。
+monthly_budget = 25_000
+
+# market は足を取りに行くときのティッカー変換に使う（既定 "JP"）。
+#   JP … 1305 → 1305.T      US … VOO → VOO
+# ^ で始まる指数（^GSPC など）は market に関係なくそのまま扱われる。
+# 売買型（settings.toml の universe）と違い、積立型は市場をまたいで並べてよい。
+
+# 完全下降配列（終値 < MA20 < MA50 < MA200）で4倍。
+# 追加投入1円あたりの効果が最良で、必要資金も最少（年平均1.15〜1.42倍）。
+# 発動は全期間の5〜13%程度。増額の原資は賞与など新規資金を前提とする。
+[[tactics]]
+id = "配列4倍"
+tactic = "bear_stack"
+symbols = ["1305.T", "1591.T"]
+multiplier = 4
+
+# 同じ機構の弱め版。暴落時に平常の4倍を出せない場合はこちら。
+# 年平均1.05〜1.14倍で済み、10年窓の勝率はほぼ変わらない。
+[[tactics]]
+id = "配列2倍"
+tactic = "bear_stack"
+symbols = ["^N225"]
+multiplier = 2
+window = { start = "14:00", end = "15:00" }
+
+# 弱気スコア（0〜6）で段階的に増額。効果は最大だが資金効率は落ちる。
+[[tactics]]
+id = "段階型"
+tactic = "stack_ladder"
+symbols = ["^GSPC"]
+market = "US"
+multipliers = { 3 = 1.5, 5 = 2.0, 6 = 4.0 }
+
+# 高値からの下落率で増額。米国指数では強いが、新高値を作らない市場では
+# 常時発動に近くなり破綻する（日経225 の全期間で +13%）。
+# require_downtrend で 200日線割れを条件に加えると発動が絞られる。
+[[tactics]]
+id = "下落率型"
+tactic = "drawdown_ladder"
+symbols = ["^IXIC"]
+market = "US"
+levels = [0.10, 0.20, 0.30]
+multipliers = [2.0, 3.0, 4.0]
+require_downtrend = true
+
+# 比較の基準。増額しない純粋なドル平均法。時間帯も制限しない。
+[[tactics]]
+id = "基準"
+tactic = "constant"
+symbols = ["1306.T"]
+enabled = false
+window = false
+
+
+# ---------------------------------------------------------------------------
+# バスケット（複数銘柄への配分）
+# ---------------------------------------------------------------------------
+# 積立型戦略が「1銘柄を何倍買うか」なのに対し、バスケットは「予算をどの銘柄に
+# どう振るか」。monthly_budget はバスケット全体の予算。比率は毎日その日に
+# 足のある銘柄の間で正規化される。
+#
+#   source = "static" … weights をそのまま使う
+#   source = "13f"    … EDGAR の 13F（cik の運用会社）の上位 top 銘柄を
+#                        評価額比で持つ。提出日の翌営業日から反映。
+#                        weights を書くとそれがコア、13F 部分は satellite_share。
+#
+# 同じ資金の流れを benchmark に投じた場合と XIRR・最大DD で比べる。
+# `wbjp accumulate sync-13f` で保有一覧、`wbjp accumulate sync` で足を取る。
+
+# 戦略1: バークシャー 13F の上位15銘柄を保有比率で積立（基準線）
+[[baskets]]
+id = "BRK上位15"
+source = "13f"
+top = 15
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 戦略1': 上位10に絞る（集中度を上げる）
+[[baskets]]
+id = "BRK上位10"
+source = "13f"
+top = 10
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 戦略4: コア・サテライト。VOO 70% ＋ BRK上位15 を 30%
+[[baskets]]
+id = "VOO70+BRK30"
+source = "13f"
+top = 15
+weights = { VOO = 1.0 }
+satellite_share = 0.3
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 戦略1 に下落時増額（bear_stack ×3）を重ねる。増額は銘柄ごとに判定。
+[[baskets]]
+id = "BRK上位15+配列3倍"
+source = "13f"
+top = 15
+tactic = "bear_stack"
+multiplier = 3
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 戦略3（価格版）: 構成銘柄のうち52週高値から深く下げているものへ配分を寄せる。
+# 比率 × (1 + tilt_strength × 下落率) で正規化。総額は変えない。
+[[baskets]]
+id = "BRK上位15+割安傾斜2"
+source = "13f"
+top = 15
+tilt_strength = 2
+monthly_budget = 100_000
+benchmark = "VOO"
+
+[[baskets]]
+id = "BRK上位15+割安傾斜5"
+source = "13f"
+top = 15
+tilt_strength = 5
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 戦略4+3: コア・サテライトにサテライト側の割安傾斜を重ねる
+# （傾斜は VOO も含めて掛かるが、指数の下落率は個別株より小さいので
+# 実質的にサテライト側へ寄る）
+[[baskets]]
+id = "VOO70+BRK30+傾斜3"
+source = "13f"
+top = 15
+weights = { VOO = 1.0 }
+satellite_share = 0.3
+tilt_strength = 3
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 比較の基準: VOO だけ（バスケットの計算経路で XIRR を出す）
+[[baskets]]
+id = "VOO単独"
+source = "static"
+weights = { VOO = 1.0 }
+monthly_budget = 100_000
+benchmark = "^GSPC"

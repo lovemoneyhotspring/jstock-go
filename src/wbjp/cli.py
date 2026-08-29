@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from wbjp.broker.base import BrokerError
@@ -43,7 +44,9 @@ app = typer.Typer(
 )
 data_app = typer.Typer(help="足データの取得と確認", no_args_is_help=True)
 creds_app = typer.Typer(help="APIキーの管理", no_args_is_help=True)
-accumulate_app = typer.Typer(help="指数の積立（戦術と銘柄の対応）", no_args_is_help=True)
+accumulate_app = typer.Typer(
+    help="積立型戦略の実行（銘柄への割り当てと検証）", no_args_is_help=True
+)
 app.add_typer(data_app, name="data")
 app.add_typer(creds_app, name="credentials")
 app.add_typer(accumulate_app, name="accumulate")
@@ -708,6 +711,84 @@ def runs(
     journal.close()
 
 
+@app.command("strategies")
+def strategies_list(
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+    kind: Annotated[
+        str | None, typer.Option(help="種別で絞る: signal（売買）/ accumulate（積立）")
+    ] = None,
+) -> None:
+    """使える戦略を一覧する。売買型・積立型をまとめて表示する。
+
+    「登録」は実装があるか、「設定」はこの設定ディレクトリの
+    ``strategies.toml`` で使われているか。
+    """
+    from wbjp.strategy.base import PlaybookKind
+    from wbjp.strategy.registry import catalog
+
+    if kind is not None:
+        try:
+            wanted = PlaybookKind(kind)
+        except ValueError:
+            console.print(f"[red]種別は signal か accumulate: {kind}[/red]")
+            raise typer.Exit(2) from None
+    else:
+        wanted = None
+
+    # 設定は読めなくてもよい。登録済みの戦略一覧は設定と独立に見せたい。
+    usage: dict[str, list[str]] = {}
+    directory = config_dir or load_config(config_dir).settings.config_dir
+    try:
+        from wbjp.config import load_strategies
+
+        config = load_strategies(directory, allow_overlap=True)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[yellow]設定を読めませんでした（登録済みのみ表示）: {exc}[/yellow]\n")
+    else:
+        # 節の名前は角括弧で始まる。Rich のマークアップと衝突するので逃がす。
+        def _use(section: str, detail: str, *, enabled: bool = True) -> str:
+            line = escape(f"[[{section}]] {detail}")
+            return line if enabled else f"[dim]{line}（停止）[/dim]"
+
+        for entry in config.strategies:
+            usage.setdefault(entry.name, []).append(
+                _use("strategies", f"重み{entry.weight:g}", enabled=entry.enabled)
+            )
+        for tactic_entry in config.tactics:
+            usage.setdefault(tactic_entry.tactic, []).append(
+                _use("tactics", tactic_entry.id, enabled=tactic_entry.enabled)
+            )
+        for basket in config.baskets:
+            usage.setdefault(basket.tactic, []).append(
+                _use("baskets", basket.id, enabled=basket.enabled)
+            )
+
+    table = Table(title=f"戦略 ({directory})", title_justify="left")
+    table.add_column("戦略")
+    table.add_column("種別")
+    table.add_column("説明")
+    table.add_column("この設定での使用")
+    for playbook_cls in catalog():
+        if wanted is not None and playbook_cls.kind is not wanted:
+            continue
+        uses = usage.get(playbook_cls.name, [])
+        table.add_row(
+            playbook_cls.name,
+            playbook_cls.kind.label,
+            playbook_cls.summary(),
+            "\n".join(uses) if uses else "[dim]—[/dim]",
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]"
+        + escape(
+            "売買型は [[strategies]]、積立型は [[tactics]] / [[baskets]] に書く"
+            "（どちらも strategies.toml）。"
+        )
+        + "\n積立の銘柄割り当ては `wbjp accumulate list` で確認する。[/dim]"
+    )
+
+
 # --------------------------------------------------------------------------
 # データ
 # --------------------------------------------------------------------------
@@ -781,14 +862,14 @@ def _yen(value: float) -> str:
 
 
 def _load_accumulate(config_dir: Path | None, *, allow_overlap: bool = False):  # type: ignore[no-untyped-def]
-    """config/accumulate.toml を読む。失敗したら理由を出して終了する。"""
-    from wbjp.accumulate import load
+    """config/strategies.toml を読む。失敗したら理由を出して終了する。"""
+    from wbjp.config import load_strategies
 
-    # 積立は universe.symbols を使わないので、_load ではなく load_config を呼ぶ。
-    # _load は売買用の検証（ユニバースが空なら終了）を含んでいる。
+    # 積立型は universe.symbols を使わないので、_load ではなく load_config を呼ぶ。
+    # _load は売買型用の検証（ユニバースが空なら終了）を含んでいる。
     directory = config_dir or load_config(config_dir).settings.config_dir
     try:
-        return load(directory, allow_overlap=allow_overlap)
+        return load_strategies(directory, allow_overlap=allow_overlap)
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from None
@@ -814,12 +895,12 @@ def _accumulate_bars(config_dir: Path | None, symbols: list[str]):  # type: igno
 
 @accumulate_app.command("list")
 def accumulate_list(config_dir: _ConfigDir = None) -> None:
-    """戦術と銘柄の対応を一覧する。"""
+    """積立型戦略と銘柄の対応を一覧する。戦略そのものは `wbjp strategies`。"""
     config = _load_accumulate(config_dir, allow_overlap=True)
 
-    table = Table(title="積立戦術", title_justify="left")
+    table = Table(title="積立型戦略の割り当て", title_justify="left")
     table.add_column("id")
-    table.add_column("戦術")
+    table.add_column("戦略")
     table.add_column("銘柄")
     table.add_column("発注時間帯")
     table.add_column("有効", justify="center")
@@ -839,7 +920,7 @@ def accumulate_list(config_dir: _ConfigDir = None) -> None:
     console.print(table)
     console.print(f"\n毎月の基本予算: {config.monthly_budget:,.0f}円 / 銘柄")
 
-    # 一覧は重複を許して読む（止めてある戦術も見せたいため）。そのぶん
+    # 一覧は重複を許して読む（止めてある戦略も見せたいため）。そのぶん
     # 衝突を検出できるのはここだけなので、必ず知らせる。
     try:
         config.validate_assignment()
@@ -966,7 +1047,7 @@ def accumulate_backtest(
 
     table = Table(title="積立バックテスト", title_justify="left")
     table.add_column("銘柄")
-    table.add_column("戦術")  # 設定の id。describe() は長すぎて表が潰れる
+    table.add_column("戦略")  # 設定の id。describe() は長すぎて表が潰れる
     for column in ("投入", "倍率", "単価", "対照比", "期末", "ﾘﾀｰﾝ"):
         table.add_column(column, justify="right")
 
@@ -1158,14 +1239,9 @@ def accumulate_compare(
     symbol: Annotated[str, typer.Argument(help="比較したい銘柄")],
     config_dir: _ConfigDir = None,
 ) -> None:
-    """1銘柄に対して、登録済みの戦術を既定パラメータで並べて比較する。"""
-    from wbjp.accumulate import (
-        AccumulationSettings,
-        available,
-        build_plan,
-        create,
-        simulate,
-    )
+    """1銘柄に対して、登録済みの積立型戦略を既定パラメータで並べて比較する。"""
+    from wbjp.accumulate import AccumulationSettings, build_plan, simulate
+    from wbjp.strategy.registry import available, create_tactic
 
     config = _load_accumulate(config_dir, allow_overlap=True)
     bars = _accumulate_bars(config_dir, [symbol])
@@ -1173,13 +1249,13 @@ def accumulate_compare(
         raise typer.Exit(1)
     frame = bars[symbol]
 
-    table = Table(title=f"{symbol} — 戦術の比較", title_justify="left")
-    table.add_column("戦術")
+    table = Table(title=f"{symbol} — 積立型戦略の比較", title_justify="left")
+    table.add_column("戦略")
     for column in ("倍率", "単価", "対照比", "1倍あたり", "期末"):
         table.add_column(column, justify="right")
 
-    for name in available():
-        tactic = create(name)
+    for name in available("accumulate"):
+        tactic = create_tactic(name)
         if frame.height < tactic.warmup_bars:
             continue
         settings = AccumulationSettings(config.monthly_budget, tactic)
@@ -1198,7 +1274,7 @@ def accumulate_compare(
 
     console.print(table)
     console.print(
-        "\n[dim]※ 既定パラメータでの比較。倍率などは config/accumulate.toml で調整する。\n"
+        "\n[dim]※ 既定パラメータでの比較。倍率などは config/strategies.toml で調整する。\n"
         "　 「1倍あたり」は追加資金1倍あたりの単価改善で、資金効率の指標。[/dim]"
     )
 

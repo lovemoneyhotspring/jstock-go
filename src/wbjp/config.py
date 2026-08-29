@@ -16,12 +16,13 @@ import datetime as dt
 import os
 import stat
 import tomllib
+from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 import structlog
 from dotenv import dotenv_values
@@ -29,6 +30,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from wbjp.domain.models import Market, TaxAccountType
+
+if TYPE_CHECKING:
+    from wbjp.accumulate.basket import DrawdownTilt, WeightSchedule
+    from wbjp.accumulate.tactics import Tactic
 
 log = structlog.get_logger(__name__)
 
@@ -599,8 +604,21 @@ class RegimeConfig(BaseModel):
         return self
 
 
+# --------------------------------------------------------------------------
+# 戦略（strategies.toml）
+#
+# 売買型（[[strategies]]）と積立型（[[tactics]] / [[baskets]]）を1つの
+# ファイル・1つのモデルで扱う。どちらも取引に使う戦略なので、置き場所を
+# 分けると片方の存在を忘れる。書き方の違いは節の名前だけ:
+#
+#   [[strategies]] … name で機構を指す。全銘柄に意見を出し、合成される
+#   [[tactics]]    … id がラベル、tactic が機構。銘柄ごとに1つだけ割り当てる
+#   [[baskets]]    … 複数銘柄への配分。比較検証が主用途
+# --------------------------------------------------------------------------
+
+
 class StrategyEntry(BaseModel):
-    """1つの戦略の有効化と重み。"""
+    """1つの売買型戦略の有効化と重み（``[[strategies]]``）。"""
 
     model_config = {"extra": "allow"}  # 戦略固有パラメータを受け取る
 
@@ -616,7 +634,152 @@ class StrategyEntry(BaseModel):
         return {k: v for k, v in extra.items() if k not in reserved}
 
 
+_TACTIC_RESERVED = frozenset({"id", "tactic", "symbols", "enabled", "market"})
+
+
+class TacticEntry(BaseModel):
+    """1つの積立型戦略と、それを適用する銘柄（``[[tactics]]``）。
+
+    Attributes:
+        id: 比較表の行名になる自由なラベル。日本語でよい。
+        tactic: 登録簿の鍵（``bear_stack`` など）。機構の名前。
+        symbols: この戦略で積み立てる銘柄コード。
+        market: 銘柄の市場。足を取りに行くときのティッカー変換に使う
+            （日本株の ``1305`` は ``1305.T``、米国株の ``VOO`` はそのまま）。
+            ``^`` で始まる指数は市場に関係なくそのまま扱われる。
+    """
+
+    model_config = {"extra": "allow"}  # 戦略固有パラメータを受け取る
+
+    id: str
+    tactic: str
+    symbols: list[str] = Field(min_length=1)
+    enabled: bool = True
+    market: Market = Market.JP
+
+    @field_validator("symbols")
+    @classmethod
+    def _clean(cls, value: list[str]) -> list[str]:
+        cleaned = [s.strip() for s in value if s.strip()]
+        if not cleaned:
+            raise ValueError("symbols が空です")
+        duplicates = {s for s in cleaned if cleaned.count(s) > 1}
+        if duplicates:
+            raise ValueError(f"同じ銘柄が重複しています: {sorted(duplicates)}")
+        return cleaned
+
+    @property
+    def params(self) -> dict[str, Any]:
+        """戦略コンストラクタに渡す固有パラメータ。"""
+        extra = self.__pydantic_extra__ or {}
+        return {k: v for k, v in extra.items() if k not in _TACTIC_RESERVED}
+
+    def build(self) -> Tactic:
+        """積立型戦略のインスタンスを組み立てる。"""
+        from wbjp.strategy.registry import create_tactic
+
+        try:
+            return create_tactic(self.tactic, self.params)
+        except ValueError as exc:
+            raise ValueError(f"[{self.id}] {exc}") from None
+
+
+class BasketEntry(BaseModel):
+    """複数銘柄への配分（``[[baskets]]``、:mod:`wbjp.accumulate.basket`）。
+
+    Attributes:
+        id: 表の行名。
+        source: ``"static"`` は ``weights`` をそのまま使う。``"13f"`` は
+            EDGAR の 13F（``cik`` の運用会社）から四半期ごとの比率を作る。
+        weights: ``source = "static"`` の配分。``13f`` のときはコア（固定部分）
+            として使い、``satellite_share`` の残りをこれに振る。
+        cik: 13F を取る運用会社。既定はバークシャー。
+        top: 13F の上位何銘柄を採るか。
+        satellite_share: 13F 部分の比率。``weights`` が空なら 1。
+        benchmark: 同じ資金の流れを投じて比較する銘柄。
+        monthly_budget: バスケット全体の毎月の予算。省略時は共通設定。
+        tactic: 各銘柄に掛ける倍率戦略と、その固有パラメータ。
+        tilt_strength: 高値からの下落率に応じて配分を寄せる強さ。0 なら無効。
+        tilt_lookback: 下落率を測る高値の期間（足の本数）。
+    """
+
+    model_config = {"extra": "allow"}
+
+    id: str
+    source: str = "static"
+    weights: dict[str, float] = Field(default_factory=dict)
+    cik: str = "0001067983"
+    top: int = Field(default=15, ge=1)
+    satellite_share: float = Field(default=1.0, gt=0, le=1)
+    benchmark: str | None = "VOO"
+    monthly_budget: Decimal | None = None
+    tactic: str = "constant"
+    tilt_strength: float = Field(default=0.0, ge=0)
+    tilt_lookback: int = Field(default=252, ge=2)
+    enabled: bool = True
+    market: Market = Market.US
+
+    def build_tilt(self) -> DrawdownTilt | None:
+        from wbjp.accumulate.basket import DrawdownTilt
+
+        if self.tilt_strength <= 0:
+            return None
+        return DrawdownTilt(self.tilt_strength, self.tilt_lookback)
+
+    @field_validator("source")
+    @classmethod
+    def _source(cls, value: str) -> str:
+        if value not in ("static", "13f"):
+            raise ValueError(f"source は static か 13f: {value!r}")
+        return value
+
+    @field_validator("weights")
+    @classmethod
+    def _weights(cls, value: dict[str, float]) -> dict[str, float]:
+        bad = {k: v for k, v in value.items() if v <= 0}
+        if bad:
+            raise ValueError(f"比率は正の値: {bad}")
+        return value
+
+    @property
+    def params(self) -> dict[str, Any]:
+        extra = self.__pydantic_extra__ or {}
+        return {k: v for k, v in extra.items() if k not in _BASKET_RESERVED}
+
+    def build_tactic(self) -> Tactic:
+        from wbjp.strategy.registry import create_tactic
+
+        try:
+            return create_tactic(self.tactic, self.params)
+        except ValueError as exc:
+            raise ValueError(f"[{self.id}] {exc}") from None
+
+    def build_schedule(
+        self, schedule_13f: list[tuple[Any, dict[str, float]]] | None = None
+    ) -> WeightSchedule:
+        """配分表を組み立てる。``13f`` のときは取得済みの比率列を渡す。"""
+        from wbjp.accumulate.basket import WeightSchedule
+
+        if self.source == "static":
+            if not self.weights:
+                raise ValueError(f"[{self.id}] static には weights が必要です")
+            return WeightSchedule.static(self.weights)
+        if not schedule_13f:
+            raise ValueError(
+                f"[{self.id}] 13F の保有一覧がありません（`wbjp accumulate sync-13f` を実行）"
+            )
+        schedule = WeightSchedule.from_pairs(schedule_13f)
+        if self.weights:
+            return schedule.blend(self.weights, self.satellite_share)
+        return schedule
+
+
+_BASKET_RESERVED = frozenset(BasketEntry.model_fields)
+
+
 class StrategiesConfig(BaseModel):
+    """``strategies.toml`` の内容。売買型と積立型の両方を持つ。"""
+
     model_config = {"extra": "forbid"}
 
     #: "weighted_vote" | "majority" | "veto" | "priority"
@@ -627,15 +790,90 @@ class StrategiesConfig(BaseModel):
     exit_threshold: float = 0.1
     strategies: list[StrategyEntry] = Field(default_factory=list)
 
+    monthly_budget: Decimal = Decimal(25_000)
+    """積立の1銘柄あたりの毎月の基本予算。比較の前提を揃えるため全戦略で共通。"""
+
+    tactics: list[TacticEntry] = Field(default_factory=list)
+    baskets: list[BasketEntry] = Field(default_factory=list)
+    """複数銘柄への配分。積立型戦略と違い1銘柄が複数のバスケットに現れてもよい
+    （バスケットは比較検証が主用途で、実発注は id を指定して行う）。"""
+
     @model_validator(mode="after")
     def _thresholds_ordered(self) -> Self:
         if self.exit_threshold > self.entry_threshold:
             raise ValueError("exit_threshold は entry_threshold 以下にしてください")
         return self
 
+    # -- 売買型 ---------------------------------------------------------
+
     @property
     def enabled(self) -> list[StrategyEntry]:
+        """有効な売買型戦略。"""
         return [s for s in self.strategies if s.enabled]
+
+    # -- 積立型 ---------------------------------------------------------
+
+    @property
+    def active(self) -> list[TacticEntry]:
+        """有効な積立型戦略。"""
+        return [t for t in self.tactics if t.enabled]
+
+    @property
+    def active_baskets(self) -> list[BasketEntry]:
+        return [b for b in self.baskets if b.enabled]
+
+    def validate_assignment(self, *, allow_overlap: bool = False) -> None:
+        """id の重複と、1銘柄への複数割り当てを検出する。
+
+        実運用で1銘柄に複数の積立型戦略を割り当てると二重に買い付けることに
+        なり、予算が意図せず倍になる。比較検証をしたい場合だけ
+        ``allow_overlap=True`` を渡す。
+
+        Raises:
+            ValueError: id が重複、または ``allow_overlap`` が False のときに
+                同じ銘柄が複数の積立型戦略に現れた場合。
+        """
+        ids = [t.id for t in self.tactics] + [b.id for b in self.baskets]
+        dup_ids = sorted({i for i in ids if ids.count(i) > 1})
+        if dup_ids:
+            raise ValueError(f"id が重複しています: {dup_ids}")
+
+        if allow_overlap:
+            return
+        owners: dict[str, list[str]] = defaultdict(list)
+        for entry in self.active:
+            for symbol in entry.symbols:
+                owners[symbol].append(entry.id)
+        conflicts = {s: v for s, v in owners.items() if len(v) > 1}
+        if conflicts:
+            detail = "、".join(f"{s} → {v}" for s, v in sorted(conflicts.items()))
+            raise ValueError(
+                f"1銘柄に複数の積立型戦略が割り当てられています（二重買付になります）: {detail}"
+            )
+
+    def build(self) -> dict[str, Tactic]:
+        """``銘柄 → 積立型戦略`` に展開する。積立の主用途はこれ。"""
+        return {s: entry.build() for entry in self.active for s in entry.symbols}
+
+    def tactic_for(self, symbol: str) -> Tactic | None:
+        """銘柄に割り当てられた積立型戦略。無ければ None。"""
+        return self.build().get(symbol)
+
+    def symbols_by_market(self) -> dict[Market, list[str]]:
+        """市場 → 銘柄。足の取得はティッカー変換が市場ごとに違うので分ける。
+
+        銘柄が複数の戦略に現れないことは :meth:`validate_assignment` が
+        保証しているので、ここで市場が衝突することはない。
+        """
+        grouped: dict[Market, list[str]] = defaultdict(list)
+        for entry in self.active:
+            grouped[entry.market].extend(entry.symbols)
+        return {market: sorted(set(symbols)) for market, symbols in grouped.items()}
+
+    @property
+    def symbols(self) -> list[str]:
+        """有効な積立型戦略が割り当てられた銘柄の一覧。"""
+        return sorted({s for entry in self.active for s in entry.symbols})
 
 
 class ExecutionConfig(BaseModel):
@@ -779,6 +1017,63 @@ class Config:
         return True, f"{self.env.value} 環境・--live 指定あり（実弾ではない）"
 
 
+#: 戦略設定のファイル名。売買型・積立型ともここに書く。
+STRATEGIES_FILENAME = "strategies.toml"
+
+#: 積立を別ファイルに分けていた頃の名前。見つかったら取り込んで移行を促す。
+LEGACY_ACCUMULATE_FILENAME = "accumulate.toml"
+
+
+def _read_strategies_toml(config_dir: Path) -> dict[str, Any]:
+    """``strategies.toml`` を読む。旧 ``accumulate.toml`` があれば取り込む。
+
+    かつて積立は別ファイルだった。統合後も古いファイルを黙って無視すると
+    「積立が丸ごと消えた」という分かりにくい状態になるので、読み込んだ上で
+    移行を促す。同じ節が両方にあるときは新しい ``strategies.toml`` を採る。
+    """
+    raw: dict[str, Any] = {}
+    path = config_dir / STRATEGIES_FILENAME
+    if path.exists():
+        raw = _read_toml(path)
+
+    legacy_path = config_dir / LEGACY_ACCUMULATE_FILENAME
+    if not legacy_path.exists():
+        return raw
+
+    legacy = _read_toml(legacy_path)
+    log.warning(
+        "旧 accumulate.toml を読み込みました。内容を strategies.toml へ移して削除してください",
+        legacy=str(legacy_path),
+        target=str(path),
+    )
+    return {**legacy, **raw}
+
+
+def load_strategies(config_dir: Path | str = Path("config"), *, allow_overlap: bool = False):  # type: ignore[no-untyped-def]
+    """``strategies.toml`` だけを読む。積立系コマンドの入り口。
+
+    売買には ``universe`` などの検証が要るが、積立には要らない。そのぶん
+    軽く読めるように :func:`load_file_config` とは別の入り口にしてある。
+
+    Args:
+        config_dir: 設定ディレクトリ。
+        allow_overlap: 1銘柄に複数の積立型戦略を許すか。比較検証のときだけ True。
+
+    Raises:
+        FileNotFoundError: 設定ファイルが無いとき。
+        ValueError: 内容が不正なとき。
+    """
+    directory = Path(config_dir)
+    if (
+        not (directory / STRATEGIES_FILENAME).is_file()
+        and not (directory / LEGACY_ACCUMULATE_FILENAME).is_file()
+    ):
+        raise FileNotFoundError(f"戦略の設定が見つかりません: {directory / STRATEGIES_FILENAME}")
+    config = StrategiesConfig.model_validate(_read_strategies_toml(directory))
+    config.validate_assignment(allow_overlap=allow_overlap)
+    return config
+
+
 def load_file_config(config_dir: Path) -> FileConfig:
     """``settings.toml`` と ``strategies.toml`` を読み込む。
 
@@ -790,9 +1085,9 @@ def load_file_config(config_dir: Path) -> FileConfig:
     if settings_path.exists():
         merged.update(_read_toml(settings_path))
 
-    strategies_path = config_dir / "strategies.toml"
-    if strategies_path.exists():
-        merged["strategies"] = _read_toml(strategies_path)
+    strategies = _read_strategies_toml(config_dir)
+    if strategies:
+        merged["strategies"] = strategies
 
     universe = merged.get("universe")
     if isinstance(universe, dict) and universe.get("symbols_file"):

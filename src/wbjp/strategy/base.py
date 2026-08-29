@@ -13,14 +13,31 @@
     :class:`StrategyContext` が渡す足は、判断時点までに**切り詰め済み**。
     戦略が未来の足を見る手段がそもそも存在しない。「規律で気をつける」
     のではなく、構造で不可能にしている。
+
+戦略の2つの種別:
+    どちらも「取引に使う戦略」だが、判断の出力が違う。共通の親は
+    :class:`Playbook` で、登録簿（:mod:`wbjp.strategy.registry`）と
+    設定ファイル（``strategies.toml``）はこの親を単位に一本化してある。
+
+    ``signal``
+        :class:`Strategy`。銘柄ごとに -1.0〜+1.0 の意見を返す。合成器が
+        1本にまとめ、サイジングが目標株数へ変換する。売りも損切りもする。
+    ``accumulate``
+        :class:`~wbjp.accumulate.tactics.Tactic`。その日の購入倍率を返す。
+        目標建玉を持たず、予算 × 倍率で積み増すだけで売却しない。
+
+    出力の意味が違うので実行経路は分けてある（倍率を意見として合成しても
+    意味を成さない）。共有するのは名前・登録・設定・一覧の面。
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any, ClassVar
 
 import polars as pl
@@ -30,6 +47,71 @@ from wbjp.domain.models import Position, Signal
 
 class InsufficientBarsError(RuntimeError):
     """ウォームアップに必要な本数の足が無い。"""
+
+
+class PlaybookKind(StrEnum):
+    """戦略の種別。判断の出力が何かを表す。"""
+
+    #: 銘柄ごとの売買意見（-1.0〜+1.0）を返す。合成 → サイジング → 発注。
+    SIGNAL = "signal"
+    #: その日の購入倍率を返す。予算 × 倍率で積み増す。
+    ACCUMULATE = "accumulate"
+
+    @property
+    def label(self) -> str:
+        return "売買" if self is PlaybookKind.SIGNAL else "積立"
+
+
+class Playbook(ABC):
+    """取引に使う戦略すべての共通の親。
+
+    共通なのは「設定ファイルから名前で引ける」ことだけ。判断の中身は
+    :class:`Strategy`（意見）と :class:`~wbjp.accumulate.tactics.Tactic`
+    （倍率）でまったく違う。それでも共通の親を置くのは、登録簿・設定・
+    一覧表示をひとつに保ち、``bear_stack`` のような戦略が
+    「別モジュールにあるせいで一覧から漏れる」事故を防ぐため。
+
+    中間の抽象クラスは ``class Foo(Playbook, abstract=True)`` と明示する。
+    ``__init_subclass__`` は ABCMeta が ``__abstractmethods__`` を設定する
+    **前**に呼ばれるため、抽象かどうかを自動判定できない。
+    """
+
+    #: 設定ファイルで指定する識別子。サブクラスで必ず上書きする。
+    #: 種別をまたいで一意（``[[strategies]]`` と ``[[tactics]]`` で同名は不可）。
+    name: ClassVar[str] = ""
+
+    #: 種別。サブクラスの系統ごとに一度定義すればよい。
+    kind: ClassVar[PlaybookKind]
+
+    def __init_subclass__(cls, *, abstract: bool = False, **kwargs: Any) -> None:
+        """``name`` と ``kind`` の付け忘れを定義時点で弾く。"""
+        super().__init_subclass__(**kwargs)
+        if abstract:
+            return
+        if not cls.name:
+            raise TypeError(f"{cls.__name__} はクラス変数 name を定義してください")
+        if getattr(cls, "kind", None) is None:
+            raise TypeError(f"{cls.__name__} はクラス変数 kind を定義してください")
+
+    def describe(self) -> str:
+        """ログ・一覧用の説明。パラメータを含めると調査が楽になる。"""
+        return self.name
+
+    @classmethod
+    def summary(cls) -> str:
+        """1行の説明。戦略一覧の説明欄に使う。
+
+        クラスに docstring が無ければモジュールのものを使う。売買型は
+        「1モジュール1戦略」で説明をモジュール冒頭に置く慣習のため。
+        """
+        doc = (cls.__doc__ or "").strip()
+        if not doc:
+            module = sys.modules.get(cls.__module__)
+            doc = (getattr(module, "__doc__", None) or "").strip()
+        if not doc:
+            return ""
+        # docstring は ReST。一覧は素のテキストなので装飾記号を落とす。
+        return doc.split("\n", 1)[0].replace("``", "").replace("**", "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,8 +184,8 @@ class StrategyContext:
         return sorted(s for s, p in self._positions.items() if p.quantity > 0)
 
 
-class Strategy(ABC):
-    """売買戦略の基底クラス。
+class Strategy(Playbook, abstract=True):
+    """売買の意見を返す戦略の基底クラス（種別 ``signal``）。
 
     実装するのは :meth:`on_bars` だけ。``name`` は設定ファイルから
     参照する識別子になるので、クラス変数で必ず定義する。
@@ -120,26 +202,13 @@ class Strategy(ABC):
         ...         ]
     """
 
-    #: 設定ファイルで指定する識別子。サブクラスで必ず上書きする。
-    name: ClassVar[str] = ""
+    kind: ClassVar[PlaybookKind] = PlaybookKind.SIGNAL
 
     #: 判断に必要な過去の足の本数。エンジンがこの本数を用意してから呼ぶ。
     #: 足りない銘柄はスキップされる（例外にはしない）。
     #: パラメータ次第で変わるため、__init__ で上書きしてよい
     #: （ClassVar にすると期間を引数で受ける戦略が書けなくなる）。
     warmup_bars: int = 1
-
-    def __init_subclass__(cls, *, abstract: bool = False, **kwargs: Any) -> None:
-        """``name`` の付け忘れを定義時点で弾く。
-
-        ``__init_subclass__`` は ABCMeta が ``__abstractmethods__`` を
-        設定する**前**に呼ばれるため、抽象クラスかどうかを自動判定できない。
-        中間の抽象クラスは ``class Foo(Strategy, abstract=True)`` と
-        明示的に申告する。
-        """
-        super().__init_subclass__(**kwargs)
-        if not abstract and not cls.name:
-            raise TypeError(f"{cls.__name__} はクラス変数 name を定義してください")
 
     @abstractmethod
     def on_bars(self, ctx: StrategyContext) -> list[Signal]:
@@ -152,10 +221,6 @@ class Strategy(ABC):
         Returns:
             意見のある銘柄ぶんの Signal。空リストでよい。
         """
-
-    def describe(self) -> str:
-        """ログ用の説明。パラメータを含めると調査が楽になる。"""
-        return self.name
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} name={self.name!r} warmup={self.warmup_bars}>"

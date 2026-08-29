@@ -7,7 +7,7 @@
 
 ## 前提と実装
 
-- **配分層を新設**（`wbjp.accumulate.basket`）。従来の積立は「1銘柄に戦術1つ、倍率だけを決める」
+- **配分層を新設**（`wbjp.accumulate.basket`）。従来の積立は「1銘柄に積立型戦略1つ、倍率だけを決める」
   構造で銘柄間の配分を持たなかった。バスケットは `予算 × 配分比率 × 倍率` の配分比率を担う。
 - **13F はSEC EDGAR から取得**（`wbjp.data.edgar_13f`、`wbjp accumulate sync-13f`）。
   XML 化された 2013-Q2 以降、53 四半期。CUSIP→ティッカーは `config/cusip.toml`。
@@ -72,7 +72,7 @@ wbjp accumulate sync --force      # 構成銘柄（過去に登場した全銘�
 wbjp accumulate basket [--from 2019-01-01] [--weights]
 ```
 
-設定は `config/accumulate.toml` の `[[baskets]]`。CUSIP の対応は `config/cusip.toml`
+設定は `config/strategies.toml` の `[[baskets]]`（統合前は `config/accumulate.toml`）。CUSIP の対応は `config/cusip.toml`
 （未対応の CUSIP はログに `cusip_unmapped` で出る）。
 
 ## 落とし穴

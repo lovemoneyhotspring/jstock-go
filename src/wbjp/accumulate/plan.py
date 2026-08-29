@@ -1,4 +1,4 @@
-"""積立計画。日足と戦術から「その日いくら投下するか」を決める。
+"""積立計画。日足と積立型戦略から「その日いくら投下するか」を決める。
 
 **投下の設計（検証で選んだ形）**
 
@@ -36,7 +36,7 @@ class AccumulationSettings:
 
     Attributes:
         monthly_budget: 毎月の基本予算（円）。入金日に全額投下する。
-        tactic: 購入倍率を決める戦術。既定は完全下降配列で4倍。
+        tactic: 購入倍率を決める積立型戦略。既定は完全下降配列で4倍。
     """
 
     monthly_budget: Decimal = Decimal(25_000)
@@ -48,7 +48,7 @@ class AccumulationSettings:
 
     @property
     def warmup_bars(self) -> int:
-        """戦術の倍率が意味を持つまでに必要な足の本数。"""
+        """戦略の倍率が意味を持つまでに必要な足の本数。"""
         return self.tactic.warmup_bars
 
 

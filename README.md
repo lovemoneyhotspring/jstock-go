@@ -126,7 +126,26 @@ uv run wbjp backtest --config-dir config/us-cameron --from 2019-01-01
 
 スコア = 0.35×RVOL + 0.30×ギャップ + 0.20×引け強度 + 0.15×ブレイク幅（ATR 単位）。出口は戦略側の終値 < EMA9 と、`[stops]` の -5% 初期ストップ／+1R 建値移動／+2R 半分利確／3 営業日で含み益なし。決算は本家にとって「材料」なのでブラックアウトは既定で無効。
 
-> 戦略は名前で呼び分ける。`config/<dir>/strategies.toml` の `name` を変えれば、既存の戦略を上書きせずに別の手法を試せる（`wbjp.strategy.registry.available()` で一覧）。
+> 戦略は名前で呼び分ける。`config/<dir>/strategies.toml` の `name` を変えれば、既存の戦略を上書きせずに別の手法を試せる。使える戦略は `uv run wbjp strategies` で一覧できる。
+
+### 戦略の2つの種別
+
+売買型と積立型はどちらも「取引に使う戦略」で、**同じ登録簿・同じ設定ファイル**（`config/<dir>/strategies.toml`）で扱う。違うのは判断の出力と、そのあとの実行の仕組みだけ。
+
+| 種別 | 設定の節 | 判断の出力 | 実行 | 例 |
+|---|---|---|---|---|
+| 売買（`signal`） | `[[strategies]]` | 銘柄ごとに −1.0〜+1.0 の意見 | 合成 → サイジング → 差分発注。売りも損切りもする | `trend_pullback`, `ross_cameron`, `momentum_rank` |
+| 積立（`accumulate`） | `[[tactics]]` / `[[baskets]]` | その日の購入倍率 | 予算 × 倍率で買い増す。売らない | `bear_stack`, `stack_ladder`, `drawdown_ladder` |
+
+倍率は「−1.0〜+1.0 の意見」ではないので、合成器に混ぜても意味を成さない。そのため実行経路だけは分けてある（`Strategy → Sizer` に対し `build_plan() → simulate()`）。共通の親は `wbjp.strategy.base.Playbook`。
+
+```bash
+uv run wbjp strategies                    # 売買型・積立型をまとめて一覧
+uv run wbjp strategies --kind accumulate  # 種別で絞る
+uv run wbjp accumulate list               # 積立型の銘柄割り当てと予算
+```
+
+種別を取り違えて `[[strategies]]` に `bear_stack` と書いた場合は、どちらの節に書くべきかを添えて起動時に弾かれる。
 
 > **UAT で未確認の点**: 米国株の発注ペイロード（`trade_currency` / `extended_hours_trading` / `support_trading_session` の値）と、Webull 市場データ API の応答形式は SDK と公開ドキュメントから組んであり、実機での疎通確認がまだ。最初は必ず `WBJP_ENV=uat` の dry-run で `wbjp account` と `wbjp run` を通し、ログの発注ペイロードを確認すること。
 

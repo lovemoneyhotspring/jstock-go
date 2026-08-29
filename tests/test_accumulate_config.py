@@ -19,15 +19,14 @@ from wbjp.accumulate import (
     StackLadder,
     Tactic,
     TradingWindow,
-    available,
     build_plan,
-    create,
     load,
-    registry,
 )
 from wbjp.accumulate.config import FILENAME
 from wbjp.data.yfinance_provider import to_yahoo_ticker
 from wbjp.domain.models import Market
+from wbjp.strategy import registry
+from wbjp.strategy.registry import available, create_tactic
 
 CONFIG = """
 monthly_budget = 30_000
@@ -64,24 +63,24 @@ def _bars(kind: str, n: int = 700) -> pl.DataFrame:
 
 
 def test_all_tactics_are_registered() -> None:
-    assert available() == ["bear_stack", "constant", "drawdown_ladder", "stack_ladder"]
+    assert available("accumulate") == ["bear_stack", "constant", "drawdown_ladder", "stack_ladder"]
 
 
 def test_create_passes_parameters_through() -> None:
-    tactic = create("bear_stack", {"multiplier": 2, "slow": 100})
+    tactic = create_tactic("bear_stack", {"multiplier": 2, "slow": 100})
     assert isinstance(tactic, BearStack)
     assert tactic.value == 2.0
     assert tactic.warmup_bars == 100
 
 
 def test_unknown_tactic_lists_the_alternatives() -> None:
-    with pytest.raises(ValueError, match="未知の戦術 'nonsense'。利用可能:"):
-        create("nonsense")
+    with pytest.raises(ValueError, match="未知の戦略 'nonsense'。利用可能:"):
+        create_tactic("nonsense")
 
 
 def test_bad_parameter_is_reported_as_config_error() -> None:
     with pytest.raises(ValueError, match="パラメータが不正です"):
-        create("bear_stack", {"nonexistent": 1})
+        create_tactic("bear_stack", {"nonexistent": 1})
 
 
 def test_registering_a_duplicate_name_is_rejected() -> None:
@@ -298,12 +297,12 @@ id = "打ち間違い"
 tactic = "bare_stack"
 symbols = ["A"]
 """
-    with pytest.raises(ValueError, match=r"\[打ち間違い\] 未知の戦術"):
+    with pytest.raises(ValueError, match=r"\[打ち間違い\] 未知の戦略"):
         load(_write(tmp_path, body)).build()
 
 
 def test_missing_file_is_reported(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="積立の設定が見つかりません"):
+    with pytest.raises(FileNotFoundError, match="戦略の設定が見つかりません"):
         load(tmp_path)
 
 
