@@ -30,6 +30,25 @@ def session_close(market: Market) -> dt.time:
     return _SESSIONS[market][1]
 
 
+def close_utc(market: Market, on: dt.date | None = None) -> dt.datetime:
+    """その日の引けを UTC で。夏時間の有無は日付で決まるので ``on`` を受ける。"""
+    day = on or dt.date.today()
+    local = dt.datetime.combine(day, session_close(market), tzinfo=market.timezone)
+    return local.astimezone(dt.UTC)
+
+
+def closes_after(market: Market, other: Market, on: dt.date | None = None) -> bool:
+    """``market`` の引けが、同じ暦日の ``other`` の引けより後か。
+
+    「日付が同じ足」でも、引けが後の市場の足はその日の判断時点にまだ無い。
+    東証の銘柄を NASDAQ の指数で判定するなら、同じ日付の指数の足は使えず
+    前日の足を使う（米国の引け 16:00 ET は翌日 05〜06:00 JST）。
+    逆に米国株を日経で判定するなら、東証の引け 15:30 JST は同日 02:30 ET なので
+    同じ日付の足が使える。
+    """
+    return close_utc(market, on).time() > close_utc(other, on).time()
+
+
 def parse_time(value: Any, label: str = "time") -> dt.time:
     """``"09:30"`` のような表記を time にする。"""
     if isinstance(value, dt.time):

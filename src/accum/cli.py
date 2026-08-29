@@ -302,6 +302,7 @@ def plan(
                 bars[symbol],
                 AccumulationSettings(config.monthly_budget, tactic),
                 signal_bars=signal,
+                signal_strict=entry.signal_lags,
             )
             frame = frame.tail(days)
 
@@ -515,7 +516,10 @@ def backtest(
                     else signal.filter(pl.col("date") <= (end or dt.date.max))
                 )
             plan_frame = build_plan(
-                frame, AccumulationSettings(config.monthly_budget, tactic), signal_bars=signal
+                frame,
+                AccumulationSettings(config.monthly_budget, tactic),
+                signal_bars=signal,
+                signal_strict=entry.signal_lags,
             )
             result = simulate(frame, plan_frame, monthly_budget=config.monthly_budget)
             edge = result.cost_edge

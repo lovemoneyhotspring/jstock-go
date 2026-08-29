@@ -66,6 +66,15 @@ class TacticEntry(BaseModel):
     def signal_market_resolved(self) -> Market:
         return self.signal_market or self.market
 
+    @property
+    def signal_lags(self) -> bool:
+        """判定用の足を 1 日遅らせるか（判定用の市場の引けが買う市場より後のとき）。"""
+        from wbcore.domain.session import closes_after
+
+        return self.signal_symbol is not None and closes_after(
+            self.signal_market_resolved, self.market
+        )
+
     @field_validator("symbols")
     @classmethod
     def _clean(cls, value: list[str]) -> list[str]:

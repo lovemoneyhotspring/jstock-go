@@ -57,6 +57,7 @@ def build_plan(
     settings: AccumulationSettings | None = None,
     *,
     signal_bars: pl.DataFrame | None = None,
+    signal_strict: bool = False,
 ) -> pl.DataFrame:
     """日足から日ごとの投下額を決める。
 
@@ -68,6 +69,10 @@ def build_plan(
             暦が違っても（東証の ETF を米国指数で判定する等）動くように、
             買う銘柄の各日に対して「その日以前で最新」の判定値を使う。
             判定値がまだ無い日は 1 倍（増額なし）。
+        signal_strict: True なら「その日より**前**」の判定値だけを使う。判定用の
+            市場の引けが買う銘柄の判断時刻より後（東証の銘柄を米国指数で判定）の
+            とき、同じ日付の足はまだ存在しないのでこれを立てる。立て忘れると
+            バックテストだけが翌朝の足で判定し、ライブと食い違う。
 
     Returns:
         :data:`PLAN_COLUMNS` の列を持つ計画表。``base``/``extra``/``amount``
@@ -89,7 +94,12 @@ def build_plan(
         multipliers = signal_bars.select("date", "close").with_columns(settings.tactic.multiplier())
         priced = (
             bars.select("date", "close")
-            .join_asof(multipliers.select("date", MULTIPLIER), on="date", strategy="backward")
+            .join_asof(
+                multipliers.select("date", MULTIPLIER),
+                on="date",
+                strategy="backward",
+                allow_exact_matches=not signal_strict,
+            )
             .with_columns(pl.col(MULTIPLIER).fill_null(1.0))
         )
 

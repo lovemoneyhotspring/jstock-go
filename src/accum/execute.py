@@ -93,7 +93,10 @@ def todays_contributions(
             tactic = entry.build()
             signal = bars.get(entry.signal_symbol) if entry.signal_symbol else None
             plan = build_plan(
-                frame, AccumulationSettings(config.monthly_budget, tactic), signal_bars=signal
+                frame,
+                AccumulationSettings(config.monthly_budget, tactic),
+                signal_bars=signal,
+                signal_strict=entry.signal_lags,
             )
             last = plan.row(-1, named=True)
             amount = Decimal(str(last["amount"]))

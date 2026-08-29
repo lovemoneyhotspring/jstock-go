@@ -131,3 +131,41 @@ def test_todays_contributions_judge_with_the_signal_symbol() -> None:
     assert c.amount > 0  # 下降配列なので増額分が毎日出る
     # 判定用の足が無ければ倍率 1（増額なし）。最終日が入金日でなければ投下も無い
     assert todays_contributions(config, {"T": bars["T"]}) == []
+
+
+def test_signal_from_a_market_that_closes_later_uses_the_previous_day() -> None:
+    """東証の銘柄を米国指数で判定: 同じ日付の指数の足は判断時点に無いので前日を使う。"""
+    from wbcore.domain.session import closes_after
+
+    assert closes_after(Market.US, Market.JP)
+    assert not closes_after(Market.JP, Market.US)
+    assert not closes_after(Market.JP, Market.JP)
+
+    n = 260
+    target = _bars(_flat(n), start=START)
+    signal = _bars(_falling(n), start=START)
+    # 判定用の最終日だけ配列を崩す（最後の 1 本を大きく上げる）
+    broken = signal.with_columns(
+        pl.when(pl.col("date") == signal["date"][-1])
+        .then(5000.0)
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    settings = AccumulationSettings(Decimal(10_000), BearStack(multiplier=4))
+    same_day = build_plan(target, settings, signal_bars=broken)
+    previous_day = build_plan(target, settings, signal_bars=broken, signal_strict=True)
+    assert same_day["multiplier"][-1] == 1.0  # 最終日の足（崩れた）を見ている
+    assert previous_day["multiplier"][-1] == 4.0  # 前日までの足（下降配列）で判定
+
+
+def test_entry_decides_the_lag_from_the_markets() -> None:
+    def entry(**fields):  # type: ignore[no-untyped-def]
+        base = {"id": "x", "tactic": "constant", "symbols": ["563A.T"]}
+        return AccumConfig.model_validate({"tactics": [{**base, **fields}]}).tactics[0]
+
+    assert entry(market="JP", signal_symbol="^IXIC", signal_market="US").signal_lags
+    assert not entry(
+        symbols=["VOO"], market="US", signal_symbol="^N225", signal_market="JP"
+    ).signal_lags
+    assert not entry(signal_symbol="^N225").signal_lags  # 同一市場
+    assert not entry().signal_lags  # 判定用なし
