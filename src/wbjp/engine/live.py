@@ -265,6 +265,8 @@ class LiveRunner:
             _bars=bars,
             _positions=positions,
             equity=equity,
+            interval=file_config.universe.bar_interval,
+            market=file_config.universe.market,
         )
         signals: list[Signal] = []
         for strategy in self.strategies:

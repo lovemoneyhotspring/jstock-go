@@ -201,6 +201,26 @@ uv run wbjp data sync --interval 5m --days 5    # 5分足を取る（data/bars/5
 
 取得元を足す手順はブローカーと同じ: `MarketDataProvider` を継承して `name` / `intervals` / `fetch_bars()` / `connect()` を書き、`wbcore.data.registry.PROVIDERS.register()` する。
 
+### 細かい足を基準に取り込み、粗い足は合成する
+
+```toml
+[universe]
+interval = "5m"        # 判断に使う足
+base_interval = "1m"   # 取り込みの基準。5分足・1時間足・日足はここから合成する
+```
+
+`base_interval` を設定すると、`data sync` は基準足と `interval` の足を両方取り、`backtest` は **二層構造** で足を読む（`wbcore.data.feed.BarFeed`）:
+
+| 区間 | 足の出どころ |
+|---|---|
+| 基準足が保存されている範囲 | 基準足から合成（`wbcore.data.resample`。始値＝最初・高値＝最大・安値＝最小・終値＝最後・出来高＝合計。区切りは取引所の寄付に揃える: NYSE の 1 時間足は 09:30, 10:30, …） |
+| それより前 | その間隔で直接取った足（日足なら数十年） |
+| 両方ある区間 | 直接取った足を優先（日足は分割調整済み、分足は無調整のため） |
+
+分足だけを唯一の取り込み元にしないのは、遡れる期間が短いから（yfinance の 1 分足は 7 日、5〜30 分足は 60 日）。日足戦略の 30 年ぶんは分足からは作れない。
+
+戦略は判断中に粗い足を見られる（マルチタイムフレーム）: `ctx.resample("7203", Interval.H1)` は見えている 5 分足から 1 時間足を合成し、まだ閉じていない最後の足は落とす（`completed_only=False` で形成中の足も含められる）。未来の足は構造的に混ざらない。
+
 ### 日中足で判断する
 
 戦略とバックテストは足の間隔に依存しない。設定の `universe.interval` を変えるだけで、同じ経路が 5 分足でも回る。

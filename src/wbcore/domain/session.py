@@ -15,6 +15,20 @@ from zoneinfo import ZoneInfo
 
 from wbcore.domain.models import Market
 
+#: 通常取引の寄付と引け（現地時刻）。足の区切りを寄付に揃えるのに使う。
+_SESSIONS: dict[Market, tuple[dt.time, dt.time]] = {
+    Market.JP: (dt.time(9, 0), dt.time(15, 30)),
+    Market.US: (dt.time(9, 30), dt.time(16, 0)),
+}
+
+
+def session_open(market: Market) -> dt.time:
+    return _SESSIONS[market][0]
+
+
+def session_close(market: Market) -> dt.time:
+    return _SESSIONS[market][1]
+
 
 def parse_time(value: Any, label: str = "time") -> dt.time:
     """``"09:30"`` のような表記を time にする。"""

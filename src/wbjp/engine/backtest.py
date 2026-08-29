@@ -410,6 +410,7 @@ class DecisionPipeline:
             equity=equity,
             interval=self.interval,
             at=at,
+            market=self.config.universe.market,
         )
 
         signals: list[Signal] = []

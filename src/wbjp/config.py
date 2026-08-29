@@ -152,6 +152,10 @@ class UniverseConfig(BaseModel):
     #: 戦略の指標は「本数」で書かれているので、間隔を変えると同じ本数が
     #: 別の時間幅を指す。時間で窓を持つ戦略は :meth:`Strategy.bind` で本数に直す。
     interval: str = "1d"
+    #: 取り込みの基準にする細かい足（例: "1m"）。設定すると、``interval`` の足は
+    #: 保存された基準足から合成し、基準足で覆えない過去だけ ``interval`` で
+    #: 直接取った足で補う。None なら ``interval`` の足をそのまま使う。
+    base_interval: str | None = None
     symbols: list[str] = Field(default_factory=list)
     #: 銘柄リストのファイル（1行1銘柄、# はコメント）。設定ディレクトリからの相対パス。
     #: 読み込んだ銘柄は ``symbols`` に合流し、allowlist にもなる。
@@ -190,11 +194,39 @@ class UniverseConfig(BaseModel):
 
         return Interval.parse(v).value
 
+    @field_validator("base_interval")
+    @classmethod
+    def _known_base_interval(cls, v: str | None) -> str | None:
+        from wbcore.data.provider import Interval
+
+        return Interval.parse(v).value if v else None
+
+    @model_validator(mode="after")
+    def _base_is_finer(self) -> Self:
+        if self.base_interval is None:
+            return self
+        from wbcore.data.resample import can_resample
+
+        base, target = self.base_bar_interval, self.bar_interval
+        assert base is not None
+        if base is target or not can_resample(base, target):
+            raise ValueError(
+                f"base_interval（{base.value}）から interval（{target.value}）を合成できません。"
+                "基準足は判断の足より細かく、割り切れる間隔にしてください"
+            )
+        return self
+
     @property
     def bar_interval(self) -> Interval:
         from wbcore.data.provider import Interval
 
         return Interval(self.interval)
+
+    @property
+    def base_bar_interval(self) -> Interval | None:
+        from wbcore.data.provider import Interval
+
+        return Interval(self.base_interval) if self.base_interval else None
 
     @property
     def currency(self) -> str:

@@ -84,6 +84,14 @@ def _build_provider(config: Config) -> MarketDataProvider:
     )
 
 
+def _build_feed(config: Config):  # type: ignore[no-untyped-def]
+    """設定の間隔と基準足で足を供給する窓口。"""
+    from wbcore.data.feed import BarFeed
+
+    universe = config.file.universe
+    return BarFeed(config.settings.bars_dir, universe.market, base=universe.base_bar_interval)
+
+
 def _load(config_dir: Path | None):  # type: ignore[no-untyped-def]
     config = load_config(config_dir)
     if not config.file.universe.symbols:
@@ -347,7 +355,6 @@ def backtest(
     判断ロジックはどちらのエンジンでも同一。--engine backtrader は約定と
     口座管理を Backtrader に任せ、自前エンジンとの突き合わせに使う。
     """
-    from wbcore.data.store import BarStore
     from wbjp.engine.backtest import BacktestRunner
     from wbjp.strategy.registry import build_all
 
@@ -356,10 +363,11 @@ def backtest(
         raise typer.Exit(2)
 
     config = _load(config_dir)
-    store = BarStore(config.settings.bars_dir, config.file.universe.bar_interval)
+    feed = _build_feed(config)
+    store = feed.store(config.file.universe.bar_interval)
     symbols = config.file.universe.symbols
 
-    bars = store.read_many(symbols)
+    bars = feed.read(symbols, config.file.universe.bar_interval)
     if not bars:
         console.print("[red]足データがありません。先に `wbjp data sync` を実行してください[/red]")
         raise typer.Exit(1)
@@ -743,10 +751,12 @@ def data_sync(
     config = _load(config_dir)
     try:
         chosen = Interval.parse(interval) if interval else config.file.universe.bar_interval
-        store = BarStore(config.settings.bars_dir, chosen)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from None
+    # --interval を明示したときはその足だけ、省略時は設定の基準足も一緒に揃える
+    feed = _build_feed(config) if interval is None else None
+    store = BarStore(config.settings.bars_dir, chosen)
     end = dt.date.today()
 
     symbols = list(config.file.universe.symbols)
@@ -755,13 +765,12 @@ def data_sync(
         for extra in (config.file.regime.benchmark, config.file.regime.cash_yield_symbol):
             if extra and extra not in symbols:
                 symbols.append(extra)
-    counts = store.sync(
-        _build_provider(config),
-        symbols,
-        end - dt.timedelta(days=days),
-        end,
-        force=force,
-    )
+    provider = _build_provider(config)
+    start = end - dt.timedelta(days=days)
+    if feed is not None:
+        counts = feed.sync(provider, symbols, start, end, chosen, force=force)
+    else:
+        counts = store.sync(provider, symbols, start, end, force=force)
     for symbol, count in sorted(counts.items()):
         console.print(f"  {symbol}: {count} 本")
 

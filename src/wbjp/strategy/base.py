@@ -32,7 +32,7 @@ from typing import Any, ClassVar
 import polars as pl
 
 from wbcore.data.provider import Interval
-from wbcore.domain.models import Position, Signal
+from wbcore.domain.models import Market, Position, Signal
 
 
 class InsufficientBarsError(RuntimeError):
@@ -53,6 +53,7 @@ class StrategyContext:
         interval: 渡している足の間隔。日足なら ``Interval.D1``。
         at: 日中足のときの判断時刻（UTC、最後の足の時刻）。日足では None。
             取引所の現地時刻は ``at.astimezone(market.timezone)``。
+        market: 取引所。:meth:`resample` の区切りを寄付に揃えるのに使う。
     """
 
     as_of: dt.date
@@ -61,6 +62,28 @@ class StrategyContext:
     equity: Decimal = Decimal(0)
     interval: Interval = Interval.D1
     at: dt.datetime | None = None
+    market: Market = Market.JP
+
+    def resample(
+        self, symbol: str, interval: Interval, *, completed_only: bool = True
+    ) -> pl.DataFrame:
+        """見えている足から、より粗い間隔の足を合成して返す。
+
+        5 分足で判断しながら 1 時間足や日足の指標を見たい（マルチタイム
+        フレーム）ときに使う。合成は見えている足だけから行うので未来は
+        混ざらないが、最後の足は形成中（区間の途中まで）になりうる。
+        ``completed_only`` なら閉じた足だけを返す。
+
+        Raises:
+            ValueError: 今の足より細かい間隔を求めたとき。
+        """
+        from wbcore.data.resample import drop_forming, resample
+
+        frame = resample(self.bars(symbol), self.interval, interval, market=self.market)
+        if completed_only and interval is not self.interval:
+            at = self.at or dt.datetime.combine(self.as_of, dt.time(23, 59), tzinfo=dt.UTC)
+            frame = drop_forming(frame, interval, at, market=self.market)
+        return frame
 
     @property
     def symbols(self) -> list[str]:
