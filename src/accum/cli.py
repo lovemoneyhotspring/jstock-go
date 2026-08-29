@@ -353,29 +353,42 @@ def run(
     ] = False,
     config_dir: _ConfigDir = None,
 ) -> None:
-    """最新日の投下額を注文にして出す。
+    """今日出すべき投下を注文にする。
 
+    判断は前日までの確定足、買うのは当日の価格（バックテストと同じ規則）。
+    直近 catch_up_days 日以内の未発注の投下は繰り越す。
     既定は dry-run。実発注には --live が必要で、本番では WBJP_ENV=prod も
     同時に必要。cron から回すときは --yes も付ける。
-    投下額が 0 の日（入金日でも増額日でもない）は何もしない。
     """
-    from accum.execute import build_orders, todays_contributions
+    from accum.execute import build_orders, pending_contributions
     from accum.ledger import DRY_RUN_STATUS, Ledger
     from wbcore.broker.base import Broker, BrokerError
     from wbcore.broker.registry import connect
     from wbcore.domain.models import Market
+    from wbcore.notify import alert
 
     settings = AppSettings()
     config = _load(config_dir)
     if not no_sync:
         _sync(settings, config, config_dir, days=30, force=False)
     bars = _bars(settings, config.all_symbols)
-    contributions = todays_contributions(config, bars)
+    now = now_utc()
+    pending = pending_contributions(
+        config,
+        bars,
+        now=now,
+        lookback_days=config.execution.catch_up_days,
+        max_stale_days=config.execution.max_stale_days,
+    )
+    if pending.stale:
+        detail = "、".join(f"{s}（最終 {d}）" for s, d in sorted(pending.stale.items()))
+        console.print(f"[red]足が古いため判定しませんでした: {detail}[/red]")
+        alert("積立: 足が古いため判定を見送り", detail)
+    contributions = pending.contributions
     if not contributions:
-        console.print("[dim]投下額のある銘柄はありません（入金日でも増額日でもない）[/dim]")
+        console.print("[dim]出すべき投下はありません（入金日でも増額日でもない）[/dim]")
         return
 
-    now = now_utc()
     planned = build_orders(
         contributions,
         tax_type=config.execution.tax_account_type,
@@ -400,20 +413,22 @@ def run(
     # 市場ごとにブローカーを1つ。積立は市場をまたぐのが普通。
     brokers: dict[Market, Broker] = {}
     status: dict[str, str] = {}
+    failures: list[str] = []
     ledger = Ledger(settings.data_dir / f"accum-{settings.env.value}.db")
     try:
         for item in planned:
             c = item.contribution
+            key = f"{c.symbol} {c.date}"
             if item.request is None:
-                status[c.symbol] = f"[yellow]見送り[/yellow] {item.note}"
+                status[key] = f"[yellow]見送り[/yellow] {item.note}"
                 continue
             # 台帳にあれば同じ判断からの再実行（祝日で足が増えない日など）。送らない。
             if ledger.was_placed(item.request.client_order_id):
-                status[c.symbol] = "[dim]発注済み（冪等）[/dim]"
+                status[key] = "[dim]発注済み（冪等）[/dim]"
                 continue
             if not allowed:
                 ledger.record(item.request, DRY_RUN_STATUS)
-                status[c.symbol] = "[yellow]dry-run[/yellow]"
+                status[key] = "[yellow]dry-run[/yellow]"
                 continue
             broker = brokers.get(c.market)
             if broker is None:
@@ -427,15 +442,28 @@ def run(
                 )
                 brokers[c.market] = broker
             try:
+                # 発注前にブローカーの見積りと買付余力を突き合わせる。
+                # 余力不足で拒否されるより、こちらで止めて理由を残す方が追える。
+                preview = broker.preview(item.request)
+                cost = preview.estimated_cost + preview.estimated_fee
+                buying_power = broker.get_balance().buying_power
+                if cost > buying_power:
+                    note = f"買付余力不足（必要 {cost:,.0f} / 余力 {buying_power:,.0f}）"
+                    status[key] = f"[red]見送り[/red] {note}"
+                    failures.append(f"{key}: {note}")
+                    continue
                 ack = broker.place(item.request)
             except BrokerError as exc:
-                status[c.symbol] = f"[red]失敗[/red] {exc}"
+                status[key] = f"[red]失敗[/red] {exc}"
+                failures.append(f"{key}: {exc}")
                 log.error("積立の発注に失敗", symbol=c.symbol, error=str(exc))
             else:
                 ledger.record(item.request, ack.status.value, ack.broker_order_id)
-                status[c.symbol] = "[green]発注[/green]"
+                status[key] = "[green]発注[/green]"
     finally:
         ledger.close()
+    if failures:
+        alert(f"積立: {len(failures)} 件の発注に失敗", "\n".join(failures))
 
     mode = "[green]実発注[/green]" if allowed else f"[yellow]dry-run[/yellow] ({reason})"
     console.print(
@@ -443,20 +471,21 @@ def run(
         f"{fmt(now, settings.timezone)}  {mode}"
     )
     table = Table(title="注文", title_justify="left")
-    for column in ("銘柄", "市場", "終値", "投下額", "倍率", "株数", "状態"):
+    for column in ("銘柄", "判断日", "市場", "価格", "投下額", "倍率", "株数", "状態"):
         table.add_column(
-            column, justify="right" if column in ("終値", "投下額", "株数") else "left"
+            column, justify="right" if column in ("価格", "投下額", "株数") else "left"
         )
     for item in planned:
         c = item.contribution
         table.add_row(
             c.symbol,
+            str(c.date),
             c.market.value,
             f"{c.close:,.2f}",
             f"{c.amount:,.0f}",
             f"×{c.multiplier:g}",
             f"{item.request.quantity:,}" if item.request else "—",
-            status[c.symbol],
+            status[f"{c.symbol} {c.date}"],
         )
     console.print(table)
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 import polars as pl
@@ -23,6 +23,7 @@ import polars as pl
 from accum.config import AccumConfig
 from accum.plan import AccumulationSettings, build_plan
 from accum.tactics import Tactic
+from wbcore.clock import to_zone
 from wbcore.domain.market_rules import rules_for
 from wbcore.domain.models import (
     Market,
@@ -78,7 +79,10 @@ def broker_symbol(symbol: str, market: Market) -> str:
 def todays_contributions(
     config: AccumConfig, bars: Mapping[str, pl.DataFrame]
 ) -> list[Contribution]:
-    """設定と足から、最新日の投下を銘柄ごとに取り出す。
+    """設定と足から、最新の足の投下を銘柄ごとに取り出す（計画の確認用）。
+
+    ライブの発注には :func:`pending_contributions` を使う（確定足で判断し、
+    未発注ぶんを繰り越す）。こちらは「最後の足でいくらか」をそのまま返す。
 
     投下額が 0 の銘柄（入金日でも増額日でもない）は含めない。
     足の無い銘柄は黙って飛ばす——呼び出し側が先に警告している前提。
@@ -115,6 +119,83 @@ def todays_contributions(
                 )
             )
     return out
+
+
+@dataclass(frozen=True, slots=True)
+class Pending:
+    """ライブで今日出すべき投下と、判定しなかった銘柄。"""
+
+    contributions: list[Contribution]
+    #: 足が古すぎて判定を見送った銘柄 → 最終足の日付
+    stale: dict[str, dt.date] = field(default_factory=dict)
+
+
+def pending_contributions(
+    config: AccumConfig,
+    bars: Mapping[str, pl.DataFrame],
+    *,
+    now: dt.datetime,
+    lookback_days: int = 7,
+    max_stale_days: int = 4,
+) -> Pending:
+    """ライブの規則で「今日出すべき投下」を取り出す。
+
+    バックテスト（:mod:`accum.simulate`）と同じ規則にする:
+
+    - **判断は前日までの確定足**で行う。当日の足はザラ場中の途中経過で、
+      同じ日でも実行時刻で判定が変わる。判定用の銘柄も同様に確定足だけ。
+    - **買うのは当日の価格**（最新の終値。ザラ場中ならその時点の価格）。
+    - 投下の日付は**計画の日付**（入金日なら月初の営業日）。注文IDはこれから
+      作るので、翌日以降に出しても同じ注文として扱われ、二重にならない。
+    - 直近 ``lookback_days`` 日以内の未発注の投下は**繰り越す**。入金日に cron が
+      動かなかった月でも、次の実行で買う。発注済みかは台帳（呼び出し側）が見る。
+    - 最終足が ``max_stale_days`` 日より古い銘柄は**判定しない**。取得元の障害で
+      古い足のまま増額判定するのを防ぐ。``stale`` に入れて呼び出し側が知らせる。
+    """
+    out: list[Contribution] = []
+    stale: dict[str, dt.date] = {}
+    for entry in config.active:
+        tactic = entry.build()
+        signal_all = bars.get(entry.signal_symbol) if entry.signal_symbol else None
+        for symbol in entry.symbols:
+            frame = bars.get(symbol)
+            if frame is None or frame.height == 0:
+                continue
+            today_local = to_zone(now, entry.market.timezone).date()
+            latest_date = frame["date"].max()
+            assert isinstance(latest_date, dt.date)
+            if (today_local - latest_date).days > max_stale_days:
+                stale[symbol] = latest_date
+                continue
+            completed = frame.filter(pl.col("date") < today_local)
+            if completed.height == 0:
+                continue
+            signal = (
+                signal_all.filter(pl.col("date") < today_local) if signal_all is not None else None
+            )
+            plan = build_plan(
+                completed,
+                AccumulationSettings(config.monthly_budget, tactic),
+                signal_bars=signal,
+                signal_strict=entry.signal_lags,
+            )
+            since = today_local - dt.timedelta(days=lookback_days)
+            due = plan.filter((pl.col("amount") > 0) & (pl.col("date") >= since))
+            latest_close = Decimal(str(frame["close"][-1]))
+            for row in due.iter_rows(named=True):
+                out.append(
+                    Contribution(
+                        symbol=symbol,
+                        market=entry.market,
+                        date=row["date"],
+                        close=latest_close,
+                        amount=Decimal(str(row["amount"])),
+                        multiplier=float(row["multiplier"]),
+                        reason=str(row["reason"]),
+                        tactic=tactic,
+                    )
+                )
+    return Pending(out, stale)
 
 
 def to_order(

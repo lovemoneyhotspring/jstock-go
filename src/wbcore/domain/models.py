@@ -18,6 +18,12 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 
+def _require_aware(name: str, value: dt.datetime | None) -> None:
+    """時刻項目は時間帯付きでなければならない（規約: 時刻は必ず時間帯と紐づける）。"""
+    if value is not None and value.tzinfo is None:
+        raise ValueError(f"{name} には時間帯が必要です（tz 無しの datetime）: {value!r}")
+
+
 class Market(StrEnum):
     """取引市場。値は Webull API の ``market`` にそのまま渡る。
 
@@ -350,6 +356,9 @@ class Order:
     created_at: dt.datetime | None = None
     time_in_force: TimeInForce = TimeInForce.DAY
 
+    def __post_init__(self) -> None:
+        _require_aware("created_at", self.created_at)
+
     @property
     def remaining_quantity(self) -> Decimal:
         return self.quantity - self.filled_quantity
@@ -376,3 +385,6 @@ class Fill:
     price: Decimal
     fee: Decimal = Decimal(0)
     filled_at: dt.datetime | None = None
+
+    def __post_init__(self) -> None:
+        _require_aware("filled_at", self.filled_at)

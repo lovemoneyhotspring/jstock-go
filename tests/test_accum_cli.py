@@ -87,7 +87,7 @@ def test_run_without_bars_does_not_touch_the_broker(tmp_path: Path) -> None:
     )
     result = _accum("run", "--no-sync", "--live", config_dir=tmp_path, env={"WBJP_ENV": "prod"})
     assert result.exit_code == 0
-    assert "投下額のある銘柄はありません" in result.stdout
+    assert "出すべき投下はありません" in result.stdout
 
 
 def test_commands_are_registered() -> None:

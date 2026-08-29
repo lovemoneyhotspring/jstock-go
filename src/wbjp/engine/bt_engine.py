@@ -46,6 +46,7 @@ import polars as pl
 
 from wbcore.broker.base import OrderRejectedError
 from wbcore.broker.paper import DEFAULT_COMMISSION_RATE, DEFAULT_SLIPPAGE_RATE
+from wbcore.clock import ensure_utc
 from wbcore.domain.models import (
     Balance,
     Fill,
@@ -229,7 +230,8 @@ class _Bridge(bt.Strategy):  # type: ignore[misc]
                 quantity=Decimal(abs(executed.size)),
                 price=Decimal(str(executed.price)),
                 fee=_money(executed.comm, self.currency),
-                filled_at=bt.num2date(executed.dt),
+                # Backtrader の時刻は tz 無し。規約（時刻は必ず時間帯付き）に合わせ UTC を付ける
+                filled_at=ensure_utc(bt.num2date(executed.dt)),
             )
             self.fills_today.append(fill)
             if request.side is Side.BUY:
