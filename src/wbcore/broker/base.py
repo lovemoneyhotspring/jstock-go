@@ -1,7 +1,7 @@
 """ブローカーの抽象。
 
-同じインターフェースの裏に、実際の証券会社（:class:`~wbjp.broker.webull.WebullBroker`）
-とシミュレータ（:class:`~wbjp.broker.paper.PaperBroker`）を並べる。
+同じインターフェースの裏に、実際の証券会社（:class:`~wbcore.broker.webull.WebullBroker`）
+とシミュレータ（:class:`~wbcore.broker.paper.PaperBroker`）を並べる。
 エンジンはどちらを渡されたか知らないため、バックテスト・UAT・本番で
 まったく同じコードが動く。
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from wbjp.domain.models import (
+from wbcore.domain.models import (
     Balance,
     Order,
     OrderAck,

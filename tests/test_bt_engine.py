@@ -16,8 +16,8 @@ from decimal import Decimal
 import pytest
 
 from tests.test_backtest import SpyStrategy, make_bars, make_config, wavy
+from wbcore.domain.models import Market, Side
 from wbjp.config import ExecutionConfig, SizingConfig, StopsConfig, UniverseConfig
-from wbjp.domain.models import Market, Side
 from wbjp.engine.backtest import BacktestRunner
 from wbjp.engine.bt_engine import BacktraderRunner
 from wbjp.strategy.registry import build_all

@@ -54,8 +54,8 @@ from typing import Any, ClassVar
 
 import polars as pl
 
-from wbjp.domain.models import Signal
-from wbjp.indicators.ohlcv import atr, sma
+from wbcore.domain.models import Signal
+from wbcore.indicators.ohlcv import atr, sma
 from wbjp.strategy.base import IndicatorStrategy, StrategyContext
 
 _DIRECTION_FLOOR = 0.3

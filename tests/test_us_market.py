@@ -15,8 +15,22 @@ from decimal import Decimal
 import polars as pl
 import pytest
 
-from wbjp.broker.paper import PaperBroker
-from wbjp.broker.webull import WebullBroker
+from wbcore.broker.paper import PaperBroker
+from wbcore.broker.webull import WebullBroker
+from wbcore.data.yfinance_provider import to_yahoo_ticker
+from wbcore.domain.jp_rules import PriceRounding
+from wbcore.domain.market_rules import JpMarketRules, UsMarketRules, rules_for
+from wbcore.domain.models import (
+    Market,
+    Order,
+    OrderRequest,
+    OrderStatus,
+    OrderType,
+    Position,
+    Side,
+    TargetPosition,
+    TimeInForce,
+)
 from wbjp.config import (
     Credentials,
     Environment,
@@ -27,20 +41,6 @@ from wbjp.config import (
     StrategiesConfig,
     StrategyEntry,
     UniverseConfig,
-)
-from wbjp.data.yfinance_provider import to_yahoo_ticker
-from wbjp.domain.jp_rules import PriceRounding
-from wbjp.domain.market_rules import JpMarketRules, UsMarketRules, rules_for
-from wbjp.domain.models import (
-    Market,
-    Order,
-    OrderRequest,
-    OrderStatus,
-    OrderType,
-    Position,
-    Side,
-    TargetPosition,
-    TimeInForce,
 )
 from wbjp.engine.backtest import BacktestRunner
 from wbjp.engine.reconcile import effective_quantity, reconcile
@@ -262,7 +262,7 @@ def test_risk_messages_use_account_currency() -> None:
     request = OrderRequest("o", "AAPL", Side.BUY, OrderType.LIMIT, D(10), D(200))
     ctx = RiskContext(
         equity=D(100_000),
-        balance=__import__("wbjp.domain.models", fromlist=["Balance"]).Balance(
+        balance=__import__("wbcore.domain.models", fromlist=["Balance"]).Balance(
             "USD", D(100_000), D(100_000)
         ),
         base_prices={"AAPL": D(200)},
@@ -274,7 +274,7 @@ def test_risk_messages_use_account_currency() -> None:
 
 def test_order_value_cap_does_not_block_exits_or_stops() -> None:
     """損切りが金額上限で弾かれると、上限が損失を膨らませる装置になる。"""
-    from wbjp.domain.models import Balance
+    from wbcore.domain.models import Balance
 
     manager = RiskManager(RiskConfig(max_order_value=D(100)), ["AAPL"], US)
     ctx = RiskContext(
@@ -292,7 +292,7 @@ def test_order_value_cap_does_not_block_exits_or_stops() -> None:
 
 def test_risk_skips_price_limit_check_for_us() -> None:
     """東証なら値幅制限で弾かれる指値も、米国株では通る。"""
-    from wbjp.domain.models import Balance
+    from wbcore.domain.models import Balance
 
     manager = RiskManager(RiskConfig(max_order_value=D(10_000_000)), ["AAPL"], US)
     request = OrderRequest("o", "AAPL", Side.BUY, OrderType.LIMIT, D(1), D(10_000))

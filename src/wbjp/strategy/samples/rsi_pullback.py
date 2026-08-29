@@ -53,8 +53,8 @@ from typing import Any, ClassVar
 
 import polars as pl
 
-from wbjp.domain.models import Signal
-from wbjp.indicators.ohlcv import atr, rsi, sma
+from wbcore.domain.models import Signal
+from wbcore.indicators.ohlcv import atr, rsi, sma
 from wbjp.strategy.base import IndicatorStrategy, StrategyContext
 
 #: 意見を出すときの direction の下限。entry_threshold（既定 0.3）以上。

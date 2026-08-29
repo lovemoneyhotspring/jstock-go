@@ -2,9 +2,9 @@
 
 **これは投下額を変えない**
 
-積立の計画は日足で決まる（:mod:`wbjp.accumulate.plan`）。この時間帯は
+積立の計画は日足で決まる（:mod:`accum.plan`）。この時間帯は
 「その日ぶんの注文を、いつ出してよいか」だけを制御する。したがって
-:func:`~wbjp.accumulate.simulate.simulate` の結果は時間帯を変えても
+:func:`~accum.simulate.simulate` の結果は時間帯を変えても
 変わらない。日足では時間内の値動きを再現できないため、変わったように
 見せる方が嘘になる。
 

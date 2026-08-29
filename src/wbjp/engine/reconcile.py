@@ -22,14 +22,13 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from wbjp.domain.jp_rules import PriceRounding, violates_same_day_settlement
-from wbjp.domain.market_rules import JpMarketRules, MarketRules
-from wbjp.domain.models import (
+from wbcore.domain.jp_rules import PriceRounding, violates_same_day_settlement
+from wbcore.domain.market_rules import JpMarketRules, MarketRules
+from wbcore.domain.models import (
     Order,
     OrderRequest,
     OrderType,
@@ -38,8 +37,9 @@ from wbjp.domain.models import (
     TargetPosition,
     TaxAccountType,
     TimeInForce,
+    make_client_order_id,
 )
-from wbjp.logging import get_logger
+from wbcore.logging import get_logger
 
 log = get_logger(__name__)
 
@@ -102,18 +102,6 @@ def open_stop_orders(symbol: str, open_orders: Iterable[Order]) -> list[Order]:
     return [
         o for o in open_orders if o.symbol == symbol and o.status.is_open and o.order_type.is_stop
     ]
-
-
-def make_client_order_id(seed_key: str, symbol: str, side: Side, quantity: Decimal) -> str:
-    """注文IDを**決定論的に**作る。
-
-    同じ判断からは必ず同じIDが出る。つまり、同じ実行を2回走らせても
-    ブローカー側が「同じ注文」と認識でき、二重発注が防げる。
-
-    Webull の上限は32文字。ハッシュで詰める。
-    """
-    seed = f"{seed_key}|{symbol}|{side.value}|{quantity}"
-    return hashlib.sha256(seed.encode()).hexdigest()[:32]
 
 
 def reconcile(

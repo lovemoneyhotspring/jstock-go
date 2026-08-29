@@ -20,8 +20,8 @@ from pathlib import Path
 
 import polars as pl
 
-from wbjp.data.provider import BAR_SCHEMA, MarketDataProvider, empty_bars, normalize_bars
-from wbjp.logging import get_logger
+from wbcore.data.provider import BAR_SCHEMA, MarketDataProvider, empty_bars, normalize_bars
+from wbcore.logging import get_logger
 
 log = get_logger(__name__)
 
@@ -201,7 +201,7 @@ class BarStore:
         """保存済みの全銘柄に SQL を投げる（DuckDB）。
 
         テーブル名 ``bars`` で全銘柄を横断できる。
-        列は :data:`~wbjp.data.provider.BAR_SCHEMA` に ``symbol`` を加えたもの。
+        列は :data:`~wbcore.data.provider.BAR_SCHEMA` に ``symbol`` を加えたもの。
 
         Example:
             >>> store.query(

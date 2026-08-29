@@ -24,7 +24,7 @@ from decimal import Decimal
 
 import polars as pl
 
-from wbjp.accumulate.tactics import MULTIPLIER, BearStack, Tactic
+from accum.tactics import MULTIPLIER, BearStack, Tactic
 
 #: 計画表の列。
 PLAN_COLUMNS = ("date", "close", MULTIPLIER, "base", "extra", "amount", "reason")

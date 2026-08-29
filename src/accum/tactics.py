@@ -1,14 +1,15 @@
-"""積立型の戦略。「その日の購入倍率をいくつにするか」だけを決める。
+"""積立戦略。「その日の購入倍率をいくつにするか」だけを決める。
 
-種別は ``accumulate``。売買型（:class:`wbjp.strategy.base.Strategy`）と
-共通の親 :class:`~wbjp.strategy.base.Playbook` を持ち、同じ登録簿・同じ
-設定ファイル（``strategies.toml`` の ``[[tactics]]``）から引ける。
-違うのは判断の出力だけ——意見ではなく倍率を返し、売却しない。
+スイング売買の :class:`wbjp.strategy.base.Strategy` とは別物。あちらは
+銘柄ごとの意見（-1.0〜+1.0）を返して合成されるが、こちらは倍率を返し、
+予算 × 倍率で買い増すだけで売却しない。出力の意味が違うので基底も
+登録簿（:mod:`accum.registry`）も分けてあり、設定は
+``config/accum/accum.toml`` の ``[[tactics]]`` に書く。
 
 **名前はメカニズム、強さはパラメータ**
 
 ``bear_stack_4x`` のような名前は作らない。倍率を変えた瞬間に名前が
-嘘になるためで、これは売買型の ``sma_cross`` が期間を名前に含めて
+嘘になるためで、これはスイング側の ``sma_cross`` が期間を名前に含めて
 いないのと同じ方針。
 
 **倍率は 1 未満にしない**
@@ -21,34 +22,43 @@
 
 from __future__ import annotations
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import ClassVar
 
 import polars as pl
 
-from wbjp.accumulate.stack import FAST, MID, SLOW, bear_stack, stack_score
-from wbjp.accumulate.window import TradingWindow
-from wbjp.indicators.ohlcv import sma
-from wbjp.strategy.base import Playbook, PlaybookKind
+from accum.stack import FAST, MID, SLOW, bear_stack, stack_score
+from accum.window import TradingWindow
+from wbcore.indicators.ohlcv import sma
 
 #: 倍率列の名前。
 MULTIPLIER = "multiplier"
 
 
-class Tactic(Playbook, abstract=True):
-    """購入倍率を決める積立型戦略の基底（種別 ``accumulate``）。
+class Tactic(ABC):
+    """購入倍率を決める積立戦略の基底。
 
     実装するのは :meth:`multiplier` と :attr:`warmup_bars` だけ。
     足の取得も約定も知らない純粋な式なので、単体でテストできる。
     """
 
-    kind: ClassVar[PlaybookKind] = PlaybookKind.ACCUMULATE
+    #: 設定ファイルから引く識別子。サブクラスで必ず定義する。
+    name: ClassVar[str] = ""
 
     def __init__(self, *, window: object = None) -> None:
         # 発注時間帯は倍率の決め方とは独立なので、全戦略で共通に持つ。
-        # 既定は 14:00〜15:00（理由は wbjp.accumulate.window の説明）。
+        # 既定は 14:00〜15:00（理由は accum.window の説明）。
         self.window = TradingWindow.parse(window)
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if not cls.name:
+            raise TypeError(f"{cls.__name__} はクラス変数 name を定義してください")
+
+    def describe(self) -> str:
+        """ログ・一覧用の説明。パラメータを含めると調査が楽になる。"""
+        return self.name
 
     @abstractmethod
     def multiplier(self) -> pl.Expr:

@@ -14,7 +14,7 @@ import math
 import polars as pl
 import pytest
 
-from wbjp.domain.models import Signal
+from wbcore.domain.models import Signal
 from wbjp.strategy.base import (
     IndicatorStrategy,
     InsufficientBarsError,
@@ -159,7 +159,7 @@ def test_indicator_strategy_applies_indicator_columns() -> None:
         warmup_bars = 5
 
         def indicators(self) -> list[pl.Expr]:
-            from wbjp.indicators.ohlcv import sma
+            from wbcore.indicators.ohlcv import sma
 
             return [sma(5)]
 

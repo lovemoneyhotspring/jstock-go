@@ -23,10 +23,10 @@ from typing import Any
 
 import polars as pl
 
-from wbjp.config import Credentials, Environment
-from wbjp.data.provider import MarketDataError, MarketDataProvider, normalize_bars
-from wbjp.domain.models import Market
-from wbjp.logging import get_logger, harden_third_party_logging, register_secret
+from wbcore.credentials import Credentials, Environment
+from wbcore.data.provider import MarketDataError, MarketDataProvider, normalize_bars
+from wbcore.domain.models import Market
+from wbcore.logging import get_logger, harden_third_party_logging, register_secret
 
 log = get_logger(__name__)
 

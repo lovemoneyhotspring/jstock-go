@@ -7,10 +7,10 @@
 
 ## 前提と実装
 
-- **配分層を新設**（`wbjp.accumulate.basket`）。従来の積立は「1銘柄に積立型戦略1つ、倍率だけを決める」
+- **配分層を新設**（`accum.basket`）。従来の積立は「1銘柄に積立型戦略1つ、倍率だけを決める」
   構造で銘柄間の配分を持たなかった。バスケットは `予算 × 配分比率 × 倍率` の配分比率を担う。
-- **13F はSEC EDGAR から取得**（`wbjp.data.edgar_13f`、`wbjp accumulate sync-13f`）。
-  XML 化された 2013-Q2 以降、53 四半期。CUSIP→ティッカーは `config/cusip.toml`。
+- **13F はSEC EDGAR から取得**（`wbcore.data.edgar_13f`、`accum sync-13f`）。
+  XML 化された 2013-Q2 以降、53 四半期。CUSIP→ティッカーは `config/accum/cusip.toml`。
 - **ルックアヘッド回避**: 比率は四半期末ではなく **提出日の翌営業日** から反映（最大 45 日遅れ）。
 - **足の無い銘柄**（買収・上場廃止: DirecTV、Precision Castparts、Activision 等）は除いて正規化。
   買収は通常プレミアム付きなので、成績は実際より **控えめ** に出る方向のバイアス。
@@ -67,12 +67,12 @@
 ## 再現
 
 ```
-wbjp accumulate sync-13f          # EDGAR から 13F（data/13f/<cik>/holdings.parquet）
-wbjp accumulate sync --force      # 構成銘柄（過去に登場した全銘柄）と基準の足
-wbjp accumulate basket [--from 2019-01-01] [--weights]
+accum sync-13f          # EDGAR から 13F（data/13f/<cik>/holdings.parquet）
+accum sync --force      # 構成銘柄（過去に登場した全銘柄）と基準の足
+accum basket [--from 2019-01-01] [--weights]
 ```
 
-設定は `config/strategies.toml` の `[[baskets]]`（統合前は `config/accumulate.toml`）。CUSIP の対応は `config/cusip.toml`
+設定は `config/accum/accum.toml` の `[[baskets]]`（積立プロジェクト `accum`）。CUSIP の対応は `config/accum/cusip.toml`
 （未対応の CUSIP はログに `cusip_unmapped` で出る）。
 
 ## 落とし穴

@@ -16,6 +16,16 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from wbcore.domain.models import (
+    CombinedSignal,
+    Order,
+    OrderRequest,
+    OrderStatus,
+    OrderType,
+    Side,
+    Signal,
+    TargetPosition,
+)
 from wbjp.config import (
     ExecutionConfig,
     FileConfig,
@@ -26,16 +36,6 @@ from wbjp.config import (
     UniverseConfig,
 )
 from wbjp.db.repo import Journal
-from wbjp.domain.models import (
-    CombinedSignal,
-    Order,
-    OrderRequest,
-    OrderStatus,
-    OrderType,
-    Side,
-    Signal,
-    TargetPosition,
-)
 from wbjp.engine.backtest import BacktestRunner
 from wbjp.risk.stops import Stop
 from wbjp.strategy.base import Strategy, StrategyContext
@@ -494,7 +494,7 @@ def test_precomputed_indicators_match_per_slice_computation() -> None:
     成り立つのは本システムの指標がすべて因果的（過去だけを見る）だから。
     将来この前提を壊す指標を足したら、ここで気付ける。
     """
-    from wbjp.indicators.ohlcv import adx, atr, bollinger_bands, macd, rsi, sma
+    from wbcore.indicators.ohlcv import adx, atr, bollinger_bands, macd, rsi, sma
 
     frame = make_bars(wavy(200))
     expressions = [sma(25), rsi(14), atr(14), *macd(), *bollinger_bands(), *adx(14)]

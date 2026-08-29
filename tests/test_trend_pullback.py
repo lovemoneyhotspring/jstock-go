@@ -10,9 +10,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from wbcore.domain.models import Position, TargetPosition
 from wbjp.config import StopsConfig, load_file_config
 from wbjp.db.repo import Journal
-from wbjp.domain.models import Position, TargetPosition
 from wbjp.risk.stops import Stop, StopBook
 from wbjp.strategy.base import StrategyContext
 from wbjp.strategy.registry import create

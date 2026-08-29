@@ -31,8 +31,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
-from wbjp.domain.jp_rules import round_to_lot
-from wbjp.domain.models import (
+from wbcore.domain.jp_rules import round_to_lot
+from wbcore.domain.models import (
     Order,
     OrderRequest,
     OrderType,
@@ -42,7 +42,7 @@ from wbjp.domain.models import (
     TaxAccountType,
     TimeInForce,
 )
-from wbjp.logging import get_logger
+from wbcore.logging import get_logger
 
 log = get_logger(__name__)
 
@@ -541,7 +541,7 @@ def _stop_request(
     order_id_seed: str,
     tax_type: TaxAccountType,
 ) -> OrderRequest:
-    from wbjp.engine.reconcile import make_client_order_id
+    from wbcore.domain.models import make_client_order_id
 
     return OrderRequest(
         client_order_id=make_client_order_id(

@@ -7,7 +7,7 @@
 移動平均クロスとは似た方向を向きやすいが、反応の速さが異なる。
 
 注意:
-    ドンチャンの高値・安値は :func:`~wbjp.indicators.ohlcv.donchian_high`
+    ドンチャンの高値・安値は :func:`~wbcore.indicators.ohlcv.donchian_high`
     が **当日を除いて** 計算している。当日を含めると当日高値が必ず
     上限に等しくなり、ブレイクが常に成立する嘘のバックテスト結果になる。
 """
@@ -18,8 +18,8 @@ from typing import ClassVar
 
 import polars as pl
 
-from wbjp.domain.models import Signal
-from wbjp.indicators.ohlcv import atr, donchian_high, donchian_low
+from wbcore.domain.models import Signal
+from wbcore.indicators.ohlcv import atr, donchian_high, donchian_low
 from wbjp.strategy.base import IndicatorStrategy, StrategyContext
 
 

@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from wbjp.accumulate import (
+from accum import (
     AccumulationSettings,
     BearStack,
     Constant,

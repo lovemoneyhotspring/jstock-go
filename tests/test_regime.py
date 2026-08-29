@@ -8,10 +8,10 @@ from decimal import Decimal
 import polars as pl
 import pytest
 
-from wbjp.broker.paper import PaperBroker
+from wbcore.broker.paper import PaperBroker
+from wbcore.data.fundamentals import QualityThresholds, evaluate
+from wbcore.domain.models import Position
 from wbjp.config import FileConfig, RegimeConfig, StopsConfig, UniverseConfig
-from wbjp.data.fundamentals import QualityThresholds, evaluate
-from wbjp.domain.models import Position
 from wbjp.engine.backtest import DecisionPipeline
 from wbjp.risk.stops import StopBook
 

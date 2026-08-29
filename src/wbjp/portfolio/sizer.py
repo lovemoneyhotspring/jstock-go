@@ -17,10 +17,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from wbcore.domain.jp_rules import DEFAULT_LOT_SIZE, round_to_lot
+from wbcore.domain.models import CombinedSignal, Position, TargetPosition
+from wbcore.logging import get_logger
 from wbjp.config import SizingConfig
-from wbjp.domain.jp_rules import DEFAULT_LOT_SIZE, round_to_lot
-from wbjp.domain.models import CombinedSignal, Position, TargetPosition
-from wbjp.logging import get_logger
 
 log = get_logger(__name__)
 

@@ -18,7 +18,7 @@ from bisect import bisect_left, bisect_right
 from decimal import ROUND_DOWN, ROUND_HALF_UP, ROUND_UP, Decimal
 from enum import Enum, auto
 
-from wbjp.domain.models import Side
+from wbcore.domain.models import Side
 
 JST = dt.timezone(dt.timedelta(hours=9), "JST")
 

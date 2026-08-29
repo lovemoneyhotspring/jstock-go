@@ -69,8 +69,8 @@ from typing import Any, ClassVar
 
 import polars as pl
 
-from wbjp.domain.models import Signal
-from wbjp.indicators.ohlcv import atr, ema, sma
+from wbcore.domain.models import Signal
+from wbcore.indicators.ohlcv import atr, ema, sma
 from wbjp.strategy.base import IndicatorStrategy, StrategyContext
 from wbjp.strategy.samples.rsi_pullback import load_blackout
 

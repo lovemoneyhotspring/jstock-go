@@ -19,7 +19,7 @@ from pathlib import Path
 
 import polars as pl
 
-from wbjp.data.provider import MarketDataProvider, normalize_bars
+from wbcore.data.provider import MarketDataProvider, normalize_bars
 
 
 class CsvReplayProvider(MarketDataProvider):

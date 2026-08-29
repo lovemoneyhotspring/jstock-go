@@ -8,8 +8,7 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
-from wbjp.config import RiskConfig, SizingConfig
-from wbjp.domain.models import (
+from wbcore.domain.models import (
     Balance,
     CombinedSignal,
     Order,
@@ -21,6 +20,7 @@ from wbjp.domain.models import (
     Side,
     TargetPosition,
 )
+from wbjp.config import RiskConfig, SizingConfig
 from wbjp.engine.reconcile import (
     ReconcileSettings,
     effective_quantity,

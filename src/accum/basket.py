@@ -2,7 +2,7 @@
 
 **なぜ積立型戦略（Tactic）と分けるのか**
 
-:mod:`wbjp.accumulate.tactics` は1銘柄の足だけを見て「今日は何倍買うか」を
+:mod:`accum.tactics` は1銘柄の足だけを見て「今日は何倍買うか」を
 返す。銘柄をまたぐ判断（バフェットの保有比率で買う、コアとサテライトに
 分ける）はそこに入れられない。そこで **配分は銘柄をまたぐ層** として
 独立させ、倍率は従来どおり銘柄ごとの積立型戦略に任せる。
@@ -20,7 +20,7 @@
 
 上場前・上場廃止後・足の未取得で、その日に足が無い銘柄には振れない。
 その分は現金として残さず、足のある銘柄の間で比率を正規化して投じる。
-現金の滞留は平均取得単価を確実に悪化させる（:mod:`~wbjp.accumulate.plan`）。
+現金の滞留は平均取得単価を確実に悪化させる（:mod:`~accum.plan`）。
 
 **評価の物差し**
 
@@ -40,8 +40,8 @@ from decimal import Decimal
 import numpy as np
 import polars as pl
 
-from wbjp.accumulate.plan import PLAN_COLUMNS, AccumulationSettings, build_plan
-from wbjp.accumulate.tactics import MULTIPLIER, Constant, Tactic
+from accum.plan import PLAN_COLUMNS, AccumulationSettings, build_plan
+from accum.tactics import MULTIPLIER, Constant, Tactic
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +118,7 @@ class DrawdownTilt:
     下落率は ``lookback`` 本の高値に対する割合（0〜1）。
     ``strength=2`` なら 30% 下げた銘柄の比率が 1.6 倍になる。
 
-    積立型戦略（:class:`~wbjp.accumulate.tactics.Tactic`）と違い予算の総額は
+    積立型戦略（:class:`~accum.tactics.Tactic`）と違い予算の総額は
     変えない。銘柄 **間** で配分を動かすだけなので追加資金は要らない。
     """
 
@@ -165,12 +165,12 @@ def build_basket_plan(
 ) -> dict[str, pl.DataFrame]:
     """銘柄ごとの計画表を作る。
 
-    銘柄単位の :func:`~wbjp.accumulate.plan.build_plan` をバスケットの予算で
+    銘柄単位の :func:`~accum.plan.build_plan` をバスケットの予算で
     走らせ、日ごとの配分比率を掛ける。比率はその日に足のある銘柄の間で
     正規化する。
 
     Returns:
-        ``銘柄 → 計画表``。計画表は :data:`~wbjp.accumulate.plan.PLAN_COLUMNS`
+        ``銘柄 → 計画表``。計画表は :data:`~accum.plan.PLAN_COLUMNS`
         に ``weight`` 列を加えたもの。配分が 0 の銘柄は含めない。
     """
     if not bars:

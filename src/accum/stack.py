@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from wbjp.indicators.ohlcv import sma
+from wbcore.indicators.ohlcv import sma
 
 #: 既定の移動平均の組。20/50/200 は感度検証で広い高原になっており、
 #: 前後にずらしても結論が変わらないことを確認済み。

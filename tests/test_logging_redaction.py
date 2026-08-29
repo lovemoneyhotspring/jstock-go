@@ -10,7 +10,7 @@ import logging
 
 import pytest
 
-from wbjp.logging import (
+from wbcore.logging import (
     REDACTED,
     RedactingFormatter,
     clear_secrets,
@@ -161,7 +161,7 @@ def test_sdk_logger_output_is_redacted(capsys: pytest.CaptureFixture[str]) -> No
 
 def test_structlog_output_is_redacted(capsys: pytest.CaptureFixture[str]) -> None:
     """構造化ログのフィールドもマスクされること。"""
-    from wbjp.logging import get_logger
+    from wbcore.logging import get_logger
 
     configure_logging("INFO")
     get_logger("wbjp.test").info("発注", app_key=APP_KEY, symbol="7203")

@@ -12,7 +12,7 @@ import math
 import polars as pl
 import pytest
 
-from wbjp.indicators.ohlcv import (
+from wbcore.indicators.ohlcv import (
     adx,
     atr,
     bollinger_bands,

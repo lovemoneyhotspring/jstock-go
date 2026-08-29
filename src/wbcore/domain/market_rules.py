@@ -2,7 +2,7 @@
 
 エンジン（サイジング・リコンサイル・リスク）は「呼値に乗せる」「単元に
 丸める」「値幅制限の内側か」「逆指値を置けるか」を**この抽象を通して**
-問い合わせる。東証の具体的な表は :mod:`wbjp.domain.jp_rules` に、
+問い合わせる。東証の具体的な表は :mod:`wbcore.domain.jp_rules` に、
 米国市場の規則はこのモジュールの :class:`UsMarketRules` に置く。
 
 新しい市場を足すときは :class:`MarketRules` を実装して
@@ -14,9 +14,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from decimal import ROUND_DOWN, ROUND_HALF_UP, ROUND_UP, Decimal
 
-from wbjp.domain import jp_rules
-from wbjp.domain.jp_rules import PriceRounding
-from wbjp.domain.models import Market, OrderType, Side
+from wbcore.domain import jp_rules
+from wbcore.domain.jp_rules import PriceRounding
+from wbcore.domain.models import Market, OrderType, Side
 
 __all__ = ["JpMarketRules", "MarketRules", "PriceRounding", "UsMarketRules", "rules_for"]
 
@@ -76,7 +76,7 @@ class MarketRules(ABC):
 
 
 class JpMarketRules(MarketRules):
-    """東証。表の実体は :mod:`wbjp.domain.jp_rules`。"""
+    """東証。表の実体は :mod:`wbcore.domain.jp_rules`。"""
 
     market = Market.JP
 

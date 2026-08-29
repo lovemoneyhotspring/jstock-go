@@ -1,6 +1,14 @@
 # wbjp — Webull証券 日本株・米国株 自動売買システム
 
-Webull証券の OpenAPI を使って日本株・米国株を売買するシステム。複数の売買戦略を差し替え・合成して実行できる。
+Webull証券の OpenAPI を使って日本株・米国株を売買するシステム。3つのパッケージからなる。
+
+| パッケージ | 役割 | CLI |
+|---|---|---|
+| `wbcore` | 共通基盤。ブローカー・足データ・指標・認証情報・登録簿の仕組み | — |
+| `wbjp` | スイング売買。複数の戦略を差し替え・合成し、差分だけを発注する | `uv run wbjp` |
+| `accum` | 積立。ドル平均法＋下落局面での増額。売らない | `uv run accum` |
+
+`wbjp` と `accum` は互いに import しない。どちらも `wbcore` の部品を組み合わせて動く。
 
 > **⚠️ 免責**
 > 本ソフトウェアは投資助言ではありません。自動売買は資産を失う可能性があります。
@@ -38,7 +46,7 @@ Webull の市場データAPI（`bars` / `snapshot`）は `US_STOCK` / `US_ETF` �
 
 ## 米国株
 
-市場ごとの制約は `wbjp.domain.market_rules` に集約してあり、設定の `universe.market` を切り替えるだけでエンジン本体は同じコードで動く。米国株の設定例は [`config/us/`](config/us/) にある。
+市場ごとの制約は `wbcore.domain.market_rules` に集約してあり、設定の `universe.market` を切り替えるだけでエンジン本体は同じコードで動く。米国株の設定例は [`config/us/`](config/us/) にある。
 
 ```bash
 uv run wbjp data sync --config-dir config/us
@@ -128,24 +136,33 @@ uv run wbjp backtest --config-dir config/us-cameron --from 2019-01-01
 
 > 戦略は名前で呼び分ける。`config/<dir>/strategies.toml` の `name` を変えれば、既存の戦略を上書きせずに別の手法を試せる。使える戦略は `uv run wbjp strategies` で一覧できる。
 
-### 戦略の2つの種別
+---
 
-売買型と積立型はどちらも「取引に使う戦略」で、**同じ登録簿・同じ設定ファイル**（`config/<dir>/strategies.toml`）で扱う。違うのは判断の出力と、そのあとの実行の仕組みだけ。
+## 積立（`accum`）
 
-| 種別 | 設定の節 | 判断の出力 | 実行 | 例 |
-|---|---|---|---|---|
-| 売買（`signal`） | `[[strategies]]` | 銘柄ごとに −1.0〜+1.0 の意見 | 合成 → サイジング → 差分発注。売りも損切りもする | `trend_pullback`, `ross_cameron`, `momentum_rank` |
-| 積立（`accumulate`） | `[[tactics]]` / `[[baskets]]` | その日の購入倍率 | 予算 × 倍率で買い増す。売らない | `bear_stack`, `stack_ladder`, `drawdown_ladder` |
+スイング売買とは別プロジェクト。「今月いくら**追加**するか」を決めて買い増すだけで、売却も損切りもしない。設定は [`config/accum/accum.toml`](config/accum/accum.toml)、APIキーとデータ置き場は `wbjp` と共有する。
 
-倍率は「−1.0〜+1.0 の意見」ではないので、合成器に混ぜても意味を成さない。そのため実行経路だけは分けてある（`Strategy → Sizer` に対し `build_plan() → simulate()`）。共通の親は `wbjp.strategy.base.Playbook`。
+| | スイング売買（`wbjp`） | 積立（`accum`） |
+|---|---|---|
+| 戦略の出力 | 銘柄ごとに −1.0〜+1.0 の意見 | その日の購入倍率（1.0 以上） |
+| 実行 | 合成 → サイジング → 差分発注 | 予算 × 倍率 → 成行買い |
+| 設定 | `settings.toml` + `strategies.toml` の `[[strategies]]` | `accum.toml` の `[[tactics]]` / `[[baskets]]` |
+| 例 | `trend_pullback`, `ross_cameron`, `momentum_rank` | `bear_stack`, `stack_ladder`, `drawdown_ladder` |
 
 ```bash
-uv run wbjp strategies                    # 売買型・積立型をまとめて一覧
-uv run wbjp strategies --kind accumulate  # 種別で絞る
-uv run wbjp accumulate list               # 積立型の銘柄割り当てと予算
+uv run accum strategies          # 使える戦略
+uv run accum list                # 戦略と銘柄の対応
+uv run accum sync                # 足を取る（約30年ぶん。増額は暴落局面で効くため長い履歴が要る）
+uv run accum plan                # 直近の投下額
+uv run accum backtest            # 銘柄ごとの結果（対照群＝同額を均等に投じた場合）
+uv run accum compare 1305.T      # 登録済み戦略を1銘柄で横並び
+uv run accum run                 # 最新日の投下額を注文にする（dry-run）
+uv run accum run --live          # 実発注。本番は WBJP_ENV=prod と --yes も
 ```
 
-種別を取り違えて `[[strategies]]` に `bear_stack` と書いた場合は、どちらの節に書くべきかを添えて起動時に弾かれる。
+`run` は日足の最終行が入金日（月初）か増額日のときだけ注文を作る。株数は `投下額 ÷ 終値` を単元に切り捨て。ETF は単元が 1 株・10 株のものが多いので `[execution] lot_size_overrides` で指定する（既定の 100 株だと月の予算が届かず丸ごと見送りになる）。注文 ID は日付・銘柄・株数から決定論的に作るため、cron が二重に走っても二重買付にならない。
+
+部品は `wbcore` と共有: 足は `wbcore.data`、発注は `wbcore.broker`、登録簿の仕組みは `wbcore.registry`。積立固有なのは倍率（`accum.tactics`）・計画（`accum.plan`）・検証（`accum.simulate` / `accum.basket`）・注文化（`accum.execute`）で、どの段も単独で差し替えられる。
 
 > **UAT で未確認の点**: 米国株の発注ペイロード（`trade_currency` / `extended_hours_trading` / `support_trading_session` の値）と、Webull 市場データ API の応答形式は SDK と公開ドキュメントから組んであり、実機での疎通確認がまだ。最初は必ず `WBJP_ENV=uat` の dry-run で `wbjp account` と `wbjp run` を通し、ログの発注ペイロードを確認すること。
 
@@ -322,21 +339,36 @@ cron を消さなくても次のサイクルから発注しなくなる。
 ## 構成
 
 ```
-src/wbjp/
-├── config.py            設定 + 認証情報の解決（秘密はここを通す）
+src/wbcore/              共通基盤（wbjp / accum のどちらからも使う。逆向きの依存は無い）
+├── credentials.py       認証情報の解決（キーチェーン / 環境変数 / .env。秘密はここを通す）
+├── settings.py          環境変数由来の設定（WBJP_ENV など）と実発注の可否判定
+├── registry.py          名前 → クラス の登録簿（両プロジェクトの戦略登録に使う）
 ├── logging.py           構造化ログ + 秘匿情報マスク
 ├── domain/
-│   ├── models.py        Bar / Signal / Order / Position（すべて Decimal）
+│   ├── models.py        Bar / Signal / Order / Position（すべて Decimal）、決定論的な注文ID
+│   ├── market_rules.py  JP / US の取引ルールの抽象化
 │   └── jp_rules.py      呼値・値幅制限・単元株・取引時間・差金決済
-├── data/                MarketDataProvider → yfinance / CSV / Parquet+DuckDB
+├── data/                MarketDataProvider → yfinance / Webull / CSV / Parquet+DuckDB / EDGAR 13F
 ├── indicators/ohlcv.py  polars 式で SMA/EMA/RSI/ATR/MACD/BB/ADX/Donchian
-├── strategy/            Strategy ABC / 合成器4種 / サンプル戦略3本
+└── broker/              Broker ABC → Webull / Paper / レート制限 / 接続の組み立て（factory）
+
+src/wbjp/                スイング売買
+├── config.py            settings.toml / strategies.toml（ユニバース・リスク・出口・レジーム）
+├── strategy/            Strategy ABC / 合成器4種 / サンプル戦略7本
 ├── portfolio/sizer.py   equal_weight / fixed_notional / atr_risk
 ├── risk/                リスク上限 / ストップの合成
-├── broker/              Broker ABC → Webull / Paper / レート制限
 ├── engine/              リコンサイル / バックテスト / 日次ランナー
 ├── db/                  SQLite の判断ジャーナル
-└── cli.py               typer
+└── cli.py               `wbjp`
+
+src/accum/               積立
+├── config.py            accum.toml（戦略と銘柄の対応・予算・発注）
+├── tactics.py           Tactic ABC / constant / bear_stack / stack_ladder / drawdown_ladder
+├── stack.py, window.py  移動平均の配列判定 / 発注時間帯
+├── plan.py              日足と戦略 → 日ごとの投下額
+├── simulate.py, basket.py  検証（対照群との比較 / 複数銘柄への配分・13F）
+├── execute.py           投下額 → 成行の買い注文（wbcore.broker へ渡す）
+└── cli.py               `accum`
 ```
 
 ### 実装上の注意点（実機で確認した挙動）
@@ -355,7 +387,7 @@ src/wbjp/
 ## 開発
 
 ```bash
-uv run pytest              # 457件（ネットワークを使うものは既定でスキップ）
+uv run pytest              # ネットワークを使うものは既定でスキップ
 uv run pytest -m network   # yfinance 実接続
 uv run ruff check .
 uv run mypy                # strict

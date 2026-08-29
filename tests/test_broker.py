@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from wbjp.broker.base import BrokerError, InsufficientFundsError, OrderRejectedError
-from wbjp.broker.paper import PaperBroker
-from wbjp.broker.ratelimit import Cached, Limit, RateLimiter
-from wbjp.broker.webull import (
+from wbcore.broker.base import BrokerError, InsufficientFundsError, OrderRejectedError
+from wbcore.broker.paper import PaperBroker
+from wbcore.broker.ratelimit import Cached, Limit, RateLimiter
+from wbcore.broker.webull import (
     _plain,
     _suppress_sdk_own_logging,
     flatten_order_legs,
@@ -19,7 +19,7 @@ from wbjp.broker.webull import (
     parse_side,
     parse_status,
 )
-from wbjp.domain.models import (
+from wbcore.domain.models import (
     OrderRequest,
     OrderStatus,
     OrderType,

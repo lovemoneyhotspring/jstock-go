@@ -1,7 +1,7 @@
 """バックテスト。
 
 **本番と同じ部品を使う。** 戦略・合成・サイジング・リコンサイル・リスクは
-すべてライブと共通で、差し替わるのは :class:`~wbjp.broker.paper.PaperBroker`
+すべてライブと共通で、差し替わるのは :class:`~wbcore.broker.paper.PaperBroker`
 だけ。バックテスト専用の売買ロジックは1行も書かない。
 
 これを守らないと「バックテストでは動いたのに本番で挙動が違う」が起きる。
@@ -20,7 +20,7 @@
         「終値までの足 + 口座の状態 → 出す注文・取り消す注文」の純粋な判断。
         ブローカーを知らない。
     :class:`BacktestRunner`
-        :class:`~wbjp.broker.paper.PaperBroker` で約定させる自前エンジン。
+        :class:`~wbcore.broker.paper.PaperBroker` で約定させる自前エンジン。
     :class:`~wbjp.engine.bt_engine.BacktraderRunner`
         同じ :class:`DecisionPipeline` を Backtrader の Cerebro/Broker に
         つないだ第2エンジン。約定モデルを第三者実装に差し替えて突き合わせる。
@@ -34,10 +34,9 @@ from decimal import Decimal
 
 import polars as pl
 
-from wbjp.broker.paper import PaperBroker
-from wbjp.config import FileConfig
-from wbjp.domain.market_rules import MarketRules, rules_for
-from wbjp.domain.models import (
+from wbcore.broker.paper import PaperBroker
+from wbcore.domain.market_rules import MarketRules, rules_for
+from wbcore.domain.models import (
     Balance,
     CombinedSignal,
     Fill,
@@ -48,9 +47,10 @@ from wbjp.domain.models import (
     Signal,
     TargetPosition,
 )
+from wbcore.indicators.ohlcv import atr, donchian_low, ema, sma
+from wbcore.logging import get_logger
+from wbjp.config import FileConfig
 from wbjp.engine.reconcile import ReconcileSettings, reconcile
-from wbjp.indicators.ohlcv import atr, donchian_low, ema, sma
-from wbjp.logging import get_logger
 from wbjp.portfolio.sizer import SizingContext, build_sizer
 from wbjp.risk.limits import RiskContext, RiskManager
 from wbjp.risk.stops import StopBook, apply_stop_priority, sync_broker_stops
@@ -483,7 +483,7 @@ class DecisionPipeline:
 
 
 class BacktestRunner:
-    """日足のバックテスト（:class:`~wbjp.broker.paper.PaperBroker` で約定）。"""
+    """日足のバックテスト（:class:`~wbcore.broker.paper.PaperBroker` で約定）。"""
 
     def __init__(
         self,

@@ -35,7 +35,7 @@
 
 ### 1.2 実装した基盤
 
-- `wbjp.domain.market_rules`: JP / US の取引ルールの抽象化
+- `wbcore.domain.market_rules`: JP / US の取引ルールの抽象化
 - `wbjp.risk.stops.sync_broker_stops`: ブローカー逆指値の冪等な置き直し
 - `effective_quantity` は逆指値を数えない（数えると買い直す）
 - `[stops]` 設定: trailing / breakeven_after_r / stale_exit_days / max_hold_days（＋別セッションが take_profit_r / trend_exit_sma を追加）

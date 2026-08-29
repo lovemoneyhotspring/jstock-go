@@ -1,0 +1,184 @@
+# 積立の設定。戦略と銘柄の対応。
+#
+# スイング売買（config/<dir>/settings.toml, strategies.toml）とは別プロジェクト。
+# あちらは全戦略が意見を出して合成されるが、積立は銘柄ごとに戦略が1つ決まり、
+# 予算 × 倍率で買い増すだけで売却しない。
+#
+#   uv run accum strategies   … 使える戦略
+#   uv run accum list         … この対応表
+#   uv run accum plan         … 今いくら買うか
+#   uv run accum run --live   … 実際に発注（本番は WBJP_ENV=prod も必要）
+#
+# 命名の方針:
+#   tactic … 機構の名前。登録簿の鍵。倍率などの数値は含めない
+#   id     … 比較表の行名になる自由なラベル。日本語でよい
+#   同じ tactic をパラメータ違いで何度でも並べられる。
+#
+# 1つの銘柄を複数の戦略に書くと二重買付になるため、既定でエラーになる。
+# 比較検証したいときは load(allow_overlap=True) を使う。
+#
+# 発注時間帯（window）:
+#   既定は 14:00〜15:00。省略すればこれが適用される。
+#   window = false                          … 時間帯を制限しない
+#   window = { start = "12:30", end = "13:00" } … 任意の時間帯（立会時間内のみ）
+#   投下額は変わらない。日足で決まった金額を「いつ発注してよいか」だけを決める。
+#   14時台を既定にしたのは安いからではなく、大引けに対するぶれが寄り付きの
+#   約1/3だから。60分足3年の実測では時間帯による平均取得単価の差は ±0.03%。
+
+# 1銘柄あたりの毎月の基本予算。比較の前提を揃えるため全戦略で共通。
+monthly_budget = 25_000
+
+# 緊急停止。true にすると `accum run --live` でも発注しない。
+kill_switch = false
+
+# 発注の振る舞い。積立は当日の投下額を成行の買いにする。
+[execution]
+# GENERAL（一般） / SPECIFIC（特定） / NISA
+tax_account_type = "SPECIFIC"
+# 米国株の時間外取引。日本株では無視される。
+extended_hours = false
+# 売買単位が既定（100株）と異なる銘柄。ETF は 1 株・10 株単位のものが多い。
+# 既定のままだと月の予算が1単元に届かず、発注が丸ごと見送りになる。
+lot_size_overrides = { "1305.T" = 10, "1591.T" = 10, "1306.T" = 10 }
+
+
+# market は足の取得と発注先に使う（既定 "JP"）。
+#   JP … 1305.T → 足は 1305.T、発注は 1305      US … VOO はそのまま
+# ^ で始まる指数（^GSPC など）は足は取れるが発注はできない（検証用）。
+
+# 完全下降配列（終値 < MA20 < MA50 < MA200）で4倍。
+# 追加投入1円あたりの効果が最良で、必要資金も最少（年平均1.15〜1.42倍）。
+# 発動は全期間の5〜13%程度。増額の原資は賞与など新規資金を前提とする。
+[[tactics]]
+id = "配列4倍"
+tactic = "bear_stack"
+symbols = ["1305.T", "1591.T"]
+multiplier = 4
+
+# 同じ機構の弱め版。暴落時に平常の4倍を出せない場合はこちら。
+# 年平均1.05〜1.14倍で済み、10年窓の勝率はほぼ変わらない。
+[[tactics]]
+id = "配列2倍"
+tactic = "bear_stack"
+symbols = ["^N225"]
+multiplier = 2
+window = { start = "14:00", end = "15:00" }
+
+# 弱気スコア（0〜6）で段階的に増額。効果は最大だが資金効率は落ちる。
+[[tactics]]
+id = "段階型"
+tactic = "stack_ladder"
+symbols = ["^GSPC"]
+market = "US"
+multipliers = { 3 = 1.5, 5 = 2.0, 6 = 4.0 }
+
+# 高値からの下落率で増額。米国指数では強いが、新高値を作らない市場では
+# 常時発動に近くなり破綻する（日経225 の全期間で +13%）。
+# require_downtrend で 200日線割れを条件に加えると発動が絞られる。
+[[tactics]]
+id = "下落率型"
+tactic = "drawdown_ladder"
+symbols = ["^IXIC"]
+market = "US"
+levels = [0.10, 0.20, 0.30]
+multipliers = [2.0, 3.0, 4.0]
+require_downtrend = true
+
+# 比較の基準。増額しない純粋なドル平均法。時間帯も制限しない。
+[[tactics]]
+id = "基準"
+tactic = "constant"
+symbols = ["1306.T"]
+enabled = false
+window = false
+
+
+# ---------------------------------------------------------------------------
+# バスケット（複数銘柄への配分）
+# ---------------------------------------------------------------------------
+# 戦略が「1銘柄を何倍買うか」なのに対し、バスケットは「予算をどの銘柄に
+# どう振るか」。monthly_budget はバスケット全体の予算。比率は毎日その日に
+# 足のある銘柄の間で正規化される。
+#
+#   source = "static" … weights をそのまま使う
+#   source = "13f"    … EDGAR の 13F（cik の運用会社）の上位 top 銘柄を
+#                        評価額比で持つ。提出日の翌営業日から反映。
+#                        weights を書くとそれがコア、13F 部分は satellite_share。
+#
+# 同じ資金の流れを benchmark に投じた場合と XIRR・最大DD で比べる。
+# `accum sync-13f` で保有一覧、`accum sync` で足を取る。CUSIP の対応は cusip.toml。
+
+# 戦略1: バークシャー 13F の上位15銘柄を保有比率で積立（基準線）
+[[baskets]]
+id = "BRK上位15"
+source = "13f"
+top = 15
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 戦略1': 上位10に絞る（集中度を上げる）
+[[baskets]]
+id = "BRK上位10"
+source = "13f"
+top = 10
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 戦略4: コア・サテライト。VOO 70% ＋ BRK上位15 を 30%
+[[baskets]]
+id = "VOO70+BRK30"
+source = "13f"
+top = 15
+weights = { VOO = 1.0 }
+satellite_share = 0.3
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 戦略1 に下落時増額（bear_stack ×3）を重ねる。増額は銘柄ごとに判定。
+[[baskets]]
+id = "BRK上位15+配列3倍"
+source = "13f"
+top = 15
+tactic = "bear_stack"
+multiplier = 3
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 戦略3（価格版）: 構成銘柄のうち52週高値から深く下げているものへ配分を寄せる。
+# 比率 × (1 + tilt_strength × 下落率) で正規化。総額は変えない。
+[[baskets]]
+id = "BRK上位15+割安傾斜2"
+source = "13f"
+top = 15
+tilt_strength = 2
+monthly_budget = 100_000
+benchmark = "VOO"
+
+[[baskets]]
+id = "BRK上位15+割安傾斜5"
+source = "13f"
+top = 15
+tilt_strength = 5
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 戦略4+3: コア・サテライトにサテライト側の割安傾斜を重ねる
+# （傾斜は VOO も含めて掛かるが、指数の下落率は個別株より小さいので
+# 実質的にサテライト側へ寄る）
+[[baskets]]
+id = "VOO70+BRK30+傾斜3"
+source = "13f"
+top = 15
+weights = { VOO = 1.0 }
+satellite_share = 0.3
+tilt_strength = 3
+monthly_budget = 100_000
+benchmark = "VOO"
+
+# 比較の基準: VOO だけ（バスケットの計算経路で XIRR を出す）
+[[baskets]]
+id = "VOO単独"
+source = "static"
+weights = { VOO = 1.0 }
+monthly_budget = 100_000
+benchmark = "^GSPC"

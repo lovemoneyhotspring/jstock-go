@@ -13,8 +13,8 @@ from typing import ClassVar
 
 import polars as pl
 
-from wbjp.domain.models import Signal
-from wbjp.indicators.ohlcv import adx, rsi
+from wbcore.domain.models import Signal
+from wbcore.indicators.ohlcv import adx, rsi
 from wbjp.strategy.base import IndicatorStrategy, StrategyContext
 
 

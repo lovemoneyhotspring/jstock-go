@@ -28,16 +28,16 @@ import datetime as dt
 from decimal import Decimal
 from typing import Any
 
-from wbjp.broker.base import (
+from wbcore.broker.base import (
     Broker,
     BrokerError,
     InsufficientFundsError,
     OrderRejectedError,
     RateLimitExceededError,
 )
-from wbjp.broker.ratelimit import LIMITS, Cached, RateLimiter
-from wbjp.config import Credentials, Environment
-from wbjp.domain.models import (
+from wbcore.broker.ratelimit import LIMITS, Cached, RateLimiter
+from wbcore.credentials import Credentials, Environment
+from wbcore.domain.models import (
     Balance,
     Market,
     Order,
@@ -51,7 +51,7 @@ from wbjp.domain.models import (
     TaxAccountType,
     TimeInForce,
 )
-from wbjp.logging import get_logger, harden_third_party_logging, register_secret
+from wbcore.logging import get_logger, harden_third_party_logging, register_secret
 
 log = get_logger(__name__)
 

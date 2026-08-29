@@ -12,10 +12,10 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from wbjp.data.csv_replay import CsvReplayProvider, InMemoryProvider
-from wbjp.data.provider import MarketDataError, empty_bars, normalize_bars
-from wbjp.data.store import OVERLAP_DAYS, BarStore
-from wbjp.data.yfinance_provider import from_yahoo_ticker, to_yahoo_ticker
+from wbcore.data.csv_replay import CsvReplayProvider, InMemoryProvider
+from wbcore.data.provider import MarketDataError, empty_bars, normalize_bars
+from wbcore.data.store import OVERLAP_DAYS, BarStore
+from wbcore.data.yfinance_provider import from_yahoo_ticker, to_yahoo_ticker
 
 
 def bars(closes: list[float], start: dt.date = dt.date(2025, 1, 6)) -> pl.DataFrame:
@@ -351,7 +351,7 @@ def test_csv_replay_ignores_unknown_symbol(tmp_path: Path) -> None:
 
 @pytest.mark.network
 def test_yfinance_fetches_real_japanese_stocks() -> None:
-    from wbjp.data.yfinance_provider import YFinanceProvider
+    from wbcore.data.yfinance_provider import YFinanceProvider
 
     end = dt.date.today() - dt.timedelta(days=3)
     result = YFinanceProvider().fetch_daily_bars(["7203", "6758"], end - dt.timedelta(days=30), end)

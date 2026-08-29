@@ -3,9 +3,9 @@
 注意点:
     - **非公式**。Yahoo Finance をスクレイピングしているため、予告なく
       壊れることがある。壊れたときに戦略側へ影響が出ないよう、
-      :class:`~wbjp.data.provider.MarketDataProvider` の裏に隠してある。
+      :class:`~wbcore.data.provider.MarketDataProvider` の裏に隠してある。
     - **短時間に連投すると IP 単位で弾かれる。** 取得済みの足は必ず
-      :class:`~wbjp.data.store.BarStore` にキャッシュし、増分だけ取りに行く。
+      :class:`~wbcore.data.store.BarStore` にキャッシュし、増分だけ取りに行く。
     - 東証銘柄は ``7203`` ではなく ``7203.T`` で問い合わせる。この変換を
       忘れると米国の別銘柄が返ってくることがあり、実害が大きい。
       米国株（``market=US``）は接尾辞を付けずにそのまま渡す。
@@ -21,9 +21,9 @@ from typing import Any
 import polars as pl
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from wbjp.data.provider import MarketDataError, MarketDataProvider, normalize_bars
-from wbjp.domain.models import Market
-from wbjp.logging import get_logger
+from wbcore.data.provider import MarketDataError, MarketDataProvider, normalize_bars
+from wbcore.domain.models import Market
+from wbcore.logging import get_logger
 
 log = get_logger(__name__)
 

@@ -43,7 +43,7 @@ from pathlib import Path
 
 import polars as pl
 
-from wbjp.logging import get_logger
+from wbcore.logging import get_logger
 
 log = get_logger(__name__)
 

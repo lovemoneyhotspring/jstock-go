@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from wbjp.accumulate import (
+from accum import (
     BasketSettings,
     BearStack,
     WeightSchedule,
@@ -17,8 +17,8 @@ from wbjp.accumulate import (
     simulate_basket,
     xirr,
 )
-from wbjp.accumulate.config import AccumulateConfig
-from wbjp.data.edgar_13f import parse_information_table, weight_schedule
+from accum.config import AccumConfig
+from wbcore.data.edgar_13f import parse_information_table, weight_schedule
 
 
 def _bars(closes: list[float], *, start: dt.date = dt.date(2020, 1, 1)) -> pl.DataFrame:
@@ -192,7 +192,7 @@ def test_top_n_is_applied_before_mapping() -> None:
 
 
 def test_basket_entry_builds_static_and_blended_schedules() -> None:
-    config = AccumulateConfig.model_validate(
+    config = AccumConfig.model_validate(
         {
             "baskets": [
                 {"id": "s", "weights": {"VOO": 1.0}},
@@ -220,7 +220,7 @@ def test_basket_entry_builds_static_and_blended_schedules() -> None:
 
 
 def test_basket_ids_share_the_namespace_with_tactics() -> None:
-    config = AccumulateConfig.model_validate(
+    config = AccumConfig.model_validate(
         {
             "tactics": [{"id": "x", "tactic": "constant", "symbols": ["A"]}],
             "baskets": [{"id": "x", "weights": {"A": 1.0}}],
@@ -234,7 +234,7 @@ def test_basket_ids_share_the_namespace_with_tactics() -> None:
 
 
 def test_tilt_shifts_budget_toward_the_fallen_symbol() -> None:
-    from wbjp.accumulate import DrawdownTilt
+    from accum import DrawdownTilt
 
     flat = _bars([100.0] * 60)
     fallen = _bars([100.0] * 30 + [50.0] * 30)  # 2か月目の途中で半値（60営業日は3か月）
@@ -255,7 +255,7 @@ def test_tilt_shifts_budget_toward_the_fallen_symbol() -> None:
 
 
 def test_tilt_parameters_are_validated() -> None:
-    from wbjp.accumulate import DrawdownTilt
+    from accum import DrawdownTilt
 
     with pytest.raises(ValueError, match="strength"):
         DrawdownTilt(strength=0)

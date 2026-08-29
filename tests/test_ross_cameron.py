@@ -9,7 +9,7 @@ from decimal import Decimal
 import polars as pl
 import pytest
 
-from wbjp.domain.models import Position
+from wbcore.domain.models import Position
 from wbjp.strategy.base import StrategyContext
 from wbjp.strategy.registry import available, create
 from wbjp.strategy.samples.ross_cameron import RossCameronStrategy

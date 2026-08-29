@@ -26,7 +26,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from wbjp.domain.models import (
+from wbcore.domain.models import (
     CombinedSignal,
     Fill,
     Order,
@@ -35,7 +35,7 @@ from wbjp.domain.models import (
     Signal,
     TargetPosition,
 )
-from wbjp.logging import get_logger
+from wbcore.logging import get_logger
 from wbjp.risk.stops import Stop
 
 log = get_logger(__name__)

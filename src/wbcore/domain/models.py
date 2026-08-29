@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
@@ -20,7 +21,7 @@ class Market(StrEnum):
     """取引市場。値は Webull API の ``market`` にそのまま渡る。
 
     市場ごとの取引ルール（呼値・単元・値幅制限・逆指値の可否・通貨）は
-    :mod:`wbjp.domain.market_rules` に集約する。ここは識別子だけ。
+    :mod:`wbcore.domain.market_rules` に集約する。ここは識別子だけ。
     """
 
     JP = "JP"
@@ -45,7 +46,7 @@ class OrderType(StrEnum):
       Webull JP が日本株でサポートしていないため、損切りは
       :mod:`wbjp.risk.stops` がエンジン側で合成する。
     - 米国株では STOP_LOSS / STOP_LOSS_LIMIT をブローカーに置ける。
-      どちらを使うかは :class:`~wbjp.domain.market_rules.MarketRules`
+      どちらを使うかは :class:`~wbcore.domain.market_rules.MarketRules`
       が決め、エンジンはそれに従う。
 
     ``OTHER`` は**読み取り専用**。口座に他の経路で置かれた注文を読んだ
@@ -248,11 +249,24 @@ class Balance:
 # --------------------------------------------------------------------------
 
 
+def make_client_order_id(seed_key: str, symbol: str, side: Side, quantity: Decimal) -> str:
+    """注文IDを**決定論的に**作る。
+
+    同じ判断からは必ず同じIDが出る。つまり、同じ実行を2回走らせても
+    ブローカー側が「同じ注文」と認識でき、二重発注が防げる。
+    スイング売買（差分発注）も積立（当日の投下）も、この規律は同じ。
+
+    Webull の上限は32文字。ハッシュで詰める。
+    """
+    seed = f"{seed_key}|{symbol}|{side.value}|{quantity}"
+    return hashlib.sha256(seed.encode()).hexdigest()[:32]
+
+
 @dataclass(frozen=True, slots=True)
 class OrderRequest:
     """発注リクエスト。
 
-    ``client_order_id`` は決定論的に生成する（:mod:`wbjp.engine.reconcile`）。
+    ``client_order_id`` は :func:`make_client_order_id` で決定論的に生成する。
     同じ判断からは必ず同じIDが出るため、再実行しても二重発注にならない。
     """
 

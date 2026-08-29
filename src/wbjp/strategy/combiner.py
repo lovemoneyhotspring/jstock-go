@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 
-from wbjp.domain.models import CombinedSignal, Signal
+from wbcore.domain.models import CombinedSignal, Signal
 
 
 class SignalCombiner(ABC):

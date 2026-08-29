@@ -25,8 +25,8 @@ import datetime as dt
 from dataclasses import dataclass, field, replace
 from decimal import ROUND_HALF_UP, Decimal
 
-from wbjp.broker.base import Broker, InsufficientFundsError, OrderRejectedError
-from wbjp.domain.models import (
+from wbcore.broker.base import Broker, InsufficientFundsError, OrderRejectedError
+from wbcore.domain.models import (
     Balance,
     Fill,
     Order,
@@ -40,7 +40,7 @@ from wbjp.domain.models import (
     TaxAccountType,
     TimeInForce,
 )
-from wbjp.logging import get_logger
+from wbcore.logging import get_logger
 
 log = get_logger(__name__)
 

@@ -10,7 +10,7 @@
 
 | 層 | 実装 | 場所 |
 |---|---|---|
-| ① 質スクリーニング | yfinance の年次財務（直近 4 期）で ROE・粗利率・営業利益率・D/E（または純有利子負債/EBIT）・利払い余力・FCF/純利益・FCF 成長を判定 | `wbjp.data.fundamentals`、`wbjp quality` |
+| ① 質スクリーニング | yfinance の年次財務（直近 4 期）で ROE・粗利率・営業利益率・D/E（または純有利子負債/EBIT）・利払い余力・FCF/純利益・FCF 成長を判定 | `wbcore.data.fundamentals`、`wbjp quality` |
 | ② レジーム | SPY 終値 vs SMA200/SMA50・SMA200 の傾きで bull/caution/bear。露出はサイジングに渡す総資産を縮めて実現、bear は全手仕舞い | `FileConfig.regime`、`DecisionPipeline.regime_exposure` |
 | ③ 執行 | 既存 `trend_pullback`（SMA 完全上昇配列・RS・出来高枯れ・前日高値ブレイク）。出口は初期 1.5ATR → +2R で半分利確＋建値 → 残りは Chandelier 2.5ATR と 20日MA | `stops.trailing_atr_multiple` を追加 |
 | ④ 資金 | 1%リスク・6 枠・1銘柄 25% 上限、待機資金に ^IRX（13 週 T-Bill）の日割り利息 | `PaperBroker.accrue_interest`、`regime.cash_yield_symbol` |

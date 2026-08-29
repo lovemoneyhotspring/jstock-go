@@ -21,7 +21,7 @@ from decimal import Decimal
 
 import polars as pl
 
-from wbjp.accumulate.plan import PLAN_COLUMNS
+from accum.plan import PLAN_COLUMNS
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +74,7 @@ def simulate(
 
     Args:
         bars: ``date`` 昇順の日足。``close`` は必須、``open`` があれば使う。
-        plan: :func:`~wbjp.accumulate.plan.build_plan` の戻り値。
+        plan: :func:`~accum.plan.build_plan` の戻り値。
         monthly_budget: 資金倍率の分母に使う基本予算。
 
     Raises:

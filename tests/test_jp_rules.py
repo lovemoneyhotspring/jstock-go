@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 
-from wbjp.domain.jp_rules import (
+from wbcore.domain.jp_rules import (
     JST,
     PriceRounding,
     is_trading_hours,
@@ -23,7 +23,7 @@ from wbjp.domain.jp_rules import (
     tick_size,
     violates_same_day_settlement,
 )
-from wbjp.domain.models import Side
+from wbcore.domain.models import Side
 
 D = Decimal
 

@@ -9,8 +9,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from wbcore.domain.models import Position
 from wbjp.config import load_file_config
-from wbjp.domain.models import Position
 from wbjp.strategy.base import StrategyContext
 from wbjp.strategy.registry import create
 from wbjp.strategy.samples.momentum_rank import MomentumRankStrategy
