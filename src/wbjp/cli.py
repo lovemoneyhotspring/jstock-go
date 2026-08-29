@@ -286,7 +286,7 @@ def run(
         config=config,
         strategies=build_all(config.file.strategies.enabled),
         broker=broker,
-        store=BarStore(config.settings.bars_dir),
+        store=BarStore(config.settings.bars_dir, config.file.universe.bar_interval),
         journal=journal,
         provider=None if no_sync else _build_provider(config),
     )
@@ -356,7 +356,7 @@ def backtest(
         raise typer.Exit(2)
 
     config = _load(config_dir)
-    store = BarStore(config.settings.bars_dir)
+    store = BarStore(config.settings.bars_dir, config.file.universe.bar_interval)
     symbols = config.file.universe.symbols
 
     bars = store.read_many(symbols)
@@ -729,8 +729,11 @@ def data_sync(
     days: Annotated[int, typer.Option(help="何日ぶん遡って取得するか")] = 900,
     force: Annotated[bool, typer.Option("--force", help="保存済みを無視して取り直す")] = False,
     interval: Annotated[
-        str, typer.Option(help="足の間隔: 1d / 1h / 30m / 15m / 5m / 1m（日中足は別の場所に保存）")
-    ] = "1d",
+        str | None,
+        typer.Option(
+            help="足の間隔: 1d / 1h / 30m / 15m / 5m / 1m。省略時は設定の universe.interval"
+        ),
+    ] = None,
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
 ) -> None:
     """足データを更新する（保存済みの続きだけ取得）。"""
@@ -739,7 +742,8 @@ def data_sync(
 
     config = _load(config_dir)
     try:
-        store = BarStore(config.settings.bars_dir, Interval.parse(interval))
+        chosen = Interval.parse(interval) if interval else config.file.universe.bar_interval
+        store = BarStore(config.settings.bars_dir, chosen)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from None

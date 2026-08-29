@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 class Market(StrEnum):
@@ -30,6 +31,11 @@ class Market(StrEnum):
     @property
     def currency(self) -> str:
         return {Market.JP: "JPY", Market.US: "USD"}[self]
+
+    @property
+    def timezone(self) -> ZoneInfo:
+        """取引所の時間帯。日中足の「何時の足か」を判断するときに使う。"""
+        return ZoneInfo({Market.JP: "Asia/Tokyo", Market.US: "America/New_York"}[self])
 
 
 class Side(StrEnum):

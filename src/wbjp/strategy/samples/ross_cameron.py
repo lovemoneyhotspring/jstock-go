@@ -69,6 +69,7 @@ from typing import Any, ClassVar
 
 import polars as pl
 
+from wbcore.data.provider import Interval
 from wbcore.domain.models import Signal
 from wbcore.indicators.ohlcv import atr, ema, sma
 from wbjp.strategy.base import IndicatorStrategy, StrategyContext
@@ -80,6 +81,8 @@ _DIRECTION_FLOOR = 0.3
 
 class RossCameronStrategy(IndicatorStrategy):
     name: ClassVar[str] = "ross_cameron"
+    #: 日付の意味に依存する（前日終値比のギャップ）ので日足のみ。
+    intervals: ClassVar[frozenset[Interval]] = frozenset({Interval.D1})
 
     def __init__(
         self,

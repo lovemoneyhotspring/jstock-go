@@ -54,6 +54,7 @@ from typing import Any, ClassVar
 
 import polars as pl
 
+from wbcore.data.provider import Interval
 from wbcore.domain.models import Signal
 from wbcore.indicators.ohlcv import atr, sma
 from wbjp.strategy.base import IndicatorStrategy, StrategyContext
@@ -64,6 +65,8 @@ _TRADING_DAYS = 252
 
 class MomentumRankStrategy(IndicatorStrategy):
     name: ClassVar[str] = "momentum_rank"
+    #: 日付の意味に依存する（月次入れ替え）ので日足のみ。
+    intervals: ClassVar[frozenset[Interval]] = frozenset({Interval.D1})
 
     def __init__(
         self,

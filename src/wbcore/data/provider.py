@@ -77,6 +77,49 @@ class Interval(StrEnum):
                 f"未知の足の間隔 {value!r}。利用可能: {[i.value for i in cls]}"
             ) from None
 
+    def bars_in(self, window: dt.timedelta | str) -> int:
+        """時間の窓を、この間隔での足の本数に直す。
+
+        「15分の移動平均」は 5 分足なら 3 本、1 分足なら 15 本。戦略が窓を
+        時間で持てば、足の間隔を変えても意味が変わらない。
+
+        >>> Interval.M5.bars_in("1h")
+        12
+        >>> Interval.D1.bars_in(dt.timedelta(days=25))
+        25
+
+        Raises:
+            ValueError: 窓がこの間隔より短いとき（0 本になってしまう）。
+        """
+        span = parse_duration(window) if isinstance(window, str) else window
+        bars = int(span / self.duration)
+        if bars < 1:
+            raise ValueError(f"窓 {span} は {self.value} 足 1 本より短い")
+        return bars
+
+
+_DURATION_UNITS: dict[str, dt.timedelta] = {
+    "m": dt.timedelta(minutes=1),
+    "min": dt.timedelta(minutes=1),
+    "h": dt.timedelta(hours=1),
+    "d": dt.timedelta(days=1),
+}
+
+
+def parse_duration(value: str | dt.timedelta) -> dt.timedelta:
+    """``"15m"`` / ``"2h"`` / ``"3d"`` のような表記を timedelta にする。
+
+    >>> parse_duration("90m")
+    datetime.timedelta(seconds=5400)
+    """
+    if isinstance(value, dt.timedelta):
+        return value
+    text = value.strip().lower()
+    for unit in sorted(_DURATION_UNITS, key=len, reverse=True):
+        if text.endswith(unit) and text[: -len(unit)].strip().isdigit():
+            return int(text[: -len(unit)]) * _DURATION_UNITS[unit]
+    raise ValueError(f"時間の表記が不正です: {value!r}（例: 15m / 2h / 3d）")
+
 
 _DURATIONS: dict[Interval, dt.timedelta] = {
     Interval.M1: dt.timedelta(minutes=1),

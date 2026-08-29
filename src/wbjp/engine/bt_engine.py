@@ -119,6 +119,10 @@ class BacktraderRunner:
         if not bars:
             raise ValueError("足データが空です")
 
+        if self.pipeline.interval.is_intraday:
+            raise ValueError(
+                "Backtrader エンジンは日足のみ対応です。日中足は --engine native を使ってください"
+            )
         enriched = self.pipeline.precompute_indicators(bars)
         trading_days = self.pipeline.trading_days(enriched, start, end)
         if not trading_days:

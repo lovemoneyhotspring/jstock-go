@@ -6,14 +6,19 @@
 
 これを守らないと「バックテストでは動いたのに本番で挙動が違う」が起きる。
 
-1日の流れ:
-    1. 前日の注文を、当日の**寄付**で約定させる
-    2. 当日の終値までの足で判断する（未来は見えない）
+1本の足の流れ（日足なら1日、5分足なら5分）:
+    1. 前の足で出した注文を、この足の**寄付**で約定させる
+    2. この足の終値までの足で判断する（未来は見えない）
     3. 合成 → サイジング → 差分 → リスク判定 → 発注
-    4. 注文は翌営業日に持ち越す
+    4. 注文は次の足に持ち越す
 
-判断は終値、約定は翌日の寄付。この1日のずれが実運用の姿であり、
-同日終値で約定させると取れない価格で売買できることになる。
+判断は終値、約定は次の足の寄付。この1本のずれが実運用の姿であり、
+同じ足の終値で約定させると取れない価格で売買できることになる。
+
+**日足と日中足で同じ経路を通る。** エンジンは足を「鍵」（日足なら日付、
+日中足なら UTC の時刻）で並べて回すだけで、日付の意味を持つ処理
+（差金決済の当日判定・待機資金の利息・時間切れの営業日数）だけを
+暦日の変わり目で行う。
 
 構成:
     :class:`DecisionPipeline`
@@ -23,7 +28,7 @@
         :class:`~wbcore.broker.paper.PaperBroker` で約定させる自前エンジン。
     :class:`~wbjp.engine.bt_engine.BacktraderRunner`
         同じ :class:`DecisionPipeline` を Backtrader の Cerebro/Broker に
-        つないだ第2エンジン。約定モデルを第三者実装に差し替えて突き合わせる。
+        つないだ第2エンジン（日足のみ）。約定モデルを第三者実装に差し替えて突き合わせる。
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from decimal import Decimal
 import polars as pl
 
 from wbcore.broker.paper import PaperBroker
+from wbcore.data.provider import Interval
 from wbcore.domain.market_rules import MarketRules, rules_for
 from wbcore.domain.models import (
     Balance,
@@ -59,16 +65,27 @@ from wbjp.strategy.combiner import build_combiner
 
 log = get_logger(__name__)
 
-#: サイジングとストップに使う ATR の期間。
+#: サイジングとストップに使う ATR の期間（足の本数）。
 ATR_PERIOD = 14
 
-#: 銘柄 → 日付 → 列名 → 値。日付で引ける形に変換した足。
-BarIndex = dict[str, dict[dt.date, dict[str, Decimal]]]
+#: 足を一意にする鍵。日足は日付、日中足は UTC の時刻。
+BarKey = dt.date | dt.datetime
+
+#: 銘柄 → 鍵 → 列名 → 値。鍵で引ける形に変換した足。
+BarIndex = dict[str, dict[BarKey, dict[str, Decimal]]]
+
+
+def day_of(key: BarKey) -> dt.date:
+    """鍵の暦日。日中足の時刻は UTC で見た日（東証も NYSE も通常取引は UTC の同じ日）。"""
+    return key.date() if isinstance(key, dt.datetime) else key
 
 
 @dataclass(frozen=True, slots=True)
 class DayRecord:
-    """1日ぶんの記録。デバッグと検証のすべてがここに残る。"""
+    """1本の足ぶんの記録。デバッグと検証のすべてがここに残る。
+
+    ``date`` は暦日、``at`` は日中足のときの時刻（UTC）。日足では None。
+    """
 
     date: dt.date
     equity: Decimal
@@ -79,6 +96,7 @@ class DayRecord:
     orders: list[str]
     fills: list[Fill]
     rejected: dict[str, str]
+    at: dt.datetime | None = None
 
 
 @dataclass
@@ -104,6 +122,7 @@ class BacktestResult:
         return pl.DataFrame(
             {
                 "date": [r.date for r in self.records],
+                "at": [r.at for r in self.records],
                 "equity": [float(r.equity) for r in self.records],
             }
         )
@@ -125,15 +144,21 @@ class BacktestResult:
 
     def summary(self) -> dict[str, object]:
         wins = [f for f in self.fills if f.side.value == "SELL"]
-        return {
-            "日数": len(self.records),
-            "初期資産": self.initial_equity,
-            "最終資産": self.final_equity,
-            "総リターン": f"{self.total_return:.2%}",
-            "最大ドローダウン": f"{self.max_drawdown:.2%}",
-            "約定回数": len(self.fills),
-            "決済回数": len(wins),
-        }
+        days = len({r.date for r in self.records})
+        out: dict[str, object] = {"日数": days}
+        if len(self.records) != days:
+            out["判断回数"] = len(self.records)
+        out.update(
+            {
+                "初期資産": self.initial_equity,
+                "最終資産": self.final_equity,
+                "総リターン": f"{self.total_return:.2%}",
+                "最大ドローダウン": f"{self.max_drawdown:.2%}",
+                "約定回数": len(self.fills),
+                "決済回数": len(wins),
+            }
+        )
+        return out
 
 
 # --------------------------------------------------------------------------
@@ -157,7 +182,7 @@ class AccountSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class DecisionPlan:
-    """1日の判断の結果。エンジンはこれを機械的にブローカーへ流すだけ。"""
+    """1本の足での判断の結果。エンジンはこれを機械的にブローカーへ流すだけ。"""
 
     signals: list[Signal]
     combined: dict[str, CombinedSignal]
@@ -175,11 +200,22 @@ class DecisionPipeline:
     ライブとバックテストが共有する売買判断の全部。ブローカーには触らず、
     「どの注文を出すか・消すか」を返すだけなので、約定モデルを差し替えても
     判断そのものは 1 bit も変わらない。
+
+    足の間隔は設定（``universe.interval``）で決まる。対応しない戦略は
+    ここで弾き、対応する戦略には :meth:`Strategy.bind` で間隔を伝える。
     """
 
     def __init__(self, strategies: list[Strategy], config: FileConfig) -> None:
         self.strategies = strategies
         self.config = config
+        self.interval: Interval = config.universe.bar_interval
+        for strategy in strategies:
+            if not strategy.supports(self.interval):
+                raise ValueError(
+                    f"戦略 {strategy.name} は {self.interval.value} 足に対応していません"
+                    f"（対応: {sorted(i.value for i in strategy.intervals)}）"
+                )
+            strategy.bind(self.interval)
         self.combiner = build_combiner(
             config.strategies.combiner,
             {s.name: s.weight for s in config.strategies.enabled},
@@ -192,6 +228,11 @@ class DecisionPipeline:
         self.stops = StopBook()
         self.warmup = max((s.warmup_bars for s in strategies), default=1)
 
+    @property
+    def key(self) -> str:
+        """足を一意にする列。日足は ``date``、日中足は ``ts``。"""
+        return self.interval.time_column
+
     # -- 足の前処理 ---------------------------------------------------------
 
     @property
@@ -203,7 +244,7 @@ class DecisionPipeline:
         if kind == "ema":
             expr = ema(period)
         elif kind == "donchian":
-            expr = donchian_low(period)  # 当日を除く N 日安値
+            expr = donchian_low(period)  # 当日を除く N 本安値
         else:
             expr = sma(period)
         return expr.alias(self.trend_exit_col)
@@ -222,17 +263,17 @@ class DecisionPipeline:
         r = self.config.regime
         return [f"sma_{r.sma_long}", f"sma_{r.sma_mid}", f"_regime_slope_{r.sma_long}"]
 
-    def regime_exposure(self, indexed: BarIndex, day: dt.date) -> tuple[str, Decimal]:
-        """その日の相場レジームと露出上限。無効なら常に強気・1.0。
+    def regime_exposure(self, indexed: BarIndex, point: BarKey) -> tuple[str, Decimal]:
+        """その足の相場レジームと露出上限。無効なら常に強気・1.0。
 
-        指数の足が無い日（ウォームアップ中）は判断できないので、
+        指数の足が無い足（ウォームアップ中）は判断できないので、
         **弱気扱い** にして建てない。判断材料が無いときに全力で建てるのは
         レジーム制御を入れた意図に反する。
         """
         r = self.config.regime
         if not r.enabled:
             return "bull", Decimal(1)
-        row = indexed.get(r.benchmark, {}).get(day)
+        row = indexed.get(r.benchmark, {}).get(point)
         if not row:
             return "bear", r.exposure_bear
         close = row.get("close")
@@ -255,8 +296,8 @@ class DecisionPipeline:
         決まり、「全期間で計算してから切る」と「切ってから計算する」は
         必ず一致する。先読みバイアスは生じない。
 
-        これをやらないと、日数ぶん指標を計算し直すことになり、
-        バックテストの所要時間が日数の二乗に比例して伸びる。
+        これをやらないと、足の本数ぶん指標を計算し直すことになり、
+        バックテストの所要時間が本数の二乗に比例して伸びる。
         """
         expressions: dict[str, pl.Expr] = {}
         for strategy in self.strategies:
@@ -282,51 +323,52 @@ class DecisionPipeline:
         }
 
     def index_by_date(self, bars: dict[str, pl.DataFrame]) -> BarIndex:
-        """日付で引ける形に一度だけ変換する。
+        """鍵で引ける形に一度だけ変換する。
 
-        毎日 ``filter`` を掛けると銘柄数×日数の総当たりになり、
+        毎回 ``filter`` を掛けると銘柄数×本数の総当たりになり、
         銘柄が増えるほど急に遅くなる。最初に索引を作っておく。
         """
         keys = self.lookup_keys
+        key_column = self.key
         indexed: BarIndex = {}
         for symbol, frame in bars.items():
-            by_date: dict[dt.date, dict[str, Decimal]] = {}
+            by_key: dict[BarKey, dict[str, Decimal]] = {}
             for row in frame.iter_rows(named=True):
                 values = {}
                 for key in keys:
                     value = row.get(key)
                     if value is not None:
                         values[key] = Decimal(str(value))
-                by_date[row["date"]] = values
-            indexed[symbol] = by_date
+                by_key[row[key_column]] = values
+            indexed[symbol] = by_key
         return indexed
 
     @staticmethod
-    def lookup(indexed: BarIndex, day: dt.date, key: str) -> dict[str, Decimal]:
+    def lookup(indexed: BarIndex, point: BarKey, key: str) -> dict[str, Decimal]:
         return {
             symbol: values[key]
-            for symbol, by_date in indexed.items()
-            if (values := by_date.get(day)) is not None and key in values
+            for symbol, by_key in indexed.items()
+            if (values := by_key.get(point)) is not None and key in values
         }
 
-    @staticmethod
     def trading_days(
-        bars: dict[str, pl.DataFrame], start: dt.date | None, end: dt.date | None
-    ) -> list[dt.date]:
-        days: set[dt.date] = set()
+        self, bars: dict[str, pl.DataFrame], start: dt.date | None, end: dt.date | None
+    ) -> list[BarKey]:
+        """判断する足の鍵を時刻順に。``start`` / ``end`` は暦日で切る。"""
+        points: set[BarKey] = set()
         for frame in bars.values():
-            days.update(frame["date"].to_list())
-        selected = sorted(days)
-        if start:
-            selected = [d for d in selected if d >= start]
-        if end:
-            selected = [d for d in selected if d <= end]
-        return selected
+            selected = frame
+            if start:
+                selected = selected.filter(pl.col("date") >= start)
+            if end:
+                selected = selected.filter(pl.col("date") <= end)
+            points.update(selected[self.key].to_list())
+        return sorted(points)
 
-    def trend_values(self, indexed: BarIndex, day: dt.date) -> dict[str, Decimal]:
+    def trend_values(self, indexed: BarIndex, point: BarKey) -> dict[str, Decimal]:
         if self.config.stops.trend_exit_sma is None:
             return {}
-        return self.lookup(indexed, day, self.trend_exit_col)
+        return self.lookup(indexed, point, self.trend_exit_col)
 
     # -- 判断 ---------------------------------------------------------------
 
@@ -334,25 +376,41 @@ class DecisionPipeline:
         self,
         bars: dict[str, pl.DataFrame],
         indexed: BarIndex,
-        today: dt.date,
+        today: BarKey,
         account: AccountSnapshot,
         *,
         order_id_seed: str,
     ) -> DecisionPlan:
-        """当日の終値までで判断し、発注・取消の計画を返す。"""
-        closes = self.lookup(indexed, today, "close")
-        atr_values = self.lookup(indexed, today, f"atr_{ATR_PERIOD}")
-        trend_values = self.trend_values(indexed, today)
+        """この足の終値までで判断し、発注・取消の計画を返す。
+
+        ``today`` は足の鍵（日足なら日付、日中足なら UTC の時刻）。
+        """
+        point = today
+        day = day_of(point)
+        at = point if isinstance(point, dt.datetime) else None
+
+        closes = self.lookup(indexed, point, "close")
+        atr_values = self.lookup(indexed, point, f"atr_{ATR_PERIOD}")
+        trend_values = self.trend_values(indexed, point)
 
         positions = account.positions
         equity = account.equity
         lot_sizes = {s: Decimal(v) for s, v in self.config.universe.lot_size_overrides.items()}
 
-        # その日までに切り詰めた足だけを戦略に渡す（先読みの遮断）
-        visible = {symbol: frame.filter(pl.col("date") <= today) for symbol, frame in bars.items()}
+        # この足までに切り詰めた足だけを戦略に渡す（先読みの遮断）
+        visible = {
+            symbol: frame.filter(pl.col(self.key) <= point) for symbol, frame in bars.items()
+        }
         visible = {s: f for s, f in visible.items() if f.height >= self.warmup}
 
-        ctx = StrategyContext(as_of=today, _bars=visible, _positions=positions, equity=equity)
+        ctx = StrategyContext(
+            as_of=day,
+            _bars=visible,
+            _positions=positions,
+            equity=equity,
+            interval=self.interval,
+            at=at,
+        )
 
         signals: list[Signal] = []
         for strategy in self.strategies:
@@ -361,7 +419,7 @@ class DecisionPipeline:
         combined = self.combiner.combine(signals)
 
         # 相場レジーム: 弱気なら全手仕舞い＋新規禁止、警戒なら露出を絞る
-        regime, exposure = self.regime_exposure(indexed, today)
+        regime, exposure = self.regime_exposure(indexed, point)
         held_symbols = {s for s, p in positions.items() if p.quantity > 0}
         if exposure == 0:
             combined = {
@@ -378,7 +436,7 @@ class DecisionPipeline:
         self.stops.ensure(
             positions,
             atr_values,
-            today,
+            day,
             atr_multiple=self.config.sizing.atr_stop_multiple,
             trailing=self.config.stops.trailing,
             initial_stop_pct=self.config.stops.initial_stop_pct,
@@ -418,7 +476,7 @@ class DecisionPipeline:
             )
             + self.stops.time_exit_targets(
                 closes,
-                today,
+                day,
                 stale_days=self.config.stops.stale_exit_days,
                 max_days=self.config.stops.max_hold_days,
             )
@@ -483,7 +541,11 @@ class DecisionPipeline:
 
 
 class BacktestRunner:
-    """日足のバックテスト（:class:`~wbcore.broker.paper.PaperBroker` で約定）。"""
+    """足ごとのバックテスト（:class:`~wbcore.broker.paper.PaperBroker` で約定）。
+
+    日足でも日中足でも同じ。約定は常に「次の足の寄付」で、未約定は
+    その1本で失効する（実運用より保守的＝約定しにくい側に倒す方針）。
+    """
 
     def __init__(
         self,
@@ -533,11 +595,18 @@ class BacktestRunner:
         """バックテストを実行する。
 
         Args:
-            bars: 銘柄 → 日足（``date`` 昇順）。
+            bars: 銘柄 → 足（設定の間隔。日足は ``date``、日中足は ``ts`` 昇順）。
             start: この日以降を売買対象にする。前の足はウォームアップに使う。
         """
         if not bars:
             raise ValueError("足データが空です")
+        key = self.pipeline.key
+        for symbol, frame in bars.items():
+            if key not in frame.columns:
+                raise ValueError(
+                    f"{symbol} の足に {key!r} 列がありません。設定の universe.interval"
+                    f"（{self.pipeline.interval.value}）と足の間隔が合っていません"
+                )
         # 待機資金の年利（%）の日足。^IRX など。与えると現金に日割りで利息を付ける
         yields: dict[dt.date, Decimal] = {}
         if cash_yield is not None and cash_yield.height:
@@ -549,8 +618,8 @@ class BacktestRunner:
         last_yield = Decimal(0)
 
         enriched = self.pipeline.precompute_indicators(bars)
-        trading_days = self.pipeline.trading_days(enriched, start, end)
-        if not trading_days:
+        points = self.pipeline.trading_days(enriched, start, end)
+        if not points:
             raise ValueError("対象期間に取引日がありません")
 
         indexed = self.pipeline.index_by_date(enriched)
@@ -558,27 +627,30 @@ class BacktestRunner:
 
         result = BacktestResult(initial_equity=self.broker.equity)
 
-        previous: dt.date | None = None
-        for index, today in enumerate(trading_days):
-            # 0) 待機資金の利息（前営業日からの暦日ぶん）
-            if yields:
-                last_yield = yields.get(today, last_yield)
-                if previous is not None:
-                    self.broker.accrue_interest(last_yield, (today - previous).days)
-            previous = today
+        previous_day: dt.date | None = None
+        for index, point in enumerate(points):
+            today = day_of(point)
 
-            # 1) 前日の注文を当日の寄付で約定させ、残ったものを失効させる。
+            # 0) 暦日が変わったときだけ行う処理: 利息・当日買付の記録の更新
+            if today != previous_day:
+                if yields:
+                    last_yield = yields.get(today, last_yield)
+                    if previous_day is not None:
+                        self.broker.accrue_interest(last_yield, (today - previous_day).days)
+                self.broker.begin_day()
+                previous_day = today
+
+            # 1) 前の足の注文をこの足の寄付で約定させ、残ったものを失効させる。
             #    失効を約定より先に行うと、注文が約定する機会を永遠に失う。
-            self.broker.begin_day()
             fills = self.broker.settle(
-                lookup(indexed, today, "open"),
-                low_prices=lookup(indexed, today, "low"),
+                lookup(indexed, point, "open"),
+                low_prices=lookup(indexed, point, "low"),
             )
             self.broker.expire_open_orders()
-            self.broker.mark(lookup(indexed, today, "close"))
+            self.broker.mark(lookup(indexed, point, "close"))
 
-            # 2) 当日の終値までで判断する
-            record = self._decide(enriched, indexed, today, index, fills)
+            # 2) この足の終値までで判断する
+            record = self._decide(enriched, indexed, point, index, fills)
             result.records.append(record)
             result.fills.extend(fills)
 
@@ -592,7 +664,7 @@ class BacktestRunner:
         self,
         bars: dict[str, pl.DataFrame],
         indexed: BarIndex,
-        today: dt.date,
+        point: BarKey,
         index: int,
         fills: list[Fill],
     ) -> DayRecord:
@@ -602,7 +674,7 @@ class BacktestRunner:
             open_orders=self.broker.get_open_orders(),
             bought_today=self.broker.bought_today,
         )
-        plan = self.pipeline.decide(bars, indexed, today, account, order_id_seed=f"bt-{index}")
+        plan = self.pipeline.decide(bars, indexed, point, account, order_id_seed=f"bt-{index}")
 
         for stale in plan.cancel:
             self.broker.cancel(stale.client_order_id)
@@ -617,7 +689,7 @@ class BacktestRunner:
                 rejected[request.symbol] = str(exc)
 
         return DayRecord(
-            date=today,
+            date=day_of(point),
             equity=account.equity,
             cash=account.balance.cash_balance,
             signals=plan.signals,
@@ -626,4 +698,5 @@ class BacktestRunner:
             orders=placed,
             fills=fills,
             rejected=rejected,
+            at=point if isinstance(point, dt.datetime) else None,
         )

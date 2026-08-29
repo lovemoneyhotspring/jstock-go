@@ -201,7 +201,35 @@ uv run wbjp data sync --interval 5m --days 5    # 5分足を取る（data/bars/5
 
 取得元を足す手順はブローカーと同じ: `MarketDataProvider` を継承して `name` / `intervals` / `fetch_bars()` / `connect()` を書き、`wbcore.data.registry.PROVIDERS.register()` する。
 
-> 現在の戦略・エンジンは日足で動く。日中足は取得・保存まで対応しており、分足で判断する戦略とエンジン側の対応（判断を足の確定に紐づける）は次の段階。
+### 日中足で判断する
+
+戦略とバックテストは足の間隔に依存しない。設定の `universe.interval` を変えるだけで、同じ経路が 5 分足でも回る。
+
+```toml
+[universe]
+interval = "5m"
+
+[[strategies]]
+name = "intraday_sma_cross"
+fast = "15m"                                # 窓は時間で書く。5分足なら 3 本、1分足なら 15 本に自動で直す
+slow = "1h"
+session = { start = "09:30", end = "14:30" } # 取引所の現地時刻。外では新規に建てない
+flat_before = "15:00"                        # 以降は持ち越さない
+```
+
+```bash
+uv run wbjp data sync --config-dir config/intraday --days 30   # universe.interval に従って 5 分足を取る
+uv run wbjp backtest --config-dir config/intraday --from 2026-08-01
+```
+
+仕組み:
+
+- 戦略は `intervals` で対応する足を宣言する。既定はすべて（指標は「本数」なので間隔に依存しない）。日付の意味に依存する戦略（`momentum_rank` の月次入れ替え、`ross_cameron` の前日比ギャップ）は日足のみで、5 分足の設定で使おうとすると起動時に弾かれる
+- 窓を時間で持つ戦略は `bind(interval)` で本数に直す（`Interval.bars_in("1h")`）。`StrategyContext.at` に足の時刻（UTC）、`Market.timezone` で現地時刻
+- エンジンは足を「鍵」（日足なら日付、日中足なら時刻）で並べて回す。約定は常に次の足の寄付。差金決済の当日判定・待機資金の利息・時間切れの営業日数だけを暦日の変わり目で扱う
+- `--engine backtrader` は日足のみ
+
+> **ライブ運用は日足のみ。** 日中足の設定で `wbjp run` を起動すると明示的に止まる。5 分ごとに回すには「新しい足が確定したときだけ判断する」エポック管理と実行の重なりを防ぐロックが要り、これは次の段階（[cron の節](#cron-で回す)を参照）。
 
 ---
 

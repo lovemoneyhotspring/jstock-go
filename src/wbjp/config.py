@@ -16,7 +16,7 @@ import tomllib
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -34,6 +34,9 @@ from wbcore.credentials import store_credentials as store_credentials
 from wbcore.domain.models import Market, TaxAccountType
 from wbcore.settings import AppSettings as AppSettings
 from wbcore.settings import allows_live_orders
+
+if TYPE_CHECKING:
+    from wbcore.data.provider import Interval
 
 # --------------------------------------------------------------------------
 # ファイル設定（config/*.toml）
@@ -145,6 +148,10 @@ class UniverseConfig(BaseModel):
     #: 足データの取得元。:data:`wbcore.data.registry.PROVIDERS` の名前
     #: （"yfinance" は両市場、"webull" は米国株のみ）。
     data_provider: str = "yfinance"
+    #: 判断に使う足の間隔。"1d"（日足、既定）/ "1h" / "30m" / "15m" / "5m" / "1m"。
+    #: 戦略の指標は「本数」で書かれているので、間隔を変えると同じ本数が
+    #: 別の時間幅を指す。時間で窓を持つ戦略は :meth:`Strategy.bind` で本数に直す。
+    interval: str = "1d"
     symbols: list[str] = Field(default_factory=list)
     #: 銘柄リストのファイル（1行1銘柄、# はコメント）。設定ディレクトリからの相対パス。
     #: 読み込んだ銘柄は ``symbols`` に合流し、allowlist にもなる。
@@ -175,6 +182,19 @@ class UniverseConfig(BaseModel):
         if self.data_provider == "webull" and self.market is not Market.US:
             raise ValueError('data_provider = "webull" は米国株（market = "US"）専用です')
         return self
+
+    @field_validator("interval")
+    @classmethod
+    def _known_interval(cls, v: str) -> str:
+        from wbcore.data.provider import Interval
+
+        return Interval.parse(v).value
+
+    @property
+    def bar_interval(self) -> Interval:
+        from wbcore.data.provider import Interval
+
+        return Interval(self.interval)
 
     @property
     def currency(self) -> str:
