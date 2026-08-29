@@ -196,6 +196,14 @@ class ExecutionConfig(BaseModel):
 
     #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（webull / paper / …）。
     broker: str = "webull"
+    #: 注文種別。"market"（成行、既定）か "limit"（最新価格 × (1 + limit_offset) の指値）。
+    #: ETF は板が薄いことがあり、成行だと不利な価格で約定しうる。指値なら上限を切れる
+    order_type: str = "market"
+    #: 指値のとき、最新価格からどれだけ上に置くか（約定しやすくするため）。
+    limit_offset: Decimal = Decimal("0.01")
+    #: 成行が「気配値が無い」（Webull の OPENAPI_QUOTE_NOT_FOUND）で拒否されたら、
+    #: 同じ内容を指値で出し直す。UAT で新規上場 ETF がこの理由で弾かれた
+    fallback_to_limit: bool = True
     #: GENERAL（一般） / SPECIFIC（特定） / NISA
     tax_account_type: TaxAccountType = TaxAccountType.SPECIFIC
     #: 米国株の時間外取引を許すか。日本株では無視される。
@@ -204,6 +212,21 @@ class ExecutionConfig(BaseModel):
     #: ETF には 1 株や 10 株単位のものがある。既定の 100 株だと月の予算が
     #: 1単元に届かず、発注が丸ごと見送りになる。
     lot_size_overrides: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("order_type")
+    @classmethod
+    def _known_order_type(cls, v: str) -> str:
+        if v not in {"market", "limit"}:
+            raise ValueError(f"order_type は market か limit: {v}")
+        return v
+
+    @field_validator("limit_offset")
+    @classmethod
+    def _offset_range(cls, v: Decimal) -> Decimal:
+        if not 0 <= v < Decimal("0.2"):
+            raise ValueError("limit_offset は 0 以上 0.2 未満")
+        return v
+
     #: 最終足がこの日数より古い銘柄は判定しない（取得元の障害で古い足のまま
     #: 増額判定するのを防ぐ）。週末＋祝日を跨げる 4 日が既定。
     max_stale_days: int = Field(default=4, ge=1)

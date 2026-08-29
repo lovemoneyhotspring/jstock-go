@@ -26,7 +26,7 @@ from accum.plan import AccumulationSettings, build_plan
 from accum.tactics import Tactic
 from wbcore.broker.base import Broker
 from wbcore.clock import to_zone
-from wbcore.domain.market_rules import rules_for
+from wbcore.domain.market_rules import PriceRounding, rules_for
 from wbcore.domain.models import (
     Market,
     OrderRequest,
@@ -295,15 +295,27 @@ def sync_order_status(ledger: Ledger, broker_for: Callable[[Market], Broker]) ->
     return changes
 
 
+#: 成行が「気配値が無い」で拒否されたときのエラーコード（Webull）。
+QUOTE_NOT_FOUND = "QUOTE_NOT_FOUND"
+
+
 def to_order(
     contribution: Contribution,
     *,
     tax_type: TaxAccountType,
     lot_size: int | None = None,
+    order_type: OrderType = OrderType.MARKET,
+    limit_offset: Decimal = Decimal("0.01"),
+    seed: str = "accum",
 ) -> OrderRequest:
-    """投下額を成行の買い注文にする。
+    """投下額を買い注文にする。
 
-    株数は ``金額 ÷ 終値`` を単元に切り捨てる。切り上げると予算を超える。
+    株数は ``金額 ÷ 価格`` を単元に切り捨てる。切り上げると予算を超える。
+    指値は ``価格 × (1 + limit_offset)`` を呼値に乗せる（約定しやすい側に丸める）。
+
+    Args:
+        seed: 注文IDの種。同じ判断からは同じIDになる。成行を指値で出し直す
+            ときは別の種にして、拒否された注文と区別する。
 
     Raises:
         ValueError: 指数など発注できない銘柄、または1単元に届かないとき。
@@ -318,17 +330,31 @@ def to_order(
             f"{contribution.symbol}: {contribution.amount:,.0f} では1単元（{lot:g}株 ≈ "
             f"{needed:,.0f}）に届きません。lot_size_overrides か予算を見直してください"
         )
+    limit_price: Decimal | None = None
+    if order_type is OrderType.LIMIT:
+        limit_price = rules.snap_to_tick(
+            contribution.close * (Decimal(1) + limit_offset),
+            Side.BUY,
+            rounding=PriceRounding.AGGRESSIVE,
+            symbol=symbol,
+        )
     return OrderRequest(
         client_order_id=make_client_order_id(
-            f"accum|{contribution.date}", symbol, Side.BUY, quantity
+            f"{seed}|{contribution.date}", symbol, Side.BUY, quantity
         ),
         symbol=symbol,
         side=Side.BUY,
-        order_type=OrderType.MARKET,
+        order_type=order_type,
         quantity=quantity,
+        limit_price=limit_price,
         tax_type=tax_type,
         reason=f"積立 {contribution.date} ×{contribution.multiplier:g} {contribution.reason}",
     )
+
+
+def should_fallback_to_limit(request: OrderRequest, error: Exception) -> bool:
+    """成行が「気配値が無い」で拒否された注文か。指値で出し直す対象。"""
+    return request.order_type is OrderType.MARKET and QUOTE_NOT_FOUND in str(error)
 
 
 def build_orders(
@@ -338,6 +364,8 @@ def build_orders(
     lot_sizes: Mapping[str, int] | None = None,
     moment: dt.datetime | None = None,
     ignore_window: bool = False,
+    order_type: OrderType = OrderType.MARKET,
+    limit_offset: Decimal = Decimal("0.01"),
 ) -> list[PlannedOrder]:
     """投下の一覧を注文にする。作れないものは理由付きで残す。
 
@@ -345,6 +373,7 @@ def build_orders(
         lot_sizes: 設定上の銘柄コード → 単元株数。
         moment: 発注時間帯の判定に使う時刻。省略時は現在。
         ignore_window: 時間帯の外でも注文を作る（手動で流すとき）。
+        order_type: 成行か指値か。``limit_offset`` は指値のときの上乗せ率。
     """
     planned: list[PlannedOrder] = []
     for c in contributions:
@@ -352,7 +381,13 @@ def build_orders(
             planned.append(PlannedOrder(c, None, f"発注時間帯の外（{c.tactic.window.describe()}）"))
             continue
         try:
-            request = to_order(c, tax_type=tax_type, lot_size=(lot_sizes or {}).get(c.symbol))
+            request = to_order(
+                c,
+                tax_type=tax_type,
+                lot_size=(lot_sizes or {}).get(c.symbol),
+                order_type=order_type,
+                limit_offset=limit_offset,
+            )
         except ValueError as exc:
             planned.append(PlannedOrder(c, None, str(exc)))
             continue

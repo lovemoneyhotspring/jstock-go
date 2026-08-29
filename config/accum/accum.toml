@@ -39,6 +39,12 @@ data_provider = "yfinance"
 [execution]
 # 発注先。登録済みのブローカー名（webull | paper）。paper はネットワークに繋がないシミュレータ。
 broker = "webull"
+# 注文種別。market（成行、既定）| limit（最新価格 × (1 + limit_offset) の指値）。
+# ETF は板が薄いことがあるので、上限を切りたければ limit。
+order_type = "market"
+limit_offset = "0.01"
+# 成行が「気配値が無い」で拒否されたら指値で出し直す（UAT の新規上場 ETF で実測）。
+fallback_to_limit = true
 # GENERAL（一般） / SPECIFIC（特定） / NISA
 tax_account_type = "SPECIFIC"
 # 米国株の時間外取引。日本株では無視される。

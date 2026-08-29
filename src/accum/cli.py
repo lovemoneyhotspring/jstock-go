@@ -378,11 +378,17 @@ def run(
     既定は dry-run。実発注には --live が必要で、本番では WBJP_ENV=prod も
     同時に必要。cron から回すときは --yes も付ける。
     """
-    from accum.execute import build_orders, pending_contributions, sync_order_status
+    from accum.execute import (
+        build_orders,
+        pending_contributions,
+        should_fallback_to_limit,
+        sync_order_status,
+        to_order,
+    )
     from accum.ledger import DRY_RUN_STATUS, Ledger
     from wbcore.broker.base import Broker, BrokerError
     from wbcore.broker.registry import connect
-    from wbcore.domain.models import Market
+    from wbcore.domain.models import Market, OrderType
     from wbcore.notify import alert
 
     settings = AppSettings()
@@ -481,6 +487,8 @@ def run(
         lot_sizes=config.execution.lot_size_overrides,
         moment=now,
         ignore_window=ignore_window,
+        order_type=OrderType(config.execution.order_type.upper()),
+        limit_offset=config.execution.limit_offset,
     )
     allowed, reason = allows_live_orders(settings.env, live, kill_switch=config.kill_switch)
 
@@ -531,21 +539,47 @@ def run(
                     status[key] = f"[red]見送り[/red] {note}"
                     failures.append(f"{key}: {note}")
                     continue
-                ack = broker.place(item.request)
+                request = item.request
+                try:
+                    ack = broker.place(request)
+                except BrokerError as exc:
+                    if not (
+                        config.execution.fallback_to_limit
+                        and should_fallback_to_limit(request, exc)
+                    ):
+                        raise
+                    # 気配値が無いと成行は通らない（UAT の新規上場 ETF で実測）。
+                    # 同じ内容を指値で出し直す。上限価格が付くぶん不利にはならない
+                    request = to_order(
+                        c,
+                        tax_type=config.execution.tax_account_type,
+                        lot_size=config.execution.lot_size_overrides.get(c.symbol),
+                        order_type=OrderType.LIMIT,
+                        limit_offset=config.execution.limit_offset,
+                        seed="accum-limit",
+                    )
+                    log.warning(
+                        "成行が気配値無しで拒否されたため指値で出し直し",
+                        code="accum.fallback_limit",
+                        symbol=c.symbol,
+                        limit_price=str(request.limit_price),
+                    )
+                    ack = broker.place(request)
+                    status[key] = f"[green]発注[/green]（指値 {request.limit_price:,} に切替）"
             except BrokerError as exc:
                 status[key] = f"[red]失敗[/red] {exc}"
                 failures.append(f"{key}: {exc}")
                 log.error("積立の発注に失敗", symbol=c.symbol, error=str(exc))
             else:
                 ledger.record(
-                    item.request,
+                    request,
                     ack.status.value,
                     ack.broker_order_id,
                     plan_month=c.month,
                     amount=c.amount,
                     market=c.market,
                 )
-                status[key] = "[green]発注[/green]"
+                status.setdefault(key, "[green]発注[/green]")
     finally:
         ledger.close()
     for item in planned:
@@ -557,6 +591,7 @@ def run(
             market=c.market.value,
             month=c.month.isoformat() if c.month else None,
             client_order_id=item.request.client_order_id if item.request else None,
+            order_type=item.request.order_type.value if item.request else None,
             quantity=str(item.request.quantity) if item.request else None,
             price=str(c.close),
             amount=str(c.amount),
