@@ -160,6 +160,12 @@ class UniverseConfig(BaseModel):
     #: 銘柄リストのファイル（1行1銘柄、# はコメント）。設定ディレクトリからの相対パス。
     #: 読み込んだ銘柄は ``symbols`` に合流し、allowlist にもなる。
     symbols_file: str | None = None
+    #: Webull のマイウォッチリストから銘柄を取り込む（``data sync`` / ``data check`` のとき）。
+    #: リストの名前を並べる。``["*"]`` で全リスト。この市場の銘柄だけを使い、
+    #: ``symbols_file`` があればそこにも書き足して残す（API が落ちても前回の
+    #: リストで動けるように）。売買（``run`` / ``backtest``）の allowlist には
+    #: 入れない——発注対象は設定ファイルに明示的に書かれたものだけ。
+    watchlists: list[str] = Field(default_factory=list)
     #: TOPIX500 構成銘柄（呼値が細かくなる）。日本株のみ意味を持つ。
     topix500_symbols: list[str] = Field(default_factory=list)
     #: 売買単位が既定と異なる銘柄の例外 {銘柄コード: 単元株数}

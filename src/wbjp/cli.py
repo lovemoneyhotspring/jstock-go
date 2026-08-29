@@ -92,6 +92,57 @@ def _build_feed(config: Config):  # type: ignore[no-untyped-def]
     return BarFeed(config.settings.bars_dir, universe.market, base=universe.base_bar_interval)
 
 
+def _collect_symbols(config: Config) -> list[str]:
+    """取り込む銘柄。設定の銘柄に、ウォッチリスト（設定があれば）の銘柄を合流させる。
+
+    ウォッチリストが読めなくても止めない。前回 ``symbols_file`` に書き残した
+    銘柄で続け、読めなかったことだけ知らせる。
+    """
+    universe = config.file.universe
+    symbols = list(universe.symbols)
+    if not universe.watchlists:
+        return symbols
+
+    from wbcore.data.webull_watchlist import (
+        WatchlistItem,
+        WebullWatchlists,
+        market_of,
+        write_universe,
+    )
+
+    try:
+        lists = WebullWatchlists.connect(config.env).lists()
+    except Exception as exc:
+        console.print(
+            f"[yellow]ウォッチリストを読めませんでした（前回の銘柄で続けます）: {exc}[/yellow]"
+        )
+        return symbols
+    wanted = None if "*" in universe.watchlists else set(universe.watchlists)
+    chosen = [w for w in lists if wanted is None or w.name in wanted]
+    if wanted is not None and (missing := wanted - {w.name for w in chosen}):
+        console.print(f"[yellow]ウォッチリストが見つかりません: {sorted(missing)}[/yellow]")
+
+    picked: list[WatchlistItem] = []
+    skipped: list[str] = []
+    for item in (item for w in chosen for item in w.items):
+        market = market_of(item)
+        if market is universe.market:
+            if item.symbol not in symbols and item.symbol not in [i.symbol for i in picked]:
+                picked.append(item)
+        else:
+            skipped.append(f"{item.symbol}({item.exchange or market or '?'})")
+    if skipped:
+        console.print(f"[dim]この市場ではないので除外: {', '.join(skipped)}[/dim]")
+    if picked:
+        console.print(
+            f"[green]ウォッチリストから {len(picked)} 銘柄を追加: {', '.join(i.symbol for i in picked)}[/green]"
+        )
+    if universe.symbols_file:
+        target = config.settings.config_dir / universe.symbols_file
+        write_universe(target, picked, source="/".join(w.name for w in chosen), merge_with=target)
+    return symbols + [i.symbol for i in picked]
+
+
 def _load(config_dir: Path | None):  # type: ignore[no-untyped-def]
     config = load_config(config_dir)
     if not config.file.universe.symbols:
@@ -759,7 +810,7 @@ def data_sync(
     store = BarStore(config.settings.bars_dir, chosen)
     end = dt.date.today()
 
-    symbols = list(config.file.universe.symbols)
+    symbols = _collect_symbols(config)
     # レジーム判定の指数と待機資金の利回り系列も一緒に取る
     if config.file.regime.enabled:
         for extra in (config.file.regime.benchmark, config.file.regime.cash_yield_symbol):
@@ -810,7 +861,7 @@ def data_check(
     for candidate in (universe.base_bar_interval, universe.bar_interval, Interval.D1):
         if candidate is not None and candidate not in intervals:
             intervals.append(candidate)
-    symbols = list(universe.symbols)
+    symbols = _collect_symbols(config)
     if not symbols:
         console.print("[red]universe.symbols が空です[/red]")
         raise typer.Exit(2)

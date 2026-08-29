@@ -22,3 +22,7 @@ interval = "5m"          # 直接取る日中足。1分足と日足はこれと�
 base_interval = "1m"     # 蓄積の基準。ここから粗い足を合成する
 symbols_file = "universe.txt"
 symbols = []
+# Webull のマイウォッチリストの銘柄を取り込み対象に加える。["*"] で全リスト、
+# 名前を並べれば特定のリストだけ。この市場（JP）の銘柄だけを使い、universe.txt にも
+# 書き足して残す（API が落ちた日も前回のリストで蓄積が続く）。
+watchlists = ["*"]

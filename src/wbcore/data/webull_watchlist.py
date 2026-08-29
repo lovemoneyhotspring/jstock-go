@@ -21,11 +21,13 @@ UAT の公開口座にリストが無く未検証。snake_case / camelCase の�
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Self
 
 from wbcore.credentials import ENDPOINTS, Credentials, Environment, load_credentials
+from wbcore.domain.models import Market
 from wbcore.logging import get_logger, harden_third_party_logging, register_secret
 
 log = get_logger(__name__)
@@ -99,6 +101,45 @@ def parse_instruments(payload: Any) -> list[WatchlistItem]:
             )
         )
     return out
+
+
+#: 取引所コード → 市場。実機の値が分かり次第ここに足す。
+_JP_EXCHANGES = frozenset({"TSE", "TYO", "JPX", "XJPX", "XTKS", "TKS", "SPR", "NGO", "FKA"})
+_US_EXCHANGES = frozenset(
+    {
+        "NASDAQ",
+        "NYSE",
+        "AMEX",
+        "ARCA",
+        "NYSEARCA",
+        "BATS",
+        "XNAS",
+        "XNYS",
+        "XASE",
+        "NMS",
+        "NGM",
+        "NCM",
+    }
+)
+
+
+def market_of(item: WatchlistItem) -> Market | None:
+    """銘柄がどの市場のものか。
+
+    取引所コードで決め、未知のコードなら銘柄コードの形で推定する
+    （東証は数字始まりの 4 桁英数字、米国は英字）。どちらでもなければ None。
+    """
+    code = item.exchange.upper()
+    if code in _JP_EXCHANGES:
+        return Market.JP
+    if code in _US_EXCHANGES:
+        return Market.US
+    symbol = item.symbol.upper().removesuffix(".T")
+    if re.fullmatch(r"[0-9][0-9A-Z]{3}", symbol):
+        return Market.JP
+    if re.fullmatch(r"[A-Z]{1,5}([.\-][A-Z]{1,2})?", symbol):
+        return Market.US
+    return None
 
 
 class WebullWatchlists:

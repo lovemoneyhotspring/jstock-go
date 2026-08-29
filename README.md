@@ -231,9 +231,16 @@ base_interval = "1m"   # 取り込みの基準。5分足・1時間足・日足�
 
 将来売買する可能性のある銘柄は、戦略を持たない設定で足だけ蓄積しておく。`universe.txt` に銘柄を書き足すだけで、その日から蓄積が始まる。Webull アプリのマイウォッチリストから流し込むこともできる：
 
+```toml
+[universe]
+watchlists = ["*"]      # 全リスト。名前を並べれば特定のリストだけ
+```
+
+`data sync` / `data check` のたびにウォッチリストを読み、この市場の銘柄を取り込み対象に加える（アプリでリストに足せば、次の取り込みから蓄積が始まる）。読めた銘柄は `universe.txt` にも書き足して残すので、API が落ちた日も前回のリストで蓄積が続く。売買の allowlist（`run` / `backtest` の対象）には入れない——発注対象は設定に明示的に書かれたものだけ。
+
 ```bash
 uv run wbjp data watchlist                                                  # リストと中身を表示
-uv run wbjp data watchlist --name 日本株 --export config/collect/universe.txt --merge   # 既存を残して足す
+uv run wbjp data watchlist --name 日本株 --export config/collect/universe.txt --merge   # 手で書き出す場合
 ```取得元は `data_provider` で切り替えられ、基準足（1 分足）に対応しない取得元でも日足は必ず揃う。
 
 ```bash
