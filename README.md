@@ -51,7 +51,7 @@ Webull の市場データAPI（`bars` / `snapshot`）は `US_STOCK` / `US_ETF` �
 ```bash
 uv run wbjp data sync --config-dir config/us
 uv run wbjp backtest --from 2024-01-01 --config-dir config/us
-uv run wbjp run --config-dir config/us            # dry-run
+uv run wbjp run --config-dir config/us            # 判断まで（注文は出さない）
 ```
 
 | | 日本株（`market = "JP"`） | 米国株（`market = "US"`） |
@@ -156,8 +156,8 @@ uv run accum sync                # 足を取る（約30年ぶん。増額は暴�
 uv run accum plan                # 直近の投下額
 uv run accum backtest            # 銘柄ごとの結果（対照群＝同額を均等に投じた場合）
 uv run accum compare 1305.T      # 登録済み戦略を1銘柄で横並び
-uv run accum run                 # 最新日の投下額を注文にする（dry-run）
-uv run accum run --live          # 実発注。本番は WBJP_ENV=prod と --yes も
+uv run accum run                 # 今日出すべき投下を計算する（注文は出さない）
+uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV（uat / prod）。cron では --yes も
 ```
 
 倍率の判定を別の銘柄で行うこともできる（`signal_symbol`）。東証の S&P500 連動 ETF を買いながら、増額の判定は本家の指数 `^GSPC` の配列で行う、といった使い方。判定用は買わないので指数でもよく、暦が違っても「その日以前で最新」の判定値を当てる。判定用の市場の引けが買う市場の判断時刻より後（東証の銘柄を米国指数で判定）なら、同じ日付の足はまだ存在しないので**前日の足**を使う——バックテストでも同じ規則にして、ライブと食い違わないようにしている。省略すれば買う銘柄自身の足で判定する。
@@ -171,6 +171,22 @@ uv run accum run --live          # 実発注。本番は WBJP_ENV=prod と --yes
 > **UAT で未確認の点**: 米国株の発注ペイロード（`trade_currency` / `extended_hours_trading` / `support_trading_session` の値）と、Webull 市場データ API の応答形式は SDK と公開ドキュメントから組んであり、実機での疎通確認がまだ。最初は必ず `WBJP_ENV=uat` の dry-run で `wbjp account` と `wbjp run` を通し、ログの発注ペイロードを確認すること。
 
 ---
+
+## 発注するかどうかは `--live` だけで決まる
+
+| 軸 | 何を決めるか | 値 |
+|---|---|---|
+| **`--live`**（コマンド引数） | **注文を出すか** | 無し＝出さない（データ取得・判断・台帳への記録は行う）／有り＝出す |
+| `WBJP_ENV`（`.env`） | **どの口座に繋ぐか** | `uat`＝Webull のテスト口座（実弾ではない）／`prod`＝本番口座 |
+| `kill_switch`（設定ファイル） | 緊急停止 | `true` なら `--live` があっても出さない |
+
+`WBJP_ENV` は売買の可否ではなく口座の選択。`wbjp run` / `accum run` は冒頭にこの 2 軸を 1 行で出す:
+
+```
+口座: 本番口座（WBJP_ENV=prod）  発注: しない（--live なし（データ取得と判断は行い、注文は出さない））
+```
+
+本番口座で `--live` を付けたときだけ、端末では続行の確認を求める（cron では `--yes` で省く）。
 
 ## 時刻の規約
 

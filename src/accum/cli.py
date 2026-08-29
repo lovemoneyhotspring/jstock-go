@@ -24,7 +24,7 @@ from rich.table import Table
 from accum.config import DEFAULT_CONFIG_DIR, FILENAME, AccumConfig, load
 from wbcore.clock import fmt, now_utc, today_utc
 from wbcore.logging import bind_run_context, configure_logging, get_logger
-from wbcore.settings import AppSettings, allows_live_orders
+from wbcore.settings import AppSettings, allows_live_orders, describe_mode
 
 app = typer.Typer(
     help="積立（ドル平均法＋下落局面での増額）",
@@ -357,7 +357,10 @@ def plan(
 
 @app.command("run")
 def run(
-    live: Annotated[bool, typer.Option("--live", help="実際に発注する（既定は dry-run）")] = False,
+    live: Annotated[
+        bool,
+        typer.Option("--live", help="注文を出す。無ければデータ取得と判断だけ行い、注文は出さない"),
+    ] = False,
     no_sync: Annotated[bool, typer.Option("--no-sync", help="足の更新をしない")] = False,
     ignore_window: Annotated[
         bool, typer.Option("--ignore-window", help="発注時間帯の外でも注文を作る")
@@ -384,6 +387,7 @@ def run(
 
     settings = AppSettings()
     config = _load(config_dir)
+    console.print(describe_mode(settings.env, live, kill_switch=config.kill_switch))
     if not no_sync:
         _sync(settings, config, config_dir, days=30, force=False)
     bars = _bars(settings, config.all_symbols)
@@ -571,7 +575,7 @@ def run(
     if failures:
         alert(f"積立: {len(failures)} 件の発注に失敗", "\n".join(failures))
 
-    mode = "[green]実発注[/green]" if allowed else f"[yellow]dry-run[/yellow] ({reason})"
+    mode = "[green]発注あり[/green]" if allowed else f"[yellow]発注なし[/yellow]（{reason}）"
     console.print(
         f"\n[bold]積立[/bold]  基準日 {planned[0].contribution.date}  "
         f"{fmt(now, settings.timezone)}  {mode}"

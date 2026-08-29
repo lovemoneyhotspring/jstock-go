@@ -61,10 +61,11 @@ class AppSettings(BaseSettings):
 def allows_live_orders(
     env: Environment, live_flag: bool, *, kill_switch: bool = False
 ) -> tuple[bool, str]:
-    """実発注してよいかを判定する。
+    """注文を出してよいかを判定する。
 
-    本番の実発注には ``WBJP_ENV=prod`` と ``--live`` の**両方**が要る。
-    UAT は実弾ではないので ``--live`` だけで足りる。
+    **注文を出すかどうかは ``--live`` だけで決まる。** 無ければデータ取得・判断・
+    記録は行い、注文だけ出さない。``WBJP_ENV`` は「どの口座に繋ぐか」
+    （uat＝テスト口座 / prod＝本番口座）であって、売買の可否ではない。
     キルスイッチはすべてに優先する。
 
     Returns:
@@ -73,7 +74,16 @@ def allows_live_orders(
     if kill_switch:
         return False, "キルスイッチが有効（設定の kill_switch = true）"
     if not live_flag:
-        return False, "--live が指定されていない（dry-run）"
-    if env.is_production:
-        return True, "本番環境・--live 指定あり"
-    return True, f"{env.value} 環境・--live 指定あり（実弾ではない）"
+        return False, "--live なし（データ取得と判断は行い、注文は出さない）"
+    return True, "--live あり"
+
+
+def describe_mode(env: Environment, live_flag: bool, *, kill_switch: bool = False) -> str:
+    """実行の冒頭に出す 1 行。口座と発注の可否を混同しないように、両方を並べて示す。
+
+    例: ``口座: 本番（WBJP_ENV=prod）  発注: しない（--live なし）``
+    """
+    account = "本番口座" if env.is_production else "テスト口座（実弾ではない）"
+    allowed, reason = allows_live_orders(env, live_flag, kill_switch=kill_switch)
+    orders = "する" if allowed else "しない"
+    return f"口座: {account}（WBJP_ENV={env.value}）  発注: {orders}（{reason}）"

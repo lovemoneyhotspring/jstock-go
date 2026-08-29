@@ -63,12 +63,12 @@ def _config(*, env: Environment, kill_switch: bool = False) -> Config:
 # --------------------------------------------------------------------------
 
 
-def test_dry_run_is_the_default_everywhere() -> None:
-    """--live を付けない限り、どの環境でも発注しない。"""
+def test_no_orders_without_live_flag_in_any_environment() -> None:
+    """--live を付けない限り、どの口座でも発注しない（データ取得と判断は行う）。"""
     for env in Environment:
         allowed, reason = _config(env=env).allows_live_orders(live_flag=False)
         assert allowed is False
-        assert "dry-run" in reason
+        assert "--live なし" in reason
 
 
 def test_live_flag_required_in_production() -> None:
@@ -79,7 +79,7 @@ def test_live_flag_required_in_production() -> None:
 def test_production_with_live_flag_is_allowed() -> None:
     allowed, reason = _config(env=Environment.PROD).allows_live_orders(live_flag=True)
     assert allowed is True
-    assert "本番" in reason
+    assert reason == "--live あり"
 
 
 def test_kill_switch_overrides_everything() -> None:
@@ -91,10 +91,13 @@ def test_kill_switch_overrides_everything() -> None:
     assert "キルスイッチ" in reason
 
 
-def test_uat_with_live_flag_is_marked_as_not_real_money() -> None:
+def test_uat_with_live_flag_is_allowed_and_the_account_is_named_in_the_mode_line() -> None:
+    """発注の可否は --live だけ。口座の区別（実弾かどうか）は describe_mode が示す。"""
+    from wbcore.settings import describe_mode
+
     allowed, reason = _config(env=Environment.UAT).allows_live_orders(live_flag=True)
-    assert allowed is True
-    assert "実弾ではない" in reason
+    assert allowed is True and reason == "--live あり"
+    assert "実弾ではない" in describe_mode(Environment.UAT, True)
 
 
 # --------------------------------------------------------------------------

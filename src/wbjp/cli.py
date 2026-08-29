@@ -30,6 +30,7 @@ from wbcore.credentials import (
 )
 from wbcore.data.provider import MarketDataProvider
 from wbcore.logging import bind_run_context, configure_logging, get_logger
+from wbcore.settings import describe_mode
 from wbjp.config import AppSettings, Config, load_config
 
 if TYPE_CHECKING:
@@ -318,7 +319,10 @@ def cancel(
 
 @app.command()
 def run(
-    live: Annotated[bool, typer.Option("--live", help="実際に発注する（既定は dry-run）")] = False,
+    live: Annotated[
+        bool,
+        typer.Option("--live", help="注文を出す。無ければデータ取得と判断だけ行い、注文は出さない"),
+    ] = False,
     as_of: Annotated[str | None, typer.Option(help="判断の基準日 YYYY-MM-DD")] = None,
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
     no_sync: Annotated[bool, typer.Option("--no-sync", help="足の更新をしない")] = False,
@@ -338,6 +342,7 @@ def run(
 
     config = _load(config_dir)
     allowed, _ = config.allows_live_orders(live)
+    console.print(describe_mode(config.env, live, kill_switch=config.file.risk.kill_switch))
 
     if allowed and config.env.is_production and not yes:
         console.print("[bold red]本番環境で実際に発注します[/bold red]")
@@ -365,7 +370,11 @@ def run(
 
     result = runner.run_once(live=live, as_of=dt.date.fromisoformat(as_of) if as_of else None)
 
-    mode = "[green]実発注[/green]" if result.live else f"[yellow]dry-run[/yellow] ({result.reason})"
+    mode = (
+        "[green]発注あり[/green]"
+        if result.live
+        else f"[yellow]発注なし[/yellow]（{result.reason}）"
+    )
     console.print(
         f"\n[bold]サイクル {result.run_id}[/bold]  基準日 {result.as_of}  "
         f"市場 {config.file.universe.market.value}  {mode}"
