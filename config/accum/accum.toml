@@ -33,6 +33,8 @@ kill_switch = false
 
 # 発注の振る舞い。積立は当日の投下額を成行の買いにする。
 [execution]
+# 発注先。登録済みのブローカー名（webull | paper）。paper はネットワークに繋がないシミュレータ。
+broker = "webull"
 # GENERAL（一般） / SPECIFIC（特定） / NISA
 tax_account_type = "SPECIFIC"
 # 米国株の時間外取引。日本株では無視される。

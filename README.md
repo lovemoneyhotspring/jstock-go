@@ -168,6 +168,24 @@ uv run accum run --live          # 実発注。本番は WBJP_ENV=prod と --yes
 
 ---
 
+## 取引所（ブローカー）の差し替え
+
+発注先は `wbcore.broker.base.Broker` 抽象クラスの裏に隠れている。売買（`wbjp`）も積立（`accum`）も `wbcore.broker.registry.connect(name, env, market=...)` を通るので、設定の1行で切り替わる。
+
+```toml
+[execution]
+broker = "webull"   # webull | paper（ネットワークに繋がないシミュレータ）
+```
+
+取引所を足す手順:
+
+1. `Broker` を継承し、`name`（設定で使う名前）と `connect()`（認証情報の解決・接続先の選択など、その証券会社固有の準備）を書く
+2. `wbcore.broker.registry.BROKERS.register(YourBroker)` する
+
+認証情報は証券会社ごとに名前空間を分ける（`load_credentials(env, namespace="XXX")` → `XXX_PROD_APP_KEY` / キーチェーン `xxx/prod`）。Webull は `WBJP`。CLI には手を入れない。
+
+---
+
 ## アーキテクチャ
 
 戦略は「注文」ではなく「シグナル」を出す。注文への変換はエンジンが一手に引き受ける。

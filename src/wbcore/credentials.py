@@ -7,8 +7,12 @@
     - 環境（uat / prod）ごとに認証情報を完全に分ける。取り違えて本番に
       発注する事故を、名前空間の分離で防ぐ。
 
-環境変数の接頭辞は ``WBJP_`` のまま（``WBJP_PROD_APP_KEY`` など）。
-プロジェクトを分けても口座は同じなので、認証情報の置き場所は共有する。
+名前空間:
+    証券会社ごとに ``namespace`` で分ける。Webull は ``WBJP``——環境変数は
+    ``WBJP_PROD_APP_KEY``、キーチェーンは ``wbjp/prod``。別の証券会社を
+    足すときは、その :class:`~wbcore.broker.base.Broker` が自分の名前空間を
+    渡す。プロジェクト（売買 / 積立）を分けても口座は同じなので、
+    名前空間はプロジェクトではなく証券会社に紐づける。
 """
 
 from __future__ import annotations
@@ -26,8 +30,8 @@ from dotenv import dotenv_values
 
 log = structlog.get_logger(__name__)
 
-#: キーチェーンのサービス名の接頭辞。環境ごとに別エントリになる。
-KEYRING_SERVICE_PREFIX = "wbjp"
+#: 既定の名前空間（Webull）。環境変数の接頭辞とキーチェーンのサービス名になる。
+DEFAULT_NAMESPACE = "WBJP"
 
 #: 既定の ``.env`` の場所（プロセスのカレントディレクトリ）。
 DEFAULT_ENV_FILE = Path(".env")
@@ -129,17 +133,17 @@ class Credentials:
 # --------------------------------------------------------------------------
 
 
-def _keyring_service(env: Environment) -> str:
-    return f"{KEYRING_SERVICE_PREFIX}/{env.value}"
+def _keyring_service(env: Environment, namespace: str) -> str:
+    return f"{namespace.lower()}/{env.value}"
 
 
-def _from_keyring(env: Environment) -> dict[str, str | None]:
+def _from_keyring(env: Environment, namespace: str = DEFAULT_NAMESPACE) -> dict[str, str | None]:
     try:
         import keyring
     except ImportError:  # pragma: no cover - keyring は必須依存
         return {}
 
-    service = _keyring_service(env)
+    service = _keyring_service(env, namespace)
     try:
         return {name: keyring.get_password(service, name) for name in _CREDENTIAL_FIELDS}
     except Exception as exc:
@@ -152,18 +156,20 @@ def _from_keyring(env: Environment) -> dict[str, str | None]:
         return {}
 
 
-def _scoped_lookup(source: Mapping[str, str | None], env: Environment) -> dict[str, str | None]:
+def _scoped_lookup(
+    source: Mapping[str, str | None], env: Environment, namespace: str
+) -> dict[str, str | None]:
     """``WBJP_UAT_APP_KEY`` 形式を優先し、``WBJP_APP_KEY`` を後方互換とする。"""
-    prefix = f"WBJP_{env.value.upper()}_"
+    prefix = f"{namespace}_{env.value.upper()}_"
     return {
-        name: source.get(f"{prefix}{name.upper()}") or source.get(f"WBJP_{name.upper()}")
+        name: source.get(f"{prefix}{name.upper()}") or source.get(f"{namespace}_{name.upper()}")
         for name in _CREDENTIAL_FIELDS
     }
 
 
-def _from_env_vars(env: Environment) -> dict[str, str | None]:
+def _from_env_vars(env: Environment, namespace: str) -> dict[str, str | None]:
     """環境変数から読む。systemd の ``EnvironmentFile=`` もここに来る。"""
-    return _scoped_lookup(os.environ, env)
+    return _scoped_lookup(os.environ, env, namespace)
 
 
 def _resolve_env_file(env_file: Path | None) -> Path:
@@ -210,6 +216,7 @@ def _resolve_fields(
     env: Environment,
     dotenv: dict[str, str | None],
     env_file: Path,
+    namespace: str,
 ) -> tuple[dict[str, str | None], dict[str, str]]:
     """項目ごとに値と、その取得元のラベルを返す。
 
@@ -217,9 +224,9 @@ def _resolve_fields(
     土台。別々に判定すると、実際に使われた認証情報と診断表示がずれる。
     """
     candidates = (
-        ("環境変数", _from_env_vars(env)),
-        (str(env_file), _scoped_lookup(dotenv, env)),
-        ("OS キーチェーン", _from_keyring(env)),
+        ("環境変数", _from_env_vars(env, namespace)),
+        (str(env_file), _scoped_lookup(dotenv, env, namespace)),
+        ("OS キーチェーン", _from_keyring(env, namespace)),
     )
     resolved: dict[str, str | None] = dict.fromkeys(_CREDENTIAL_FIELDS)
     origins: dict[str, str] = {}
@@ -236,6 +243,7 @@ def load_credentials(
     *,
     allow_public_test_account: bool = True,
     env_file: Path | None = None,
+    namespace: str = DEFAULT_NAMESPACE,
 ) -> Credentials:
     """認証情報を解決する。
 
@@ -243,16 +251,19 @@ def load_credentials(
         1. 環境変数（CI・systemd の ``EnvironmentFile=`` 向け）
         2. ``.env``（キーチェーンの無いサーバー向け。0600 にすること）
         3. OS キーチェーン（ローカル開発の既定）
-        4. UAT のみ: Webull 公開のテスト口座
+        4. Webull の UAT のみ: 公開のテスト口座
+
+    Args:
+        namespace: 証券会社ごとの名前空間（環境変数の接頭辞）。既定は Webull。
 
     Raises:
         MissingCredentialsError: どこにも見つからないとき。
     """
     path = _resolve_env_file(env_file)
     dotenv = _read_dotenv(path)
-    resolved, _ = _resolve_fields(env, dotenv, path)
+    resolved, _ = _resolve_fields(env, dotenv, path, namespace)
 
-    created_key = f"WBJP_{env.value.upper()}_KEY_CREATED_ON"
+    created_key = f"{namespace}_{env.value.upper()}_KEY_CREATED_ON"
     created_on = _parse_date(os.environ.get(created_key) or dotenv.get(created_key))
 
     if all(resolved.values()):
@@ -264,7 +275,8 @@ def load_credentials(
         )
 
     # 本番で公開テスト口座にフォールバックすることは絶対にない。
-    if env is Environment.UAT and allow_public_test_account:
+    # 公開テスト口座は Webull のものなので、他の名前空間にも使わない。
+    if env is Environment.UAT and allow_public_test_account and namespace == DEFAULT_NAMESPACE:
         return Credentials(
             app_key=PUBLIC_UAT_CREDENTIALS["app_key"],
             app_secret=PUBLIC_UAT_CREDENTIALS["app_secret"],
@@ -275,14 +287,16 @@ def load_credentials(
     missing = [k for k, v in resolved.items() if not v]
     upper = env.value.upper()
     raise MissingCredentialsError(
-        f"{env.value} 環境の認証情報が不足しています: {', '.join(missing)}\n"
+        f"{env.value} 環境の認証情報（{namespace}）が不足しています: {', '.join(missing)}\n"
         f"  キーチェーンに登録: uv run wbjp credentials set --env {env.value}\n"
-        f"  または環境変数:     WBJP_{upper}_APP_KEY 等を設定\n"
-        f"  または .env に記載: WBJP_{upper}_APP_KEY=... （chmod 600 のこと）"
+        f"  または環境変数:     {namespace}_{upper}_APP_KEY 等を設定\n"
+        f"  または .env に記載: {namespace}_{upper}_APP_KEY=... （chmod 600 のこと）"
     )
 
 
-def credential_source(env: Environment, *, env_file: Path | None = None) -> str:
+def credential_source(
+    env: Environment, *, env_file: Path | None = None, namespace: str = DEFAULT_NAMESPACE
+) -> str:
     """認証情報がどこから来たかを人間向けに説明する。
 
     どこから読まれているか分からないまま本番に発注する事故を防ぐための、
@@ -293,12 +307,12 @@ def credential_source(env: Environment, *, env_file: Path | None = None) -> str:
     だけを見て「.env から読んだ」と表示すると嘘になる。
     """
     path = _resolve_env_file(env_file)
-    resolved, origins = _resolve_fields(env, _read_dotenv(path), path)
+    resolved, origins = _resolve_fields(env, _read_dotenv(path), path, namespace)
 
     missing = [k for k, v in resolved.items() if not v]
     if missing:
         detail = f"{', '.join(missing)} が未設定"
-        if env is Environment.UAT:
+        if env is Environment.UAT and namespace == DEFAULT_NAMESPACE:
             return f"公開テスト口座（UAT 共有）— {detail}のため"
         return f"解決できません（{detail}）"
 
@@ -309,11 +323,13 @@ def credential_source(env: Environment, *, env_file: Path | None = None) -> str:
     return ", ".join(f"{k}={origins[k]}" for k in _CREDENTIAL_FIELDS)
 
 
-def store_credentials(env: Environment, creds: Credentials) -> None:
+def store_credentials(
+    env: Environment, creds: Credentials, *, namespace: str = DEFAULT_NAMESPACE
+) -> None:
     """認証情報を OS キーチェーンに保存する。"""
     import keyring
 
-    service = _keyring_service(env)
+    service = _keyring_service(env, namespace)
     keyring.set_password(service, "app_key", creds.app_key)
     keyring.set_password(service, "app_secret", creds.app_secret)
     keyring.set_password(service, "account_id", creds.account_id)

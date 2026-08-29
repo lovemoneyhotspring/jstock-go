@@ -62,12 +62,12 @@ def main(
 
 
 def _build_broker(config, live: bool):  # type: ignore[no-untyped-def]
-    """環境に応じたブローカーを作る。接続の手順は wbcore.broker.factory（積立と共有）。"""
-    from wbcore.broker.factory import connect_webull
+    """設定の ``execution.broker`` で選んだブローカーに接続する（積立と同じ経路）。"""
+    from wbcore.broker.registry import connect
 
-    return connect_webull(
+    return connect(
+        config.file.execution.broker,
         config.env,
-        config.settings.endpoints,
         market=config.file.universe.market,
         tax_type=config.file.execution.tax_account_type,
         extended_hours=config.file.execution.extended_hours,

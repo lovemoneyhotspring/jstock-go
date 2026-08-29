@@ -348,7 +348,7 @@ def run(
     """
     from accum.execute import build_orders, todays_contributions
     from wbcore.broker.base import Broker, BrokerError
-    from wbcore.broker.factory import connect_webull
+    from wbcore.broker.registry import connect
     from wbcore.domain.models import Market
 
     settings = AppSettings()
@@ -396,9 +396,9 @@ def run(
             continue
         broker = brokers.get(c.market)
         if broker is None:
-            broker = connect_webull(
+            broker = connect(
+                config.execution.broker,
                 settings.env,
-                settings.endpoints,
                 market=c.market,
                 tax_type=config.execution.tax_account_type,
                 extended_hours=config.execution.extended_hours,

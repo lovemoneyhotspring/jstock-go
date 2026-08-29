@@ -173,6 +173,8 @@ class ExecutionConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（webull / paper / …）。
+    broker: str = "webull"
     #: GENERAL（一般） / SPECIFIC（特定） / NISA
     tax_account_type: TaxAccountType = TaxAccountType.SPECIFIC
     #: 米国株の時間外取引を許すか。日本株では無視される。

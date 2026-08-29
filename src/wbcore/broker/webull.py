@@ -25,8 +25,9 @@ SDK がやってくれないこと（＝ここで引き受けること）:
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
 from decimal import Decimal
-from typing import Any
+from typing import Any, ClassVar, Self
 
 from wbcore.broker.base import (
     Broker,
@@ -36,7 +37,7 @@ from wbcore.broker.base import (
     RateLimitExceededError,
 )
 from wbcore.broker.ratelimit import LIMITS, Cached, RateLimiter
-from wbcore.credentials import Credentials, Environment
+from wbcore.credentials import ENDPOINTS, Credentials, Environment, load_credentials
 from wbcore.domain.models import (
     Balance,
     Market,
@@ -142,10 +143,46 @@ def _decimal(value: Any, default: Decimal = Decimal(0)) -> Decimal:
         return default
 
 
+#: 公開テスト口座を使っているときの注意文。
+PUBLIC_ACCOUNT_NOTICE = "公開テスト口座を使用中です。残高・建玉は他の利用者により変動します"
+
+
 class WebullBroker(Broker):
     """Webull OpenAPI 経由の発注。"""
 
-    name = "webull"
+    name: ClassVar[str] = "webull"
+
+    #: 認証情報の名前空間。環境変数は ``WBJP_<ENV>_APP_KEY``、キーチェーンは ``wbjp/<env>``。
+    credential_namespace: ClassVar[str] = "WBJP"
+
+    @classmethod
+    def connect(
+        cls,
+        env: Environment,
+        *,
+        market: Market,
+        tax_type: TaxAccountType = TaxAccountType.SPECIFIC,
+        extended_hours: bool = False,
+        notify: Callable[[str], None] | None = None,
+    ) -> Self:
+        """認証情報を解決し、環境に応じた接続先で組み立てる。
+
+        dry-run でも本物のブローカーを使う。残高・建玉・未約定の実データが
+        無ければ判断が意味を成さないため。発注だけを呼び出し側で止める。
+        """
+        credentials = load_credentials(env, namespace=cls.credential_namespace)
+        if credentials.is_public_test_account:
+            (notify or log.warning)(PUBLIC_ACCOUNT_NOTICE)
+        broker = cls(
+            credentials,
+            env,
+            ENDPOINTS[env].trade,
+            market=market,
+            tax_type=tax_type,
+            extended_hours=extended_hours,
+        )
+        broker.check_key_expiry()
+        return broker
 
     def __init__(
         self,

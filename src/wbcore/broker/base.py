@@ -4,19 +4,33 @@
 とシミュレータ（:class:`~wbcore.broker.paper.PaperBroker`）を並べる。
 エンジンはどちらを渡されたか知らないため、バックテスト・UAT・本番で
 まったく同じコードが動く。
+
+**取引所を足すには**
+
+1. :class:`Broker` を継承し、``name`` と :meth:`Broker.connect` を書く
+2. :data:`wbcore.broker.registry.BROKERS` に登録する
+
+設定の ``execution.broker = "<name>"`` で切り替わる。売買側（``wbjp``）も
+積立側（``accum``）も :func:`wbcore.broker.registry.connect` 経由で
+ブローカーを得るので、CLI には手を入れない。
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import ClassVar, Self
 
+from wbcore.credentials import Environment
 from wbcore.domain.models import (
     Balance,
+    Market,
     Order,
     OrderAck,
     OrderPreview,
     OrderRequest,
     Position,
+    TaxAccountType,
 )
 
 
@@ -39,8 +53,31 @@ class RateLimitExceededError(BrokerError):
 class Broker(ABC):
     """発注と口座照会の窓口。"""
 
-    #: ログ・設定用の識別子。
-    name: str = ""
+    #: 設定ファイル（``execution.broker``）とログで使う識別子。サブクラスで必ず定義する。
+    name: ClassVar[str] = ""
+
+    @classmethod
+    @abstractmethod
+    def connect(
+        cls,
+        env: Environment,
+        *,
+        market: Market,
+        tax_type: TaxAccountType = TaxAccountType.SPECIFIC,
+        extended_hours: bool = False,
+        notify: Callable[[str], None] | None = None,
+    ) -> Self:
+        """環境と市場から、接続済みのブローカーを組み立てる。
+
+        認証情報の解決・接続先の選択・キー失効の確認など「その証券会社
+        固有の準備」をここに閉じ込める。呼び出し側は名前と環境しか知らない。
+
+        Args:
+            env: uat / prod。認証情報と接続先の切り替えに使う。
+            market: この接続が扱う市場。1接続1市場。
+            notify: 利用者に見せたい注意（共有テスト口座を使っている等）を渡す先。
+                省略時はログに警告する。
+        """
 
     @property
     @abstractmethod

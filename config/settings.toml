@@ -60,6 +60,10 @@ max_positions = 5
 # 発注の振る舞い
 # --------------------------------------------------------------------------
 [execution]
+# 発注先。登録済みのブローカー名（webull | paper）。paper はネットワークに繋がないシミュレータ。
+# 取引所を足すには wbcore.broker.base.Broker を継承して registry に登録する。
+broker = "webull"
+
 # GENERAL（一般） / SPECIFIC（特定） / NISA
 tax_account_type = "SPECIFIC"
 

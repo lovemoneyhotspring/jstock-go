@@ -350,6 +350,9 @@ class ExecutionConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（webull / paper / …）。
+    #: 未知の名前は接続時に候補付きで弾かれる。
+    broker: str = "webull"
     tax_account_type: TaxAccountType = TaxAccountType.SPECIFIC
     #: "market" | "limit"
     order_type: str = "limit"

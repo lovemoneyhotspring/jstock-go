@@ -22,13 +22,17 @@
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from decimal import ROUND_HALF_UP, Decimal
+from typing import ClassVar, Self
 
 from wbcore.broker.base import Broker, InsufficientFundsError, OrderRejectedError
+from wbcore.credentials import Environment
 from wbcore.domain.models import (
     Balance,
     Fill,
+    Market,
     Order,
     OrderAck,
     OrderPreview,
@@ -73,7 +77,7 @@ class PaperBroker(Broker):
     tax_type: TaxAccountType = TaxAccountType.SPECIFIC
     currency: str = "JPY"
 
-    name: str = "paper"
+    name: ClassVar[str] = "paper"
 
     _cash: Decimal = field(init=False)
     _holdings: dict[str, _Holding] = field(init=False, default_factory=dict)
@@ -85,6 +89,25 @@ class PaperBroker(Broker):
 
     def __post_init__(self) -> None:
         self._cash = self.initial_cash
+
+    @classmethod
+    def connect(
+        cls,
+        env: Environment,
+        *,
+        market: Market,
+        tax_type: TaxAccountType = TaxAccountType.SPECIFIC,
+        extended_hours: bool = False,
+        notify: Callable[[str], None] | None = None,
+    ) -> Self:
+        """ネットワークに繋がない口座を作る。``execution.broker = "paper"`` で使う。
+
+        残高・建玉は実口座を反映しないので、発注経路の確認用。
+        """
+        (notify or log.warning)(
+            f"ペーパー口座（シミュレータ、{env.value}）です。実口座の残高・建玉は反映されません"
+        )
+        return cls(currency=market.currency, tax_type=tax_type)
 
     # -- 口座 ---------------------------------------------------------------
 

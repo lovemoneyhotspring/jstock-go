@@ -106,7 +106,7 @@ def test_production_never_falls_back_to_public_test_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """本番で公開テスト口座が使われる経路は存在しない。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
 
     with pytest.raises(MissingCredentialsError) as exc:
         load_credentials(Environment.PROD)
@@ -115,7 +115,7 @@ def test_production_never_falls_back_to_public_test_account(
 
 
 def test_uat_falls_back_to_public_test_account(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
 
     creds = load_credentials(Environment.UAT)
 
@@ -124,7 +124,7 @@ def test_uat_falls_back_to_public_test_account(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_public_fallback_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
 
     with pytest.raises(MissingCredentialsError):
         load_credentials(Environment.UAT, allow_public_test_account=False)
@@ -133,7 +133,7 @@ def test_public_fallback_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_env_vars_take_priority_over_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "wbcore.credentials._from_keyring",
-        lambda env: {"app_key": "kr", "app_secret": "kr", "account_id": "kr"},
+        lambda env, *_: {"app_key": "kr", "app_secret": "kr", "account_id": "kr"},
     )
     monkeypatch.setenv("WBJP_PROD_APP_KEY", "from-env")
     monkeypatch.setenv("WBJP_PROD_APP_SECRET", "secret-env")
@@ -147,7 +147,7 @@ def test_env_vars_take_priority_over_keyring(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_environment_scoped_env_var_beats_generic(monkeypatch: pytest.MonkeyPatch) -> None:
     """環境別の変数が、共通の変数より優先される。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     monkeypatch.setenv("WBJP_APP_KEY", "generic")
     monkeypatch.setenv("WBJP_PROD_APP_KEY", "prod-specific")
     monkeypatch.setenv("WBJP_APP_SECRET", "s3cr3t-value")
@@ -159,7 +159,7 @@ def test_environment_scoped_env_var_beats_generic(monkeypatch: pytest.MonkeyPatc
 def test_missing_credentials_error_names_what_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     monkeypatch.setenv("WBJP_PROD_APP_KEY", "only-key")
 
     with pytest.raises(MissingCredentialsError, match="app_secret"):
@@ -173,7 +173,7 @@ def test_missing_credentials_error_names_what_is_missing(
 
 def test_dotenv_supplies_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """.env に書いた鍵が実際に使われる（環境変数への export 不要）。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     env_file = _write_env_file(
         tmp_path / ".env",
         "WBJP_PROD_APP_KEY=dotenv-key\n"
@@ -196,7 +196,7 @@ def test_dotenv_does_not_leak_into_os_environ(
     """
     import os
 
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     env_file = _write_env_file(
         tmp_path / ".env",
         "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=leaky-secret\nWBJP_PROD_ACCOUNT_ID=a\n",
@@ -209,7 +209,7 @@ def test_dotenv_does_not_leak_into_os_environ(
 
 def test_real_env_vars_beat_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """デプロイ時の環境変数で .env を上書きできる。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     monkeypatch.setenv("WBJP_PROD_APP_KEY", "from-env")
     env_file = _write_env_file(
         tmp_path / ".env",
@@ -227,7 +227,7 @@ def test_real_env_vars_beat_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 def test_dotenv_beats_keyring(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "wbcore.credentials._from_keyring",
-        lambda env: {"app_key": "kr", "app_secret": "kr", "account_id": "kr"},
+        lambda env, *_: {"app_key": "kr", "app_secret": "kr", "account_id": "kr"},
     )
     env_file = _write_env_file(
         tmp_path / ".env",
@@ -241,7 +241,7 @@ def test_dotenv_beats_keyring(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
 
 def test_dotenv_supplies_key_created_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """失効警告が .env 運用でも効く。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     env_file = _write_env_file(
         tmp_path / ".env",
         "WBJP_PROD_APP_KEY=k\n"
@@ -259,7 +259,7 @@ def test_dotenv_supplies_key_created_on(monkeypatch: pytest.MonkeyPatch, tmp_pat
 def test_loose_permissions_on_dotenv_are_warned(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     env_file = _write_env_file(
         tmp_path / ".env",
         "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n",
@@ -275,7 +275,7 @@ def test_loose_permissions_on_dotenv_are_warned(
 def test_tight_permissions_on_dotenv_are_quiet(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     env_file = _write_env_file(
         tmp_path / ".env",
         "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n",
@@ -291,7 +291,7 @@ def test_env_file_override_locates_dotenv_outside_cwd(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """cron は $HOME で起動する。相対パスに頼らず絶対パスで指定できる。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     env_file = _write_env_file(
         tmp_path / "elsewhere.env",
         "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n",
@@ -302,7 +302,7 @@ def test_env_file_override_locates_dotenv_outside_cwd(
 
 
 def test_missing_dotenv_is_not_an_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     monkeypatch.setenv("WBJP_PROD_APP_KEY", "k")
     monkeypatch.setenv("WBJP_PROD_APP_SECRET", "s")
     monkeypatch.setenv("WBJP_PROD_ACCOUNT_ID", "a")
@@ -360,7 +360,7 @@ _FULL_SET = "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a
 def test_credential_source_reports_where_the_key_came_from(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     env_file = _write_env_file(tmp_path / ".env", _FULL_SET)
 
     assert credential_source(Environment.PROD, env_file=env_file) == str(env_file)
@@ -374,7 +374,7 @@ def test_credential_source_matches_what_was_actually_used(
     「.env から読んだ」と表示しながら実際は共有テスト口座、という
     食い違いが起きると、他人の口座を自分の口座だと思って眺めることになる。
     """
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     env_file = _write_env_file(
         tmp_path / ".env",
         "WBJP_UAT_APP_KEY=k\nWBJP_UAT_APP_SECRET=s\n",  # account_id が無い
@@ -393,7 +393,7 @@ def test_credential_source_flags_mixed_origins(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """項目ごとにソースが違うなら、その内訳を出す。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     monkeypatch.setenv("WBJP_PROD_APP_KEY", "from-env")
     env_file = _write_env_file(tmp_path / ".env", _FULL_SET)
 
