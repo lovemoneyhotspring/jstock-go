@@ -85,6 +85,7 @@ tactic = "bear_stack"
 symbols = ["^N225"]
 multiplier = 2
 window = { start = "14:00", end = "15:00" }
+enabled = false
 
 # 弱気スコア（0〜6）で段階的に増額。効果は最大だが資金効率は落ちる。
 [[tactics]]
@@ -93,6 +94,7 @@ tactic = "stack_ladder"
 symbols = ["^GSPC"]
 market = "US"
 multipliers = { 3 = 1.5, 5 = 2.0, 6 = 4.0 }
+enabled = false
 
 # 高値からの下落率で増額。米国指数では強いが、新高値を作らない市場では
 # 常時発動に近くなり破綻する（日経225 の全期間で +13%）。
@@ -105,14 +107,14 @@ market = "US"
 levels = [0.10, 0.20, 0.30]
 multipliers = [2.0, 3.0, 4.0]
 require_downtrend = true
+enabled = false
 
-# 比較の基準。増額しない純粋なドル平均法。時間帯も制限しない。
+# 比較の基準。増額しない純粋なドル平均法。発注時間帯は既定の 14:00〜15:00 JST。
 [[tactics]]
 id = "基準"
 tactic = "constant"
 symbols = ["1306.T"]
 enabled = false
-window = false
 
 
 # ---------------------------------------------------------------------------
