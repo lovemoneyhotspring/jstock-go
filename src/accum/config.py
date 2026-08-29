@@ -204,9 +204,6 @@ class ExecutionConfig(BaseModel):
     #: ETF には 1 株や 10 株単位のものがある。既定の 100 株だと月の予算が
     #: 1単元に届かず、発注が丸ごと見送りになる。
     lot_size_overrides: dict[str, int] = Field(default_factory=dict)
-    #: 未発注の投下を何日まで繰り越すか。入金日に cron が動かなくても、この日数
-    #: 以内なら次の実行で買う。長くしすぎると初回実行で過去の増額分まで出る。
-    catch_up_days: int = Field(default=7, ge=0)
     #: 最終足がこの日数より古い銘柄は判定しない（取得元の障害で古い足のまま
     #: 増額判定するのを防ぐ）。週末＋祝日を跨げる 4 日が既定。
     max_stale_days: int = Field(default=4, ge=1)

@@ -355,8 +355,9 @@ def run(
 ) -> None:
     """今日出すべき投下を注文にする。
 
-    判断は前日までの確定足、買うのは当日の価格（バックテストと同じ規則）。
-    直近 catch_up_days 日以内の未発注の投下は繰り越す。
+    「今月の目標（今日まで）− 今月の発注済み」の差額を出す。判断は前日までの
+    確定足、買うのは当日の価格（バックテストと同じ規則）。月の途中から始めても、
+    予算を増やしても、cron が止まっても、差額が残っていれば次の実行で埋まる。
     既定は dry-run。実発注には --live が必要で、本番では WBJP_ENV=prod も
     同時に必要。cron から回すときは --yes も付ける。
     """
@@ -373,11 +374,12 @@ def run(
         _sync(settings, config, config_dir, days=30, force=False)
     bars = _bars(settings, config.all_symbols)
     now = now_utc()
+    ledger = Ledger(settings.data_dir / f"accum-{settings.env.value}.db")
     pending = pending_contributions(
         config,
         bars,
         now=now,
-        lookback_days=config.execution.catch_up_days,
+        placed=ledger.placed_amount,
         max_stale_days=config.execution.max_stale_days,
     )
     if pending.stale:
@@ -386,7 +388,8 @@ def run(
         alert("積立: 足が古いため判定を見送り", detail)
     contributions = pending.contributions
     if not contributions:
-        console.print("[dim]出すべき投下はありません（入金日でも増額日でもない）[/dim]")
+        ledger.close()
+        console.print("[dim]出すべき投下はありません（今月の目標に達しています）[/dim]")
         return
 
     planned = build_orders(
@@ -414,7 +417,6 @@ def run(
     brokers: dict[Market, Broker] = {}
     status: dict[str, str] = {}
     failures: list[str] = []
-    ledger = Ledger(settings.data_dir / f"accum-{settings.env.value}.db")
     try:
         for item in planned:
             c = item.contribution
@@ -427,7 +429,7 @@ def run(
                 status[key] = "[dim]発注済み（冪等）[/dim]"
                 continue
             if not allowed:
-                ledger.record(item.request, DRY_RUN_STATUS)
+                ledger.record(item.request, DRY_RUN_STATUS, plan_month=c.month, amount=c.amount)
                 status[key] = "[yellow]dry-run[/yellow]"
                 continue
             broker = brokers.get(c.market)
@@ -458,7 +460,13 @@ def run(
                 failures.append(f"{key}: {exc}")
                 log.error("積立の発注に失敗", symbol=c.symbol, error=str(exc))
             else:
-                ledger.record(item.request, ack.status.value, ack.broker_order_id)
+                ledger.record(
+                    item.request,
+                    ack.status.value,
+                    ack.broker_order_id,
+                    plan_month=c.month,
+                    amount=c.amount,
+                )
                 status[key] = "[green]発注[/green]"
     finally:
         ledger.close()
@@ -471,7 +479,7 @@ def run(
         f"{fmt(now, settings.timezone)}  {mode}"
     )
     table = Table(title="注文", title_justify="left")
-    for column in ("銘柄", "判断日", "市場", "価格", "投下額", "倍率", "株数", "状態"):
+    for column in ("銘柄", "判断日", "市場", "価格", "投下額", "倍率", "株数", "状態", "内訳"):
         table.add_column(
             column, justify="right" if column in ("価格", "投下額", "株数") else "left"
         )
@@ -486,6 +494,7 @@ def run(
             f"×{c.multiplier:g}",
             f"{item.request.quantity:,}" if item.request else "—",
             status[f"{c.symbol} {c.date}"],
+            c.reason,
         )
     console.print(table)
 

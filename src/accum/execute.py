@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -47,6 +47,8 @@ class Contribution:
     multiplier: float
     reason: str
     tactic: Tactic
+    #: どの月の積立か（月初の日付）。台帳の月次集計に使う。計画の確認用では None。
+    month: dt.date | None = None
 
     @property
     def broker_symbol(self) -> str:
@@ -130,30 +132,39 @@ class Pending:
     stale: dict[str, dt.date] = field(default_factory=dict)
 
 
+#: 銘柄と月（月初の日付）から、その月に発注済みの額を返す。台帳が実装する。
+PlacedLookup = Callable[[str, dt.date], Decimal]
+
+
 def pending_contributions(
     config: AccumConfig,
     bars: Mapping[str, pl.DataFrame],
     *,
     now: dt.datetime,
-    lookback_days: int = 7,
+    placed: PlacedLookup | None = None,
     max_stale_days: int = 4,
 ) -> Pending:
     """ライブの規則で「今日出すべき投下」を取り出す。
 
-    バックテスト（:mod:`accum.simulate`）と同じ規則にする:
+    **今月の目標（今日まで） − 今月の発注済み** を銘柄ごとに計算し、正なら
+    その差額を 1 件の投下にする。目標は計画（:func:`~accum.plan.build_plan`）の
+    今月ぶんの投下額の合計で、入金日を過ぎていれば基本予算を含み、そこに
+    今日までの増額分が積み上がる。発注済みは台帳から ``placed`` で引く。
 
-    - **判断は前日までの確定足**で行う。当日の足はザラ場中の途中経過で、
-      同じ日でも実行時刻で判定が変わる。判定用の銘柄も同様に確定足だけ。
-    - **買うのは当日の価格**（最新の終値。ザラ場中ならその時点の価格）。
-    - 投下の日付は**計画の日付**（入金日なら月初の営業日）。注文IDはこれから
-      作るので、翌日以降に出しても同じ注文として扱われ、二重にならない。
-    - 直近 ``lookback_days`` 日以内の未発注の投下は**繰り越す**。入金日に cron が
-      動かなかった月でも、次の実行で買う。発注済みかは台帳（呼び出し側）が見る。
-    - 最終足が ``max_stale_days`` 日より古い銘柄は**判定しない**。取得元の障害で
-      古い足のまま増額判定するのを防ぐ。``stale`` に入れて呼び出し側が知らせる。
+    この 1 本の規則で次がすべて同じ扱いになる:
+
+    - 月の途中から始めた → 目標に基本予算が含まれる → 最初に注文を出せる日に全額
+    - 月の途中で予算を増やした → 目標が増える → 差額だけ追加
+    - cron が動かなかった日があった → 差が残る → 次の実行で埋まる
+    - 同じ日に 2 回走った → 1 回目で発注済みが目標に達する → 2 回目は 0
+
+    判断はバックテストと同じく**前日までの確定足**で行い（当日の足は途中経過）、
+    買うのは当日の価格。判定用の銘柄も確定足だけ。
+    最終足が ``max_stale_days`` 日より古い銘柄は判定しない（``stale`` に入れる）。
     """
     out: list[Contribution] = []
     stale: dict[str, dt.date] = {}
+    lookup: PlacedLookup = placed or (lambda _symbol, _month: Decimal(0))
     for entry in config.active:
         tactic = entry.build()
         signal_all = bars.get(entry.signal_symbol) if entry.signal_symbol else None
@@ -179,22 +190,34 @@ def pending_contributions(
                 signal_bars=signal,
                 signal_strict=entry.signal_lags,
             )
-            since = today_local - dt.timedelta(days=lookback_days)
-            due = plan.filter((pl.col("amount") > 0) & (pl.col("date") >= since))
-            latest_close = Decimal(str(frame["close"][-1]))
-            for row in due.iter_rows(named=True):
-                out.append(
-                    Contribution(
-                        symbol=symbol,
-                        market=entry.market,
-                        date=row["date"],
-                        close=latest_close,
-                        amount=Decimal(str(row["amount"])),
-                        multiplier=float(row["multiplier"]),
-                        reason=str(row["reason"]),
-                        tactic=tactic,
-                    )
+            month = today_local.replace(day=1)
+            this_month = plan.filter(pl.col("date") >= month)
+            if this_month.height == 0:
+                continue  # 今月の確定足がまだ無い（月初の初日）
+            target = Decimal(str(int(this_month["amount"].sum())))
+            already = lookup(symbol, month)
+            due = target - already
+            if due <= 0:
+                continue
+            last = this_month.row(-1, named=True)
+            extras = int(this_month["extra"].sum())
+            reason = (
+                f"今月の目標 {target:,.0f}（基本 {int(this_month['base'].sum()):,}"
+                f"＋増額 {extras:,}）− 発注済み {already:,.0f}"
+            )
+            out.append(
+                Contribution(
+                    symbol=symbol,
+                    market=entry.market,
+                    date=today_local,
+                    close=Decimal(str(frame["close"][-1])),
+                    amount=due,
+                    multiplier=float(last["multiplier"]),
+                    reason=reason,
+                    tactic=tactic,
+                    month=month,
                 )
+            )
     return Pending(out, stale)
 
 
