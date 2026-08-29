@@ -778,18 +778,27 @@ def data_sync(
 @data_app.command("status")
 def data_status(
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+    interval: Annotated[
+        str | None, typer.Option(help="見る足の間隔。省略時は設定の universe.interval")
+    ] = None,
 ) -> None:
-    """保存済みの足データを一覧する。"""
+    """保存済みの足データを一覧する（見立ては含まない。保存されている本物の足だけ）。"""
+    from wbcore.data.provider import Interval
     from wbcore.data.store import BarStore
 
     config = load_config(config_dir)
-    summary = BarStore(config.settings.bars_dir).summary()
+    try:
+        chosen = Interval.parse(interval) if interval else config.file.universe.bar_interval
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from None
+    summary = BarStore(config.settings.bars_dir, chosen).summary()
 
     if summary.height == 0:
-        console.print("保存済みの足データはありません")
+        console.print(f"保存済みの {chosen.value} 足はありません")
         return
 
-    table = Table(title="保存済みの足", title_justify="left")
+    table = Table(title=f"保存済みの足（{chosen.value}）", title_justify="left")
     for column in summary.columns:
         table.add_column(column)
     for row in summary.iter_rows():
