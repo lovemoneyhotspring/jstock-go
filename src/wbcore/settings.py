@@ -38,6 +38,12 @@ class AppSettings(BaseSettings):
     #: 画面に時刻を出すときの時間帯（``WBJP_TIMEZONE``）。既定は UTC。
     #: 保存と演算は常に UTC で、ここは表示にだけ効く。表示には必ず略号が付く。
     timezone: str = "UTC"
+    #: 機械が読むログ（JSON Lines）の置き場（``WBJP_LOG_DIR``）。
+    log_dir: Path = Path("data/logs")
+
+    def log_file(self, app: str) -> Path:
+        """アプリ（wbjp / accum）と環境ごとのログファイル。日次でローテーションする。"""
+        return self.log_dir / f"{app}-{self.env.value}.jsonl"
 
     @property
     def endpoints(self) -> Endpoints:

@@ -272,7 +272,9 @@ class LiveRunner:
         signals: list[Signal] = []
         for strategy in self.strategies:
             found = strategy.on_bars(ctx)
-            log.info("戦略の判断", strategy=strategy.describe(), signals=len(found))
+            log.info(
+                "戦略の判断", code="wbjp.signals", strategy=strategy.describe(), signals=len(found)
+            )
             signals.extend(found)
 
         combined = self.combiner.combine(signals)

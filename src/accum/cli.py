@@ -11,6 +11,7 @@ APIキーは ``wbjp`` と共有する（``uv run wbjp credentials set``）。
 from __future__ import annotations
 
 import datetime as dt
+import re
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -22,7 +23,7 @@ from rich.table import Table
 
 from accum.config import DEFAULT_CONFIG_DIR, FILENAME, AccumConfig, load
 from wbcore.clock import fmt, now_utc, today_utc
-from wbcore.logging import configure_logging, get_logger
+from wbcore.logging import bind_run_context, configure_logging, get_logger
 from wbcore.settings import AppSettings, allows_live_orders
 
 app = typer.Typer(
@@ -41,15 +42,28 @@ _ConfigDir = Annotated[
 
 @app.callback()
 def main(
+    ctx: typer.Context,
     log_level: Annotated[str, typer.Option(help="ログレベル")] = "INFO",
-    json_logs: Annotated[bool, typer.Option("--json-logs", help="JSON形式で出力")] = False,
+    json_logs: Annotated[bool, typer.Option("--json-logs", help="端末にも JSON で出力")] = False,
 ) -> None:
-    configure_logging(log_level, json_output=json_logs, timezone=AppSettings().timezone)
+    settings = AppSettings()
+    configure_logging(
+        log_level,
+        json_output=json_logs,
+        timezone=settings.timezone,
+        log_file=settings.log_file("accum"),
+    )
+    bind_run_context(app="accum", env=settings.env.value, command=ctx.invoked_subcommand or "")
 
 
 # --------------------------------------------------------------------------
 # 補助
 # --------------------------------------------------------------------------
+
+
+def _plain(markup: str) -> str:
+    """Rich のマークアップを外す（ログに色指定を残さない）。"""
+    return re.sub(r"\[/?[a-z ]+\]", "", markup)
 
 
 def _yen(value: float) -> str:
@@ -403,6 +417,17 @@ def run(
         for change in changes:
             style = "red" if change.lost_amount_ratio > 0 else "dim"
             console.print(f"[{style}]前回の注文: {change.describe()}[/{style}]")
+            log.info(
+                "前回の注文の約定状況",
+                code="accum.fill",
+                symbol=change.symbol,
+                client_order_id=change.client_order_id,
+                before=change.before,
+                after=change.after.value,
+                filled=str(change.filled_quantity),
+                quantity=str(change.quantity),
+                lost_ratio=str(change.lost_amount_ratio),
+            )
         if lost:
             alert(
                 f"積立: {len(lost)} 件の注文が未約定のまま終了",
@@ -418,8 +443,29 @@ def run(
     if pending.stale:
         detail = "、".join(f"{s}（最終 {d}）" for s, d in sorted(pending.stale.items()))
         console.print(f"[red]足が古いため判定しませんでした: {detail}[/red]")
+        log.warning(
+            "足が古いため判定を見送り",
+            code="accum.stale",
+            symbols={s: d.isoformat() for s, d in pending.stale.items()},
+        )
         alert("積立: 足が古いため判定を見送り", detail)
     contributions = pending.contributions
+    for c in contributions:
+        log.info(
+            "積立の判断",
+            code="accum.decision",
+            symbol=c.symbol,
+            market=c.market.value,
+            month=c.month.isoformat() if c.month else None,
+            judged_on=c.date.isoformat(),
+            target=str(c.target),
+            placed=str(c.placed),
+            due=str(c.amount),
+            multiplier=c.multiplier,
+            price=str(c.close),
+            tactic=c.tactic.describe(),
+            signal=next((e.signal_symbol for e in config.active if c.symbol in e.symbols), None),
+        )
     if not contributions:
         ledger.close()
         console.print("[dim]出すべき投下はありません（今月の目標に達しています）[/dim]")
@@ -498,6 +544,30 @@ def run(
                 status[key] = "[green]発注[/green]"
     finally:
         ledger.close()
+    for item in planned:
+        c = item.contribution
+        log.info(
+            "積立の注文",
+            code="accum.order",
+            symbol=c.symbol,
+            market=c.market.value,
+            month=c.month.isoformat() if c.month else None,
+            client_order_id=item.request.client_order_id if item.request else None,
+            quantity=str(item.request.quantity) if item.request else None,
+            price=str(c.close),
+            amount=str(c.amount),
+            live=allowed,
+            outcome=_plain(status[f"{c.symbol} {c.date}"]),
+            note=item.note or None,
+        )
+    log.info(
+        "積立の実行を終了",
+        code="accum.run",
+        live=allowed,
+        reason=reason,
+        orders=len(planned),
+        failures=len(failures),
+    )
     if failures:
         alert(f"積立: {len(failures)} 件の発注に失敗", "\n".join(failures))
 

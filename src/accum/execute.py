@@ -52,6 +52,9 @@ class Contribution:
     tactic: Tactic
     #: どの月の積立か（月初の日付）。台帳の月次集計に使う。計画の確認用では None。
     month: dt.date | None = None
+    #: 今月の目標（今日まで）と発注済み。ログに数値で残すため。計画の確認用では None。
+    target: Decimal | None = None
+    placed: Decimal | None = None
 
     @property
     def broker_symbol(self) -> str:
@@ -219,6 +222,8 @@ def pending_contributions(
                     reason=reason,
                     tactic=tactic,
                     month=month,
+                    target=target,
+                    placed=already,
                 )
             )
     return Pending(out, stale)

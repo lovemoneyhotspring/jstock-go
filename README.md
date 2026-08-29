@@ -179,7 +179,15 @@ uv run accum run --live          # 実発注。本番は WBJP_ENV=prod と --yes
 | 保存 | 時刻は必ず時間帯付き。日中足の `ts` は UTC（Parquet に時間帯が残る）、SQLite の `placed_at` は UTC の ISO 8601（`+00:00` 付き）。暦日（`date`）は取引所の日付で時刻ではないので時間帯を持たない |
 | 演算・判定 | UTC。取引所の現地時刻が要る判断（発注時間帯・引けの前後・分足の区切り）は、その場で `Market.timezone` に変換して比べる |
 | 表示 | 設定の時間帯（`WBJP_TIMEZONE`、既定 UTC）。日本で運用するなら `.env` に `WBJP_TIMEZONE=Asia/Tokyo`。どの時間帯でも**略号を必ず添える**（`2026-08-29 06:20 UTC` / `15:20 JST`）。DB に UTC で保存された時刻（`placed_at` 等）も `explain` / `runs` では設定の時間帯に直して出す |
-| ログ | 設定の時間帯。オフセット付き ISO（`2026-08-29T15:36:37.215607+09:00`）なので、どの時間帯で書かれたかがログ自身に残る |
+| ログ | 端末の表示は設定の時間帯（オフセット付き ISO）。ファイルのログには加えて `ts_utc`（常に UTC）が入る |
+
+## ログ（後から AI に読ませる用）
+
+端末に出る整形表示とは別に、**機械が読む JSON Lines** を常に `data/logs/<app>-<env>.jsonl` に書く（1 行 1 レコード、日次ローテーション、90 日保持、秘匿情報は伏せる）。全レコードに `schema` / `ts_utc` / `run_id`（1 回の実行の識別子）/ `app` / `env` / `command` が付き、主要な出来事には安定した `code`（`accum.decision` / `accum.order` / `accum.fill` …）が付く。項目の定義は [docs/LOGGING.md](docs/LOGGING.md)。
+
+```bash
+jq -r 'select(.code == "accum.decision") | [.ts_utc, .symbol, .target, .placed, .due] | @tsv' data/logs/accum-prod.jsonl
+```
 
 「今」を取るのは `wbcore.clock` だけ（`now_utc()` / `today_utc()`）。`date.today()` や tz 無しの `datetime.now()` は cron のサーバーと開発機で結果が変わるので使わない——テストが監視している。tz 無しの datetime を受け取ったら UTC とみなす。
 

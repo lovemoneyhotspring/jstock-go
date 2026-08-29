@@ -29,7 +29,7 @@ from wbcore.credentials import (
     store_credentials,
 )
 from wbcore.data.provider import MarketDataProvider
-from wbcore.logging import configure_logging, get_logger
+from wbcore.logging import bind_run_context, configure_logging, get_logger
 from wbjp.config import AppSettings, Config, load_config
 
 if TYPE_CHECKING:
@@ -52,10 +52,18 @@ log = get_logger(__name__)
 
 @app.callback()
 def main(
+    ctx: typer.Context,
     log_level: Annotated[str, typer.Option(help="ログレベル")] = "INFO",
-    json_logs: Annotated[bool, typer.Option("--json-logs", help="JSON形式で出力")] = False,
+    json_logs: Annotated[bool, typer.Option("--json-logs", help="端末にも JSON で出力")] = False,
 ) -> None:
-    configure_logging(log_level, json_output=json_logs, timezone=AppSettings().timezone)
+    settings = AppSettings()
+    configure_logging(
+        log_level,
+        json_output=json_logs,
+        timezone=settings.timezone,
+        log_file=settings.log_file("wbjp"),
+    )
+    bind_run_context(app="wbjp", env=settings.env.value, command=ctx.invoked_subcommand or "")
 
 
 # --------------------------------------------------------------------------

@@ -21,7 +21,10 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import uuid
 from collections.abc import Iterable
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -156,18 +159,56 @@ def _timestamper(timezone: str) -> Any:
     return add_timestamp
 
 
+#: 機械が読むログの形式の版。項目を変えたら上げる（docs/LOGGING.md）。
+LOG_SCHEMA = "wbjp.log.v1"
+
+
+def _machine_fields(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+    """後から AI や集計に読ませるための固定項目。
+
+    - ``ts_utc``: 表示の時間帯に関係なく UTC。並べ替えと突き合わせの鍵
+    - ``schema``: 形式の版
+    - ``code``: 出来事の安定した識別子（``accum.decision`` 等）。付いていない
+      ログは ``event``（日本語の説明文）だけで分類する
+    """
+    from wbcore.clock import stamp_iso
+
+    event_dict.setdefault("ts_utc", stamp_iso("UTC"))
+    event_dict.setdefault("schema", LOG_SCHEMA)
+    return event_dict
+
+
+def bind_run_context(**fields: Any) -> str:
+    """この実行のあいだ全ログに付く項目（app / env / command / config_dir …）。
+
+    ``run_id`` を発行して返す。1回の CLI 実行のログを後から 1 本の線として
+    読めるようにするためのもの。
+    """
+    run_id = uuid.uuid4().hex[:12]
+    structlog.contextvars.bind_contextvars(run_id=run_id, **fields)
+    return run_id
+
+
 def configure_logging(
     level: str = "INFO",
     *,
     json_output: bool = False,
     timezone: str = "UTC",
+    log_file: Path | None = None,
     quiet_loggers: Iterable[str] = ("urllib3", "asyncio", "botocore"),
 ) -> None:
     """ログ経路を構築する。
 
-    structlog と stdlib logging の出力を1つのハンドラに集約し、
-    その出口に :class:`RedactingFormatter` を必ず置く。
-    SDK のログもここを通るため、経路の取りこぼしが起きない。
+    structlog と stdlib logging の出力を集約し、出口に :class:`RedactingFormatter`
+    を必ず置く。SDK のログもここを通るため、経路の取りこぼしが起きない。
+
+    出口は 2 つ:
+        端末（stderr）
+            人が読む。既定は色付きの整形、``json_output`` で JSON。
+        ファイル（``log_file``）
+            **機械が読む**。常に JSON Lines（1 行 1 レコード、UTF-8）で、
+            日次でローテーションする。後から AI に読ませて改善に使う前提なので、
+            項目名は docs/LOGGING.md に固定してある。
     """
     shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
@@ -176,6 +217,7 @@ def configure_logging(
         # ログの時刻は設定の時間帯（既定 UTC）。オフセット付き ISO なので、
         # どの時間帯で書かれたかがログ自身に残る
         _timestamper(timezone),
+        _machine_fields,
         structlog.processors.StackInfoRenderer(),
         redact_processor,
     ]
@@ -210,6 +252,20 @@ def configure_logging(
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level.upper())
+
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = TimedRotatingFileHandler(
+            log_file, when="midnight", utc=True, backupCount=90, encoding="utf-8"
+        )
+        file_handler.setFormatter(
+            _RedactingProcessorFormatter(
+                processor=structlog.processors.JSONRenderer(ensure_ascii=False, sort_keys=True),
+                foreign_pre_chain=shared_processors,
+            )
+        )
+        file_handler.addFilter(RedactingFilter())
+        root.addHandler(file_handler)
 
     for name in quiet_loggers:
         logging.getLogger(name).setLevel(logging.WARNING)
