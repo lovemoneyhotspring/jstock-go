@@ -143,10 +143,24 @@ class RedactingFilter(logging.Filter):
         return True
 
 
+def _timestamper(timezone: str) -> Any:
+    """設定の時間帯で ``timestamp`` を付ける structlog プロセッサ。"""
+    from wbcore.clock import stamp_iso, zone
+
+    tz = zone(timezone)  # 未知の名前はここで早めに弾く
+
+    def add_timestamp(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+        event_dict["timestamp"] = stamp_iso(tz)
+        return event_dict
+
+    return add_timestamp
+
+
 def configure_logging(
     level: str = "INFO",
     *,
     json_output: bool = False,
+    timezone: str = "UTC",
     quiet_loggers: Iterable[str] = ("urllib3", "asyncio", "botocore"),
 ) -> None:
     """ログ経路を構築する。
@@ -159,8 +173,9 @@ def configure_logging(
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
-        # ログの時刻は UTC（末尾 Z）。サーバーと開発機で時間帯が違っても読み違えない
-        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        # ログの時刻は設定の時間帯（既定 UTC）。オフセット付き ISO なので、
+        # どの時間帯で書かれたかがログ自身に残る
+        _timestamper(timezone),
         structlog.processors.StackInfoRenderer(),
         redact_processor,
     ]

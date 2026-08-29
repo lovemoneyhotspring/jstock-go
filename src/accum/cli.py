@@ -44,7 +44,7 @@ def main(
     log_level: Annotated[str, typer.Option(help="ログレベル")] = "INFO",
     json_logs: Annotated[bool, typer.Option("--json-logs", help="JSON形式で出力")] = False,
 ) -> None:
-    configure_logging(log_level, json_output=json_logs)
+    configure_logging(log_level, json_output=json_logs, timezone=AppSettings().timezone)
 
 
 # --------------------------------------------------------------------------

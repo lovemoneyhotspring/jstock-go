@@ -79,3 +79,26 @@ def fmt(moment: dt.datetime, tz: str | ZoneInfo | None = None, *, seconds: bool 
 def fmt_time(moment: dt.datetime, tz: str | ZoneInfo | None = None) -> str:
     """時刻だけ。``15:20 JST``。"""
     return to_zone(moment, tz).strftime("%H:%M %Z")
+
+
+def fmt_iso(text: object, tz: str | ZoneInfo | None = None) -> str:
+    """保存されている ISO 8601 の文字列（UTC）を表示用に変える。
+
+    DB の ``placed_at`` 等をそのまま出すと ``2026-08-29T06:36:37+00:00`` で、
+    時間帯を読み取れる人にしか意味が無い。設定の時間帯で ``2026-08-29 15:36:37 JST``
+    にする。日時として読めない値はそのまま返す（日付や None を壊さない）。
+    """
+    if not isinstance(text, str):
+        return str(text)
+    try:
+        moment = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if moment.tzinfo is None and "T" not in text:
+        return text  # 日付だけ（"2026-08-29"）。時刻ではない
+    return fmt(moment, tz, seconds=True)
+
+
+def stamp_iso(tz: str | ZoneInfo | None = None) -> str:
+    """ログ用の現在時刻。設定の時間帯で、オフセット付き ISO（``+09:00``）。"""
+    return to_zone(now_utc(), tz).isoformat(timespec="microseconds")

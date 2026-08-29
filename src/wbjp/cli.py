@@ -19,7 +19,7 @@ from rich.table import Table
 
 from wbcore.broker.base import BrokerError
 from wbcore.clock import fmt as fmt_when
-from wbcore.clock import now_utc, today_utc
+from wbcore.clock import fmt_iso, now_utc, today_utc
 from wbcore.credentials import Credentials as Creds
 from wbcore.credentials import (
     Environment,
@@ -30,7 +30,7 @@ from wbcore.credentials import (
 )
 from wbcore.data.provider import MarketDataProvider
 from wbcore.logging import configure_logging, get_logger
-from wbjp.config import Config, load_config
+from wbjp.config import AppSettings, Config, load_config
 
 if TYPE_CHECKING:
     from wbjp.engine.backtest import BacktestRunner
@@ -55,7 +55,7 @@ def main(
     log_level: Annotated[str, typer.Option(help="ログレベル")] = "INFO",
     json_logs: Annotated[bool, typer.Option("--json-logs", help="JSON形式で出力")] = False,
 ) -> None:
-    configure_logging(log_level, json_output=json_logs)
+    configure_logging(log_level, json_output=json_logs, timezone=AppSettings().timezone)
 
 
 # --------------------------------------------------------------------------
@@ -561,7 +561,7 @@ def quality(
     if out:
         lines = [
             "# 財務の質で絞った母集団（`wbjp quality` が生成）。",
-            f"# 生成 {fmt_when(now_utc())}。閾値: {thresholds}",
+            f"# 生成 {fmt_when(now_utc(), config.settings.timezone)}。閾値: {thresholds}",
             "# 注意: 今日の財務で選んでいるため、過去のバックテストには生存者バイアスが乗る。",
             "SPY",
             *[r.symbol for r in passed],
@@ -715,7 +715,13 @@ def explain(
         for column in rows[0]:
             table.add_column(column)
         for row in rows:
-            table.add_row(*[str(v)[:40] for v in row.values()])
+            # 時刻の列（*_at）は保存が UTC の ISO。表示は設定の時間帯に
+            table.add_row(
+                *[
+                    (fmt_iso(v, config.settings.timezone) if k.endswith("_at") else str(v))[:40]
+                    for k, v in row.items()
+                ]
+            )
         console.print(table)
 
     journal.close()
@@ -733,11 +739,12 @@ def runs(
     journal = Journal(config.settings.db_path)
 
     table = Table(title="実行履歴", title_justify="left")
-    for column in ("run_id", "基準日", "環境", "モード", "状態", "資産"):
+    for column in ("run_id", "開始", "基準日", "環境", "モード", "状態", "資産"):
         table.add_column(column)
     for row in journal.recent_runs(limit):
         table.add_row(
             row["run_id"],
+            fmt_iso(row["started_at"], config.settings.timezone),
             row["as_of"],
             row["env"],
             row["mode"],

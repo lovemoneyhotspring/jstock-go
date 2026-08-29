@@ -60,9 +60,24 @@ def test_no_local_clock_outside_the_clock_module() -> None:
     assert not offenders, "ローカル時刻の取得が残っています:\n" + "\n".join(offenders)
 
 
-def test_log_timestamps_are_utc() -> None:
-    source = (SRC / "wbcore" / "logging.py").read_text(encoding="utf-8")
-    assert 'TimeStamper(fmt="iso", utc=True)' in source
+def test_log_timestamps_follow_the_configured_zone_with_offset() -> None:
+    from wbcore.logging import _timestamper
+
+    stamped = _timestamper("Asia/Tokyo")(None, "info", {})["timestamp"]
+    assert stamped.endswith("+09:00")
+    assert _timestamper("UTC")(None, "info", {})["timestamp"].endswith("+00:00")
+    with pytest.raises(ValueError, match="未知の時間帯"):
+        _timestamper("Mars/Olympus")
+
+
+def test_stored_iso_strings_are_shown_in_the_configured_zone() -> None:
+    from wbcore.clock import fmt_iso
+
+    assert fmt_iso("2026-08-29T06:36:37+00:00", "Asia/Tokyo") == "2026-08-29 15:36:37 JST"
+    assert fmt_iso("2026-08-29T06:36:37Z") == "2026-08-29 06:36:37 UTC"
+    assert fmt_iso("2026-08-29", "Asia/Tokyo") == "2026-08-29"  # 日付は時刻ではない
+    assert fmt_iso("SUBMITTED", "Asia/Tokyo") == "SUBMITTED"
+    assert fmt_iso(None) == "None"
 
 
 def test_stored_intraday_bars_keep_their_zone(tmp_path: Path) -> None:
