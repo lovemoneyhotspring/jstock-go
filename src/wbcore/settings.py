@@ -38,12 +38,21 @@ class AppSettings(BaseSettings):
     #: 画面に時刻を出すときの時間帯（``WBJP_TIMEZONE``）。既定は UTC。
     #: 保存と演算は常に UTC で、ここは表示にだけ効く。表示には必ず略号が付く。
     timezone: str = "UTC"
-    #: 機械が読むログ（JSON Lines）の置き場（``WBJP_LOG_DIR``）。
-    log_dir: Path = Path("data/logs")
+    #: ログの置き場（``WBJP_LOG_DIR``）。**ファイルに残すログはここ 1 箇所だけ。**
+    #: 省略時は ``data_dir / "logs"``——データの置き場を変えればログも一緒に動く。
+    #: 置き場が分散すると障害時にどこを見ればよいか分からなくなるため、
+    #: 機械が読む JSONL も、cron / systemd で stderr を残す場合もここに集める。
+    #: SDK が勝手に作るログ（``webull_*_sdk.log``）は抑止してあり、どこにも書かない。
+    log_dir: Path | None = None
+
+    @property
+    def resolved_log_dir(self) -> Path:
+        """実際に使うログの置き場。``WBJP_LOG_DIR`` があればそれ、無ければ ``data_dir/logs``。"""
+        return self.log_dir if self.log_dir is not None else self.data_dir / "logs"
 
     def log_file(self, app: str) -> Path:
-        """アプリ（wbjp / accum）と環境ごとのログファイル。日次でローテーションする。"""
-        return self.log_dir / f"{app}-{self.env.value}.jsonl"
+        """アプリ（wbjp / accum）と環境ごとの JSONL。日次でローテーションする。"""
+        return self.resolved_log_dir / f"{app}-{self.env.value}.jsonl"
 
     @property
     def endpoints(self) -> Endpoints:

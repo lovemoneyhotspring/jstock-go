@@ -52,9 +52,17 @@ from wbcore.domain.models import (
     TaxAccountType,
     TimeInForce,
 )
-from wbcore.logging import get_logger, harden_third_party_logging, register_secret
+from wbcore.logging import (
+    get_logger,
+    harden_third_party_logging,
+    register_secret,
+    suppress_sdk_own_logging,
+)
 
 log = get_logger(__name__)
+
+#: 後方互換の別名。実体は :func:`wbcore.logging.suppress_sdk_own_logging`。
+_suppress_sdk_own_logging = suppress_sdk_own_logging
 
 #: 発注に固定で入れる値（市場共通）。
 INSTRUMENT_TYPE = "EQUITY"
@@ -257,7 +265,7 @@ class WebullBroker(Broker):
                 self._env.value,
             )
             api_client.add_endpoint(self._env.value, self._endpoint)
-            _suppress_sdk_own_logging(api_client)
+            suppress_sdk_own_logging(api_client)
             client = TradeClient(api_client)
             self._api_client = api_client
         except Exception as exc:
@@ -611,31 +619,6 @@ class WebullBroker(Broker):
                 return OrderRejectedError(message)
             case _:
                 return BrokerError(message)
-
-
-def _suppress_sdk_own_logging(api_client: Any) -> None:
-    """SDK が独自のログ出力を仕込むのを抑止する。
-
-    **なぜ必要か（実測で確認した挙動）**
-
-    ``TradeClient.__init__`` は ``_init_logger`` を呼び、ログが未設定だと
-    判断すると次の2つを勝手に追加する:
-
-        1. stdout への ``StreamHandler``
-        2. **カレントディレクトリの** ``webull_trade_sdk.log`` への
-           ``TimedRotatingFileHandler``（INFO、72世代）
-
-    どちらも ``propagate`` とは無関係にこちらのマスク経路を通らない。
-    API がエラーを返すと SDK はリクエストヘッダを丸ごと出力するため、
-    **認証情報が平文でディスクに残る**ことになる。
-
-    ``_init_logger`` は ``_stream_logger_set`` と ``_file_logger_set`` の
-    いずれかが真なら何もしない。そこで構築前に立てておく。
-    非公開属性だが、これが SDK 側に用意された唯一の抑止経路であり、
-    代替はディスクへの認証情報の書き出しを許すことになる。
-    """
-    api_client._stream_logger_set = True
-    api_client._file_logger_set = True
 
 
 def flatten_order_legs(payload: Any) -> list[dict[str, Any]]:

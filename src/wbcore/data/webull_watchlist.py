@@ -28,7 +28,12 @@ from typing import Any, ClassVar, Self
 from wbcore.clock import fmt, now_utc
 from wbcore.credentials import ENDPOINTS, Credentials, Environment, load_credentials
 from wbcore.domain.models import Market
-from wbcore.logging import get_logger, harden_third_party_logging, register_secret
+from wbcore.logging import (
+    get_logger,
+    harden_third_party_logging,
+    register_secret,
+    suppress_sdk_own_logging,
+)
 
 log = get_logger(__name__)
 
@@ -198,6 +203,7 @@ class WebullWatchlists:
                 self._credentials.app_key, self._credentials.app_secret, self._env.value
             )
             api.add_endpoint(self._env.value, self._endpoint)
+            suppress_sdk_own_logging(api)  # webull_data_sdk.log への平文出力を防ぐ
             self._client = DataClient(api)
             harden_third_party_logging()
         return self._client

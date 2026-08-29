@@ -32,7 +32,12 @@ from wbcore.data.provider import (
     normalize_bars,
 )
 from wbcore.domain.models import Market
-from wbcore.logging import get_logger, harden_third_party_logging, register_secret
+from wbcore.logging import (
+    get_logger,
+    harden_third_party_logging,
+    register_secret,
+    suppress_sdk_own_logging,
+)
 
 log = get_logger(__name__)
 
@@ -105,6 +110,9 @@ class WebullMarketDataProvider(MarketDataProvider):
             self._credentials.app_key, self._credentials.app_secret, self._env.value
         )
         api_client.add_endpoint(self._env.value, self._endpoint)
+        # DataClient も構築時に自前のログ（webull_data_sdk.log）を仕込む。
+        # 認証情報が平文でディスクに残るため、渡す前に必ず抑止する
+        suppress_sdk_own_logging(api_client)
         client = DataClient(api_client)
         harden_third_party_logging()
         return client

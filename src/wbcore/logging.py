@@ -219,6 +219,10 @@ def configure_logging(
         _timestamper(timezone),
         _machine_fields,
         structlog.processors.StackInfoRenderer(),
+        # 例外はここで文字列（``exception`` 項目）にする。これが無いと JSONL には
+        # ``"exc_info": true`` しか残らず、後から原因を追えない。マスクの前に置き、
+        # トレースバック本文（SDK がリクエストヘッダを載せる）も必ずマスクに通す
+        structlog.processors.format_exc_info,
         redact_processor,
     ]
 
@@ -285,6 +289,34 @@ class _RedactingProcessorFormatter(structlog.stdlib.ProcessorFormatter):
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     """名前付きの構造化ロガーを返す。"""
     return structlog.stdlib.get_logger(name)
+
+
+def suppress_sdk_own_logging(api_client: Any) -> None:
+    """Webull SDK が独自のログ出力を仕込むのを抑止する。**``ApiClient`` を作った直後、
+    ``TradeClient`` / ``DataClient`` に渡す前に必ず呼ぶ。**
+
+    **なぜ必要か（実測で確認した挙動）**
+
+    ``TradeClient.__init__`` と ``DataClient.__init__`` は ``_init_logger`` を呼び、
+    ログが未設定だと判断すると次の2つを勝手に追加する:
+
+        1. stdout への ``StreamHandler``
+        2. **カレントディレクトリの** ``webull_trade_sdk.log`` /
+           ``webull_data_sdk.log`` への ``TimedRotatingFileHandler``（INFO、72世代）
+
+    どちらも ``propagate`` とは無関係にこちらのマスク経路を通らない。
+    API がエラーを返すと SDK はリクエストヘッダ（``x-app-key`` と
+    ``x-signature``）を丸ごと出力するため、**認証情報が平文でディスクに残る**。
+    実際に、抑止を通さずに ``DataClient`` を作っていた経路で
+    ``webull_data_sdk.log`` に ``x-app-key`` が書き出されていた。
+
+    ``_init_logger`` は ``_stream_logger_set`` と ``_file_logger_set`` の
+    いずれかが真なら何もしない。そこで構築前に立てておく。
+    非公開属性だが、これが SDK 側に用意された唯一の抑止経路であり、
+    代替はディスクへの認証情報の書き出しを許すことになる。
+    """
+    api_client._stream_logger_set = True
+    api_client._file_logger_set = True
 
 
 #: マスク経路を迂回されると困るサードパーティのロガー接頭辞。

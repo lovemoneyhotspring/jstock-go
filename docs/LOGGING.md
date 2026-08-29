@@ -5,7 +5,8 @@
 
 | 何 | どこ |
 |---|---|
-| ファイル | `data/logs/<app>-<env>.jsonl`（`WBJP_LOG_DIR` で変更可）。`app` は `wbjp` / `accum`、`env` は `uat` / `prod` |
+| 置き場 | `WBJP_LOG_DIR`（既定 `WBJP_DATA_DIR/logs`＝`data/logs`）。**ファイルに残すログはこの 1 箇所だけ。** cron で stderr を残すときもここへ。本番では絶対パスで指定する |
+| ファイル | `<WBJP_LOG_DIR>/<app>-<env>.jsonl`。`app` は `wbjp` / `accum`、`env` は `uat` / `prod` |
 | ローテーション | 日次（UTC の 0 時）、90 日保持。ローテーション後は `…jsonl.YYYY-MM-DD` |
 | 文字 | UTF-8、`ensure_ascii=False`（日本語はそのまま） |
 | 鍵の並び | 辞書順（`sort_keys`）。差分を取りやすくするため |
@@ -40,7 +41,9 @@
 | `accum.lot_size` | 売買単位が設定と銘柄情報で食い違った（API を採用）、または照会できず設定値で進んだ | `symbol`, `configured`, `api` / `market`, `error` |
 | `accum.decision` | 今日出すべき投下を決めた | `symbol`, `market`, `month`（どの月の積立か）, `judged_on`（判断日）, `target`（今月の目標）, `placed`（発注済み）, `due`（差額＝今日出す額）, `multiplier`, `price`, `tactic`, `signal`（判定用の銘柄。無ければ null） |
 | `accum.order` | 投下を注文にした結果（1 件ごと） | `symbol`, `client_order_id`, `quantity`, `price`, `amount`, `live`（実発注か）, `outcome`（`発注` / `dry-run` / `見送り …` / `失敗 …` / `発注済み（冪等）`）, `note`（見送り・失敗の理由） |
+| `accum.unconfirmed` | 発注を送ったが応答が返らず、届いたか分からない。台帳には `PENDING` のまま残し再送しない（`accum orders --check` で確かめる） | `symbol`, `client_order_id`, `error` |
 | `accum.run` | 実行の終了 | `live`, `reason`（dry-run の理由）, `orders`, `failures` |
+| `accum.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception`（トレースバック本文。`log.exception` / `exc_info=True` のログはすべてこの項目を持つ） |
 
 金額・数量・価格は **文字列**（`"25000"`）で入っている。JSON の数値にすると Decimal の精度が失われるため。
 
