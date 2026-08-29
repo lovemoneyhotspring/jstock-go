@@ -52,12 +52,22 @@ class AccumulationSettings:
         return self.tactic.warmup_bars
 
 
-def build_plan(bars: pl.DataFrame, settings: AccumulationSettings | None = None) -> pl.DataFrame:
+def build_plan(
+    bars: pl.DataFrame,
+    settings: AccumulationSettings | None = None,
+    *,
+    signal_bars: pl.DataFrame | None = None,
+) -> pl.DataFrame:
     """日足から日ごとの投下額を決める。
 
     Args:
-        bars: ``date`` 昇順の日足。``date`` と ``close`` 列が必要。
+        bars: 買う銘柄の ``date`` 昇順の日足。``date`` と ``close`` 列が必要。
+            入金日（月初の営業日）と株数の計算はこちらの足で決まる。
         settings: 省略時は既定値（月25,000円・完全下降配列で4倍）。
+        signal_bars: 倍率の判定に使う別銘柄の日足。省略すれば ``bars`` で判定する。
+            暦が違っても（東証の ETF を米国指数で判定する等）動くように、
+            買う銘柄の各日に対して「その日以前で最新」の判定値を使う。
+            判定値がまだ無い日は 1 倍（増額なし）。
 
     Returns:
         :data:`PLAN_COLUMNS` の列を持つ計画表。``base``/``extra``/``amount``
@@ -72,8 +82,18 @@ def build_plan(bars: pl.DataFrame, settings: AccumulationSettings | None = None)
     budget = int(settings.monthly_budget)
     month = pl.col("date").dt.truncate("1mo")
 
-    plan = bars.select("date", "close").with_columns(
-        settings.tactic.multiplier(),
+    if signal_bars is None:
+        priced = bars.select("date", "close").with_columns(settings.tactic.multiplier())
+    else:
+        _validate(signal_bars)
+        multipliers = signal_bars.select("date", "close").with_columns(settings.tactic.multiplier())
+        priced = (
+            bars.select("date", "close")
+            .join_asof(multipliers.select("date", MULTIPLIER), on="date", strategy="backward")
+            .with_columns(pl.col(MULTIPLIER).fill_null(1.0))
+        )
+
+    plan = priced.with_columns(
         # 入金日＝その月の最初の営業日。分割せず全額をここで投下する。
         month.is_first_distinct().alias("_payday"),
         # 増額分はその月の営業日数で按分する。こうすると倍率が月を通して

@@ -31,7 +31,9 @@ FILENAME = "accum.toml"
 #: 既定の設定ディレクトリ。スイング売買の ``config/`` と分けてある。
 DEFAULT_CONFIG_DIR = Path("config/accum")
 
-_TACTIC_RESERVED = frozenset({"id", "tactic", "symbols", "enabled", "market"})
+_TACTIC_RESERVED = frozenset(
+    {"id", "tactic", "symbols", "enabled", "market", "signal_symbol", "signal_market"}
+)
 
 
 class TacticEntry(BaseModel):
@@ -44,6 +46,10 @@ class TacticEntry(BaseModel):
         market: 銘柄の市場。足を取りに行くときのティッカー変換と、発注先の
             決定に使う（日本株の ``1305`` は ``1305.T``、米国株の ``VOO`` はそのまま）。
             ``^`` で始まる指数は市場に関係なくそのまま扱われる（発注はできない）。
+        signal_symbol: 倍率の判定に使う別の銘柄。省略すれば買う銘柄自身の足で
+            判定する。東証の S&P500 連動 ETF を ``^GSPC`` で判定する、といった使い方。
+            判定にしか使わないので指数でもよい。
+        signal_market: 判定用銘柄の市場。省略すれば ``market`` と同じ。
     """
 
     model_config = {"extra": "allow"}  # 戦略固有パラメータを受け取る
@@ -53,6 +59,12 @@ class TacticEntry(BaseModel):
     symbols: list[str] = Field(min_length=1)
     enabled: bool = True
     market: Market = Market.JP
+    signal_symbol: str | None = None
+    signal_market: Market | None = None
+
+    @property
+    def signal_market_resolved(self) -> Market:
+        return self.signal_market or self.market
 
     @field_validator("symbols")
     @classmethod
@@ -256,20 +268,28 @@ class AccumConfig(BaseModel):
         return None
 
     def symbols_by_market(self) -> dict[Market, list[str]]:
-        """市場 → 銘柄。足の取得はティッカー変換が市場ごとに違うので分ける。
+        """市場 → 銘柄（判定用の銘柄も含む）。足の取得はティッカー変換が市場ごとに違うので分ける。
 
-        銘柄が複数の戦略に現れないことは :meth:`validate_assignment` が
-        保証しているので、ここで市場が衝突することはない。
+        買う銘柄が複数の戦略に現れないことは :meth:`validate_assignment` が
+        保証している。判定用の銘柄は複数の戦略で共有してよい。
         """
         grouped: dict[Market, list[str]] = defaultdict(list)
         for entry in self.active:
             grouped[entry.market].extend(entry.symbols)
+            if entry.signal_symbol:
+                grouped[entry.signal_market_resolved].append(entry.signal_symbol)
         return {market: sorted(set(symbols)) for market, symbols in grouped.items()}
 
     @property
     def symbols(self) -> list[str]:
-        """有効な戦略が割り当てられた銘柄の一覧。"""
+        """有効な戦略で**買う**銘柄の一覧。判定用は含まない。"""
         return sorted({s for entry in self.active for s in entry.symbols})
+
+    @property
+    def all_symbols(self) -> list[str]:
+        """足が要る銘柄すべて（買う銘柄 ＋ 判定用の銘柄）。"""
+        signals = {e.signal_symbol for e in self.active if e.signal_symbol}
+        return sorted(set(self.symbols) | signals)
 
 
 def load(

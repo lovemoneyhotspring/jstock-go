@@ -51,6 +51,20 @@ lot_size_overrides = { "1305.T" = 10, "1591.T" = 10, "1306.T" = 10 }
 # market は足の取得と発注先に使う（既定 "JP"）。
 #   JP … 1305.T → 足は 1305.T、発注は 1305      US … VOO はそのまま
 # ^ で始まる指数（^GSPC など）は足は取れるが発注はできない（検証用）。
+#
+# signal_symbol を書くと、倍率の判定だけをその銘柄の足で行う（買うのは symbols）。
+# 東証の S&P500 連動 ETF を、本家の指数 ^GSPC の配列で判定する、といった使い方。
+# 暦が違っても（米国の判定値を東証の日に当てる）「その日以前で最新」の判定値を使う。
+# signal_market は判定用銘柄の市場（省略時は market と同じ）。
+#
+#   [[tactics]]
+#   id = "452A（S&P500で判定）"
+#   tactic = "bear_stack"
+#   symbols = ["452A.T"]
+#   market = "JP"
+#   signal_symbol = "^GSPC"
+#   signal_market = "US"
+#   multiplier = 4
 
 # 完全下降配列（終値 < MA20 < MA50 < MA200）で4倍。
 # 追加投入1円あたりの効果が最良で、必要資金も最少（年平均1.15〜1.42倍）。

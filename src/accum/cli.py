@@ -160,6 +160,7 @@ def list_assignments(config_dir: _ConfigDir = None) -> None:
     table.add_column("戦略")
     table.add_column("銘柄")
     table.add_column("市場")
+    table.add_column("判定")
     table.add_column("発注時間帯")
     table.add_column("有効", justify="center")
     for entry in config.tactics:
@@ -173,6 +174,7 @@ def list_assignments(config_dir: _ConfigDir = None) -> None:
             described,
             ", ".join(entry.symbols),
             entry.market.value,
+            entry.signal_symbol or "[dim]自身[/dim]",
             window,
             "○" if entry.enabled else "—",
         )
@@ -284,40 +286,48 @@ def plan(
 
     settings = AppSettings()
     config = _load(config_dir)
-    bars = _bars(settings, config.symbols)
+    bars = _bars(settings, config.all_symbols)
     if not bars:
         raise typer.Exit(1)
 
     total = 0
     blocked: list[str] = []
-    for symbol, tactic in config.build().items():
-        if symbol not in bars:
-            continue
-        frame = build_plan(bars[symbol], AccumulationSettings(config.monthly_budget, tactic))
-        frame = frame.tail(days)
-
-        window = tactic.window
-        if window.enabled and not window.allows():
-            blocked.append(f"{symbol}（{window.describe()}）")
-        table = Table(
-            title=f"{symbol} — {tactic.describe()}  発注 {window.describe()}",
-            title_justify="left",
-        )
-        for column in ("日付", "終値", "倍率", "投下額", "理由"):
-            table.add_column(column, justify="right" if column != "理由" else "left")
-        for row in frame.iter_rows(named=True):
-            amount = row["amount"]
-            style = "bold" if amount > 0 else "dim"
-            table.add_row(
-                str(row["date"]),
-                f"{row['close']:,.2f}",
-                f"{row['multiplier']:.2g}",
-                f"{amount:,}" if amount else "—",
-                row["reason"],
-                style=style,
+    for entry in config.active:
+        tactic = entry.build()
+        signal = bars.get(entry.signal_symbol) if entry.signal_symbol else None
+        for symbol in entry.symbols:
+            if symbol not in bars:
+                continue
+            frame = build_plan(
+                bars[symbol],
+                AccumulationSettings(config.monthly_budget, tactic),
+                signal_bars=signal,
             )
-        console.print(table)
-        total += int(frame.filter(pl.col("date") == frame["date"].max())["amount"][0])
+            frame = frame.tail(days)
+
+            window = tactic.window
+            if window.enabled and not window.allows():
+                blocked.append(f"{symbol}（{window.describe()}）")
+            judged = f"  判定 {entry.signal_symbol}" if entry.signal_symbol else ""
+            table = Table(
+                title=f"{symbol} — {tactic.describe()}{judged}  発注 {window.describe()}",
+                title_justify="left",
+            )
+            for column in ("日付", "終値", "倍率", "投下額", "理由"):
+                table.add_column(column, justify="right" if column != "理由" else "left")
+            for row in frame.iter_rows(named=True):
+                amount = row["amount"]
+                style = "bold" if amount > 0 else "dim"
+                table.add_row(
+                    str(row["date"]),
+                    f"{row['close']:,.2f}",
+                    f"{row['multiplier']:.2g}",
+                    f"{amount:,}" if amount else "—",
+                    row["reason"],
+                    style=style,
+                )
+            console.print(table)
+            total += int(frame.filter(pl.col("date") == frame["date"].max())["amount"][0])
 
     console.print(f"\n[bold]最終日の投下額 合計: {total:,}[/bold]")
     if blocked:
@@ -357,7 +367,7 @@ def run(
     config = _load(config_dir)
     if not no_sync:
         _sync(settings, config, config_dir, days=30, force=False)
-    bars = _bars(settings, config.symbols)
+    bars = _bars(settings, config.all_symbols)
     contributions = todays_contributions(config, bars)
     if not contributions:
         console.print("[dim]投下額のある銘柄はありません（入金日でも増額日でもない）[/dim]")
@@ -460,6 +470,8 @@ def backtest(
     config_dir: _ConfigDir = None,
 ) -> None:
     """設定どおりに積み立てた場合の結果を銘柄ごとに出す。"""
+    import polars as pl
+
     from accum.plan import AccumulationSettings, build_plan
     from accum.simulate import simulate
 
@@ -467,7 +479,7 @@ def backtest(
     config = _load(config_dir)
     start = dt.date.fromisoformat(from_) if from_ else None
     end = dt.date.fromisoformat(to) if to else None
-    bars = _bars(settings, config.symbols)
+    bars = _bars(settings, config.all_symbols)
     if not bars:
         raise typer.Exit(1)
 
@@ -484,8 +496,6 @@ def backtest(
             tactic = entry.build()
             frame = bars[symbol]
             if start or end:
-                import polars as pl
-
                 if start:
                     frame = frame.filter(pl.col("date") >= start)
                 if end:
@@ -497,7 +507,16 @@ def backtest(
                 )
                 continue
 
-            plan_frame = build_plan(frame, AccumulationSettings(config.monthly_budget, tactic))
+            signal = bars.get(entry.signal_symbol) if entry.signal_symbol else None
+            if start or end:
+                signal = (
+                    None
+                    if signal is None
+                    else signal.filter(pl.col("date") <= (end or dt.date.max))
+                )
+            plan_frame = build_plan(
+                frame, AccumulationSettings(config.monthly_budget, tactic), signal_bars=signal
+            )
             result = simulate(frame, plan_frame, monthly_budget=config.monthly_budget)
             edge = result.cost_edge
             table.add_row(

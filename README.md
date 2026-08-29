@@ -160,6 +160,8 @@ uv run accum run                 # 最新日の投下額を注文にする（dry
 uv run accum run --live          # 実発注。本番は WBJP_ENV=prod と --yes も
 ```
 
+倍率の判定を別の銘柄で行うこともできる（`signal_symbol`）。東証の S&P500 連動 ETF を買いながら、増額の判定は本家の指数 `^GSPC` の配列で行う、といった使い方。判定用は買わないので指数でもよく、暦が違っても「その日以前で最新」の判定値を当てる。省略すれば買う銘柄自身の足で判定する。
+
 `run` は日足の最終行が入金日（月初）か増額日のときだけ注文を作る。株数は `投下額 ÷ 終値` を単元に切り捨て。ETF は単元が 1 株・10 株のものが多いので `[execution] lot_size_overrides` で指定する（既定の 100 株だと月の予算が届かず丸ごと見送りになる）。注文 ID は日付・銘柄・株数から決定論的に作るため、cron が二重に走っても二重買付にならない。
 
 部品は `wbcore` と共有: 足は `wbcore.data`、発注は `wbcore.broker`、登録簿の仕組みは `wbcore.registry`。積立固有なのは倍率（`accum.tactics`）・計画（`accum.plan`）・検証（`accum.simulate` / `accum.basket`）・注文化（`accum.execute`）で、どの段も単独で差し替えられる。

@@ -82,6 +82,7 @@ def todays_contributions(
 
     投下額が 0 の銘柄（入金日でも増額日でもない）は含めない。
     足の無い銘柄は黙って飛ばす——呼び出し側が先に警告している前提。
+    判定用の銘柄（``signal_symbol``）の足が無ければ、その戦略は倍率 1 で動く。
     """
     out: list[Contribution] = []
     for entry in config.active:
@@ -90,7 +91,10 @@ def todays_contributions(
             if frame is None or frame.height == 0:
                 continue
             tactic = entry.build()
-            plan = build_plan(frame, AccumulationSettings(config.monthly_budget, tactic))
+            signal = bars.get(entry.signal_symbol) if entry.signal_symbol else None
+            plan = build_plan(
+                frame, AccumulationSettings(config.monthly_budget, tactic), signal_bars=signal
+            )
             last = plan.row(-1, named=True)
             amount = Decimal(str(last["amount"]))
             if amount <= 0:
