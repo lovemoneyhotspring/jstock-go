@@ -250,14 +250,19 @@ class StatusChange:
         return (self.quantity - self.filled_quantity) / self.quantity
 
     def describe(self) -> str:
+        filled, total = _qty(self.filled_quantity), _qty(self.quantity)
         if self.lost_amount_ratio == 0:
-            return (
-                f"{self.symbol}: {self.after.value}（{self.filled_quantity}/{self.quantity} 約定）"
-            )
+            return f"{self.symbol}: {self.after.value}（{filled}/{total} 約定）"
         return (
-            f"{self.symbol}: {self.after.value}（{self.filled_quantity}/{self.quantity} 約定、"
+            f"{self.symbol}: {self.after.value}（{filled}/{total} 約定、"
             f"未約定 {self.lost_amount_ratio:.0%} は次回に持ち越し）"
         )
+
+
+def _qty(value: Decimal) -> str:
+    """数量の表示。``30.000000`` ではなく ``30``、端数があればそのまま。"""
+    text = f"{value.normalize():f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def sync_order_status(ledger: Ledger, broker_for: Callable[[Market], Broker]) -> list[StatusChange]:
