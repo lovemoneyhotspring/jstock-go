@@ -347,6 +347,7 @@ def run(
     投下額が 0 の日（入金日でも増額日でもない）は何もしない。
     """
     from accum.execute import build_orders, todays_contributions
+    from accum.ledger import DRY_RUN_STATUS, Ledger
     from wbcore.broker.base import Broker, BrokerError
     from wbcore.broker.registry import connect
     from wbcore.domain.models import Market
@@ -386,32 +387,42 @@ def run(
     # 市場ごとにブローカーを1つ。積立は市場をまたぐのが普通。
     brokers: dict[Market, Broker] = {}
     status: dict[str, str] = {}
-    for item in planned:
-        c = item.contribution
-        if item.request is None:
-            status[c.symbol] = f"[yellow]見送り[/yellow] {item.note}"
-            continue
-        if not allowed:
-            status[c.symbol] = "[yellow]dry-run[/yellow]"
-            continue
-        broker = brokers.get(c.market)
-        if broker is None:
-            broker = connect(
-                config.execution.broker,
-                settings.env,
-                market=c.market,
-                tax_type=config.execution.tax_account_type,
-                extended_hours=config.execution.extended_hours,
-                notify=lambda message: console.print(f"[yellow]{message}[/yellow]"),
-            )
-            brokers[c.market] = broker
-        try:
-            broker.place(item.request)
-        except BrokerError as exc:
-            status[c.symbol] = f"[red]失敗[/red] {exc}"
-            log.error("積立の発注に失敗", symbol=c.symbol, error=str(exc))
-        else:
-            status[c.symbol] = "[green]発注[/green]"
+    ledger = Ledger(settings.data_dir / f"accum-{settings.env.value}.db")
+    try:
+        for item in planned:
+            c = item.contribution
+            if item.request is None:
+                status[c.symbol] = f"[yellow]見送り[/yellow] {item.note}"
+                continue
+            # 台帳にあれば同じ判断からの再実行（祝日で足が増えない日など）。送らない。
+            if ledger.was_placed(item.request.client_order_id):
+                status[c.symbol] = "[dim]発注済み（冪等）[/dim]"
+                continue
+            if not allowed:
+                ledger.record(item.request, DRY_RUN_STATUS)
+                status[c.symbol] = "[yellow]dry-run[/yellow]"
+                continue
+            broker = brokers.get(c.market)
+            if broker is None:
+                broker = connect(
+                    config.execution.broker,
+                    settings.env,
+                    market=c.market,
+                    tax_type=config.execution.tax_account_type,
+                    extended_hours=config.execution.extended_hours,
+                    notify=lambda message: console.print(f"[yellow]{message}[/yellow]"),
+                )
+                brokers[c.market] = broker
+            try:
+                ack = broker.place(item.request)
+            except BrokerError as exc:
+                status[c.symbol] = f"[red]失敗[/red] {exc}"
+                log.error("積立の発注に失敗", symbol=c.symbol, error=str(exc))
+            else:
+                ledger.record(item.request, ack.status.value, ack.broker_order_id)
+                status[c.symbol] = "[green]発注[/green]"
+    finally:
+        ledger.close()
 
     mode = "[green]実発注[/green]" if allowed else f"[yellow]dry-run[/yellow] ({reason})"
     console.print(
