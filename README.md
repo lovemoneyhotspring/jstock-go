@@ -184,6 +184,25 @@ broker = "webull"   # webull | paper（ネットワークに繋がないシミ�
 
 認証情報は証券会社ごとに名前空間を分ける（`load_credentials(env, namespace="XXX")` → `XXX_PROD_APP_KEY` / キーチェーン `xxx/prod`）。Webull は `WBJP`。CLI には手を入れない。
 
+## 足データの取得元と足の間隔
+
+取得元も同じ形で差し替える。`wbcore.data.provider.MarketDataProvider` 抽象クラスの裏に yfinance / Webull 市場データ API が並び、設定の名前で選ぶ。
+
+```toml
+[universe]
+data_provider = "yfinance"   # yfinance（両市場）| webull（米国株のみ）
+```
+
+足の間隔（`Interval`: `1d` / `1h` / `30m` / `15m` / `5m` / `1m`）は抽象の一部で、取得元ごとに対応範囲を申告する（yfinance の 1 分足は直近 7 日、5〜30 分足は 60 日まで）。日中足は UTC の `ts` と暦日 `date` の両方を持ち、`data/bars/<間隔>/` に日足とは別に保存される。
+
+```bash
+uv run wbjp data sync --interval 5m --days 5    # 5分足を取る（data/bars/5m/）
+```
+
+取得元を足す手順はブローカーと同じ: `MarketDataProvider` を継承して `name` / `intervals` / `fetch_bars()` / `connect()` を書き、`wbcore.data.registry.PROVIDERS.register()` する。
+
+> 現在の戦略・エンジンは日足で動く。日中足は取得・保存まで対応しており、分足で判断する戦略とエンジン側の対応（判断を足の確定に紐づける）は次の段階。
+
 ---
 
 ## アーキテクチャ

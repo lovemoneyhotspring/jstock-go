@@ -8,24 +8,29 @@
       意図的に作り込む。
 
 CSV の形式:
-    ``date,open,high,low,close,volume`` のヘッダ付き。
+    日足は ``date,open,high,low,close,volume``、日中足は先頭が ``ts``
+    （ISO 日時。tz 無しは UTC とみなす）のヘッダ付き。
     ファイル名が銘柄コードになる（``7203.csv`` → ``7203``）。
+
+どちらも設定からは選べない（:meth:`MarketDataProvider.connect` を持たない）。
 """
 
 from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from typing import ClassVar
 
 import polars as pl
 
-from wbcore.data.provider import MarketDataProvider, normalize_bars
+from wbcore.data.provider import Interval, MarketDataProvider, normalize_bars
 
 
 class CsvReplayProvider(MarketDataProvider):
     """ディレクトリ内の CSV を読む。"""
 
-    name = "csv_replay"
+    name: ClassVar[str] = "csv_replay"
+    intervals: ClassVar[frozenset[Interval]] = frozenset(Interval)
 
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
@@ -35,11 +40,13 @@ class CsvReplayProvider(MarketDataProvider):
             return []
         return sorted(p.stem for p in self.directory.glob("*.csv"))
 
-    def fetch_daily_bars(
+    def fetch_bars(
         self,
         symbols: list[str],
         start: dt.date,
         end: dt.date,
+        *,
+        interval: Interval = Interval.D1,
     ) -> dict[str, pl.DataFrame]:
         result: dict[str, pl.DataFrame] = {}
 
@@ -48,11 +55,12 @@ class CsvReplayProvider(MarketDataProvider):
             if not path.exists():
                 continue
 
-            frame = normalize_bars(
-                pl.read_csv(path, try_parse_dates=True).with_columns(
-                    pl.col("date").cast(pl.Date, strict=False)
-                )
-            ).filter((pl.col("date") >= start) & (pl.col("date") <= end))
+            raw = pl.read_csv(path, try_parse_dates=True)
+            if "date" in raw.columns and not interval.is_intraday:
+                raw = raw.with_columns(pl.col("date").cast(pl.Date, strict=False))
+            frame = normalize_bars(raw, interval).filter(
+                (pl.col("date") >= start) & (pl.col("date") <= end)
+            )
 
             if frame.height > 0:
                 result[symbol] = frame
@@ -61,19 +69,28 @@ class CsvReplayProvider(MarketDataProvider):
 
 
 class InMemoryProvider(MarketDataProvider):
-    """あらかじめ用意した DataFrame を返す。テスト専用。"""
+    """あらかじめ用意した DataFrame を返す。テスト専用。
 
-    name = "in_memory"
+    渡したフレームの間隔を ``interval`` で申告する。それ以外の間隔を
+    要求されると :class:`MarketDataError` になる（本物の取得元と同じ振る舞い）。
+    """
 
-    def __init__(self, bars: dict[str, pl.DataFrame]) -> None:
-        self._bars = {symbol: normalize_bars(frame) for symbol, frame in bars.items()}
+    name: ClassVar[str] = "in_memory"
 
-    def fetch_daily_bars(
+    def __init__(self, bars: dict[str, pl.DataFrame], *, interval: Interval = Interval.D1) -> None:
+        self.interval = interval
+        self.intervals = frozenset({interval})  # type: ignore[misc]
+        self._bars = {symbol: normalize_bars(frame, interval) for symbol, frame in bars.items()}
+
+    def fetch_bars(
         self,
         symbols: list[str],
         start: dt.date,
         end: dt.date,
+        *,
+        interval: Interval = Interval.D1,
     ) -> dict[str, pl.DataFrame]:
+        self._require(interval)
         result = {}
         for symbol in symbols:
             frame = self._bars.get(symbol)

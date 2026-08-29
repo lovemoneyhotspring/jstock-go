@@ -196,6 +196,10 @@ class AccumConfig(BaseModel):
     #: true で全発注を即停止する。スイング売買の ``risk.kill_switch`` と同じ役割。
     kill_switch: bool = False
 
+    #: 足データの取得元。:data:`wbcore.data.registry.PROVIDERS` の名前。
+    #: 積立は市場をまたぐので、両市場に対応する取得元（yfinance）が既定。
+    data_provider: str = "yfinance"
+
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
 
     tactics: list[TacticEntry] = Field(default_factory=list)

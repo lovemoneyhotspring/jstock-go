@@ -31,6 +31,10 @@ monthly_budget = 25_000
 # 緊急停止。true にすると `accum run --live` でも発注しない。
 kill_switch = false
 
+# 足データの取得元。登録済みの名前（yfinance | webull）。積立は市場をまたぐので
+# 両市場に対応する yfinance が既定。webull は米国株のみ。
+data_provider = "yfinance"
+
 # 発注の振る舞い。積立は当日の投下額を成行の買いにする。
 [execution]
 # 発注先。登録済みのブローカー名（webull | paper）。paper はネットワークに繋がないシミュレータ。

@@ -197,8 +197,8 @@ def _sync(
     settings: AppSettings, config: AccumConfig, config_dir: Path | None, *, days: int, force: bool
 ) -> dict[str, int]:
     """積立対象（バスケットの構成銘柄と基準銘柄を含む）の足を更新する。"""
+    from wbcore.data.registry import connect as connect_provider
     from wbcore.data.store import BarStore
-    from wbcore.data.yfinance_provider import YFinanceProvider
 
     store = BarStore(settings.bars_dir)
     end = dt.date.today()
@@ -219,7 +219,8 @@ def _sync(
 
     counts: dict[str, int] = {}
     for market, symbols in grouped.items():
-        counts.update(store.sync(YFinanceProvider(market=market), symbols, start, end, force=force))
+        provider = connect_provider(config.data_provider, settings.env, market=market)
+        counts.update(store.sync(provider, symbols, start, end, force=force))
     return counts
 
 

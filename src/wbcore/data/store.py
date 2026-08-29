@@ -1,9 +1,14 @@
 """足データのローカル保存。
 
 構成:
-    ``data/bars/{銘柄コード}.parquet`` に1銘柄1ファイルで置く。
+    日足は ``data/bars/{銘柄コード}.parquet``、日中足は
+    ``data/bars/{間隔}/{銘柄コード}.parquet`` に1銘柄1ファイルで置く
+    （日足を直下に置くのは、分足対応より前からある配置を壊さないため）。
     書き込みと戦略向けの読み出しは polars、横断的な集計・調査は
     DuckDB（Parquet を直接 SQL で読める）を使う。
+
+    1つの :class:`BarStore` は1つの間隔だけを扱う。日足と5分足を両方
+    使うなら、間隔ごとにインスタンスを作る。
 
 なぜキャッシュが必須か:
     yfinance は短時間に連投すると IP 単位で遮断される。毎回フル取得
@@ -20,7 +25,13 @@ from pathlib import Path
 
 import polars as pl
 
-from wbcore.data.provider import BAR_SCHEMA, MarketDataProvider, empty_bars, normalize_bars
+from wbcore.data.provider import (
+    BAR_SCHEMA,
+    Interval,
+    MarketDataProvider,
+    empty_bars,
+    normalize_bars,
+)
 from wbcore.logging import get_logger
 
 log = get_logger(__name__)
@@ -34,12 +45,25 @@ _SAFE_SYMBOL = re.compile(r"^[A-Za-z0-9.^_-]+$")
 #: 直近の足が後から訂正される場合に備えた重ね幅。
 OVERLAP_DAYS = 5
 
+#: 日中足の重ね幅。当日ぶんを取り直せば十分。
+INTRADAY_OVERLAP_DAYS = 1
+
 
 class BarStore:
-    """Parquet による足データの保管庫。"""
+    """Parquet による足データの保管庫。1インスタンス1間隔。"""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, interval: Interval = Interval.D1) -> None:
         self.root = Path(root)
+        self.interval = interval
+
+    @property
+    def directory(self) -> Path:
+        """この間隔のファイルを置く場所。"""
+        return self.root if self.interval is Interval.D1 else self.root / self.interval.value
+
+    @property
+    def _key(self) -> str:
+        return self.interval.time_column
 
     # -- 場所 ---------------------------------------------------------------
 
@@ -52,13 +76,13 @@ class BarStore:
         """
         if not _SAFE_SYMBOL.match(symbol):
             raise ValueError(f"銘柄コードに使えない文字が含まれます: {symbol!r}")
-        return self.root / f"{symbol}.parquet"
+        return self.directory / f"{symbol}.parquet"
 
     def symbols(self) -> list[str]:
         """保存済みの銘柄。"""
-        if not self.root.exists():
+        if not self.directory.exists():
             return []
-        return sorted(p.stem for p in self.root.glob("*.parquet"))
+        return sorted(p.stem for p in self.directory.glob("*.parquet"))
 
     def has(self, symbol: str) -> bool:
         return self.path_for(symbol).exists()
@@ -71,10 +95,13 @@ class BarStore:
         start: dt.date | None = None,
         end: dt.date | None = None,
     ) -> pl.DataFrame:
-        """1銘柄の足を読む。未保存なら空フレームを返す。"""
+        """1銘柄の足を読む。未保存なら空フレームを返す。
+
+        ``start`` / ``end`` は暦日。日中足でも日で切る。
+        """
         path = self.path_for(symbol)
         if not path.exists():
-            return empty_bars()
+            return empty_bars(self.interval)
 
         frame = pl.read_parquet(path)
         if "symbol" in frame.columns:
@@ -85,7 +112,7 @@ class BarStore:
         if end is not None:
             frame = frame.filter(pl.col("date") <= end)
 
-        return frame.sort("date")
+        return frame.sort(self._key)
 
     def read_many(
         self,
@@ -109,22 +136,32 @@ class BarStore:
         value = frame["date"].max()
         return value if isinstance(value, dt.date) else None
 
+    def last_timestamp(self, symbol: str) -> dt.datetime | None:
+        """保存済みの最終足の時刻（UTC）。日足では None。"""
+        if not self.interval.is_intraday:
+            return None
+        frame = self.read(symbol)
+        if frame.height == 0:
+            return None
+        value = frame["ts"].max()
+        return value if isinstance(value, dt.datetime) else None
+
     # -- 書き込み -----------------------------------------------------------
 
     def write(self, symbol: str, frame: pl.DataFrame) -> None:
         """足を保存する（既存を置き換える）。"""
-        self.root.mkdir(parents=True, exist_ok=True)
-        normalized = normalize_bars(frame)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        normalized = normalize_bars(frame, self.interval)
         # DuckDB で全銘柄を横断する際に必要なので銘柄列を持たせる
         normalized.with_columns(pl.lit(symbol).alias("symbol")).write_parquet(self.path_for(symbol))
 
     def upsert(self, symbol: str, frame: pl.DataFrame) -> int:
-        """既存データに継ぎ足す。同じ日付は新しい方で上書きする。
+        """既存データに継ぎ足す。同じ時刻は新しい方で上書きする。
 
         Returns:
             保存後の総本数。
         """
-        incoming = normalize_bars(frame)
+        incoming = normalize_bars(frame, self.interval)
         if incoming.height == 0:
             return self.read(symbol).height
 
@@ -132,8 +169,8 @@ class BarStore:
         merged = (
             pl.concat([existing, incoming], how="vertical") if existing.height > 0 else incoming
         )
-        # normalize_bars が日付重複を「後勝ち」で潰すので、新しい方が残る
-        merged = normalize_bars(merged)
+        # normalize_bars が重複を「後勝ち」で潰すので、新しい方が残る
+        merged = normalize_bars(merged, self.interval)
         self.write(symbol, merged)
         return merged.height
 
@@ -150,7 +187,8 @@ class BarStore:
     ) -> dict[str, int]:
         """不足している足だけを取得して保存する。
 
-        保存済みの最終日から :data:`OVERLAP_DAYS` 日ぶん重ねて取り直す
+        保存済みの最終日から :data:`OVERLAP_DAYS`（日中足は
+        :data:`INTRADAY_OVERLAP_DAYS`）日ぶん重ねて取り直す
         （直近の足が後から訂正されることがあるため）。
 
         Args:
@@ -159,6 +197,7 @@ class BarStore:
         Returns:
             銘柄 → 保存後の総本数。
         """
+        overlap = INTRADAY_OVERLAP_DAYS if self.interval.is_intraday else OVERLAP_DAYS
         needed: dict[str, dt.date] = {}
         for symbol in symbols:
             if force:
@@ -167,11 +206,12 @@ class BarStore:
             last = self.last_date(symbol)
             if last is None:
                 needed[symbol] = start
-            elif last < end:
-                needed[symbol] = max(start, last - dt.timedelta(days=OVERLAP_DAYS))
+            elif last < end or self.interval.is_intraday:
+                # 日中足は最終日が今日でも、その日の続きがまだ来る
+                needed[symbol] = max(start, last - dt.timedelta(days=overlap))
 
         if not needed:
-            log.info("足は最新です", symbols=len(symbols))
+            log.info("足は最新です", symbols=len(symbols), interval=self.interval.value)
             return {s: self.read(s).height for s in symbols}
 
         # 取得開始日ごとにまとめて問い合わせ、通信回数を減らす
@@ -181,7 +221,7 @@ class BarStore:
 
         counts: dict[str, int] = {}
         for symbol_start, group in by_start.items():
-            fetched = provider.fetch_daily_bars(sorted(group), symbol_start, end)
+            fetched = provider.fetch_bars(sorted(group), symbol_start, end, interval=self.interval)
             for symbol, frame in fetched.items():
                 counts[symbol] = self.upsert(symbol, frame)
             for symbol in group:
@@ -192,7 +232,12 @@ class BarStore:
         for symbol in symbols:
             counts.setdefault(symbol, self.read(symbol).height)
 
-        log.info("足を更新しました", updated=len(needed), total=len(symbols))
+        log.info(
+            "足を更新しました",
+            updated=len(needed),
+            total=len(symbols),
+            interval=self.interval.value,
+        )
         return counts
 
     # -- 分析 ---------------------------------------------------------------
@@ -201,7 +246,7 @@ class BarStore:
         """保存済みの全銘柄に SQL を投げる（DuckDB）。
 
         テーブル名 ``bars`` で全銘柄を横断できる。
-        列は :data:`~wbcore.data.provider.BAR_SCHEMA` に ``symbol`` を加えたもの。
+        列は :func:`~wbcore.data.provider.bar_schema` に ``symbol`` を加えたもの。
 
         Example:
             >>> store.query(
@@ -210,7 +255,7 @@ class BarStore:
         """
         import duckdb
 
-        pattern = str(self.root / "*.parquet")
+        pattern = str(self.directory / "*.parquet")
         connection = duckdb.connect()
         try:
             if not self.symbols():
@@ -232,4 +277,4 @@ class BarStore:
         )
 
 
-__all__ = ["BAR_SCHEMA", "OVERLAP_DAYS", "BarStore"]
+__all__ = ["BAR_SCHEMA", "INTRADAY_OVERLAP_DAYS", "OVERLAP_DAYS", "BarStore"]

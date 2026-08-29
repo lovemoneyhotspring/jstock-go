@@ -142,7 +142,8 @@ class UniverseConfig(BaseModel):
     #: 取引市場。1つの設定ディレクトリは1つの市場だけを扱う。
     #: 日本株と米国株を両方回すなら、設定ディレクトリを分けて別プロセスで動かす。
     market: Market = Market.JP
-    #: 足データの取得元。"yfinance"（両市場）| "webull"（米国株のみ）
+    #: 足データの取得元。:data:`wbcore.data.registry.PROVIDERS` の名前
+    #: （"yfinance" は両市場、"webull" は米国株のみ）。
     data_provider: str = "yfinance"
     symbols: list[str] = Field(default_factory=list)
     #: 銘柄リストのファイル（1行1銘柄、# はコメント）。設定ディレクトリからの相対パス。
@@ -165,8 +166,12 @@ class UniverseConfig(BaseModel):
             raise ValueError(f"topix500_symbols が symbols に含まれていません: {sorted(unknown)}")
         if self.market is not Market.JP and self.topix500_symbols:
             raise ValueError('topix500_symbols は market = "JP" のときだけ指定できます')
-        if self.data_provider not in {"yfinance", "webull"}:
-            raise ValueError(f"data_provider は yfinance か webull: {self.data_provider}")
+        from wbcore.data.registry import available as available_providers
+
+        if self.data_provider not in available_providers():
+            raise ValueError(
+                f"data_provider は {available_providers()} のいずれか: {self.data_provider}"
+            )
         if self.data_provider == "webull" and self.market is not Market.US:
             raise ValueError('data_provider = "webull" は米国株（market = "US"）専用です')
         return self

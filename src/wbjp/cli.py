@@ -76,18 +76,12 @@ def _build_broker(config, live: bool):  # type: ignore[no-untyped-def]
 
 
 def _build_provider(config: Config) -> MarketDataProvider:
-    """設定に応じた足データの取得元を作る。"""
-    from wbcore.data.yfinance_provider import YFinanceProvider
+    """設定の ``universe.data_provider`` で選んだ取得元を組み立てる。"""
+    from wbcore.data.registry import connect
 
-    market = config.file.universe.market
-    if config.file.universe.data_provider == "webull":
-        from wbcore.data.webull_provider import WebullMarketDataProvider
-
-        credentials = load_credentials(config.env)
-        return WebullMarketDataProvider(
-            credentials, config.env, config.settings.endpoints.market_data, market=market
-        )
-    return YFinanceProvider(market=market)
+    return connect(
+        config.file.universe.data_provider, config.env, market=config.file.universe.market
+    )
 
 
 def _load(config_dir: Path | None):  # type: ignore[no-untyped-def]
@@ -734,13 +728,21 @@ def strategies_list(
 def data_sync(
     days: Annotated[int, typer.Option(help="何日ぶん遡って取得するか")] = 900,
     force: Annotated[bool, typer.Option("--force", help="保存済みを無視して取り直す")] = False,
+    interval: Annotated[
+        str, typer.Option(help="足の間隔: 1d / 1h / 30m / 15m / 5m / 1m（日中足は別の場所に保存）")
+    ] = "1d",
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
 ) -> None:
     """足データを更新する（保存済みの続きだけ取得）。"""
+    from wbcore.data.provider import Interval
     from wbcore.data.store import BarStore
 
     config = _load(config_dir)
-    store = BarStore(config.settings.bars_dir)
+    try:
+        store = BarStore(config.settings.bars_dir, Interval.parse(interval))
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from None
     end = dt.date.today()
 
     symbols = list(config.file.universe.symbols)
