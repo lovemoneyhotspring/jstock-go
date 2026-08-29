@@ -164,6 +164,8 @@ uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV
 
 `run` は毎回 **「今月の目標（今日まで）− 今月の発注済み」** を銘柄ごとに計算し、差額があればその額を 1 件の成行買いにする。目標は入金日（月初の営業日）を過ぎていれば基本予算を含み、そこに今日までの増額分が積み上がる。発注済みは台帳（`data/accum-<env>.db`）から引く。この 1 本の規則で、月の途中から始めた場合（最初に注文を出せる日に全額）、月の途中で予算を増やした場合（差額だけ）、cron が止まった日があった場合（次の実行で埋まる）、同じ日に 2 回走った場合（2 回目は 0）がすべて同じ扱いになる。判断はバックテストと同じく前日までの確定足で行い、買うのは当日の価格。最終足が `max_stale_days`（既定 4 日）より古い銘柄は判定せず通知する。
 
+増額分は日ごとに判定して積み上げ、**翌週の最初の営業日（月曜、休場なら火曜以降）に 1 件でまとめて出す**。日ごとに出すと 1 件が数千円になり、最低手数料 55 円で 1.5% 取られるうえ 10 口単位の ETF では 1 単元に届かないため。単元に届かず買えなかった端数は差額として残り、次に資金が足される月曜か翌月の入金日に自動で繰り越される（台帳に残す「発注済み」は差額ではなく**株数 × 価格**）。月をまたいだ残りは、前月に実際の発注記録がある場合だけ当月の目標に足す——dry-run しかしていない月の分まで本稼働の初月に買わないため。
+
 `run` は冒頭で、前回までに送った注文の**約定状況をブローカーに照会**して台帳を更新する。「発注済み」に数えるのは生きている注文と約定した分だけで、失効・拒否の未約定分は数えない——つまり次の `run` で差額として自動的に埋め直される。未約定のまま終わった注文は通知する。台帳は `uv run accum orders`（`--check` で照会を伴う）で見られる。発注前にブローカーの見積りと買付余力を突き合わせ、足りなければ見送って通知する。株数は `投下額 ÷ 価格` を単元に切り捨て。ETF は単元が 1 株・10 株のものが多いので `[execution] lot_size_overrides` で指定する（既定の 100 株だと月の予算が届かず丸ごと見送りになる）。注文 ID は日付・銘柄・株数から決定論的に作るため、cron が二重に走っても二重買付にならない。
 
 部品は `wbcore` と共有: 足は `wbcore.data`、発注は `wbcore.broker`、登録簿の仕組みは `wbcore.registry`。積立固有なのは倍率（`accum.tactics`）・計画（`accum.plan`）・検証（`accum.simulate` / `accum.basket`）・注文化（`accum.execute`）で、どの段も単独で差し替えられる。
@@ -199,7 +201,9 @@ uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV
 
 ## ログ（後から AI に読ませる用）
 
-端末に出る整形表示とは別に、**機械が読む JSON Lines** を常に `data/logs/<app>-<env>.jsonl` に書く（1 行 1 レコード、日次ローテーション、90 日保持、秘匿情報は伏せる）。全レコードに `schema` / `ts_utc` / `run_id`（1 回の実行の識別子）/ `app` / `env` / `command` が付き、主要な出来事には安定した `code`（`accum.decision` / `accum.order` / `accum.fill` …）が付く。項目の定義は [docs/LOGGING.md](docs/LOGGING.md)。
+**ファイルに残すログは 1 箇所だけ**——`WBJP_LOG_DIR`（既定 `WBJP_DATA_DIR/logs`＝`data/logs`）。機械が読む JSONL も、cron で stderr を残す場合もここに集める。SDK が勝手に作る `webull_*_sdk.log` は抑止してあり、どこにも書かれない。
+
+端末に出る整形表示とは別に、**機械が読む JSON Lines** を常に `<WBJP_LOG_DIR>/<app>-<env>.jsonl` に書く（1 行 1 レコード、日次ローテーション、90 日保持、秘匿情報は伏せる）。全レコードに `schema` / `ts_utc` / `run_id`（1 回の実行の識別子）/ `app` / `env` / `command` が付き、主要な出来事には安定した `code`（`accum.decision` / `accum.order` / `accum.fill` …）が付く。項目の定義は [docs/LOGGING.md](docs/LOGGING.md)。
 
 ```bash
 jq -r 'select(.code == "accum.decision") | [.ts_utc, .symbol, .target, .placed, .due] | @tsv' data/logs/accum-prod.jsonl
@@ -298,8 +302,9 @@ uv run wbjp data check --config-dir config/collect --notify   # WBJP_ALERT_WEBHO
 
 ```cron
 CRON_TZ=Asia/Tokyo
-0 12,16 * * 1-5 cd /opt/wbjp && .venv/bin/wbjp data sync --config-dir config/collect --days 7 >> /var/log/wbjp/collect.log 2>&1
-15 16 * * 1-5   cd /opt/wbjp && .venv/bin/wbjp data check --config-dir config/collect --notify >> /var/log/wbjp/collect.log 2>&1
+# stderr も JSONL と同じ WBJP_LOG_DIR に残す（ログの置き場は 1 箇所）
+0 12,16 * * 1-5 cd /opt/wbjp && .venv/bin/wbjp data sync --config-dir config/collect --days 7 >> data/logs/collect.log 2>&1
+15 16 * * 1-5   cd /opt/wbjp && .venv/bin/wbjp data check --config-dir config/collect --notify >> data/logs/collect.log 2>&1
 ```
 
 `data sync` 自体が失敗したとき（取得元の障害など）も同じ Webhook に通知する。Webhook は Slack / Discord の Incoming Webhook URL を `WBJP_ALERT_WEBHOOK_URL` に置く。未設定ならエラーログに残るだけ。
@@ -479,7 +484,8 @@ WBJP_ENV=prod uv run wbjp run --live
 ```cron
 # 平日 16:30 に日次サイクルを実行
 CRON_TZ=Asia/Tokyo
-30 16 * * 1-5 cd /opt/wbjp && WBJP_ENV=prod /opt/wbjp/.venv/bin/wbjp run --live --yes >> /var/log/wbjp/run.log 2>&1
+# stderr も JSONL と同じ WBJP_LOG_DIR に残す（ログの置き場は 1 箇所）。systemd なら journald でよい
+30 16 * * 1-5 cd /opt/wbjp && WBJP_ENV=prod /opt/wbjp/.venv/bin/wbjp run --live --yes >> data/logs/wbjp-run.log 2>&1
 ```
 
 cron で詰まりやすい点:
@@ -543,7 +549,7 @@ src/accum/               積立
 
 | 箇所 | 内容 |
 |---|---|
-| `logging.py` | SDK は起動時に**自前のログハンドラとログファイル**を作り、マスクを迂回する。`harden_third_party_logging()` と `_suppress_sdk_own_logging()` で塞いでいる |
+| `logging.py` | SDK は起動時に**自前のログハンドラとログファイル**を作り、マスクを迂回する。`harden_third_party_logging()` と `suppress_sdk_own_logging()` で塞いでいる（`ApiClient` を `TradeClient` / `DataClient` に渡す前に必ず呼ぶ） |
 | `broker/webull.py` | 注文照会は**コンボ構造**（実データは入れ子の `orders` 配列）。外側だけ読むと空の注文に見える |
 | `broker/webull.py` | `TradeClient()` はコンストラクタでネットワークを叩くため遅延初期化 |
 | `jp_rules.py` | 呼値は「以下」区分、値幅制限は「未満」区分。引き方が違う |

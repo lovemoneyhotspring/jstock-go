@@ -84,6 +84,17 @@ def broker_symbol(symbol: str, market: Market) -> str:
     return symbol
 
 
+def ledger_symbol(config: AccumConfig, symbol: str) -> str:
+    """設定上の銘柄コード（``1305.T``）を台帳の表記（ブローカーの ``1305``）にする。
+
+    台帳は :class:`~wbcore.domain.models.OrderRequest` の銘柄で記録されるため
+    ブローカーの表記になる。設定の表記のまま照会すると発注済みが常に 0 に見え、
+    同じ月の予算を毎回買い直す（実際に起きかけた）。
+    """
+    market = config.market_of(symbol)
+    return broker_symbol(symbol, market) if market else symbol
+
+
 def todays_contributions(
     config: AccumConfig, bars: Mapping[str, pl.DataFrame]
 ) -> list[Contribution]:
@@ -139,7 +150,11 @@ class Pending:
 
 
 #: 銘柄と月（月初の日付）から、その月に発注済みの額を返す。台帳が実装する。
+#: 銘柄は**設定上の表記**（``1305.T``）で受ける。台帳の表記への変換は呼び出し側。
 PlacedLookup = Callable[[str, dt.date], Decimal]
+
+#: 銘柄と月から、その月に実際の発注記録があるかを返す。前月の残りを繰り越す条件。
+ActiveLookup = Callable[[str, dt.date], bool]
 
 
 def pending_contributions(
@@ -148,6 +163,7 @@ def pending_contributions(
     *,
     now: dt.datetime,
     placed: PlacedLookup | None = None,
+    active: ActiveLookup | None = None,
     max_stale_days: int = 4,
 ) -> Pending:
     """ライブの規則で「今日出すべき投下」を取り出す。
@@ -167,6 +183,11 @@ def pending_contributions(
     判断はバックテストと同じく**前日までの確定足**で行い（当日の足は途中経過）、
     買うのは当日の価格。判定用の銘柄も確定足だけ。
     最終足が ``max_stale_days`` 日より古い銘柄は判定しない（``stale`` に入れる）。
+
+    **前月の残りは当月に繰り越す。** 単元に届かず買えなかった端数や、月末に
+    積み上がった増額は「前月の目標 − 前月の発注済み」として残る。``active`` が
+    前月に実際の発注があったと言うときだけ、その残りを当月の目標に足す
+    （動いていなかった月や dry-run だけの月の分まで買わないため）。
     """
     out: list[Contribution] = []
     stale: dict[str, dt.date] = {}
@@ -201,15 +222,18 @@ def pending_contributions(
             if this_month.height == 0:
                 continue  # 今月の確定足がまだ無い（月初の初日）
             target = Decimal(str(int(this_month["amount"].sum())))
+            carried = _carry_over(plan, symbol, month, lookup, active)
             already = lookup(symbol, month)
-            due = target - already
+            due = target + carried - already
             if due <= 0:
                 continue
             last = this_month.row(-1, named=True)
             extras = int(this_month["extra"].sum())
             reason = (
                 f"今月の目標 {target:,.0f}（基本 {int(this_month['base'].sum()):,}"
-                f"＋増額 {extras:,}）− 発注済み {already:,.0f}"
+                f"＋増額 {extras:,}）"
+                + (f"＋前月からの繰り越し {carried:,.0f}" if carried else "")
+                + f"− 発注済み {already:,.0f}"
             )
             out.append(
                 Contribution(
@@ -222,11 +246,29 @@ def pending_contributions(
                     reason=reason,
                     tactic=tactic,
                     month=month,
-                    target=target,
+                    target=target + carried,
                     placed=already,
                 )
             )
     return Pending(out, stale)
+
+
+def _carry_over(
+    plan: pl.DataFrame,
+    symbol: str,
+    month: dt.date,
+    placed: PlacedLookup,
+    active: ActiveLookup | None,
+) -> Decimal:
+    """前月の「目標 − 発注済み」の残り。前月に発注記録が無ければ 0。"""
+    if active is None:
+        return Decimal(0)
+    previous = (month - dt.timedelta(days=1)).replace(day=1)
+    if not active(symbol, previous):
+        return Decimal(0)
+    last_month = plan.filter((pl.col("date") >= previous) & (pl.col("date") < month))
+    target = Decimal(str(int(last_month["amount"].sum())))
+    return max(Decimal(0), target - placed(symbol, previous))
 
 
 @dataclass(frozen=True, slots=True)

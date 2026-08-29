@@ -160,6 +160,19 @@ class Ledger:
         ).fetchall()
         return sum((self._row(r).effective_amount for r in rows), start=Decimal(0))
 
+    def has_orders(self, symbol: str, month: dt.date) -> bool:
+        """その銘柄・その月に**ブローカーへ送った**記録があるか（dry-run は数えない）。
+
+        前月の残り（目標 − 発注済み）を当月に繰り越すかの判断に使う。
+        dry-run しかしていない月や、動いていなかった月の分まで繰り越すと、
+        本稼働の初月に前月ぶんを二重に買うことになる。
+        """
+        row = self._connection.execute(
+            "SELECT 1 FROM orders WHERE symbol = ? AND plan_month = ? AND status != ? LIMIT 1",
+            (symbol, month.replace(day=1).isoformat(), DRY_RUN_STATUS),
+        ).fetchone()
+        return row is not None
+
     def open_orders(self) -> list[LedgerOrder]:
         """結果が確定していない注文（ブローカーへの照会が要る）。"""
         rows = self._connection.execute(

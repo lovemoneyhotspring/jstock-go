@@ -102,7 +102,28 @@ def test_extra_per_month_does_not_exceed_budget_share() -> None:
     """月をまたいで下降配列が続いても、増額は月あたり基本の3倍を超えない。"""
     plan = build_plan(_long("down", 900))
     per_month = plan.group_by(pl.col("date").dt.truncate("1mo")).agg(pl.col("extra").sum())
-    assert per_month["extra"].max() <= 75_000
+    # 積み上げは月あたり 3 倍が上限。翌週の月曜にまとめて出すため、月末の週の分が
+    # 翌月にずれて 1 週ぶん（約 1/4）多く見える月はあるが、平均では超えない
+    assert per_month["extra"].max() <= 75_000 * 1.3
+    assert per_month["extra"].mean() <= 75_000
+
+
+def test_extras_are_placed_on_the_first_session_of_the_next_week() -> None:
+    """日ごとの増額は翌週の最初の営業日（月曜）にまとまる。月曜が休場なら火曜。"""
+    plan = build_plan(_long("down", 400))
+    boosted = plan.filter(pl.col("extra") > 0)
+    assert boosted.height > 0
+    assert (boosted["date"].dt.weekday() == 1).all()  # 1 = 月曜
+    assert boosted["extra"].median() > 5_000  # 1 日ぶん（数千円）ではなく 1 週ぶん
+
+    # 月曜を休場にする → その週の増額は火曜に出る
+    bars = _long("down", 400)
+    holiday = boosted["date"][3]
+    without = bars.filter(pl.col("date") != holiday)
+    moved = build_plan(without).filter(pl.col("extra") > 0)
+    tuesday = holiday + dt.timedelta(days=1)
+    assert tuesday in set(moved["date"].to_list())
+    assert holiday not in set(moved["date"].to_list())
 
 
 def test_reason_is_always_filled() -> None:

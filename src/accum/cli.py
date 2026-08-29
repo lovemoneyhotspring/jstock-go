@@ -13,8 +13,9 @@ from __future__ import annotations
 import datetime as dt
 import re
 import sys
+from decimal import Decimal
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
@@ -25,6 +26,12 @@ from accum.config import DEFAULT_CONFIG_DIR, FILENAME, AccumConfig, load
 from wbcore.clock import fmt, now_utc, today_utc
 from wbcore.logging import bind_run_context, configure_logging, get_logger
 from wbcore.settings import AppSettings, allows_live_orders, describe_mode
+
+if TYPE_CHECKING:
+    from accum.execute import Contribution
+    from accum.ledger import Ledger
+    from wbcore.broker.base import Broker
+    from wbcore.domain.models import OrderAck, OrderRequest
 
 app = typer.Typer(
     help="積立（ドル平均法＋下落局面での増額）",
@@ -355,6 +362,73 @@ def plan(
         )
 
 
+class UnconfirmedOrderError(Exception):
+    """発注を送ったが、届いたかどうか分からない（応答が返らなかった）。
+
+    台帳には送信中のまま残っている。次の ``run`` は冒頭の照会で結果を取りに行き、
+    ブローカーに無ければ送信中のまま「発注済み」に数え続ける——二重買付より
+    買い漏れの方がましなため。``accum orders --check`` で確かめて、無ければ
+    台帳の状態を手で REJECTED にする。
+    """
+
+    def __init__(self, client_order_id: str, cause: Exception) -> None:
+        super().__init__(f"{cause}（client_order_id={client_order_id}）")
+        self.client_order_id = client_order_id
+
+
+def _place_recorded(
+    broker: Broker, ledger: Ledger, request: OrderRequest, contribution: Contribution
+) -> OrderAck:
+    """台帳に**先に**記録してから発注する。
+
+    送信後・記録前にプロセスが落ちる、あるいは注文は届いたのに応答がタイムアウトで
+    例外になると、次の ``run`` が同じ注文を送り直す。先に「送信中」で記録して
+    おけば :meth:`~accum.ledger.Ledger.was_placed` が真になり再送されない。
+
+    - 受理された → その状態で上書き
+    - 明確に拒否された（``OrderRejectedError``）→ REJECTED。次回の差額で埋め直す
+    - それ以外（通信断・タイムアウト）→ 送信中のまま残し :class:`UnconfirmedOrderError`
+    """
+    from wbcore.broker.base import BrokerError, OrderRejectedError
+    from wbcore.domain.models import OrderStatus
+
+    c = contribution
+    amount = _notional(request, c)
+    ledger.record(
+        request,
+        OrderStatus.PENDING.value,
+        plan_month=c.month,
+        amount=amount,
+        market=c.market,
+    )
+    try:
+        ack = broker.place(request)
+    except OrderRejectedError:
+        ledger.update_status(request.client_order_id, OrderStatus.REJECTED)
+        raise
+    except BrokerError as exc:
+        raise UnconfirmedOrderError(request.client_order_id, exc) from exc
+    ledger.record(
+        request,
+        ack.status.value,
+        ack.broker_order_id,
+        plan_month=c.month,
+        amount=amount,
+        market=c.market,
+    )
+    return ack
+
+
+def _notional(request: OrderRequest, contribution: Contribution) -> Decimal:
+    """台帳に「発注済み」として残す額＝**株数 × 判断に使った価格**。
+
+    差額（``contribution.amount``）をそのまま書くと、単元に丸めて買えなかった
+    端数まで発注済みに数えられ、二度と買われない。実際に買う額を書けば
+    端数は次回の差額に残り、次の月曜や翌月の入金日に繰り越される。
+    """
+    return request.quantity * contribution.close
+
+
 @app.command("run")
 def run(
     live: Annotated[
@@ -378,8 +452,36 @@ def run(
     既定は dry-run。実発注には --live が必要で、本番では WBJP_ENV=prod も
     同時に必要。cron から回すときは --yes も付ける。
     """
+    from wbcore.notify import alert
+
+    try:
+        _run(
+            live=live,
+            no_sync=no_sync,
+            ignore_window=ignore_window,
+            yes=yes,
+            config_dir=config_dir,
+        )
+    except typer.Exit, typer.Abort:
+        raise
+    except Exception as exc:
+        # cron / systemd では誰も端末を見ていない。理由を通知してから落とす
+        log.exception("積立の実行が異常終了", code="accum.crash", error=str(exc))
+        alert("積立: 実行が異常終了", f"{type(exc).__name__}: {exc}")
+        raise typer.Exit(1) from exc
+
+
+def _run(
+    *,
+    live: bool,
+    no_sync: bool,
+    ignore_window: bool,
+    yes: bool,
+    config_dir: Path | None,
+) -> None:
     from accum.execute import (
         build_orders,
+        ledger_symbol,
         pending_contributions,
         resolve_lot_sizes,
         should_fallback_to_limit,
@@ -387,7 +489,7 @@ def run(
         to_order,
     )
     from accum.ledger import DRY_RUN_STATUS, Ledger
-    from wbcore.broker.base import Broker, BrokerError
+    from wbcore.broker.base import BrokerError
     from wbcore.broker.registry import connect
     from wbcore.domain.models import Market, OrderType
     from wbcore.notify import alert
@@ -444,11 +546,15 @@ def run(
                 f"積立: {len(lost)} 件の注文が未約定のまま終了",
                 "\n".join(c.describe() for c in lost),
             )
+
     pending = pending_contributions(
         config,
         bars,
         now=now,
-        placed=ledger.placed_amount,
+        # 台帳はブローカーの表記（452A）、設定は足の表記（452A.T）。揃えないと
+        # 発注済みが常に 0 に見え、同じ月の予算を毎回買い直す
+        placed=lambda symbol, month: ledger.placed_amount(ledger_symbol(config, symbol), month),
+        active=lambda symbol, month: ledger.has_orders(ledger_symbol(config, symbol), month),
         max_stale_days=config.execution.max_stale_days,
     )
     if pending.stale:
@@ -544,7 +650,7 @@ def run(
                     item.request,
                     DRY_RUN_STATUS,
                     plan_month=c.month,
-                    amount=c.amount,
+                    amount=_notional(item.request, c),
                     market=c.market,
                 )
                 status[key] = "[yellow]dry-run[/yellow]"
@@ -563,7 +669,7 @@ def run(
                     continue
                 request = item.request
                 try:
-                    ack = broker.place(request)
+                    _place_recorded(broker, ledger, request, c)
                 except BrokerError as exc:
                     if not (
                         config.execution.fallback_to_limit
@@ -586,21 +692,25 @@ def run(
                         symbol=c.symbol,
                         limit_price=str(request.limit_price),
                     )
-                    ack = broker.place(request)
+                    _place_recorded(broker, ledger, request, c)
                     status[key] = f"[green]発注[/green]（指値 {request.limit_price:,} に切替）"
+            except UnconfirmedOrderError as exc:
+                # 送ったかどうか分からない。台帳には送信中として残してあるので
+                # 次回は再送されない（二重買付より買い漏れの方がまし）。人が確かめる
+                status[key] = f"[red]要確認[/red] {exc}"
+                failures.append(f"{key}: {exc}")
+                log.error(
+                    "発注の結果を確認できず",
+                    code="accum.unconfirmed",
+                    symbol=c.symbol,
+                    client_order_id=exc.client_order_id,
+                    error=str(exc),
+                )
             except BrokerError as exc:
                 status[key] = f"[red]失敗[/red] {exc}"
                 failures.append(f"{key}: {exc}")
                 log.error("積立の発注に失敗", symbol=c.symbol, error=str(exc))
             else:
-                ledger.record(
-                    request,
-                    ack.status.value,
-                    ack.broker_order_id,
-                    plan_month=c.month,
-                    amount=c.amount,
-                    market=c.market,
-                )
                 status.setdefault(key, "[green]発注[/green]")
     finally:
         ledger.close()
@@ -656,6 +766,9 @@ def run(
             c.reason,
         )
     console.print(table)
+    if failures:
+        # 通知は出しているが、systemd / cron にも失敗として見せる
+        raise typer.Exit(1)
 
 
 @app.command("orders")
@@ -673,7 +786,7 @@ def orders(
     """
     from accum.execute import sync_order_status
     from accum.ledger import Ledger
-    from wbcore.broker.base import Broker, BrokerError
+    from wbcore.broker.base import BrokerError
     from wbcore.broker.registry import connect
     from wbcore.clock import fmt_iso
     from wbcore.domain.models import Market

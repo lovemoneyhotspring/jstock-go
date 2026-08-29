@@ -15,6 +15,15 @@
 
 増額分の原資は新規資金（賞与・余剰収入）を想定している。積立予算を
 取り置いて作ると待機が発生し、増額の利益をそのまま打ち消す。
+
+**増額分は翌週の最初の営業日にまとめて出す**
+
+判定は日次のまま、その日ぶんの増額を積み上げておき、翌週の最初の営業日
+（月曜。休場なら火曜以降）に 1 件で出す。日ごとに出すと 1 件が数千円に
+なり、Webull の最低手数料（5 万円以下 55 円）で 1.5% 取られるうえ、
+10 口単位の ETF では 1 単元に届かない。2000 年以降の指数で検証すると、
+週でまとめても平均取得単価は日次と ±0.2% しか変わらず、手数料は半減する
+（月でまとめると「月の最初」に寄った場合 +0.9% 悪化するので週が上限）。
 """
 
 from __future__ import annotations
@@ -117,8 +126,9 @@ def build_plan(
         ((pl.col(MULTIPLIER) - 1.0) * budget / pl.col("_days_in_month"))
         .floor()
         .cast(pl.Int64)
-        .alias("extra"),
+        .alias("_accrued"),
     )
+    plan = _defer_extras_to_next_week(plan)
 
     return plan.with_columns(
         (pl.col("base") + pl.col("extra")).alias("amount"),
@@ -126,9 +136,38 @@ def build_plan(
     ).select(PLAN_COLUMNS)
 
 
+def _defer_extras_to_next_week(plan: pl.DataFrame) -> pl.DataFrame:
+    """日ごとに積み上げた増額（``_accrued``）を、翌週の最初の営業日に 1 件でまとめる。
+
+    週は月曜始まり。翌週の月曜が休場なら、その週で最初に足のある日に出す。
+    足の最終週に積み上がった分は、まだ出す日が来ていないので計画には現れない
+    （ライブでは翌週の足が増えた時点で目標に入る）。
+    """
+    next_week = (pl.col("date").dt.truncate("1w") + pl.duration(weeks=1)).alias("_next_week")
+    accrued = (
+        plan.filter(pl.col("_accrued") > 0)
+        .select(next_week, "_accrued")
+        .group_by("_next_week")
+        .agg(pl.col("_accrued").sum().alias("extra"), pl.len().alias("_extra_days"))
+        .sort("_next_week")
+    )
+    sessions = plan.select(pl.col("date").alias("_session")).sort("_session")
+    scheduled = (
+        accrued.join_asof(sessions, left_on="_next_week", right_on="_session", strategy="forward")
+        .drop_nulls("_session")
+        .group_by("_session")
+        .agg(pl.col("extra").sum(), pl.col("_extra_days").sum())
+        .rename({"_session": "date"})
+    )
+    return plan.join(scheduled, on="date", how="left").with_columns(
+        pl.col("extra").fill_null(0).cast(pl.Int64),
+        pl.col("_extra_days").fill_null(0).cast(pl.Int64),
+    )
+
+
 def _reason() -> pl.Expr:
     """なぜその金額になったかを日本語で残す。障害時の調査で効く。"""
-    boosted = pl.format("{}倍で増額 {} 円", pl.col(MULTIPLIER).round(2), "extra")
+    boosted = pl.format("先週の増額 {} 円（下降 {} 日ぶん）", "extra", "_extra_days")
     return (
         pl.when((pl.col("base") > 0) & (pl.col("extra") > 0))
         .then(pl.format("入金日 {} 円＋", "base") + boosted)

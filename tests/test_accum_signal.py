@@ -126,9 +126,12 @@ def test_todays_contributions_judge_with_the_signal_symbol() -> None:
         }
     )
     bars = {"T": _bars(_flat(n), start=START), "S": _bars(_falling(n), start=START)}
+    # 増額は翌週の月曜にまとまるので、最終日を月曜に揃える
+    last_monday = bars["T"].filter(pl.col("date").dt.weekday() == 1)["date"].max()
+    bars = {k: f.filter(pl.col("date") <= last_monday) for k, f in bars.items()}
     (c,) = todays_contributions(config, bars)
     assert c.symbol == "T" and c.multiplier == 4.0 and c.close == Decimal(100)
-    assert c.amount > 0  # 下降配列なので増額分が毎日出る
+    assert c.amount > 0  # 下降配列なので先週ぶんの増額が月曜に出る
     # 判定用の足が無ければ倍率 1（増額なし）。最終日が入金日でなければ投下も無い
     assert todays_contributions(config, {"T": bars["T"]}) == []
 
