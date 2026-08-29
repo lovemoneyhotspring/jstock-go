@@ -103,7 +103,7 @@ def parse_instruments(payload: Any) -> list[WatchlistItem]:
     return out
 
 
-#: 取引所コード → 市場。実機の値が分かり次第ここに足す。
+#: 取引所コード → 市場。実機で見た値（2026-08-29: PSE / INDEXNASDAQ / SP）を含む。
 _JP_EXCHANGES = frozenset({"TSE", "TYO", "JPX", "XJPX", "XTKS", "TKS", "SPR", "NGO", "FKA"})
 _US_EXCHANGES = frozenset(
     {
@@ -119,16 +119,44 @@ _US_EXCHANGES = frozenset(
         "NMS",
         "NGM",
         "NCM",
+        "PSE",  # NYSE Arca（旧 Pacific Exchange）。米国 ETF はここに載ることが多い
     }
 )
 
+#: ウォッチリストの指数コード → yfinance のティッカー。指数は市場に属さないが、
+#: 積立の判定用（signal_symbol）に使えるので、どの収集設定でも蓄積する。
+INDEX_TICKERS: dict[str, str] = {
+    "SPX": "^GSPC",
+    "IXIC": "^IXIC",
+    "DJI": "^DJI",
+    "NDX": "^NDX",
+    "RUT": "^RUT",
+    "VIX": "^VIX",
+    "N225": "^N225",
+    "NKY": "^N225",
+    "TOPIX": "^TPX",
+}
+
+
+def is_index(item: WatchlistItem) -> bool:
+    """指数か。取引所コードが INDEX で始まる（INDEXNASDAQ 等）か、既知の指数コード。"""
+    code = item.exchange.upper()
+    return code.startswith("INDEX") or code == "SP" or item.symbol.upper() in INDEX_TICKERS
+
+
+def index_ticker(item: WatchlistItem) -> str:
+    """指数を yfinance の表記にする。対応表に無ければ ``^`` を付ける。"""
+    return INDEX_TICKERS.get(item.symbol.upper(), f"^{item.symbol.upper().lstrip('^')}")
+
 
 def market_of(item: WatchlistItem) -> Market | None:
-    """銘柄がどの市場のものか。
+    """銘柄がどの市場のものか。指数は None。
 
     取引所コードで決め、未知のコードなら銘柄コードの形で推定する
     （東証は数字始まりの 4 桁英数字、米国は英字）。どちらでもなければ None。
     """
+    if is_index(item):
+        return None
     code = item.exchange.upper()
     if code in _JP_EXCHANGES:
         return Market.JP

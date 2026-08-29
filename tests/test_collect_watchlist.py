@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from wbcore.data.webull_watchlist import Watchlist, WatchlistItem, market_of
+from wbcore.data.webull_watchlist import (
+    Watchlist,
+    WatchlistItem,
+    index_ticker,
+    is_index,
+    market_of,
+)
 from wbcore.domain.models import Market
 from wbjp.cli import _collect_symbols
 from wbjp.config import load_config
@@ -21,6 +27,13 @@ def test_market_of_uses_exchange_code_then_symbol_shape() -> None:
     assert market_of(WatchlistItem("BRK.B")) is Market.US
     assert market_of(WatchlistItem("MSFT")) is Market.US
     assert market_of(WatchlistItem("^N225")) is None
+    # 実機で見た値: 米国 ETF は PSE（NYSE Arca）、指数は INDEXNASDAQ / SP
+    assert market_of(WatchlistItem("SCHD", exchange="PSE")) is Market.US
+    assert market_of(WatchlistItem("IXIC", exchange="INDEXNASDAQ")) is None
+    assert is_index(WatchlistItem("SPX", exchange="SP"))
+    assert index_ticker(WatchlistItem("SPX", exchange="SP")) == "^GSPC"
+    assert index_ticker(WatchlistItem("IXIC", exchange="INDEXNASDAQ")) == "^IXIC"
+    assert index_ticker(WatchlistItem("FOO", exchange="INDEXX")) == "^FOO"
 
 
 def _config(tmp_path: Path, *, watchlists: str) -> Path:
@@ -61,6 +74,7 @@ def test_watchlist_symbols_join_the_universe_and_are_persisted(
                     WatchlistItem("452A", "iShares", "TSE"),
                     WatchlistItem("6758", "ソニー", "TSE"),  # 既にある
                     WatchlistItem("AAPL", "Apple", "NASDAQ"),  # 別市場
+                    WatchlistItem("SPX", "S&P 500", "SP"),  # 指数はどの市場でも蓄積
                 ],
             ),
             Watchlist("2", "米国株", items=[WatchlistItem("MSFT", "", "NASDAQ")]),
@@ -68,7 +82,7 @@ def test_watchlist_symbols_join_the_universe_and_are_persisted(
     )
     config = load_config(_config(tmp_path, watchlists='["*"]'))
     symbols = _collect_symbols(config)
-    assert symbols == ["7203", "6758", "452A"]
+    assert symbols == ["7203", "6758", "452A", "^GSPC"]
     # universe.txt に書き足され、次回は API が落ちても残る
     text = (tmp_path / "universe.txt").read_text(encoding="utf-8")
     assert "6758" in text and "452A" in text and "AAPL" not in text

@@ -255,4 +255,9 @@ def harden_third_party_logging() -> list[str]:
             logger.addFilter(RedactingFilter())
             hardened.append(name)
 
+    # SDK の初期化はトークン確認の結果を INFO で出す（"_check_token_enable result
+    # is False"）。運用ログには意味が無く、しかも最初の 1 行は SDK が自前の
+    # ハンドラを付けた直後に出るためマスク経路を通らない。レベルで落とす。
+    logging.getLogger("webull.core.http.initializer").setLevel(logging.WARNING)
+
     return hardened

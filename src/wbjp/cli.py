@@ -106,6 +106,8 @@ def _collect_symbols(config: Config) -> list[str]:
     from wbcore.data.webull_watchlist import (
         WatchlistItem,
         WebullWatchlists,
+        index_ticker,
+        is_index,
         market_of,
         write_universe,
     )
@@ -125,18 +127,19 @@ def _collect_symbols(config: Config) -> list[str]:
     picked: list[WatchlistItem] = []
     skipped: list[str] = []
     for item in (item for w in chosen for item in w.items):
-        market = market_of(item)
-        if market is universe.market:
-            if item.symbol not in symbols and item.symbol not in [i.symbol for i in picked]:
-                picked.append(item)
-        else:
-            skipped.append(f"{item.symbol}({item.exchange or market or '?'})")
+        if is_index(item):
+            # 指数は市場に属さない。積立の判定用に使えるので yfinance の表記で蓄積する
+            item = WatchlistItem(index_ticker(item), item.name, item.exchange, item.instrument_id)
+        elif market_of(item) is not universe.market:
+            skipped.append(f"{item.symbol}({item.exchange or '?'})")
+            continue
+        if item.symbol not in symbols and item.symbol not in [i.symbol for i in picked]:
+            picked.append(item)
     if skipped:
         console.print(f"[dim]この市場ではないので除外: {', '.join(skipped)}[/dim]")
     if picked:
-        console.print(
-            f"[green]ウォッチリストから {len(picked)} 銘柄を追加: {', '.join(i.symbol for i in picked)}[/green]"
-        )
+        added = ", ".join(f"{i.symbol}({i.exchange})" if i.exchange else i.symbol for i in picked)
+        console.print(f"[green]ウォッチリストから {len(picked)} 銘柄を追加: {added}[/green]")
     if universe.symbols_file:
         target = config.settings.config_dir / universe.symbols_file
         write_universe(target, picked, source="/".join(w.name for w in chosen), merge_with=target)
