@@ -229,7 +229,12 @@ base_interval = "1m"   # 取り込みの基準。5分足・1時間足・日足�
 
 ### 収集専用の設定（[`config/collect/`](config/collect/)）
 
-将来売買する可能性のある銘柄は、戦略を持たない設定で足だけ蓄積しておく。`universe.txt` に銘柄を書き足すだけで、その日から蓄積が始まる。取得元は `data_provider` で切り替えられ、基準足（1 分足）に対応しない取得元でも日足は必ず揃う。
+将来売買する可能性のある銘柄は、戦略を持たない設定で足だけ蓄積しておく。`universe.txt` に銘柄を書き足すだけで、その日から蓄積が始まる。Webull アプリのマイウォッチリストから流し込むこともできる：
+
+```bash
+uv run wbjp data watchlist                                                  # リストと中身を表示
+uv run wbjp data watchlist --name 日本株 --export config/collect/universe.txt --merge   # 既存を残して足す
+```取得元は `data_provider` で切り替えられ、基準足（1 分足）に対応しない取得元でも日足は必ず揃う。
 
 ```bash
 uv run wbjp data sync   --config-dir config/collect --days 7

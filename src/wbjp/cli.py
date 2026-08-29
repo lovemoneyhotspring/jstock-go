@@ -845,6 +845,68 @@ def data_check(
     raise typer.Exit(1)
 
 
+@data_app.command("watchlist")
+def data_watchlist(
+    export: Annotated[
+        Path | None, typer.Option(help="銘柄リスト（universe.txt）として書き出す先")
+    ] = None,
+    name: Annotated[
+        str | None, typer.Option(help="書き出すウォッチリストの名前。省略時は全リストをまとめる")
+    ] = None,
+    merge: Annotated[
+        bool, typer.Option("--merge", help="書き出し先に既にある銘柄を残して足す（既定は上書き）")
+    ] = False,
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+) -> None:
+    """Webull のマイウォッチリストを表示する。--export で収集用の銘柄リストに書き出す。
+
+    アプリで気になった銘柄をウォッチリストに入れておけば、そのまま
+    `config/collect/universe.txt` に流し込んで足を蓄積し始められる。
+    """
+    from wbcore.data.webull_watchlist import WebullWatchlists, write_universe
+
+    config = load_config(config_dir)
+    try:
+        lists = WebullWatchlists.connect(config.env).lists()
+    except Exception as exc:
+        console.print(f"[red]ウォッチリストを取得できませんでした: {exc}[/red]")
+        raise typer.Exit(1) from None
+
+    if not lists:
+        console.print(f"[yellow]ウォッチリストがありません（{config.env.value}）[/yellow]")
+        raise typer.Exit(1)
+
+    for w in lists:
+        table = Table(title=f"{w.name}（{len(w.items)} 銘柄）", title_justify="left")
+        for column in ("銘柄", "名称", "取引所"):
+            table.add_column(column)
+        for item in w.items:
+            table.add_row(item.symbol, item.name, item.exchange)
+        console.print(table)
+
+    if export is None:
+        return
+    chosen = [w for w in lists if name is None or w.name == name]
+    if not chosen:
+        console.print(
+            f"[red]ウォッチリスト {name!r} がありません。ある名前: {[w.name for w in lists]}[/red]"
+        )
+        raise typer.Exit(1)
+    seen: set[str] = set()
+    unique = []
+    for item in (item for w in chosen for item in w.items):
+        if item.symbol not in seen:
+            seen.add(item.symbol)
+            unique.append(item)
+    written = write_universe(
+        export,
+        unique,
+        source=name or "全リスト",
+        merge_with=export if merge else None,
+    )
+    console.print(f"\n[green]{export} に {len(written)} 銘柄を書き出しました[/green]")
+
+
 @data_app.command("status")
 def data_status(
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
