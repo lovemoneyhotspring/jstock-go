@@ -547,10 +547,26 @@ def _run(
                 "\n".join(c.describe() for c in lost),
             )
 
+    allowed, reason = allows_live_orders(settings.env, live, kill_switch=config.kill_switch)
+
+    def started(symbol: str) -> dt.date:
+        """積立の開始日。初めて本発注に来た日を台帳に残す（dry-run は確定させない）。"""
+        from wbcore.clock import to_zone
+
+        key = ledger_symbol(config, symbol)
+        day = ledger.started_on(key)
+        if day is None:
+            market = config.market_of(symbol)
+            day = to_zone(now, market.timezone if market else None).date()
+            if allowed:
+                ledger.mark_started(key, day)
+        return day
+
     pending = pending_contributions(
         config,
         bars,
         now=now,
+        started=started,
         # 台帳はブローカーの表記（452A）、設定は足の表記（452A.T）。揃えないと
         # 発注済みが常に 0 に見え、同じ月の予算を毎回買い直す
         placed=lambda symbol, month: ledger.placed_amount(ledger_symbol(config, symbol), month),
@@ -618,8 +634,6 @@ def _run(
         order_type=OrderType(config.execution.order_type.upper()),
         limit_offset=config.execution.limit_offset,
     )
-    allowed, reason = allows_live_orders(settings.env, live, kill_switch=config.kill_switch)
-
     if allowed and settings.env.is_production and not yes:
         console.print("[bold red]本番環境で実際に発注します[/bold red]")
         # cron には stdin が無い。ここで確認を求めると Abort になるだけで、

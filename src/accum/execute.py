@@ -156,6 +156,9 @@ PlacedLookup = Callable[[str, dt.date], Decimal]
 #: 銘柄と月から、その月に実際の発注記録があるかを返す。前月の残りを繰り越す条件。
 ActiveLookup = Callable[[str, dt.date], bool]
 
+#: 銘柄から積立の開始日を返す。None なら日割りしない（開始日を管理しない呼び出し）。
+StartedLookup = Callable[[str], dt.date | None]
+
 
 def pending_contributions(
     config: AccumConfig,
@@ -164,6 +167,7 @@ def pending_contributions(
     now: dt.datetime,
     placed: PlacedLookup | None = None,
     active: ActiveLookup | None = None,
+    started: StartedLookup | None = None,
     max_stale_days: int = 4,
 ) -> Pending:
     """ライブの規則で「今日出すべき投下」を取り出す。
@@ -188,6 +192,11 @@ def pending_contributions(
     積み上がった増額は「前月の目標 − 前月の発注済み」として残る。``active`` が
     前月に実際の発注があったと言うときだけ、その残りを当月の目標に足す
     （動いていなかった月や dry-run だけの月の分まで買わないため）。
+
+    **開始月は残り日数で日割りする。** ``started`` が返す開始日がその月の途中なら、
+    基本予算 × （開始日から月末までの暦日数 ÷ その月の暦日数）を目標にする
+    （25,000 円で残り 15/30 日なら 12,500 円）。開始日より前に積み上がった増額も
+    数えない。翌月からは通常どおり全額。
     """
     out: list[Contribution] = []
     stale: dict[str, dt.date] = {}
@@ -221,17 +230,20 @@ def pending_contributions(
             this_month = plan.filter(pl.col("date") >= month)
             if this_month.height == 0:
                 continue  # 今月の確定足がまだ無い（月初の初日）
-            target = Decimal(str(int(this_month["amount"].sum())))
+            base_target, extras, prorated = _month_target(
+                this_month, config.monthly_budget, month, started(symbol) if started else None
+            )
+            target = base_target + extras
             carried = _carry_over(plan, symbol, month, lookup, active)
             already = lookup(symbol, month)
             due = target + carried - already
             if due <= 0:
                 continue
             last = this_month.row(-1, named=True)
-            extras = int(this_month["extra"].sum())
             reason = (
-                f"今月の目標 {target:,.0f}（基本 {int(this_month['base'].sum()):,}"
-                f"＋増額 {extras:,}）"
+                f"今月の目標 {target:,.0f}（基本 {base_target:,.0f}"
+                + (f"〔{prorated}〕" if prorated else "")
+                + f"＋増額 {extras:,.0f}）"
                 + (f"＋前月からの繰り越し {carried:,.0f}" if carried else "")
                 + f"− 発注済み {already:,.0f}"
             )
@@ -251,6 +263,34 @@ def pending_contributions(
                 )
             )
     return Pending(out, stale)
+
+
+def _month_target(
+    this_month: pl.DataFrame, budget: Decimal, month: dt.date, started: dt.date | None
+) -> tuple[Decimal, Decimal, str]:
+    """今月の目標を（基本, 増額, 日割りの説明）で返す。
+
+    基本は入金日の足が確定していれば予算の全額。開始日が今月の途中なら
+    残り暦日数で日割りする（開始日を含む）。増額は開始日以降に出す分だけ。
+    """
+    payday_passed = int(this_month["base"].sum()) > 0
+    in_start_month = started is not None and started.replace(day=1) == month and started.day > 1
+    scoped = this_month.filter(pl.col("date") >= started) if in_start_month else this_month
+    extras = Decimal(str(int(scoped["extra"].sum())))
+    if not payday_passed:
+        return Decimal(0), extras, ""
+    if not in_start_month:
+        return Decimal(str(int(budget))), extras, ""
+    assert started is not None
+    days = _days_in_month(month)
+    remaining = days - started.day + 1
+    base = Decimal(int(budget * remaining / days))
+    return base, extras, f"{started:%-m/%-d} 開始、残り {remaining}/{days} 日で日割り"
+
+
+def _days_in_month(month: dt.date) -> int:
+    following = (month.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+    return (following - month.replace(day=1)).days
 
 
 def _carry_over(

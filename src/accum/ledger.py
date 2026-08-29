@@ -99,6 +99,11 @@ class Ledger:
             " reason TEXT,"
             " placed_at TEXT NOT NULL)"
         )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS accumulation ("
+            " symbol TEXT PRIMARY KEY,"
+            " started_on TEXT NOT NULL)"
+        )
         self._migrate()
         self._connection.commit()
 
@@ -186,6 +191,26 @@ class Ledger:
             "SELECT * FROM orders ORDER BY placed_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [self._row(r) for r in rows]
+
+    # -- 開始日 -------------------------------------------------------------
+
+    def started_on(self, symbol: str) -> dt.date | None:
+        """その銘柄の積立を始めた日。まだ本発注に至っていなければ None。
+
+        開始月の基本予算を残り日数で日割りするために使う。
+        """
+        row = self._connection.execute(
+            "SELECT started_on FROM accumulation WHERE symbol = ?", (symbol,)
+        ).fetchone()
+        return dt.date.fromisoformat(row["started_on"]) if row else None
+
+    def mark_started(self, symbol: str, day: dt.date) -> None:
+        """開始日を記録する。すでにあれば変えない（最初の日が開始日）。"""
+        self._connection.execute(
+            "INSERT OR IGNORE INTO accumulation (symbol, started_on) VALUES (?, ?)",
+            (symbol, day.isoformat()),
+        )
+        self._connection.commit()
 
     # -- 書き込み -----------------------------------------------------------
 
