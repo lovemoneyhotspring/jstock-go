@@ -15,6 +15,7 @@ import datetime as dt
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from wbcore.clock import today_utc
 from wbcore.data.provider import Interval
 from wbcore.data.store import BarStore
 
@@ -66,7 +67,7 @@ def check(
     Args:
         lookback_days: 穴を探す範囲（暦日）。古い穴は今さら埋まらないので見ない。
     """
-    today = today or dt.date.today()
+    today = today or today_utc()
     since = today - dt.timedelta(days=lookback_days)
     daily_store = BarStore(root, Interval.D1)
     out: list[Coverage] = []

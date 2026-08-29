@@ -28,6 +28,7 @@ from decimal import Decimal
 import polars as pl
 
 from wbcore.broker.base import Broker, BrokerError
+from wbcore.clock import today_utc
 from wbcore.data.provider import MarketDataProvider
 from wbcore.data.store import BarStore
 from wbcore.domain.market_rules import rules_for
@@ -165,7 +166,7 @@ class LiveRunner:
             as_of: 判断の基準日。既定は保存済みの最新取引日。
         """
         allowed, reason = self.config.allows_live_orders(live)
-        run_id = run_id or f"{dt.date.today():%Y%m%d}-{uuid.uuid4().hex[:8]}"
+        run_id = run_id or f"{today_utc():%Y%m%d}-{uuid.uuid4().hex[:8]}"
 
         symbols = self.config.file.universe.symbols
         if not symbols:
@@ -174,7 +175,7 @@ class LiveRunner:
         # キルスイッチは他の何よりも先に効かせる
         if self.config.file.risk.kill_switch:
             log.error("キルスイッチが有効なため、サイクルを中止します")
-            return CycleResult(run_id, as_of or dt.date.today(), False, reason)
+            return CycleResult(run_id, as_of or today_utc(), False, reason)
 
         self._refresh_bars(symbols)
         bars = self._load_bars(symbols)
@@ -496,7 +497,7 @@ class LiveRunner:
     def _refresh_bars(self, symbols: list[str]) -> None:
         if self.provider is None:
             return
-        today = dt.date.today()
+        today = today_utc()
         warmup = max((s.warmup_bars for s in self.strategies), default=1)
         start = today - dt.timedelta(days=warmup * 2 + HISTORY_PADDING_DAYS)
         self.store.sync(self.provider, symbols, start, today)

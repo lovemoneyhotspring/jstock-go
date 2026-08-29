@@ -125,7 +125,9 @@ class Credentials:
         expires = self.expires_on
         if expires is None:
             return None
-        return (expires - (today or dt.date.today())).days
+        from wbcore.clock import today_utc
+
+        return (expires - (today or today_utc())).days
 
 
 # --------------------------------------------------------------------------

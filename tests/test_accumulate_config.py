@@ -341,17 +341,25 @@ JST = dt.timezone(dt.timedelta(hours=9))
 def test_window_defaults_to_the_afternoon_slot() -> None:
     for tactic in (Constant(), BearStack(), StackLadder(), DrawdownLadder()):
         assert tactic.window.enabled
-        assert tactic.window.describe() == "14:00〜15:00"
+        assert tactic.window.describe() == "14:00〜15:00 JST"
 
 
 def test_window_gates_only_the_configured_hour() -> None:
+    """発注時間帯は東証の現地時刻（JST）で判定する。時刻は tz 付きで渡す。"""
+    from zoneinfo import ZoneInfo
+
     tactic = BearStack()
     day = dt.date(2026, 8, 26)
-    assert not tactic.allows_order(dt.datetime.combine(day, dt.time(9, 30)))
-    assert not tactic.allows_order(dt.datetime.combine(day, dt.time(13, 59)))
-    assert tactic.allows_order(dt.datetime.combine(day, dt.time(14, 0)))
-    assert tactic.allows_order(dt.datetime.combine(day, dt.time(14, 59)))
-    assert not tactic.allows_order(dt.datetime.combine(day, dt.time(15, 0)))
+    jst = ZoneInfo("Asia/Tokyo")
+
+    def at(hour: int, minute: int) -> dt.datetime:
+        return dt.datetime.combine(day, dt.time(hour, minute), tzinfo=jst)
+
+    assert not tactic.allows_order(at(9, 30))
+    assert not tactic.allows_order(at(13, 59))
+    assert tactic.allows_order(at(14, 0))
+    assert tactic.allows_order(at(14, 59))
+    assert not tactic.allows_order(at(15, 0))
 
 
 def test_window_can_be_switched_off() -> None:
@@ -381,17 +389,19 @@ symbols = ["C"]
 window = { start = "12:30", end = "13:00" }
 """
     built = load(_write(tmp_path, body)).build()
-    assert built["A"].window.describe() == "14:00〜15:00"
+    assert built["A"].window.describe() == "14:00〜15:00 JST"
     assert built["B"].window.describe() == "制限なし"
-    assert built["C"].window.describe() == "12:30〜13:00"
+    assert built["C"].window.describe() == "12:30〜13:00 JST"
 
 
-def test_naive_datetimes_are_treated_as_tokyo_time() -> None:
+def test_naive_datetimes_are_treated_as_utc() -> None:
+    """時刻の規約: tz 無しは UTC とみなす（ローカル時刻とみなすとサーバー次第で変わる）。"""
     tactic = BearStack()
-    naive = dt.datetime(2026, 8, 26, 14, 30)
-    aware_utc = dt.datetime(2026, 8, 26, 5, 30, tzinfo=dt.UTC)  # = 14:30 JST
-    assert tactic.allows_order(naive)
+    naive_utc = dt.datetime(2026, 8, 26, 5, 30)  # = 14:30 JST
+    aware_utc = dt.datetime(2026, 8, 26, 5, 30, tzinfo=dt.UTC)
+    assert tactic.allows_order(naive_utc)
     assert tactic.allows_order(aware_utc)
+    assert not tactic.allows_order(dt.datetime(2026, 8, 26, 14, 30))  # 14:30 UTC = 23:30 JST
 
 
 @pytest.mark.parametrize(

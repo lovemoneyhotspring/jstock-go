@@ -20,12 +20,12 @@ UAT の公開口座にリストが無く未検証。snake_case / camelCase の�
 
 from __future__ import annotations
 
-import datetime as dt
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Self
 
+from wbcore.clock import fmt, now_utc
 from wbcore.credentials import ENDPOINTS, Credentials, Environment, load_credentials
 from wbcore.domain.models import Market
 from wbcore.logging import get_logger, harden_third_party_logging, register_secret
@@ -243,7 +243,7 @@ def write_universe(
         existing = read_symbols_file(merge_with)
     fresh = [i for i in items if i.symbol not in existing]
     lines = [
-        f"# Webull のウォッチリスト「{source}」から {dt.date.today()} に書き出し",
+        f"# Webull のウォッチリスト「{source}」から {fmt(now_utc())} に書き出し",
         "# 1行1銘柄、# 以降はコメント。手で書き足してよい",
         "",
         *existing,

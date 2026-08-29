@@ -170,6 +170,19 @@ uv run accum run --live          # 実発注。本番は WBJP_ENV=prod と --yes
 
 ---
 
+## 時刻の規約
+
+| 場面 | 規則 |
+|---|---|
+| 保存 | 時刻は必ず時間帯付き。日中足の `ts` は UTC（Parquet に時間帯が残る）、SQLite の `placed_at` は UTC の ISO 8601（`+00:00` 付き）。暦日（`date`）は取引所の日付で時刻ではないので時間帯を持たない |
+| 演算・判定 | UTC。取引所の現地時刻が要る判断（発注時間帯・引けの前後・分足の区切り）は、その場で `Market.timezone` に変換して比べる |
+| 表示 | 既定は UTC。`WBJP_TIMEZONE=Asia/Tokyo` で JST 表示にできる。どちらでも**時間帯の略号を必ず添える**（`2026-08-29 06:20 UTC` / `15:20 JST`）。時間帯の無い時刻は画面に出さない |
+| ログ | UTC（末尾 `Z`） |
+
+「今」を取るのは `wbcore.clock` だけ（`now_utc()` / `today_utc()`）。`date.today()` や tz 無しの `datetime.now()` は cron のサーバーと開発機で結果が変わるので使わない——テストが監視している。tz 無しの datetime を受け取ったら UTC とみなす。
+
+---
+
 ## 取引所（ブローカー）の差し替え
 
 発注先は `wbcore.broker.base.Broker` 抽象クラスの裏に隠れている。売買（`wbjp`）も積立（`accum`）も `wbcore.broker.registry.connect(name, env, market=...)` を通るので、設定の1行で切り替わる。

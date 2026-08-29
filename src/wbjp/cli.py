@@ -18,6 +18,8 @@ from rich.console import Console
 from rich.table import Table
 
 from wbcore.broker.base import BrokerError
+from wbcore.clock import fmt as fmt_when
+from wbcore.clock import now_utc, today_utc
 from wbcore.credentials import Credentials as Creds
 from wbcore.credentials import (
     Environment,
@@ -559,7 +561,7 @@ def quality(
     if out:
         lines = [
             "# 財務の質で絞った母集団（`wbjp quality` が生成）。",
-            f"# 生成日 {dt.date.today()}。閾値: {thresholds}",
+            f"# 生成 {fmt_when(now_utc())}。閾値: {thresholds}",
             "# 注意: 今日の財務で選んでいるため、過去のバックテストには生存者バイアスが乗る。",
             "SPY",
             *[r.symbol for r in passed],
@@ -811,7 +813,7 @@ def data_sync(
     # --interval を明示したときはその足だけ、省略時は設定の基準足も一緒に揃える
     feed = _build_feed(config) if interval is None else None
     store = BarStore(config.settings.bars_dir, chosen)
-    end = dt.date.today()
+    end = today_utc()
 
     symbols = _collect_symbols(config)
     # レジーム判定の指数と待機資金の利回り系列も一緒に取る

@@ -45,7 +45,7 @@ DEFAULT_END = dt.time(15, 0)
 
 @dataclass(frozen=True, slots=True)
 class TradingWindow:
-    """発注を許す時間帯（日本時間）。
+    """発注を許す時間帯（日本時間 JST。東証の立会時間に対する規則なので固定）。
 
     Attributes:
         start: 開始時刻（含む）。
@@ -75,7 +75,7 @@ class TradingWindow:
         """その時刻に発注してよいか。
 
         Args:
-            moment: 省略時は現在時刻。naive な値は日本時間とみなす。
+            moment: 省略時は現在時刻。naive な値は UTC とみなす（アプリの規約）。
         """
         if not self.enabled:
             return True
@@ -96,14 +96,14 @@ class TradingWindow:
     def describe(self) -> str:
         if not self.enabled:
             return "制限なし"
-        return f"{self.start:%H:%M}〜{self.end:%H:%M}"
+        return f"{self.start:%H:%M}〜{self.end:%H:%M} JST"
 
     @staticmethod
     def _jst(moment: dt.datetime | None) -> dt.datetime:
         if moment is None:
             return dt.datetime.now(JST)
         if moment.tzinfo is None:
-            return moment.replace(tzinfo=JST)
+            moment = moment.replace(tzinfo=dt.UTC)
         return moment.astimezone(JST)
 
     @classmethod

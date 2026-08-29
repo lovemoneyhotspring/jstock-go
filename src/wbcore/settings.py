@@ -35,6 +35,9 @@ class AppSettings(BaseSettings):
     log_level: str = "INFO"
     #: 構造化ログを JSON で出す（本番運用向け）
     log_json: bool = False
+    #: 画面に時刻を出すときの時間帯（``WBJP_TIMEZONE``）。既定は UTC。
+    #: 保存と演算は常に UTC で、ここは表示にだけ効く。表示には必ず略号が付く。
+    timezone: str = "UTC"
 
     @property
     def endpoints(self) -> Endpoints:

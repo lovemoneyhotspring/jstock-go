@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from wbcore.clock import today_utc
 from wbcore.domain.models import Market
 
 #: 通常取引の寄付と引け（現地時刻）。足の区切りを寄付に揃えるのに使う。
@@ -32,7 +33,7 @@ def session_close(market: Market) -> dt.time:
 
 def close_utc(market: Market, on: dt.date | None = None) -> dt.datetime:
     """その日の引けを UTC で。夏時間の有無は日付で決まるので ``on`` を受ける。"""
-    day = on or dt.date.today()
+    day = on or today_utc()
     local = dt.datetime.combine(day, session_close(market), tzinfo=market.timezone)
     return local.astimezone(dt.UTC)
 

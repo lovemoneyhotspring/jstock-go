@@ -159,7 +159,8 @@ def configure_logging(
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
-        structlog.processors.TimeStamper(fmt="iso", utc=False),
+        # ログの時刻は UTC（末尾 Z）。サーバーと開発機で時間帯が違っても読み違えない
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         redact_processor,
     ]

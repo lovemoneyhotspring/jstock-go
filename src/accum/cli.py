@@ -14,7 +14,6 @@ import datetime as dt
 import sys
 from pathlib import Path
 from typing import Annotated
-from zoneinfo import ZoneInfo
 
 import typer
 from rich.console import Console
@@ -22,6 +21,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from accum.config import DEFAULT_CONFIG_DIR, FILENAME, AccumConfig, load
+from wbcore.clock import fmt, now_utc, today_utc
 from wbcore.logging import configure_logging, get_logger
 from wbcore.settings import AppSettings, allows_live_orders
 
@@ -203,7 +203,7 @@ def _sync(
     from wbcore.data.store import BarStore
 
     store = BarStore(settings.bars_dir)
-    end = dt.date.today()
+    end = today_utc()
     start = end - dt.timedelta(days=days)
 
     # ティッカー変換が市場ごとに違う（1305→1305.T / VOO→VOO）ので分けて取る。
@@ -332,9 +332,10 @@ def plan(
 
     console.print(f"\n[bold]最終日の投下額 合計: {total:,}[/bold]")
     if blocked:
-        now = dt.datetime.now(ZoneInfo("Asia/Tokyo"))
+        now = now_utc()
         console.print(
-            f"[yellow]いまは発注時間帯の外です（{now:%H:%M} JST）: {'、'.join(blocked)}[/yellow]\n"
+            f"[yellow]いまは発注時間帯の外です（現在 {fmt(now, settings.timezone)}）: "
+            f"{'、'.join(blocked)}[/yellow]\n"
             "[dim]※ 時間帯は投下額を変えない。日足で決まる金額を、"
             "いつ発注してよいかだけを制御する。[/dim]"
         )
@@ -374,7 +375,7 @@ def run(
         console.print("[dim]投下額のある銘柄はありません（入金日でも増額日でもない）[/dim]")
         return
 
-    now = dt.datetime.now(ZoneInfo("Asia/Tokyo"))
+    now = now_utc()
     planned = build_orders(
         contributions,
         tax_type=config.execution.tax_account_type,
@@ -438,7 +439,8 @@ def run(
 
     mode = "[green]実発注[/green]" if allowed else f"[yellow]dry-run[/yellow] ({reason})"
     console.print(
-        f"\n[bold]積立[/bold]  基準日 {planned[0].contribution.date}  {now:%H:%M} JST  {mode}"
+        f"\n[bold]積立[/bold]  基準日 {planned[0].contribution.date}  "
+        f"{fmt(now, settings.timezone)}  {mode}"
     )
     table = Table(title="注文", title_justify="left")
     for column in ("銘柄", "市場", "終値", "投下額", "倍率", "株数", "状態"):
@@ -600,7 +602,7 @@ def basket(
             continue
 
         if show_weights:
-            latest = schedule.at(dt.date.today())
+            latest = schedule.at(today_utc())
             console.print(
                 f"[bold]{entry.id}[/bold] いま有効な配分: "
                 + ", ".join(f"{s} {w:.1%}" for s, w in sorted(latest.items(), key=lambda x: -x[1]))

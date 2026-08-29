@@ -24,6 +24,7 @@ from typing import Any, ClassVar, Self
 import polars as pl
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from wbcore.clock import today_utc
 from wbcore.credentials import Environment
 from wbcore.data.provider import Interval, MarketDataError, MarketDataProvider, normalize_bars
 from wbcore.domain.models import Market
@@ -145,7 +146,7 @@ class YFinanceProvider(MarketDataProvider):
         limit = MAX_LOOKBACK_DAYS.get(interval)
         if limit is None:
             return start
-        earliest = dt.date.today() - dt.timedelta(days=limit - 1)
+        earliest = today_utc() - dt.timedelta(days=limit - 1)
         if start >= earliest:
             return start
         log.warning(

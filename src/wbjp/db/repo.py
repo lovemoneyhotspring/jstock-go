@@ -295,9 +295,8 @@ class Journal:
     def today() -> dt.date:
         """``placed_at`` と同じ時計（UTC）で見た今日。
 
-        ``orders_today`` にはこれを渡すこと。``dt.date.today()``（ローカル
-        時刻）を渡すと、JST の深夜〜朝 9 時は UTC がまだ前日で、当日の
-        発注が 0 件に見える。
+        ``orders_today`` にはこれを渡すこと。ローカル時刻の日付を渡すと、
+        JST の深夜〜朝 9 時は UTC がまだ前日で、当日の発注が 0 件に見える。
         """
         return dt.datetime.now(dt.UTC).date()
 

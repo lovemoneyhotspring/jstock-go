@@ -81,7 +81,7 @@ class IntradaySmaCrossStrategy(IndicatorStrategy):
                     self.name,
                     symbol,
                     direction=-1.0,
-                    reason=f"{self.flat_before:%H:%M} 以降は持ち越さない",
+                    reason=f"{self.flat_before:%H:%M} {local:%Z} 以降は持ち越さない",
                 )
             return None
 
@@ -105,11 +105,11 @@ class IntradaySmaCrossStrategy(IndicatorStrategy):
 
         if prev_diff <= 0 < current_diff:
             return Signal(
-                self.name, symbol, 1.0, max(confidence, 0.3), f"{label} 上抜け（{local:%H:%M}）"
+                self.name, symbol, 1.0, max(confidence, 0.3), f"{label} 上抜け（{local:%H:%M %Z}）"
             )
         if prev_diff >= 0 > current_diff:
             return Signal(
-                self.name, symbol, -1.0, max(confidence, 0.3), f"{label} 下抜け（{local:%H:%M}）"
+                self.name, symbol, -1.0, max(confidence, 0.3), f"{label} 下抜け（{local:%H:%M %Z}）"
             )
         direction = 1.0 if current_diff > 0 else -1.0
         return Signal(

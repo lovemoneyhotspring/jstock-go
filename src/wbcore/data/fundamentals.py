@@ -24,13 +24,13 @@ yfinance の財務諸表は **直近 4 期分** しか取れない。したが�
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from wbcore.clock import today_utc
 from wbcore.logging import get_logger
 
 log = get_logger(__name__)
@@ -122,7 +122,7 @@ def fetch_statements(symbol: str) -> dict[str, Any]:
     import yfinance as yf
 
     ticker = yf.Ticker(symbol)
-    data: dict[str, Any] = {"symbol": symbol, "fetched": dt.date.today().isoformat()}
+    data: dict[str, Any] = {"symbol": symbol, "fetched": today_utc().isoformat()}
     data.update(_series(ticker.financials, _INCOME))
     data.update(_series(ticker.balance_sheet, _BALANCE))
     data.update(_series(ticker.cashflow, _CASHFLOW))
