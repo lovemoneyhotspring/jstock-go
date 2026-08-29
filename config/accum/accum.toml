@@ -45,7 +45,8 @@ tax_account_type = "SPECIFIC"
 extended_hours = false
 # 売買単位が既定（100株）と異なる銘柄。ETF は 1 株・10 株単位のものが多い。
 # 既定のままだと月の予算が1単元に届かず、発注が丸ごと見送りになる。
-lot_size_overrides = { "1305.T" = 10, "1591.T" = 10, "1306.T" = 10 }
+# 452A / 563A の単位は JPX で要確認（1 口の想定）。100 口なら月 25,000 円では届かない。
+lot_size_overrides = { "452A.T" = 1, "563A.T" = 1, "1305.T" = 10, "1591.T" = 10, "1306.T" = 10 }
 
 
 # market は足の取得と発注先に使う（既定 "JP"）。
@@ -71,11 +72,35 @@ lot_size_overrides = { "1305.T" = 10, "1591.T" = 10, "1306.T" = 10 }
 # 完全下降配列（終値 < MA20 < MA50 < MA200）で4倍。
 # 追加投入1円あたりの効果が最良で、必要資金も最少（年平均1.15〜1.42倍）。
 # 発動は全期間の5〜13%程度。増額の原資は賞与など新規資金を前提とする。
+#
+# 買う ETF は上場が浅く（452A は 2025-11、563A は 2026-04）自身の足では 200 日線が
+# 揃わないため、判定は連動先の本家指数で行う。指数の引けは翌朝 JST なので、
+# 同じ日付の足は使わず前日の足で判定する（自動）。
 [[tactics]]
-id = "配列4倍"
+id = "452A 配列4倍（S&P500 で判定）"
+tactic = "bear_stack"
+symbols = ["452A.T"]            # iShares S&P500 プレミアムインカム ETF
+market = "JP"
+signal_symbol = "^GSPC"         # S&P 500 指数（ウォッチリストの SPX）
+signal_market = "US"
+multiplier = 4
+
+[[tactics]]
+id = "563A 配列4倍（NASDAQ で判定）"
+tactic = "bear_stack"
+symbols = ["563A.T"]            # Global X NASDAQ100 カバードコール ETF
+market = "JP"
+signal_symbol = "^IXIC"         # NASDAQ 総合指数（ウォッチリストの IXIC）
+signal_market = "US"
+multiplier = 4
+
+# 以前の対象（1305 / 1591）。止めてあるが、戻すときは enabled を外す。
+[[tactics]]
+id = "配列4倍（旧: 1305/1591）"
 tactic = "bear_stack"
 symbols = ["1305.T", "1591.T"]
 multiplier = 4
+enabled = false
 
 # 同じ機構の弱め版。暴落時に平常の4倍を出せない場合はこちら。
 # 年平均1.05〜1.14倍で済み、10年窓の勝率はほぼ変わらない。
