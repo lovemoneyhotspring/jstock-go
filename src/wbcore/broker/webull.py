@@ -25,7 +25,7 @@ SDK がやってくれないこと（＝ここで引き受けること）:
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from decimal import Decimal
 from typing import Any, ClassVar, Self
 
@@ -202,6 +202,8 @@ class WebullBroker(Broker):
         self._tax_type = tax_type
         self._extended_hours = extended_hours
         self._client: Any = None
+        self._api_client: Any = None
+        self._data_client: Any = None
 
         # SDK がエラー時にヘッダを吐くので、実値をマスク対象に入れておく
         register_secret(credentials.app_key, credentials.app_secret, credentials.account_id)
@@ -257,12 +259,50 @@ class WebullBroker(Broker):
             api_client.add_endpoint(self._env.value, self._endpoint)
             _suppress_sdk_own_logging(api_client)
             client = TradeClient(api_client)
+            self._api_client = api_client
         except Exception as exc:
             raise self._translate(exc, "接続") from exc
 
         # 取りこぼしがあった場合に備えて、構築後にもう一度均す
         harden_third_party_logging()
         return client
+
+    @property
+    def data_client(self) -> Any:
+        """SDK の DataClient（銘柄マスタなど）。取引と同じ接続を使い回す。"""
+        if self._data_client is None:
+            from webull.data.data_client import DataClient
+
+            _ = self.client  # 先に接続して api_client を作る
+            self._data_client = DataClient(self._api_client)
+            harden_third_party_logging()
+        return self._data_client
+
+    #: 銘柄マスタ照会のカテゴリ。ETF も株式のカテゴリに含まれる（実測）。
+    _INSTRUMENT_CATEGORY: ClassVar[dict[Market, str]] = {
+        Market.JP: "JP_STOCK",
+        Market.US: "US_STOCK",
+    }
+
+    def lot_sizes(self, symbols: Iterable[str]) -> dict[str, Decimal]:
+        """銘柄マスタの ``lot_size``。マスタに無い銘柄（新規上場など）は返らない。"""
+        wanted = [s for s in dict.fromkeys(symbols)]
+        if not wanted:
+            return {}
+        category = self._INSTRUMENT_CATEGORY[self._market]
+        try:
+            response = self.data_client.instrument.get_instrument(
+                symbols=",".join(wanted), category=category
+            )
+            rows = response.json() if hasattr(response, "json") else response
+        except Exception as exc:
+            raise self._translate(exc, "銘柄情報の照会") from exc
+        found: dict[str, Decimal] = {}
+        for row in rows or []:
+            symbol, lot = row.get("symbol"), row.get("lot_size")
+            if symbol in wanted and lot not in (None, ""):
+                found[str(symbol)] = Decimal(str(lot))
+        return found
 
     @property
     def account_id(self) -> str:

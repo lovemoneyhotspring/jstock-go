@@ -37,6 +37,7 @@
 |---|---|---|
 | `accum.fill` | 前回までに送った注文の約定状況が変わった | `symbol`, `client_order_id`, `before`, `after`, `filled`, `quantity`, `lost_ratio`（未約定のまま終わった割合。0 なら全部約定） |
 | `accum.stale` | 足が古くて判定を見送った | `symbols`（銘柄 → 最終足の日付） |
+| `accum.lot_size` | 売買単位が設定と銘柄情報で食い違った（API を採用）、または照会できず設定値で進んだ | `symbol`, `configured`, `api` / `market`, `error` |
 | `accum.decision` | 今日出すべき投下を決めた | `symbol`, `market`, `month`（どの月の積立か）, `judged_on`（判断日）, `target`（今月の目標）, `placed`（発注済み）, `due`（差額＝今日出す額）, `multiplier`, `price`, `tactic`, `signal`（判定用の銘柄。無ければ null） |
 | `accum.order` | 投下を注文にした結果（1 件ごと） | `symbol`, `client_order_id`, `quantity`, `price`, `amount`, `live`（実発注か）, `outcome`（`発注` / `dry-run` / `見送り …` / `失敗 …` / `発注済み（冪等）`）, `note`（見送り・失敗の理由） |
 | `accum.run` | 実行の終了 | `live`, `reason`（dry-run の理由）, `orders`, `failures` |

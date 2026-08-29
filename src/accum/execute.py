@@ -300,6 +300,54 @@ def sync_order_status(ledger: Ledger, broker_for: Callable[[Market], Broker]) ->
     return changes
 
 
+@dataclass(frozen=True)
+class LotSizes:
+    """発注に使う売買単位と、決め方の記録。"""
+
+    #: 設定上の銘柄コード → 単元株数。API で分かった分は API、他は設定値。
+    sizes: dict[str, int]
+    #: 設定と API が食い違った銘柄 → (設定値, API 値)。API を採用済み
+    mismatches: dict[str, tuple[int, int]] = field(default_factory=dict)
+    #: API で確かめられなかった理由（市場ごと）。設定値のまま進んだ
+    failures: dict[Market, str] = field(default_factory=dict)
+
+
+def resolve_lot_sizes(
+    contributions: Iterable[Contribution],
+    overrides: Mapping[str, int],
+    broker_for: Callable[[Market], Broker],
+) -> LotSizes:
+    """売買単位を決める。ブローカーの銘柄マスタ → 設定 → 市場の既定の順。
+
+    設定は人が書くので間違える（1591 を 10 と書いていた実例）。マスタで
+    分かる銘柄はマスタを信じ、食い違いは記録して呼び出し側に知らせる。
+    マスタに無い銘柄（新規上場、UAT）は設定値のまま。照会自体が失敗しても
+    発注は止めない（単位が違えば発注時にブローカーが拒否する）。
+    """
+    by_market: dict[Market, list[Contribution]] = {}
+    for c in contributions:
+        by_market.setdefault(c.market, []).append(c)
+    sizes = dict(overrides)
+    mismatches: dict[str, tuple[int, int]] = {}
+    failures: dict[Market, str] = {}
+    for market, items in by_market.items():
+        try:
+            found = broker_for(market).lot_sizes(c.broker_symbol for c in items)
+        except Exception as exc:
+            failures[market] = str(exc)
+            continue
+        for c in items:
+            lot = found.get(c.broker_symbol)
+            if lot is None:
+                continue
+            api = int(lot)
+            configured = overrides.get(c.symbol)
+            if configured is not None and configured != api:
+                mismatches[c.symbol] = (configured, api)
+            sizes[c.symbol] = api
+    return LotSizes(sizes, mismatches, failures)
+
+
 #: 成行が「気配値が無い」で拒否されたときのエラーコード（Webull）。
 QUOTE_NOT_FOUND = "QUOTE_NOT_FOUND"
 

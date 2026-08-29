@@ -381,6 +381,7 @@ def run(
     from accum.execute import (
         build_orders,
         pending_contributions,
+        resolve_lot_sizes,
         should_fallback_to_limit,
         sync_order_status,
         to_order,
@@ -481,10 +482,31 @@ def run(
         console.print("[dim]出すべき投下はありません（今月の目標に達しています）[/dim]")
         return
 
+    # 売買単位は設定より銘柄マスタを信じる（設定の書き間違いで拒否されるより良い）
+    lots = resolve_lot_sizes(contributions, config.execution.lot_size_overrides, broker_for)
+    for symbol, (configured, api) in sorted(lots.mismatches.items()):
+        console.print(
+            f"[yellow]{symbol}: 売買単位が設定（{configured}）と銘柄情報（{api}）で異なるため "
+            f"{api} を使います。lot_size_overrides を直してください[/yellow]"
+        )
+        log.warning(
+            "売買単位が設定と銘柄情報で食い違い",
+            code="accum.lot_size",
+            symbol=symbol,
+            configured=configured,
+            api=api,
+        )
+    for market, why in lots.failures.items():
+        log.warning(
+            "銘柄情報を照会できず設定の売買単位で進行",
+            code="accum.lot_size",
+            market=market.value,
+            error=why,
+        )
     planned = build_orders(
         contributions,
         tax_type=config.execution.tax_account_type,
-        lot_sizes=config.execution.lot_size_overrides,
+        lot_sizes=lots.sizes,
         moment=now,
         ignore_window=ignore_window,
         order_type=OrderType(config.execution.order_type.upper()),
@@ -553,7 +575,7 @@ def run(
                     request = to_order(
                         c,
                         tax_type=config.execution.tax_account_type,
-                        lot_size=config.execution.lot_size_overrides.get(c.symbol),
+                        lot_size=lots.sizes.get(c.symbol),
                         order_type=OrderType.LIMIT,
                         limit_offset=config.execution.limit_offset,
                         seed="accum-limit",

@@ -18,7 +18,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from decimal import Decimal
 from typing import ClassVar, Self
 
 from wbcore.credentials import Environment
@@ -120,6 +121,14 @@ class Broker(ABC):
     @abstractmethod
     def cancel(self, client_order_id: str) -> None:
         """注文を取り消す。"""
+
+    def lot_sizes(self, symbols: Iterable[str]) -> dict[str, Decimal]:
+        """銘柄ごとの売買単位（ブローカー表記の銘柄 → 単元株数）。
+
+        分かる銘柄だけ返す（無い銘柄は含めない）。既定は何も分からない。
+        ブローカーが銘柄マスタを持つなら上書きする。
+        """
+        return {}
 
     def positions_by_symbol(self) -> dict[str, Position]:
         """建玉を銘柄で引ける形にする。
