@@ -822,11 +822,17 @@ def _run(
         f"\n[bold]積立[/bold]  基準日 {planned[0].contribution.date}  "
         f"{fmt(now, settings.timezone)}  {mode}"
     )
-    table = Table(title="注文", title_justify="left")
-    for column in ("銘柄", "判断日", "市場", "価格", "投下額", "倍率", "株数", "状態", "内訳"):
+    # 内訳は「目標・繰り越し・発注済み」の式で長い。短い列は折り返さず、残りの幅を
+    # 内訳 : 状態 = 3 : 1 で分ける（expand が無いと ratio は効かない）
+    table = Table(title="注文", title_justify="left", expand=True)
+    for column in ("銘柄", "判断日", "市場", "価格", "投下額", "倍率", "株数"):
         table.add_column(
-            column, justify="right" if column in ("価格", "投下額", "株数") else "left"
+            column,
+            justify="right" if column in ("価格", "投下額", "株数") else "left",
+            no_wrap=True,
         )
+    table.add_column("状態", ratio=1)
+    table.add_column("内訳", ratio=3)
     for item in planned:
         c = item.contribution
         table.add_row(
