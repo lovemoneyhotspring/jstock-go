@@ -27,7 +27,7 @@ from decimal import Decimal
 
 import polars as pl
 
-from wbcore.broker.base import Broker, BrokerError
+from wbcore.broker.base import Broker, BrokerError, OrderRejectedError
 from wbcore.clock import today_utc
 from wbcore.data.provider import MarketDataProvider
 from wbcore.data.store import BarStore
@@ -37,6 +37,7 @@ from wbcore.domain.models import (
     CombinedSignal,
     Order,
     OrderRequest,
+    OrderStatus,
     Position,
     Side,
     Signal,
@@ -167,6 +168,8 @@ class LiveRunner:
         """
         allowed, reason = self.config.allows_live_orders(live)
         run_id = run_id or f"{today_utc():%Y%m%d}-{uuid.uuid4().hex[:8]}"
+
+        self._sync_pending_orders()
 
         symbols = self.config.file.universe.symbols
         if not symbols:
@@ -417,6 +420,29 @@ class LiveRunner:
         )
         return result
 
+    def _sync_pending_orders(self) -> None:
+        """前回までに送って結果が確定していない注文を、ブローカーに照会して確定させる。
+
+        PENDING のまま残っている注文（送信直後にタイムアウト等で応答を
+        取りこぼしたもの）を含む。``get_order`` は見つからない・照会自体が
+        失敗したときは ``None`` を返す（:meth:`WebullBroker.get_order`）ので、
+        その場合は何もしない——勝手に失効扱いにすると、実は板に残っていた
+        注文と二重発注になりうる。次のサイクルでまた照会する。
+        """
+        for client_order_id in self.journal.unresolved_orders():
+            order = self.broker.get_order(client_order_id)
+            if order is None:
+                continue
+            self.journal.update_order(order)
+            log.info(
+                "注文状態を確定",
+                code="wbjp.order_sync",
+                client_order_id=client_order_id,
+                symbol=order.symbol,
+                status=order.status.value,
+                filled_quantity=str(order.filled_quantity),
+            )
+
     def _place(
         self,
         run_id: str,
@@ -466,7 +492,20 @@ class LiveRunner:
                     rejected[request.symbol] = decision.reason
                     continue
 
-                ack = self.broker.place(request)
+                # 台帳に先に記録してから送る。送信後・記録前にプロセスが
+                # 落ちる、あるいは注文は届いたのに応答がタイムアウトで例外に
+                # なっても、この PENDING 記録が残っていれば次回の
+                # was_placed が真になり再送されない（明確な拒否だけ
+                # REJECTED に落とす。それ以外は PENDING のまま残し、
+                # `wbjp order <client_order_id>` で実際の状態を確認できる
+                # ようにする——勝手に失効扱いにすると、実は板に残っていた
+                # 注文と二重発注になりうる）。
+                self.journal.record_order(run_id, request, OrderStatus.PENDING.value)
+                try:
+                    ack = self.broker.place(request)
+                except OrderRejectedError:
+                    self.journal.record_order(run_id, request, OrderStatus.REJECTED.value)
+                    raise
                 self.journal.record_order(run_id, request, ack.status.value, ack.broker_order_id)
                 placed.append(request)
             except BrokerError as exc:

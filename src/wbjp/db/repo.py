@@ -31,6 +31,7 @@ from wbcore.domain.models import (
     Fill,
     Order,
     OrderRequest,
+    OrderStatus,
     Position,
     Signal,
     TargetPosition,
@@ -256,6 +257,27 @@ class Journal:
                 _now(),
             ),
         )
+
+    def unresolved_orders(self) -> list[str]:
+        """結果がまだ確定していない注文の ``client_order_id``。
+
+        ブローカーへ送った（dry-run でない）が、まだ終端状態
+        （FILLED / CANCELLED / REJECTED / EXPIRED）に達していないもの。
+        PENDING のまま残っている注文（送信後にタイムアウト等で応答を
+        取りこぼしたもの）もここに含まれる——次回サイクルの冒頭で
+        ブローカーに照会し、実際の状態を確定させるため。
+        """
+        terminal = (
+            OrderStatus.FILLED.value,
+            OrderStatus.CANCELLED.value,
+            OrderStatus.REJECTED.value,
+            OrderStatus.EXPIRED.value,
+        )
+        cursor = self._connection.execute(
+            "SELECT client_order_id FROM orders WHERE status != ? AND status NOT IN (?, ?, ?, ?)",
+            (self.DRY_RUN_STATUS, *terminal),
+        )
+        return [row["client_order_id"] for row in cursor.fetchall()]
 
     def update_order(self, order: Order) -> None:
         self._connection.execute(
