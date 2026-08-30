@@ -117,7 +117,7 @@ def todays_contributions(
             signal = bars.get(entry.signal_symbol) if entry.signal_symbol else None
             plan = build_plan(
                 frame,
-                AccumulationSettings(config.monthly_budget, tactic),
+                AccumulationSettings(entry.monthly_budget, tactic),
                 signal_bars=signal,
                 signal_strict=entry.signal_lags,
             )
@@ -220,9 +220,10 @@ def pending_contributions(
             signal = (
                 signal_all.filter(pl.col("date") < today_local) if signal_all is not None else None
             )
+            budget = entry.monthly_budget
             plan = build_plan(
                 completed,
-                AccumulationSettings(config.monthly_budget, tactic),
+                AccumulationSettings(budget, tactic),
                 signal_bars=signal,
                 signal_strict=entry.signal_lags,
             )
@@ -231,7 +232,7 @@ def pending_contributions(
             if this_month.height == 0:
                 continue  # 今月の確定足がまだ無い（月初の初日）
             base_target, extras, prorated = _month_target(
-                this_month, config.monthly_budget, month, started(symbol) if started else None
+                this_month, budget, month, started(symbol) if started else None
             )
             target = base_target + extras
             carried = _carry_over(plan, symbol, month, lookup, active)

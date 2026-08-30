@@ -222,7 +222,9 @@ def test_basket_entry_builds_static_and_blended_schedules() -> None:
 def test_basket_ids_share_the_namespace_with_tactics() -> None:
     config = AccumConfig.model_validate(
         {
-            "tactics": [{"id": "x", "tactic": "constant", "symbols": ["A"]}],
+            "tactics": [
+                {"id": "x", "tactic": "constant", "symbols": ["A"], "monthly_budget": 25_000}
+            ],
             "baskets": [{"id": "x", "weights": {"A": 1.0}}],
         }
     )

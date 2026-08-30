@@ -94,8 +94,14 @@ def test_config_collects_signal_symbols_for_fetching_but_not_for_buying() -> Non
                     "market": "JP",
                     "signal_symbol": "^GSPC",
                     "signal_market": "US",
+                    "monthly_budget": 10_000,
                 },
-                {"id": "b", "tactic": "constant", "symbols": ["1306.T"]},
+                {
+                    "id": "b",
+                    "tactic": "constant",
+                    "symbols": ["1306.T"],
+                    "monthly_budget": 10_000,
+                },
             ]
         }
     )
@@ -121,6 +127,7 @@ def test_todays_contributions_judge_with_the_signal_symbol() -> None:
                     "signal_symbol": "S",
                     "multiplier": 4,
                     "window": False,
+                    "monthly_budget": 10_000,
                 }
             ],
         }
@@ -163,7 +170,7 @@ def test_signal_from_a_market_that_closes_later_uses_the_previous_day() -> None:
 
 def test_entry_decides_the_lag_from_the_markets() -> None:
     def entry(**fields):  # type: ignore[no-untyped-def]
-        base = {"id": "x", "tactic": "constant", "symbols": ["563A.T"]}
+        base = {"id": "x", "tactic": "constant", "symbols": ["563A.T"], "monthly_budget": 10_000}
         return AccumConfig.model_validate({"tactics": [{**base, **fields}]}).tactics[0]
 
     assert entry(market="JP", signal_symbol="^IXIC", signal_market="US").signal_lags

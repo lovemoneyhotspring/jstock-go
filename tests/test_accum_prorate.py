@@ -28,7 +28,15 @@ def _bars(n: int, start: dt.date) -> pl.DataFrame:
 CONFIG = AccumConfig.model_validate(
     {
         "monthly_budget": 25_000,
-        "tactics": [{"id": "a", "tactic": "constant", "symbols": ["T"], "window": False}],
+        "tactics": [
+            {
+                "id": "a",
+                "tactic": "constant",
+                "symbols": ["T"],
+                "window": False,
+                "monthly_budget": 25_000,
+            }
+        ],
     }
 )
 BARS = _bars(70, dt.date(2026, 8, 1))  # 8 月〜11 月上旬

@@ -158,8 +158,20 @@ def test_todays_contributions_only_returns_symbols_with_an_amount() -> None:
         {
             "monthly_budget": 10_000,
             "tactics": [
-                {"id": "a", "tactic": "constant", "symbols": ["AAA"], "window": False},
-                {"id": "b", "tactic": "constant", "symbols": ["BBB"], "window": False},
+                {
+                    "id": "a",
+                    "tactic": "constant",
+                    "symbols": ["AAA"],
+                    "window": False,
+                    "monthly_budget": 10_000,
+                },
+                {
+                    "id": "b",
+                    "tactic": "constant",
+                    "symbols": ["BBB"],
+                    "window": False,
+                    "monthly_budget": 10_000,
+                },
             ],
         }
     )

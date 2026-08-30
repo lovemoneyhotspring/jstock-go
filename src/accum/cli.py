@@ -184,6 +184,7 @@ def list_assignments(config_dir: _ConfigDir = None) -> None:
     table.add_column("判定")
     table.add_column("発注時間帯")
     table.add_column("有効", justify="center")
+    budgets: list[str] = []
     for entry in config.tactics:
         try:
             tactic = entry.build()
@@ -199,8 +200,10 @@ def list_assignments(config_dir: _ConfigDir = None) -> None:
             window,
             "○" if entry.enabled else "—",
         )
+        budgets.append(f"{entry.id}: {entry.monthly_budget:,.0f}")
     console.print(table)
-    console.print(f"\n毎月の基本予算: {config.monthly_budget:,.0f} / 銘柄")
+    if budgets:
+        console.print(f"\n[dim]毎月の基本予算: {'、'.join(budgets)}[/dim]")
 
     # 一覧は重複を許して読む（止めてある戦略も見せたいため）。そのぶん
     # 衝突を検出できるのはここだけなので、必ず知らせる。
@@ -321,7 +324,7 @@ def plan(
                 continue
             frame = build_plan(
                 bars[symbol],
-                AccumulationSettings(config.monthly_budget, tactic),
+                AccumulationSettings(entry.monthly_budget, tactic),
                 signal_bars=signal,
                 signal_strict=entry.signal_lags,
             )
@@ -929,13 +932,14 @@ def backtest(
                     if signal is None
                     else signal.filter(pl.col("date") <= (end or dt.date.max))
                 )
+            budget = entry.monthly_budget
             plan_frame = build_plan(
                 frame,
-                AccumulationSettings(config.monthly_budget, tactic),
+                AccumulationSettings(budget, tactic),
                 signal_bars=signal,
                 signal_strict=entry.signal_lags,
             )
-            result = simulate(frame, plan_frame, monthly_budget=config.monthly_budget)
+            result = simulate(frame, plan_frame, monthly_budget=budget)
             edge = result.cost_edge
             table.add_row(
                 symbol,

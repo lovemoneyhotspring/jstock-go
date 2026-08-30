@@ -61,8 +61,8 @@ def test_missing_config_fails_with_a_reason(tmp_path: Path) -> None:
 
 def test_broken_config_fails_with_a_reason(tmp_path: Path) -> None:
     (tmp_path / "accum.toml").write_text(
-        '[[tactics]]\nid = "x"\ntactic = "constant"\nsymbols = ["A"]\n'
-        '[[tactics]]\nid = "y"\ntactic = "constant"\nsymbols = ["A"]\n',
+        '[[tactics]]\nid = "x"\ntactic = "constant"\nsymbols = ["A"]\nmonthly_budget = 25_000\n'
+        '[[tactics]]\nid = "y"\ntactic = "constant"\nsymbols = ["A"]\nmonthly_budget = 25_000\n',
         encoding="utf-8",
     )
     result = _accum("list", config_dir=tmp_path)
@@ -73,7 +73,8 @@ def test_broken_config_fails_with_a_reason(tmp_path: Path) -> None:
 def test_backtest_without_bars_exits_with_advice(tmp_path: Path) -> None:
     """足が無いときに黙って空表を出さない。"""
     (tmp_path / "accum.toml").write_text(
-        '[[tactics]]\nid = "x"\ntactic = "constant"\nsymbols = ["NOSUCH"]\n', encoding="utf-8"
+        '[[tactics]]\nid = "x"\ntactic = "constant"\nsymbols = ["NOSUCH"]\nmonthly_budget = 25_000\n',
+        encoding="utf-8",
     )
     result = _accum("backtest", config_dir=tmp_path)
     assert result.exit_code == 1
@@ -83,7 +84,8 @@ def test_backtest_without_bars_exits_with_advice(tmp_path: Path) -> None:
 def test_run_without_bars_does_not_touch_the_broker(tmp_path: Path) -> None:
     """足が無ければ投下額も決まらない。ブローカーに繋ぐ前に終わる。"""
     (tmp_path / "accum.toml").write_text(
-        '[[tactics]]\nid = "x"\ntactic = "constant"\nsymbols = ["NOSUCH"]\n', encoding="utf-8"
+        '[[tactics]]\nid = "x"\ntactic = "constant"\nsymbols = ["NOSUCH"]\nmonthly_budget = 25_000\n',
+        encoding="utf-8",
     )
     result = _accum("run", "--no-sync", "--live", config_dir=tmp_path, env={"WBJP_ENV": "prod"})
     assert result.exit_code == 0

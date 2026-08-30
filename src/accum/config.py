@@ -32,7 +32,16 @@ FILENAME = "accum.toml"
 DEFAULT_CONFIG_DIR = Path("config/accum")
 
 _TACTIC_RESERVED = frozenset(
-    {"id", "tactic", "symbols", "enabled", "market", "signal_symbol", "signal_market"}
+    {
+        "id",
+        "tactic",
+        "symbols",
+        "enabled",
+        "market",
+        "signal_symbol",
+        "signal_market",
+        "monthly_budget",
+    }
 )
 
 
@@ -50,6 +59,8 @@ class TacticEntry(BaseModel):
             判定する。東証の S&P500 連動 ETF を ``^GSPC`` で判定する、といった使い方。
             判定にしか使わないので指数でもよい。
         signal_market: 判定用銘柄の市場。省略すれば ``market`` と同じ。
+        monthly_budget: この戦略（銘柄）の毎月の基本予算。**必須**——銘柄ごとに
+            額が違うことが前提のため、書き忘れて共通設定に紛れ込むことを防ぐ。
     """
 
     model_config = {"extra": "allow"}  # 戦略固有パラメータを受け取る
@@ -61,6 +72,14 @@ class TacticEntry(BaseModel):
     market: Market = Market.JP
     signal_symbol: str | None = None
     signal_market: Market | None = None
+    monthly_budget: Decimal
+
+    @field_validator("monthly_budget")
+    @classmethod
+    def _positive_budget(cls, value: Decimal) -> Decimal:
+        if value <= 0:
+            raise ValueError("monthly_budget は正の値")
+        return value
 
     @property
     def signal_market_resolved(self) -> Market:
@@ -238,7 +257,9 @@ class AccumConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     monthly_budget: Decimal = Decimal(25_000)
-    """1銘柄あたりの毎月の基本予算（口座通貨）。比較の前提を揃えるため全戦略で共通。"""
+    """毎月の基本予算（口座通貨）の既定値。``[[tactics]]`` は各自
+    ``monthly_budget`` を必須で持つためここは使わない。``[[baskets]]``
+    （省略時にこれを使う）と ``accum compare`` の既定パラメータ比較に使う。"""
 
     #: true で全発注を即停止する。スイング売買の ``risk.kill_switch`` と同じ役割。
     kill_switch: bool = False

@@ -40,7 +40,16 @@ def _config(budget: int = 10_000, tactic: str = "constant", **fields) -> AccumCo
     return AccumConfig.model_validate(
         {
             "monthly_budget": budget,
-            "tactics": [{"id": "a", "tactic": tactic, "symbols": ["T"], "window": False, **fields}],
+            "tactics": [
+                {
+                    "id": "a",
+                    "tactic": tactic,
+                    "symbols": ["T"],
+                    "window": False,
+                    "monthly_budget": budget,
+                    **fields,
+                }
+            ],
         }
     )
 

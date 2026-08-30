@@ -28,7 +28,14 @@ def _config(**fields) -> AccumConfig:  # type: ignore[no-untyped-def]
         {
             "monthly_budget": 10_000,
             "tactics": [
-                {"id": "a", "tactic": "constant", "symbols": ["T"], "window": False, **fields}
+                {
+                    "id": "a",
+                    "tactic": "constant",
+                    "symbols": ["T"],
+                    "window": False,
+                    "monthly_budget": 10_000,
+                    **fields,
+                }
             ],
         }
     )
@@ -82,8 +89,20 @@ def test_ledger_symbol_matches_the_broker_notation() -> None:
     config = AccumConfig.model_validate(
         {
             "tactics": [
-                {"id": "jp", "tactic": "constant", "symbols": ["1305.T"], "market": "JP"},
-                {"id": "us", "tactic": "constant", "symbols": ["VOO"], "market": "US"},
+                {
+                    "id": "jp",
+                    "tactic": "constant",
+                    "symbols": ["1305.T"],
+                    "market": "JP",
+                    "monthly_budget": 10_000,
+                },
+                {
+                    "id": "us",
+                    "tactic": "constant",
+                    "symbols": ["VOO"],
+                    "market": "US",
+                    "monthly_budget": 10_000,
+                },
             ]
         }
     )

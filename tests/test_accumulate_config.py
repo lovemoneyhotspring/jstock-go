@@ -36,11 +36,13 @@ id = "配列4倍"
 tactic = "bear_stack"
 symbols = ["1305.T", "1591.T", "^GSPC", "^IXIC"]
 multiplier = 4
+monthly_budget = 30_000
 
 [[tactics]]
 id = "基準"
 tactic = "constant"
 symbols = ["^N225"]
+monthly_budget = 30_000
 """
 
 
@@ -195,12 +197,14 @@ id = "強め"
 tactic = "bear_stack"
 symbols = ["A"]
 multiplier = 4
+monthly_budget = 25_000
 
 [[tactics]]
 id = "弱め"
 tactic = "bear_stack"
 symbols = ["B"]
 multiplier = 2
+monthly_budget = 25_000
 """
     built = load(_write(tmp_path, body)).build()
     assert built["A"].value == 4.0
@@ -215,6 +219,7 @@ def test_symbol_assigned_twice_is_rejected(tmp_path: Path) -> None:
 id = "重複"
 tactic = "constant"
 symbols = ["1305.T"]
+monthly_budget = 30_000
 """
     )
     with pytest.raises(ValueError, match="二重買付"):
@@ -229,6 +234,7 @@ def test_overlap_is_allowed_when_comparing(tmp_path: Path) -> None:
 id = "重複"
 tactic = "constant"
 symbols = ["1305.T"]
+monthly_budget = 30_000
 """
     )
     config = load(_write(tmp_path, body), allow_overlap=True)
@@ -244,6 +250,7 @@ id = "止めてある"
 tactic = "constant"
 symbols = ["1305.T"]
 enabled = false
+monthly_budget = 30_000
 """
     )
     config = load(_write(tmp_path, body))  # 重複しているが enabled=false なので通る
@@ -258,6 +265,7 @@ def test_duplicate_id_is_rejected(tmp_path: Path) -> None:
 id = "配列4倍"
 tactic = "constant"
 symbols = ["9984.T"]
+monthly_budget = 30_000
 """
     )
     with pytest.raises(ValueError, match="id が重複"):
@@ -266,19 +274,43 @@ symbols = ["9984.T"]
 
 def test_empty_symbols_is_rejected() -> None:
     with pytest.raises(ValueError, match="symbols"):
-        AccumConfig.model_validate({"tactics": [{"id": "x", "tactic": "constant", "symbols": []}]})
+        AccumConfig.model_validate(
+            {
+                "tactics": [
+                    {"id": "x", "tactic": "constant", "symbols": [], "monthly_budget": 25_000}
+                ]
+            }
+        )
 
 
 def test_duplicate_symbol_within_one_tactic_is_rejected() -> None:
     with pytest.raises(ValueError, match="重複しています"):
         AccumConfig.model_validate(
-            {"tactics": [{"id": "x", "tactic": "constant", "symbols": ["A", "A"]}]}
+            {
+                "tactics": [
+                    {
+                        "id": "x",
+                        "tactic": "constant",
+                        "symbols": ["A", "A"],
+                        "monthly_budget": 25_000,
+                    }
+                ]
+            }
         )
 
 
 def test_symbols_are_stripped() -> None:
     config = AccumConfig.model_validate(
-        {"tactics": [{"id": "x", "tactic": "constant", "symbols": [" A ", "B"]}]}
+        {
+            "tactics": [
+                {
+                    "id": "x",
+                    "tactic": "constant",
+                    "symbols": [" A ", "B"],
+                    "monthly_budget": 25_000,
+                }
+            ]
+        }
     )
     assert config.symbols == ["A", "B"]
 
@@ -294,6 +326,7 @@ def test_bad_tactic_name_reports_which_entry(tmp_path: Path) -> None:
 id = "打ち間違い"
 tactic = "bare_stack"
 symbols = ["A"]
+monthly_budget = 25_000
 """
     with pytest.raises(ValueError, match=r"\[打ち間違い\] 未知の戦略"):
         load(_write(tmp_path, body)).build()
@@ -375,18 +408,21 @@ def test_window_is_read_from_config(tmp_path: Path) -> None:
 id = "既定"
 tactic = "bear_stack"
 symbols = ["A"]
+monthly_budget = 25_000
 
 [[tactics]]
 id = "制限なし"
 tactic = "bear_stack"
 symbols = ["B"]
 window = false
+monthly_budget = 25_000
 
 [[tactics]]
 id = "後場寄り"
 tactic = "bear_stack"
 symbols = ["C"]
 window = { start = "12:30", end = "13:00" }
+monthly_budget = 25_000
 """
     built = load(_write(tmp_path, body)).build()
     assert built["A"].window.describe() == "14:00〜15:00 JST"
@@ -449,7 +485,16 @@ def test_window_does_not_change_the_plan() -> None:
 
 def test_market_defaults_to_japan() -> None:
     config = AccumConfig.model_validate(
-        {"tactics": [{"id": "x", "tactic": "constant", "symbols": ["1305.T"]}]}
+        {
+            "tactics": [
+                {
+                    "id": "x",
+                    "tactic": "constant",
+                    "symbols": ["1305.T"],
+                    "monthly_budget": 25_000,
+                }
+            ]
+        }
     )
     assert config.tactics[0].market is Market.JP
 
@@ -460,12 +505,14 @@ def test_symbols_are_grouped_by_market(tmp_path: Path) -> None:
 id = "日本株"
 tactic = "constant"
 symbols = ["1305.T", "1591.T"]
+monthly_budget = 25_000
 
 [[tactics]]
 id = "米国株"
 tactic = "constant"
 symbols = ["VOO", "^GSPC"]
 market = "US"
+monthly_budget = 25_000
 """
     grouped = load(_write(tmp_path, body)).symbols_by_market()
     assert grouped == {Market.JP: ["1305.T", "1591.T"], Market.US: ["VOO", "^GSPC"]}
@@ -489,6 +536,7 @@ tactic = "bear_stack"
 symbols = ["VOO"]
 market = "US"
 multiplier = 2
+monthly_budget = 25_000
 """
     entry = load(_write(tmp_path, body)).tactics[0]
     assert entry.params == {"multiplier": 2}

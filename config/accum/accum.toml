@@ -25,7 +25,9 @@
 #   14時台を既定にしたのは安いからではなく、大引けに対するぶれが寄り付きの
 #   約1/3だから。60分足3年の実測では時間帯による平均取得単価の差は ±0.03%。
 
-# 1銘柄あたりの毎月の基本予算。比較の前提を揃えるため全戦略で共通。
+# 1銘柄あたりの毎月の基本予算（既定値）。
+# 個別の [[tactics]] に monthly_budget を書けば、その戦略（銘柄）だけこちらを使う
+# （書かなければこの既定値のまま）。
 monthly_budget = 25_000
 
 # 緊急停止。true にすると `accum run --live` でも発注しない。
@@ -76,6 +78,7 @@ lot_size_overrides = { "452A.T" = 10, "563A.T" = 1, "1305.T" = 10, "1591.T" = 1,
 #   signal_symbol = "^GSPC"
 #   signal_market = "US"
 #   multiplier = 4
+#   monthly_budget = 40_000        # この銘柄の毎月の基本予算（必須）
 
 # 完全下降配列（終値 < MA20 < MA50 < MA200）で4倍。
 # 追加投入1円あたりの効果が最良で、必要資金も最少（年平均1.15〜1.42倍）。
@@ -92,6 +95,7 @@ market = "JP"
 signal_symbol = "^GSPC"         # S&P 500 指数（ウォッチリストの SPX）
 signal_market = "US"
 multiplier = 4
+monthly_budget = 25_000
 
 [[tactics]]
 id = "563A 配列4倍（NASDAQ で判定）"
@@ -101,6 +105,7 @@ market = "JP"
 signal_symbol = "^IXIC"         # NASDAQ 総合指数（ウォッチリストの IXIC）
 signal_market = "US"
 multiplier = 4
+monthly_budget = 25_000
 
 # 以前の対象（1305 / 1591）。止めてあるが、戻すときは enabled を外す。
 [[tactics]]
@@ -108,6 +113,7 @@ id = "配列4倍（旧: 1305/1591）"
 tactic = "bear_stack"
 symbols = ["1305.T", "1591.T"]
 multiplier = 4
+monthly_budget = 25_000
 enabled = false
 
 # 同じ機構の弱め版。暴落時に平常の4倍を出せない場合はこちら。
@@ -118,6 +124,7 @@ tactic = "bear_stack"
 symbols = ["^N225"]
 multiplier = 2
 window = { start = "14:00", end = "15:00" }
+monthly_budget = 25_000
 enabled = false
 
 # 弱気スコア（0〜6）で段階的に増額。効果は最大だが資金効率は落ちる。
@@ -127,6 +134,7 @@ tactic = "stack_ladder"
 symbols = ["^GSPC"]
 market = "US"
 multipliers = { 3 = 1.5, 5 = 2.0, 6 = 4.0 }
+monthly_budget = 25_000
 enabled = false
 
 # 高値からの下落率で増額。米国指数では強いが、新高値を作らない市場では
@@ -140,6 +148,7 @@ market = "US"
 levels = [0.10, 0.20, 0.30]
 multipliers = [2.0, 3.0, 4.0]
 require_downtrend = true
+monthly_budget = 25_000
 enabled = false
 
 # 比較の基準。増額しない純粋なドル平均法。発注時間帯は既定の 14:00〜15:00 JST。
@@ -147,6 +156,7 @@ enabled = false
 id = "基準"
 tactic = "constant"
 symbols = ["1306.T"]
+monthly_budget = 25_000
 enabled = false
 
 
