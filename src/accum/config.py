@@ -247,8 +247,9 @@ class ExecutionConfig(BaseModel):
         return v
 
     #: 最終足がこの日数より古い銘柄は判定しない（取得元の障害で古い足のまま
-    #: 増額判定するのを防ぐ）。週末＋祝日を跨げる 4 日が既定。
-    max_stale_days: int = Field(default=4, ge=1)
+    #: 増額判定するのを防ぐ）。既定の 6 日は GW・年末年始（最長 6 日）を跨げる。
+    #: 判定用の銘柄（signal_symbol）が古い場合は投下を止めず警告だけ出す。
+    max_stale_days: int = Field(default=6, ge=1)
 
 
 class AccumConfig(BaseModel):

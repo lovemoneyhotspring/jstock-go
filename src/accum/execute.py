@@ -147,6 +147,9 @@ class Pending:
     contributions: list[Contribution]
     #: 足が古すぎて判定を見送った銘柄 → 最終足の日付
     stale: dict[str, dt.date] = field(default_factory=dict)
+    #: 判定用の銘柄（``signal_symbol``）の足が古い → 最終足の日付。
+    #: 投下は止めない（基本分まで止まる方が損）が、倍率は古い足のままなので警告する
+    stale_signals: dict[str, dt.date] = field(default_factory=dict)
 
 
 #: 銘柄と月（月初の日付）から、その月に発注済みの額を返す。台帳が実装する。
@@ -168,7 +171,7 @@ def pending_contributions(
     placed: PlacedLookup | None = None,
     active: ActiveLookup | None = None,
     started: StartedLookup | None = None,
-    max_stale_days: int = 4,
+    max_stale_days: int = 6,
 ) -> Pending:
     """ライブの規則で「今日出すべき投下」を取り出す。
 
@@ -200,10 +203,17 @@ def pending_contributions(
     """
     out: list[Contribution] = []
     stale: dict[str, dt.date] = {}
+    stale_signals: dict[str, dt.date] = {}
     lookup: PlacedLookup = placed or (lambda _symbol, _month: Decimal(0))
     for entry in config.active:
         tactic = entry.build()
         signal_all = bars.get(entry.signal_symbol) if entry.signal_symbol else None
+        if entry.signal_symbol and signal_all is not None and signal_all.height:
+            signal_today = to_zone(now, entry.signal_market_resolved.timezone).date()
+            signal_latest = signal_all["date"].max()
+            assert isinstance(signal_latest, dt.date)
+            if (signal_today - signal_latest).days > max_stale_days:
+                stale_signals[entry.signal_symbol] = signal_latest
         for symbol in entry.symbols:
             frame = bars.get(symbol)
             if frame is None or frame.height == 0:
@@ -235,7 +245,9 @@ def pending_contributions(
                 this_month, budget, month, started(symbol) if started else None
             )
             target = base_target + extras
-            carried = _carry_over(plan, symbol, month, lookup, active)
+            carried = _carry_over(
+                plan, symbol, month, budget, lookup, active, started(symbol) if started else None
+            )
             already = lookup(symbol, month)
             due = target + carried - already
             if due <= 0:
@@ -263,7 +275,7 @@ def pending_contributions(
                     placed=already,
                 )
             )
-    return Pending(out, stale)
+    return Pending(out, stale, stale_signals)
 
 
 def _month_target(
@@ -298,18 +310,27 @@ def _carry_over(
     plan: pl.DataFrame,
     symbol: str,
     month: dt.date,
+    budget: Decimal,
     placed: PlacedLookup,
     active: ActiveLookup | None,
+    started: dt.date | None,
 ) -> Decimal:
-    """前月の「目標 − 発注済み」の残り。前月に発注記録が無ければ 0。"""
+    """前月の「目標 − 発注済み」の残り。前月に発注記録が無ければ 0。
+
+    前月の目標は当月と同じ規則（:func:`_month_target`）で出す。前月が開始月なら
+    日割り後の額が目標。満額で計算すると、日割りで買わなかった分まで
+    「買い残し」として当月に上乗せされ、二重買付になる。
+    """
     if active is None:
         return Decimal(0)
     previous = (month - dt.timedelta(days=1)).replace(day=1)
     if not active(symbol, previous):
         return Decimal(0)
     last_month = plan.filter((pl.col("date") >= previous) & (pl.col("date") < month))
-    target = Decimal(str(int(last_month["amount"].sum())))
-    return max(Decimal(0), target - placed(symbol, previous))
+    if last_month.height == 0:
+        return Decimal(0)
+    base, extras, _ = _month_target(last_month, budget, previous, started)
+    return max(Decimal(0), base + extras - placed(symbol, previous))
 
 
 @dataclass(frozen=True, slots=True)

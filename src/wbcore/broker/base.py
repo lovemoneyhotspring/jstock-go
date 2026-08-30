@@ -51,6 +51,10 @@ class RateLimitExceededError(BrokerError):
     """レート制限に当たった。"""
 
 
+class OrderNotFoundError(BrokerError):
+    """照会した注文がブローカーに無い（404）。認証エラーや通信断とは区別する。"""
+
+
 class Broker(ABC):
     """発注と口座照会の窓口。"""
 

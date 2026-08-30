@@ -145,10 +145,15 @@ class Ledger:
         )
 
     def was_placed(self, client_order_id: str) -> bool:
-        """すでに**ブローカーへ送った**注文か。dry-run の記録は数えない。"""
+        """すでに**ブローカーへ送った**注文で、まだ有効（または結果不明）か。
+
+        dry-run は数えない。明確に拒否された（REJECTED）注文も数えない——
+        同じ日の次の実行で同じ判断（同じ ID）を出し直せるように。数えると
+        一時的な拒否で当日の投下が丸ごと翌日に持ち越される。
+        """
         row = self._connection.execute(
-            "SELECT 1 FROM orders WHERE client_order_id = ? AND status != ?",
-            (client_order_id, DRY_RUN_STATUS),
+            "SELECT 1 FROM orders WHERE client_order_id = ? AND status NOT IN (?, ?)",
+            (client_order_id, DRY_RUN_STATUS, OrderStatus.REJECTED.value),
         ).fetchone()
         return row is not None
 

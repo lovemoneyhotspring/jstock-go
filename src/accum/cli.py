@@ -498,7 +498,14 @@ def _run(
     from wbcore.notify import alert
 
     settings = AppSettings()
-    config = _load(config_dir)
+    try:
+        config = load(_dir(config_dir))
+    except (FileNotFoundError, ValueError) as exc:
+        # cron では誰も端末を見ていない。設定の壊れで積立が止まっていることを通知する
+        console.print(f"[red]設定を読めません: {exc}[/red]")
+        log.error("積立の設定を読めず停止", code="accum.config", error=str(exc))
+        alert("積立: 設定を読めず停止", str(exc))
+        raise typer.Exit(1) from None
     console.print(describe_mode(settings.env, live, kill_switch=config.kill_switch))
     if not no_sync:
         _sync(settings, config, config_dir, days=30, force=False)
@@ -585,6 +592,15 @@ def _run(
             symbols={s: d.isoformat() for s, d in pending.stale.items()},
         )
         alert("積立: 足が古いため判定を見送り", detail)
+    if pending.stale_signals:
+        detail = "、".join(f"{s}（最終 {d}）" for s, d in sorted(pending.stale_signals.items()))
+        console.print(f"[yellow]判定用の足が古いため倍率が最新ではありません: {detail}[/yellow]")
+        log.warning(
+            "判定用の足が古い（投下は続けるが倍率は古い足のまま）",
+            code="accum.stale_signal",
+            symbols={s: d.isoformat() for s, d in pending.stale_signals.items()},
+        )
+        alert("積立: 判定用の足が古い（投下は続行）", detail)
     contributions = pending.contributions
     for c in contributions:
         log.info(
@@ -651,6 +667,9 @@ def _run(
 
     status: dict[str, str] = {}
     failures: list[str] = []
+    # 市場ごとの買付余力。同じ実行で複数銘柄を出すとき、先に出した分を引いて
+    # 次を判断する（毎回同じ余力と比べると 2 銘柄目以降が余力を超えて通る）
+    remaining: dict[Market, Decimal] = {}
     try:
         for item in planned:
             c = item.contribution
@@ -678,12 +697,15 @@ def _run(
                 # 余力不足で拒否されるより、こちらで止めて理由を残す方が追える。
                 preview = broker.preview(item.request)
                 cost = preview.estimated_cost + preview.estimated_fee
-                buying_power = broker.get_balance().buying_power
+                if c.market not in remaining:
+                    remaining[c.market] = broker.get_balance().buying_power
+                buying_power = remaining[c.market]
                 if cost > buying_power:
                     note = f"買付余力不足（必要 {cost:,.0f} / 余力 {buying_power:,.0f}）"
                     status[key] = f"[red]見送り[/red] {note}"
                     failures.append(f"{key}: {note}")
                     continue
+                remaining[c.market] = buying_power - cost
                 request = item.request
                 try:
                     _place_recorded(broker, ledger, request, c)

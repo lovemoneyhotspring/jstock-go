@@ -109,3 +109,34 @@ def test_ledger_symbol_matches_the_broker_notation() -> None:
     assert ledger_symbol(config, "1305.T") == "1305"
     assert ledger_symbol(config, "VOO") == "VOO"
     assert ledger_symbol(config, "unknown") == "unknown"
+
+
+def test_carry_over_uses_the_prorated_target_of_the_start_month() -> None:
+    """8/16 開始（日割り 5,000）で 5,000 を買えていれば、9 月に繰り越しは無い。
+
+    満額 10,000 で計算すると 5,000 が「買い残し」に見え、9 月に二重に買う。
+    """
+    placed = {AUG: Decimal(5_000), SEP: Decimal(0)}
+    (c,) = pending_contributions(
+        _config(),
+        {"T": BARS},
+        now=NOW,
+        placed=lambda _s, m: placed.get(m, Decimal(0)),
+        active=lambda _s, m: m == AUG,
+        started=lambda _s: dt.date(2026, 8, 16),  # 残り 16/31 日 → 5,161
+    ).contributions
+    assert c.amount == Decimal(10_000) + (Decimal(5_161) - Decimal(5_000))
+    assert "繰り越し 161" in c.reason
+
+
+def test_stale_signal_bars_are_reported_but_do_not_stop_the_contribution() -> None:
+    """判定用の足が古くても投下は止めない（倍率が古いだけ）。ただし警告する。"""
+    signal = BARS.filter(pl.col("date") < dt.date(2026, 8, 20))
+    pending = pending_contributions(
+        _config(signal_symbol="S", monthly_budget=10_000),
+        {"T": BARS, "S": signal},
+        now=NOW,
+        placed=lambda _s, _m: Decimal(0),
+    )
+    assert pending.stale_signals == {"S": dt.date(2026, 8, 19)}
+    assert [c.amount for c in pending.contributions] == [Decimal(10_000)]

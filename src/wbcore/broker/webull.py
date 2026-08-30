@@ -33,6 +33,7 @@ from wbcore.broker.base import (
     Broker,
     BrokerError,
     InsufficientFundsError,
+    OrderNotFoundError,
     OrderRejectedError,
     RateLimitExceededError,
 )
@@ -440,13 +441,19 @@ class WebullBroker(Broker):
         ]
 
     def get_order(self, client_order_id: str) -> Order | None:
+        """注文を照会する。無ければ None。
+
+        認証エラーや通信断は None にせず :class:`BrokerError` を上げる。
+        None に丸めると、照会できていないだけの注文が「ブローカーに無い」
+        と同じに見え、台帳の PENDING が残った原因を追えない。
+        """
         self._order_read_limiter.acquire()
         try:
             payload = self._call(
                 lambda: self.client.order_v3.get_order_detail(self.account_id, client_order_id),
                 "注文照会",
             )
-        except BrokerError:
+        except OrderNotFoundError:
             return None
         legs = flatten_order_legs(payload)
         return self._to_order(legs[0]) if legs else None
@@ -613,6 +620,8 @@ class WebullBroker(Broker):
                 return RateLimitExceededError(message)
             case 401 | 403:
                 return BrokerError(f"{message}: 認証情報または権限を確認してください")
+            case 404:
+                return OrderNotFoundError(message)
             case _ if "INSUFFICIENT" in message.upper():
                 return InsufficientFundsError(message)
             case 400 | 422:

@@ -43,3 +43,14 @@ def test_dry_run_does_not_block_the_real_order(tmp_path: Path) -> None:
 def test_ledger_creates_parent_directory(tmp_path: Path) -> None:
     with Ledger(tmp_path / "nested" / "dir" / "ledger.db") as ledger:
         assert ledger.recent() == []
+
+
+def test_rejected_order_can_be_resent_the_same_day(tmp_path: Path) -> None:
+    """一時的な拒否で当日の投下を丸ごと翌日に持ち越さない。同じ ID を出し直せる。"""
+    from wbcore.domain.models import OrderStatus
+
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        ledger.record(_request(), OrderStatus.PENDING.value)
+        assert ledger.was_placed("a" * 32)
+        ledger.update_status("a" * 32, OrderStatus.REJECTED)
+        assert not ledger.was_placed("a" * 32)
