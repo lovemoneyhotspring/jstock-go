@@ -96,6 +96,7 @@ signal_symbol = "^GSPC"         # S&P 500 指数（ウォッチリストの SPX�
 signal_market = "US"
 multiplier = 4
 monthly_budget = 25_000
+enabled = false
 
 [[tactics]]
 id = "563A 配列4倍（NASDAQ で判定）"
