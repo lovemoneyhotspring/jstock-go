@@ -54,3 +54,11 @@ def test_rejected_order_can_be_resent_the_same_day(tmp_path: Path) -> None:
         assert ledger.was_placed("a" * 32)
         ledger.update_status("a" * 32, OrderStatus.REJECTED)
         assert not ledger.was_placed("a" * 32)
+
+
+def test_backup_copies_the_ledger_to_another_file(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "ledger.db") as ledger:
+        ledger.record(_request(), "FILLED")
+        copy = ledger.backup(tmp_path / "backup" / "ledger-copy.db")
+    with Ledger(copy) as restored:
+        assert restored.was_placed("a" * 32)

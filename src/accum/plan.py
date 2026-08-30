@@ -16,7 +16,7 @@
 増額分の原資は新規資金（賞与・余剰収入）を想定している。積立予算を
 取り置いて作ると待機が発生し、増額の利益をそのまま打ち消す。
 
-**増額分は翌週の最初の営業日にまとめて出す**
+**増額分は翌週の最初の営業日に、基本予算以上に貯まっていれば出す**
 
 判定は日次のまま、その日ぶんの増額を積み上げておき、翌週の最初の営業日
 （月曜。休場なら火曜以降）に 1 件で出す。日ごとに出すと 1 件が数千円に
@@ -24,6 +24,13 @@
 10 口単位の ETF では 1 単元に届かない。2000 年以降の指数で検証すると、
 週でまとめても平均取得単価は日次と ±0.2% しか変わらず、手数料は半減する
 （月でまとめると「月の最初」に寄った場合 +0.9% 悪化するので週が上限）。
+
+ただし 1 週ぶんでも基本予算（月 25,000 円なら ×4 で約 18,000 円）に届かない
+ことが多い。そこで**累積が基本予算以上になった週の月曜だけ**出し、届かない
+週は次週へ持ち越して積み続ける。1 件あたりの金額をまとめて手数料率を下げる
+ためで、投下額の総量は変わらない（出す日が後ろにずれるだけ）。
+**入金日には閾値に関係なく累積を出す**——基本分の注文がどのみち出るので、
+同じ注文に乗せても手数料は増えず、持ち越しが 1 か月より長くならない。
 """
 
 from __future__ import annotations
@@ -128,7 +135,7 @@ def build_plan(
         .cast(pl.Int64)
         .alias("_accrued"),
     )
-    plan = _defer_extras_to_next_week(plan)
+    plan = _defer_extras_to_next_week(plan, threshold=budget)
 
     return plan.with_columns(
         (pl.col("base") + pl.col("extra")).alias("amount"),
@@ -136,12 +143,15 @@ def build_plan(
     ).select(PLAN_COLUMNS)
 
 
-def _defer_extras_to_next_week(plan: pl.DataFrame) -> pl.DataFrame:
+def _defer_extras_to_next_week(plan: pl.DataFrame, *, threshold: int) -> pl.DataFrame:
     """日ごとに積み上げた増額（``_accrued``）を、翌週の最初の営業日に 1 件でまとめる。
 
     週は月曜始まり。翌週の月曜が休場なら、その週で最初に足のある日に出す。
-    足の最終週に積み上がった分は、まだ出す日が来ていないので計画には現れない
-    （ライブでは翌週の足が増えた時点で目標に入る）。
+    その日の累積が ``threshold``（基本予算）に届かなければ出さず、次の週へ
+    持ち越して積み続ける。届いた週にまとめて出す。入金日（``_payday``）は
+    基本分の注文が出るので、累積があれば閾値に関係なく同じ日に出す。
+    足の最終週に積み上がった分や、まだ閾値に届いていない分は計画には現れない
+    （ライブでは足が増えて届いた時点で目標に入る）。
     """
     next_week = (pl.col("date").dt.truncate("1w") + pl.duration(weeks=1)).alias("_next_week")
     accrued = (
@@ -158,16 +168,64 @@ def _defer_extras_to_next_week(plan: pl.DataFrame) -> pl.DataFrame:
         .group_by("_session")
         .agg(pl.col("extra").sum(), pl.col("_extra_days").sum())
         .rename({"_session": "date"})
+        .sort("date")
     )
+    paydays = plan.filter(pl.col("_payday"))["date"]
+    scheduled = _release_when_reaching(scheduled, threshold, paydays=paydays)
     return plan.join(scheduled, on="date", how="left").with_columns(
         pl.col("extra").fill_null(0).cast(pl.Int64),
         pl.col("_extra_days").fill_null(0).cast(pl.Int64),
     )
 
 
+def _release_when_reaching(
+    scheduled: pl.DataFrame, threshold: int, *, paydays: pl.Series
+) -> pl.DataFrame:
+    """週ごとの増額を、累積が ``threshold`` 以上になった週か入金日にまとめて出す。
+
+    候補日（翌週の最初の営業日と入金日）を古い順にたどり、累積が閾値に届いた
+    日か入金日に全額出して 0 に戻す。候補日は年に 60 ほどなので Python の
+    ループで十分。
+    """
+    payday_set = set(paydays.to_list())
+    candidates = (
+        pl.concat(
+            [
+                scheduled.select(
+                    "date", pl.col("extra").cast(pl.Int64), pl.col("_extra_days").cast(pl.Int64)
+                ),
+                pl.DataFrame(
+                    {"date": paydays, "extra": 0, "_extra_days": 0},
+                    schema={"date": pl.Date, "extra": pl.Int64, "_extra_days": pl.Int64},
+                ),
+            ]
+        )
+        .group_by("date")
+        .agg(pl.col("extra").sum(), pl.col("_extra_days").sum())
+        .sort("date")
+    )
+    dates, extras, days = [], [], []
+    carry_amount = carry_days = 0
+    for row in candidates.iter_rows(named=True):
+        carry_amount += int(row["extra"])
+        carry_days += int(row["_extra_days"])
+        if carry_amount <= 0:
+            continue
+        if carry_amount < threshold and row["date"] not in payday_set:
+            continue
+        dates.append(row["date"])
+        extras.append(carry_amount)
+        days.append(carry_days)
+        carry_amount = carry_days = 0
+    return pl.DataFrame(
+        {"date": dates, "extra": extras, "_extra_days": days},
+        schema={"date": pl.Date, "extra": pl.Int64, "_extra_days": pl.Int64},
+    )
+
+
 def _reason() -> pl.Expr:
     """なぜその金額になったかを日本語で残す。障害時の調査で効く。"""
-    boosted = pl.format("先週の増額 {} 円（下降 {} 日ぶん）", "extra", "_extra_days")
+    boosted = pl.format("累積の増額 {} 円（下降 {} 日ぶん）", "extra", "_extra_days")
     return (
         pl.when((pl.col("base") > 0) & (pl.col("extra") > 0))
         .then(pl.format("入金日 {} 円＋", "base") + boosted)

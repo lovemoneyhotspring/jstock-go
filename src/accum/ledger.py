@@ -119,6 +119,27 @@ class Ledger:
     def close(self) -> None:
         self._connection.close()
 
+    def backup(self, destination: Path) -> Path:
+        """台帳を別ファイルに複製する（SQLite のオンラインバックアップ）。
+
+        台帳は「今月いくら発注済みか」の唯一の記録で、ブローカーから
+        再構築できない。失うと次の実行で当月の予算を買い直す。
+        """
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        copy = sqlite3.connect(destination)
+        try:
+            self._connection.backup(copy)
+        finally:
+            copy.close()
+        return destination
+
+    def recorded_ids(self) -> set[str]:
+        """台帳にある注文 ID（dry-run を除く）。ブローカーの履歴との突合に使う。"""
+        rows = self._connection.execute(
+            "SELECT client_order_id FROM orders WHERE status != ?", (DRY_RUN_STATUS,)
+        ).fetchall()
+        return {row["client_order_id"] for row in rows}
+
     def __enter__(self) -> Ledger:
         return self
 
@@ -268,17 +289,24 @@ class Ledger:
         filled_quantity: Decimal = Decimal(0),
         avg_fill_price: Decimal | None = None,
         broker_order_id: str | None = None,
+        amount: Decimal | None = None,
     ) -> None:
-        """ブローカーに照会した結果で約定状況を更新する。"""
+        """ブローカーに照会した結果で約定状況を更新する。
+
+        Args:
+            amount: 「発注済み」として数える額を置き換える（株数 × 約定単価）。
+                None なら変えない。
+        """
         self._connection.execute(
             "UPDATE orders SET status = ?, filled_quantity = ?, avg_fill_price = ?,"
-            " broker_order_id = COALESCE(?, broker_order_id), updated_at = ?"
-            " WHERE client_order_id = ?",
+            " broker_order_id = COALESCE(?, broker_order_id), amount = COALESCE(?, amount),"
+            " updated_at = ? WHERE client_order_id = ?",
             (
                 status.value,
                 str(filled_quantity),
                 str(avg_fill_price) if avg_fill_price is not None else None,
                 broker_order_id,
+                str(amount) if amount is not None else None,
                 now_utc().isoformat(timespec="seconds"),
                 client_order_id,
             ),

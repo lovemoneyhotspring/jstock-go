@@ -541,3 +541,14 @@ monthly_budget = 25_000
     entry = load(_write(tmp_path, body)).tactics[0]
     assert entry.params == {"multiplier": 2}
     assert entry.build().value == 2.0
+
+
+def test_window_rejects_weekends_when_enabled() -> None:
+    """土日は発注しない。window = false（制限なし）は検証用なので土日も通す。"""
+    from accum.window import JST, TradingWindow
+
+    saturday = dt.datetime(2026, 8, 29, 14, 30, tzinfo=JST)
+    friday = dt.datetime(2026, 8, 28, 14, 30, tzinfo=JST)
+    assert not TradingWindow().allows(saturday)
+    assert TradingWindow().allows(friday)
+    assert TradingWindow(enabled=False).allows(saturday)

@@ -72,14 +72,21 @@ class TradingWindow:
             )
 
     def allows(self, moment: dt.datetime | None = None) -> bool:
-        """その時刻に発注してよいか。
+        """その時刻に発注してよいか。時間帯を制限しているときは土日も不可。
+
+        祝日は時計だけでは分からないので判定しない。祝日に送った注文は
+        ブローカーが拒否し（REJECTED）、翌営業日に同じ判断で出し直される。
+        ``window = false`` は文字どおり制限なし（土日も含む。検証・手動用）。
 
         Args:
             moment: 省略時は現在時刻。naive な値は UTC とみなす（アプリの規約）。
         """
         if not self.enabled:
             return True
-        return self.start <= self._jst(moment).time() < self.end
+        jst = self._jst(moment)
+        if jst.weekday() >= 5:
+            return False
+        return self.start <= jst.time() < self.end
 
     def next_open(self, moment: dt.datetime | None = None) -> dt.datetime:
         """次に発注できるようになる日時。今が時間内ならその時刻自身。

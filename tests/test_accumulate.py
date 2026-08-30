@@ -102,15 +102,17 @@ def test_extra_per_month_does_not_exceed_budget_share() -> None:
     """月をまたいで下降配列が続いても、増額は月あたり基本の3倍を超えない。"""
     plan = build_plan(_long("down", 900))
     per_month = plan.group_by(pl.col("date").dt.truncate("1mo")).agg(pl.col("extra").sum())
-    # 積み上げは月あたり 3 倍が上限。翌週の月曜にまとめて出すため、月末の週の分が
-    # 翌月にずれて 1 週ぶん（約 1/4）多く見える月はあるが、平均では超えない
-    assert per_month["extra"].max() <= 75_000 * 1.3
+    # 積み上げは月あたり 3 倍が上限。基本予算に届くまで貯めてから月曜に出すため、
+    # 2 週ぶんが同じ月に入って 1.5 倍近く見える月はあるが、平均では超えない
+    assert per_month["extra"].max() <= 75_000 * 1.5
     assert per_month["extra"].mean() <= 75_000
 
 
 def test_extras_are_placed_on_the_first_session_of_the_next_week() -> None:
     """日ごとの増額は翌週の最初の営業日（月曜）にまとまる。月曜が休場なら火曜。"""
-    plan = build_plan(_long("down", 400))
+    # ×8 なら 1 週ぶん（7×25,000/21×5 ≈ 41,000）が基本予算を超え、毎週出る
+    strong = AccumulationSettings(tactic=BearStack(8))
+    plan = build_plan(_long("down", 400), strong)
     boosted = plan.filter(pl.col("extra") > 0)
     assert boosted.height > 0
     assert (boosted["date"].dt.weekday() == 1).all()  # 1 = 月曜
@@ -120,10 +122,44 @@ def test_extras_are_placed_on_the_first_session_of_the_next_week() -> None:
     bars = _long("down", 400)
     holiday = boosted["date"][3]
     without = bars.filter(pl.col("date") != holiday)
-    moved = build_plan(without).filter(pl.col("extra") > 0)
+    moved = build_plan(without, strong).filter(pl.col("extra") > 0)
     tuesday = holiday + dt.timedelta(days=1)
     assert tuesday in set(moved["date"].to_list())
     assert holiday not in set(moved["date"].to_list())
+
+
+def test_extras_wait_until_they_reach_the_monthly_budget() -> None:
+    """1 週ぶんが基本予算に届かなければ出さず、届いた週の月曜にまとめて出す。
+
+    ×4 の 1 週ぶんは 3×25,000/21×5 ≈ 17,800 で 25,000 に届かない。2 週貯めて出る。
+    手数料をまとめるためで、総量は変わらない。
+    """
+    bars = _long("down", 400)
+    plan = build_plan(bars)
+    # 入金日は閾値に関係なく出す（別のテスト）ので、ここでは入金日以外を見る
+    boosted = plan.filter((pl.col("extra") > 0) & (pl.col("base") == 0))
+    assert boosted.height > 0
+    assert (boosted["extra"] >= 25_000).all()
+    assert (boosted["date"].dt.weekday() == 1).all()
+    # 出る週は飛び飛び（毎週ではない）
+    weekly = build_plan(bars, AccumulationSettings(tactic=BearStack(8)))
+    assert boosted.height < weekly.filter(pl.col("extra") > 0).height
+    # 出した合計は、日ごとに積み上げた合計を超えない（前倒しはしない）
+    accrued_total = ((plan["multiplier"] - 1.0) * 25_000 / 21).floor().sum()
+    assert boosted["extra"].sum() <= accrued_total * 1.05
+
+
+def test_extras_below_the_threshold_are_released_on_payday() -> None:
+    """閾値に届かない累積も、入金日には基本分と同じ注文に乗せる（手数料が増えない）。"""
+    plan = build_plan(_long("down", 400))
+    paydays = plan.filter(pl.col("base") > 0)
+    # 入金日にも増額が出る日がある（月曜以外の入金日も含む）
+    on_payday = paydays.filter(pl.col("extra") > 0)
+    assert on_payday.height > 0
+    assert (on_payday["extra"] < 25_000).any()  # 閾値未満でも出ている
+    # 入金日の直前の候補日から持ち越した分が入金日に消化されるので、
+    # 入金日翌日以降の最初の増額は「その週以降」の分だけ
+    assert plan.filter(pl.col("amount") > 0)["reason"].str.contains("入金日").any()
 
 
 def test_reason_is_always_filled() -> None:

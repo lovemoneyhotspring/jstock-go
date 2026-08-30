@@ -87,9 +87,29 @@ def test_run_without_bars_does_not_touch_the_broker(tmp_path: Path) -> None:
         '[[tactics]]\nid = "x"\ntactic = "constant"\nsymbols = ["NOSUCH"]\nmonthly_budget = 25_000\n',
         encoding="utf-8",
     )
-    result = _accum("run", "--no-sync", "--live", config_dir=tmp_path, env={"WBJP_ENV": "prod"})
+    # --ignore-window: 時間帯の外なら --live は同期もせずに終わるので、判断まで進める
+    result = _accum(
+        "run",
+        "--no-sync",
+        "--live",
+        "--ignore-window",
+        config_dir=tmp_path,
+        env={"WBJP_ENV": "prod"},
+    )
     assert result.exit_code == 0
     assert "出すべき投下はありません" in result.stdout
+
+
+def test_live_run_outside_the_window_exits_before_syncing(tmp_path: Path) -> None:
+    """cron は一日中叩く。窓の外では足の同期もブローカー接続もしない。"""
+    (tmp_path / "accum.toml").write_text(
+        '[[tactics]]\nid = "x"\ntactic = "constant"\nsymbols = ["NOSUCH"]\nmonthly_budget = 25_000\n'
+        'window = { start = "14:00", end = "14:01" }\n',
+        encoding="utf-8",
+    )
+    result = _accum("run", "--live", config_dir=tmp_path, env={"WBJP_ENV": "prod"})
+    assert result.exit_code == 0
+    assert "発注時間帯の外" in result.stdout and "足データがありません" not in result.stdout
 
 
 def test_commands_are_registered() -> None:

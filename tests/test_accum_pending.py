@@ -92,14 +92,44 @@ def test_nothing_is_due_once_the_month_is_fully_placed() -> None:
 
 
 def test_budget_increase_mid_month_adds_only_the_difference() -> None:
+    """差額 5,000 は基本目標 15,000 に届かないので、リリース日まで持ち越す。"""
+    placed = _placed(T_202608=Decimal(10_000))
+    pending = pending_contributions(
+        _config(budget=15_000), {"T": BARS}, now=_at(dt.date(2026, 8, 20)), placed=placed
+    )
+    assert pending.contributions == [] and pending.deferred == {"T": Decimal(5_000)}
+    # 入金日（8/3）の翌日ならどのみち注文が出るので同じ注文に乗せる
     (c,) = pending_contributions(
-        _config(budget=15_000),
-        {"T": BARS},
-        now=_at(dt.date(2026, 8, 20)),
-        placed=_placed(T_202608=Decimal(10_000)),
+        _config(budget=15_000), {"T": BARS}, now=_at(dt.date(2026, 8, 4)), placed=placed
     ).contributions
     assert c.amount == Decimal(5_000)
     assert "発注済み 10,000" in c.reason
+
+
+def test_small_remainder_waits_for_a_release_day() -> None:
+    """単元に丸めた端数（643）は株価が下がった日に小口で出さず、次の入金日に乗せる。"""
+    placed = _placed(T_202608=Decimal(9_357), T_202609=Decimal(0))
+    pending = pending_contributions(
+        _config(), {"T": BARS}, now=_at(dt.date(2026, 8, 20)), placed=placed
+    )
+    assert pending.contributions == [] and pending.deferred == {"T": Decimal(643)}
+    # 9 月の入金日（9/1）の翌日: 8 月の残り 643 が繰り越されて 9 月の基本と一緒に出る
+    (c,) = pending_contributions(
+        _config(),
+        {"T": BARS},
+        now=_at(dt.date(2026, 9, 2)),
+        placed=placed,
+        active=lambda _s, m: m == dt.date(2026, 8, 1),
+    ).contributions
+    assert c.amount == Decimal(10_643)
+
+
+def test_a_whole_unfilled_budget_is_placed_without_waiting() -> None:
+    """入金日の注文が丸ごと失効した・cron が止まっていた → リリース日を待たず埋める。"""
+    (c,) = pending_contributions(
+        _config(), {"T": BARS}, now=_at(dt.date(2026, 8, 20))
+    ).contributions
+    assert c.amount == Decimal(10_000)
 
 
 def test_payday_itself_is_not_due_until_its_bar_closes() -> None:

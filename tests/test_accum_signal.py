@@ -125,7 +125,7 @@ def test_todays_contributions_judge_with_the_signal_symbol() -> None:
                     "tactic": "bear_stack",
                     "symbols": ["T"],
                     "signal_symbol": "S",
-                    "multiplier": 4,
+                    "multiplier": 8,  # 1 週ぶんの増額が基本予算を超え、毎週の月曜に出る
                     "window": False,
                     "monthly_budget": 10_000,
                 }
@@ -137,7 +137,7 @@ def test_todays_contributions_judge_with_the_signal_symbol() -> None:
     last_monday = bars["T"].filter(pl.col("date").dt.weekday() == 1)["date"].max()
     bars = {k: f.filter(pl.col("date") <= last_monday) for k, f in bars.items()}
     (c,) = todays_contributions(config, bars)
-    assert c.symbol == "T" and c.multiplier == 4.0 and c.close == Decimal(100)
+    assert c.symbol == "T" and c.multiplier == 8.0 and c.close == Decimal(100)
     assert c.amount > 0  # 下降配列なので先週ぶんの増額が月曜に出る
     # 判定用の足が無ければ倍率 1（増額なし）。最終日が入金日でなければ投下も無い
     assert todays_contributions(config, {"T": bars["T"]}) == []

@@ -116,8 +116,10 @@ def test_sync_updates_open_orders_and_reports_changes(tmp_path: Path) -> None:
         assert "c" * 32 not in by_id  # 見つからない注文は変えない（勝手に失効にしない）
         assert [o.client_order_id for o in ledger.open_orders()] == ["c" * 32]
 
-        # 発注済み: a は全額、b は 10/30、c は生きているので全額
-        expected = Decimal(25_000) + Decimal(25_000) * Decimal(10) / Decimal(30) + Decimal(25_000)
+        # 発注済み: 約定単価が分かった a・b は 株数 × 約定単価（30 × 827 = 24,810）に
+        # 置き換わる。a は全額、b は 10/30、c は生きているので判断時の 25,000 のまま
+        filled = Decimal(30) * Decimal(827)
+        expected = filled + filled * Decimal(10) / Decimal(30) + Decimal(25_000)
         assert ledger.placed_amount("452A", MONTH) + Decimal(0) == expected + Decimal(1)
 
 
@@ -131,3 +133,57 @@ def test_sync_is_a_noop_without_open_orders(tmp_path: Path) -> None:
 def test_status_change_describe_for_a_full_fill() -> None:
     change = StatusChange("x", "452A", "SUBMITTED", OrderStatus.FILLED, Decimal(30), Decimal(30))
     assert change.describe() == "452A: FILLED（30/30 約定）"
+
+
+def test_pending_order_missing_at_the_broker_is_rejected_after_a_day(tmp_path: Path) -> None:
+    """送信中のままブローカーに無い注文は、翌日以降なら「届かなかった」として落とす。"""
+    broker = FakeBroker({})
+    with Ledger(tmp_path / "l.db") as ledger:
+        ledger.record(
+            _request("p" * 32),
+            "PENDING",
+            plan_month=MONTH,
+            amount=Decimal(25_000),
+            market=Market.JP,
+        )
+        ledger.record(
+            _request("s" * 32),
+            "SUBMITTED",
+            plan_month=MONTH,
+            amount=Decimal(25_000),
+            market=Market.JP,
+        )
+        # 送った直後は照会に出ていないだけかもしれない → 触らない
+        assert sync_order_status(ledger, lambda m: broker, now=now_utc()) == []
+        later = now_utc() + dt.timedelta(days=1, minutes=1)
+        (change,) = sync_order_status(ledger, lambda m: broker, now=later)
+        assert change.client_order_id == "p" * 32 and change.after is OrderStatus.REJECTED
+        assert change.lost_amount_ratio == 1
+        # 受理済み（SUBMITTED）は無くても勝手に落とさない
+        assert [o.client_order_id for o in ledger.open_orders()] == ["s" * 32]
+        assert ledger.placed_amount("452A", MONTH) == Decimal(25_000)
+
+
+def test_unrecorded_fills_finds_broker_buys_missing_from_the_ledger(tmp_path: Path) -> None:
+    """台帳を失った状態で走ると当月を買い直す。ブローカーの約定で気づく。"""
+    from accum.execute import Contribution, unrecorded_fills
+    from accum.tactics import Constant
+
+    broker = FakeBroker({})
+    broker._orders["x" * 32] = _order("x" * 32, OrderStatus.FILLED, 30)  # 台帳に無い
+    broker._orders["k" * 32] = _order("k" * 32, OrderStatus.FILLED, 30)  # 台帳にある
+    c = Contribution(
+        symbol="452A.T",
+        market=Market.JP,
+        date=dt.date(2026, 8, 20),
+        close=Decimal(827),
+        amount=Decimal(25_000),
+        multiplier=1.0,
+        reason="",
+        tactic=Constant(window=False),
+    )
+    with Ledger(tmp_path / "l.db") as ledger:
+        ledger.record(_request("k" * 32), "FILLED", plan_month=MONTH, amount=Decimal(1))
+        # 注文の作成日は now_utc() なので、突合の「今日」も同じ日にする
+        found = unrecorded_fills(ledger, lambda m: broker, [c], today=now_utc().date())
+    assert found == {"452A.T": Decimal(30) * Decimal(827)}

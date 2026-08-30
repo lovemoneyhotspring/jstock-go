@@ -440,6 +440,31 @@ class WebullBroker(Broker):
             if self._belongs_to_market(leg)
         ]
 
+    def get_order_history(self, start: dt.date, end: dt.date) -> list[Order]:
+        """期間内の注文（約定・失効を含む）。ページを最後までたどる。"""
+        orders: list[Order] = []
+        last_id: str | None = None
+        for _ in range(50):  # 1 ページ 100 件 × 50 で十分。無限ループの保険
+            self._order_read_limiter.acquire()
+            payload = self._call(
+                lambda cursor=last_id: self.client.order_v3.get_order_history(
+                    self.account_id,
+                    page_size=100,
+                    start_date=start.isoformat(),
+                    end_date=end.isoformat(),
+                    last_client_order_id=cursor,
+                ),
+                "注文履歴照会",
+            )
+            legs = flatten_order_legs(payload)
+            orders.extend(self._to_order(leg) for leg in legs if self._belongs_to_market(leg))
+            if len(legs) < 100:
+                break
+            last_id = str(legs[-1].get("client_order_id") or "") or None
+            if not last_id:
+                break
+        return orders
+
     def get_order(self, client_order_id: str) -> Order | None:
         """注文を照会する。無ければ None。
 

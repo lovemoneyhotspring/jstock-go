@@ -25,7 +25,7 @@ from accum.ledger import Ledger
 from accum.plan import AccumulationSettings, build_plan
 from accum.tactics import Tactic
 from wbcore.broker.base import Broker
-from wbcore.clock import to_zone
+from wbcore.clock import now_utc, to_zone
 from wbcore.domain.market_rules import PriceRounding, rules_for
 from wbcore.domain.models import (
     Market,
@@ -150,6 +150,8 @@ class Pending:
     #: 判定用の銘柄（``signal_symbol``）の足が古い → 最終足の日付。
     #: 投下は止めない（基本分まで止まる方が損）が、倍率は古い足のままなので警告する
     stale_signals: dict[str, dt.date] = field(default_factory=dict)
+    #: リリース日ではないので持ち越した差額 → 銘柄ごとの額。小口注文を避けるため
+    deferred: dict[str, Decimal] = field(default_factory=dict)
 
 
 #: 銘柄と月（月初の日付）から、その月に発注済みの額を返す。台帳が実装する。
@@ -187,6 +189,17 @@ def pending_contributions(
     - cron が動かなかった日があった → 差が残る → 次の実行で埋まる
     - 同じ日に 2 回走った → 1 回目で発注済みが目標に達する → 2 回目は 0
 
+    **差額を出す日は増額と同じ規則に揃える。** 単元に丸めて買えなかった端数や
+    小さな予算増は、そのままだと株価が下がった日に 1 単元だけの小口注文になる。
+    手数料をまとめるため、差額は次のどちらかのときだけ出す:
+
+    - 直前の確定足が入金日か増額のリリース日（計画の ``amount > 0``）——
+      その日はどのみち注文が出るので同じ注文に乗せる
+    - 差額が今月の基本目標以上——入金日の注文が丸ごと通らなかった、
+      cron が止まっていた、月の途中で始めた、など。リリース日を待たず埋める
+
+    それ以外の日は差額を持ち越す（``deferred`` に入れる）。
+
     判断はバックテストと同じく**前日までの確定足**で行い（当日の足は途中経過）、
     買うのは当日の価格。判定用の銘柄も確定足だけ。
     最終足が ``max_stale_days`` 日より古い銘柄は判定しない（``stale`` に入れる）。
@@ -204,6 +217,7 @@ def pending_contributions(
     out: list[Contribution] = []
     stale: dict[str, dt.date] = {}
     stale_signals: dict[str, dt.date] = {}
+    deferred: dict[str, Decimal] = {}
     lookup: PlacedLookup = placed or (lambda _symbol, _month: Decimal(0))
     for entry in config.active:
         tactic = entry.build()
@@ -253,6 +267,10 @@ def pending_contributions(
             if due <= 0:
                 continue
             last = this_month.row(-1, named=True)
+            release_day = int(last["amount"]) > 0
+            if not release_day and not (base_target > 0 and due >= base_target):
+                deferred[symbol] = due
+                continue
             reason = (
                 f"今月の目標 {target:,.0f}（基本 {base_target:,.0f}"
                 + (f"〔{prorated}〕" if prorated else "")
@@ -275,7 +293,7 @@ def pending_contributions(
                     placed=already,
                 )
             )
-    return Pending(out, stale, stale_signals)
+    return Pending(out, stale, stale_signals, deferred)
 
 
 def _month_target(
@@ -369,18 +387,46 @@ def _qty(value: Decimal) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def sync_order_status(ledger: Ledger, broker_for: Callable[[Market], Broker]) -> list[StatusChange]:
+#: 送信中（PENDING）のままブローカーに無い注文を「届かなかった」と見なすまでの時間。
+#: 送った直後は照会に反映されていないことがあるので、翌日まで待つ。
+UNCONFIRMED_GRACE = dt.timedelta(days=1)
+
+
+def sync_order_status(
+    ledger: Ledger, broker_for: Callable[[Market], Broker], *, now: dt.datetime | None = None
+) -> list[StatusChange]:
     """結果が確定していない注文をブローカーに照会し、台帳を更新する。
 
-    見つからない注文（ブローカー側に無い）は UNKNOWN のまま残す。
-    勝手に「失効」にすると、実は板に残っていた注文と二重になる。
+    ブローカーに無い注文は原則そのまま残す（勝手に「失効」にすると、実は
+    板に残っていた注文と二重になる）。例外は**送信中（PENDING）のまま
+    :data:`UNCONFIRMED_GRACE` を過ぎても無い**注文——応答が返らず記録だけが
+    残ったもので、届いていれば翌日には照会できる。これは REJECTED に落とし、
+    次の実行で差額として埋め直す。
+
+    約定単価が分かった注文は「発注済み」の額を **株数 × 約定単価** に置き換える。
+    判断時の価格のままだと、実際に払った額との差だけ差額の計算がずれる。
     """
+    now = now or now_utc()
     changes: list[StatusChange] = []
     for row in ledger.open_orders():
         if row.market is None:
             continue
         order = broker_for(row.market).get_order(row.client_order_id)
         if order is None:
+            placed_at = dt.datetime.fromisoformat(row.placed_at)
+            if row.status != OrderStatus.PENDING.value or now - placed_at < UNCONFIRMED_GRACE:
+                continue
+            ledger.update_status(row.client_order_id, OrderStatus.REJECTED)
+            changes.append(
+                StatusChange(
+                    row.client_order_id,
+                    row.symbol,
+                    row.status,
+                    OrderStatus.REJECTED,
+                    Decimal(0),
+                    row.quantity,
+                )
+            )
             continue
         if order.status.value == row.status and order.filled_quantity == row.filled_quantity:
             continue
@@ -390,6 +436,7 @@ def sync_order_status(ledger: Ledger, broker_for: Callable[[Market], Broker]) ->
             filled_quantity=order.filled_quantity,
             avg_fill_price=order.avg_fill_price,
             broker_order_id=order.broker_order_id,
+            amount=row.quantity * order.avg_fill_price if order.avg_fill_price else None,
         )
         changes.append(
             StatusChange(
@@ -402,6 +449,42 @@ def sync_order_status(ledger: Ledger, broker_for: Callable[[Market], Broker]) ->
             )
         )
     return changes
+
+
+def unrecorded_fills(
+    ledger: Ledger,
+    broker_for: Callable[[Market], Broker],
+    contributions: Iterable[Contribution],
+    *,
+    today: dt.date,
+) -> dict[str, Decimal]:
+    """台帳に無いのにブローカーには約定がある、当月の買い注文を探す。
+
+    台帳を失った（消した・別の環境で動かした）状態で走ると、当月の予算を
+    もう一度買う。ブローカーの当月の買い履歴に、台帳に無い注文 ID の約定が
+    あればそれで、呼び出し側は発注を止めて人に知らせる。
+
+    Returns:
+        設定上の銘柄コード → 台帳に無い約定額（株数 × 約定単価）。
+    """
+    known = ledger.recorded_ids()
+    month_start = today.replace(day=1)
+    found: dict[str, Decimal] = {}
+    by_market: dict[Market, list[Contribution]] = {}
+    for c in contributions:
+        by_market.setdefault(c.market, []).append(c)
+    for market, items in by_market.items():
+        symbols = {c.broker_symbol: c.symbol for c in items}
+        for order in broker_for(market).get_order_history(month_start, today):
+            if order.side is not Side.BUY or order.filled_quantity <= 0:
+                continue
+            if order.client_order_id in known or order.symbol not in symbols:
+                continue
+            price = order.avg_fill_price or Decimal(0)
+            found[symbols[order.symbol]] = found.get(symbols[order.symbol], Decimal(0)) + (
+                order.filled_quantity * price
+            )
+    return found
 
 
 @dataclass(frozen=True)

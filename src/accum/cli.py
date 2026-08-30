@@ -490,10 +490,12 @@ def _run(
         should_fallback_to_limit,
         sync_order_status,
         to_order,
+        unrecorded_fills,
     )
     from accum.ledger import DRY_RUN_STATUS, Ledger
     from wbcore.broker.base import BrokerError
     from wbcore.broker.registry import connect
+    from wbcore.clock import to_zone
     from wbcore.domain.models import Market, OrderType
     from wbcore.notify import alert
 
@@ -507,10 +509,18 @@ def _run(
         alert("積立: 設定を読めず停止", str(exc))
         raise typer.Exit(1) from None
     console.print(describe_mode(settings.env, live, kill_switch=config.kill_switch))
+    now = now_utc()
+    # cron は 20 分おきに一日中叩く。発注できない時間帯に足の同期やブローカー接続まで
+    # 行うと、取得元が落ちている間は 20 分ごとに通知が飛ぶ。--live のときは窓の外なら
+    # ここで終える（dry-run は確認用なので、いつ実行しても判断まで見せる）
+    if live and not ignore_window and not any(e.build().allows_order(now) for e in config.active):
+        windows = "、".join(sorted({e.build().window.describe() for e in config.active}))
+        console.print(f"[dim]発注時間帯の外（{windows}）。何もしません[/dim]")
+        log.info("発注時間帯の外", code="accum.skip", windows=windows)
+        return
     if not no_sync:
         _sync(settings, config, config_dir, days=30, force=False)
     bars = _bars(settings, config.all_symbols)
-    now = now_utc()
     ledger = Ledger(settings.data_dir / f"accum-{settings.env.value}.db")
 
     # 市場ごとにブローカーを1つ。積立は市場をまたぐのが普通。
@@ -532,7 +542,7 @@ def _run(
     # 「発注済み」から外れ、この後の差額の計算で自動的に埋め直される
     if ledger.open_orders():
         try:
-            changes = sync_order_status(ledger, broker_for)
+            changes = sync_order_status(ledger, broker_for, now=now)
         except BrokerError as exc:
             console.print(f"[yellow]注文の照会に失敗（前回の状態のまま続けます）: {exc}[/yellow]")
             changes = []
@@ -561,8 +571,6 @@ def _run(
 
     def started(symbol: str) -> dt.date:
         """積立の開始日。初めて本発注に来た日を台帳に残す（dry-run は確定させない）。"""
-        from wbcore.clock import to_zone
-
         key = ledger_symbol(config, symbol)
         day = ledger.started_on(key)
         if day is None:
@@ -601,6 +609,11 @@ def _run(
             symbols={s: d.isoformat() for s, d in pending.stale_signals.items()},
         )
         alert("積立: 判定用の足が古い（投下は続行）", detail)
+    for symbol, due in sorted(pending.deferred.items()):
+        console.print(
+            f"[dim]{symbol}: 差額 {due:,.0f} はリリース日（入金日・増額の日）まで持ち越し[/dim]"
+        )
+        log.info("差額をリリース日まで持ち越し", code="accum.deferred", symbol=symbol, due=str(due))
     contributions = pending.contributions
     for c in contributions:
         log.info(
@@ -622,6 +635,29 @@ def _run(
         ledger.close()
         console.print("[dim]出すべき投下はありません（今月の目標に達しています）[/dim]")
         return
+
+    # 台帳に無い当月の約定がブローカーにあれば、台帳を失っている。買い直す前に止める
+    if allowed:
+        try:
+            unknown = unrecorded_fills(
+                ledger, broker_for, contributions, today=to_zone(now, settings.timezone).date()
+            )
+        except NotImplementedError:
+            unknown = {}
+        except BrokerError as exc:
+            console.print(f"[yellow]注文履歴を照会できず、台帳との突合を省略: {exc}[/yellow]")
+            log.warning("注文履歴を照会できず突合を省略", code="accum.reconcile", error=str(exc))
+            unknown = {}
+        if unknown:
+            detail = "、".join(f"{s}（約定 {a:,.0f}）" for s, a in sorted(unknown.items()))
+            console.print(
+                f"[red]台帳に無い当月の約定がブローカーにあります。台帳を失っていませんか: "
+                f"{detail}。発注を止めます[/red]"
+            )
+            log.error("台帳に無い当月の約定", code="accum.reconcile", fills=str(unknown))
+            alert("積立: 台帳に無い当月の約定があるため発注を停止", detail)
+            ledger.close()
+            raise typer.Exit(1)
 
     # 売買単位は設定より銘柄マスタを信じる（設定の書き間違いで拒否されるより良い）
     lots = resolve_lot_sizes(contributions, config.execution.lot_size_overrides, broker_for)
@@ -808,6 +844,35 @@ def _run(
     if failures:
         # 通知は出しているが、systemd / cron にも失敗として見せる
         raise typer.Exit(1)
+
+
+@app.command("backup")
+def backup(
+    dest: Annotated[
+        Path | None, typer.Option(help="保存先ディレクトリ（既定 data/backup）")
+    ] = None,
+    keep: Annotated[int, typer.Option(help="残す世代数。古いものから消す")] = 30,
+) -> None:
+    """台帳（data/accum-<env>.db）を日付付きで複製する。cron で毎日回す。
+
+    台帳は「今月いくら発注済みか」の唯一の記録で、ブローカーから再構築できない。
+    失うと次の実行で当月の予算を買い直す。
+    """
+    from accum.ledger import Ledger
+
+    settings = AppSettings()
+    directory = dest or settings.data_dir / "backup"
+    stem = f"accum-{settings.env.value}"
+    target = directory / f"{stem}-{today_utc():%Y%m%d}.db"
+    with Ledger(settings.data_dir / f"{stem}.db") as ledger:
+        ledger.backup(target)
+    console.print(f"複製しました: {target}")
+    old = sorted(directory.glob(f"{stem}-*.db"))[:-keep] if keep > 0 else []
+    for path in old:
+        path.unlink()
+    if old:
+        console.print(f"[dim]古い複製を {len(old)} 件削除[/dim]")
+    log.info("台帳を複製", code="accum.backup", path=str(target), removed=len(old))
 
 
 @app.command("orders")

@@ -149,6 +149,13 @@ class PaperBroker(Broker):
     def get_order(self, client_order_id: str) -> Order | None:
         return self._orders.get(client_order_id)
 
+    def get_order_history(self, start: dt.date, end: dt.date) -> list[Order]:
+        return [
+            o
+            for o in self._orders.values()
+            if o.created_at is None or start <= o.created_at.date() <= end
+        ]
+
     @property
     def market_value(self) -> Decimal:
         return sum(

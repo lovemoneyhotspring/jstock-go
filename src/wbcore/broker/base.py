@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from decimal import Decimal
@@ -109,6 +110,14 @@ class Broker(ABC):
     @abstractmethod
     def get_order(self, client_order_id: str) -> Order | None:
         """注文1件の状態。見つからなければ None。"""
+
+    def get_order_history(self, start: dt.date, end: dt.date) -> list[Order]:
+        """期間内に出した注文（約定・失効を含む）。
+
+        積立の台帳とブローカーの記録を突き合わせるために使う。
+        対応していないブローカーは :class:`NotImplementedError`。
+        """
+        raise NotImplementedError(f"{self.name}: 注文履歴の照会に対応していません")
 
     @abstractmethod
     def preview(self, request: OrderRequest) -> OrderPreview:
