@@ -15,6 +15,11 @@
 
 ## 2. セットアップ手順
 
+> **先に IP を許可する。** Webull OpenAPI の API キーは送信元 IP で制限される。
+> サーバーの外向き IP（`curl -s https://ifconfig.me`）を Webull の API キー設定の
+> 許可リストに追加していないと、接続が `IP_NOT_ALLOWED`（HTTP 401）で失敗する。
+> UAT と本番でキーが別なら、本番キーの側に登録する。
+
 ```bash
 # 1. コード配置
 git clone https://github.com/lovemoneyhotspring/we-bull.git /home/abobo/webull/wbjp && cd /home/abobo/webull/wbjp

@@ -618,6 +618,11 @@ class WebullBroker(Broker):
         match status_code:
             case 429:
                 return RateLimitExceededError(message)
+            case _ if "IP_NOT_ALLOWED" in message:
+                return BrokerError(
+                    f"{message}: この端末の送信元 IP が Webull OpenAPI の許可リストに"
+                    "ありません（`curl -s https://ifconfig.me` の IP を API キー設定に追加）"
+                )
             case 401 | 403:
                 return BrokerError(f"{message}: 認証情報または権限を確認してください")
             case 404:
