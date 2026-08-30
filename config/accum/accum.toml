@@ -106,7 +106,15 @@ market = "JP"
 signal_symbol = "^IXIC"         # NASDAQ 総合指数（ウォッチリストの IXIC）
 signal_market = "US"
 multiplier = 4
-monthly_budget = 25_000
+monthly_budget = 20_000
+
+[[tactics]]
+id = "1629 配列4倍"
+tactic = "bear_stack"
+symbols = ["1629.T"]          
+market = "JP"
+multiplier = 4
+monthly_budget = 20_000
 
 # 以前の対象（1305 / 1591）。止めてあるが、戻すときは enabled を外す。
 [[tactics]]
