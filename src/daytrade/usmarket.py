@@ -31,8 +31,11 @@ class UsSession:
 
 
 def _download(start: dt.date, end: dt.date) -> pl.DataFrame:
+    import logging
+
     import yfinance as yf
 
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
     frames: list[pl.DataFrame] = []
     for symbol, name in SYMBOLS.items():
         raw = yf.download(

@@ -473,3 +473,116 @@ def test_usmarket_sessions_and_asof() -> None:
     assert joined["spx_ret"].to_list()[0] == pytest.approx(0.01)  # 8/31 の朝 → NY 8/28
     assert joined["vix"].to_list()[1] == 20.0  # 9/1 の朝 → NY 8/31
     assert joined["vix"].to_list()[2] == 20.0
+
+
+# --------------------------------------------------------------------------
+# CLI: open（csv の気配・一時的な state で発注経路を通す）
+# --------------------------------------------------------------------------
+
+
+def _cli_env(tmp_path: Path, max_capital: int) -> tuple[Path, dict[str, str]]:
+    """設定ディレクトリ・plan・気配 CSV を tmp に作り、環境変数で state/data を隔離する。"""
+    import json
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "daytrade.toml").write_text(
+        f"[capital]\nmax_capital = {max_capital}\n[regime]\nskip_months = []\n", encoding="utf-8"
+    )
+    state = tmp_path / "state"
+    plans = state / "daytrade"
+    plans.mkdir(parents=True)
+    frame = _cands([("A", 1000), ("B", 1000), ("C", 1000), ("D", 1000)]).with_columns(
+        segment=pl.lit("prime"),
+        prev_close=pl.col("prev_close").cast(pl.Float64),
+        turnover_med=pl.lit(5e8),
+        mkt_cap=pl.lit(9000.0),
+        cap_tercile=pl.lit(3, dtype=pl.Int32),
+        earn_prev=pl.lit(False),
+        disc_today=pl.lit(False),
+        alert=pl.lit(False),
+    )
+    frame.write_parquet(plans / f"plan-{DAY}.parquet")
+    meta = {
+        "day": DAY.isoformat(),
+        "prev_day": PREV.isoformat(),
+        "positions": 3,
+        "budget_per_order": "666666",
+        "iv_prev": None,
+        "iv_gate": "0",
+        "drift": None,
+        "candidates": 4,
+        "eligible": 4,
+        "created_at": "2026-08-31T12:00:00+00:00",
+    }
+    (plans / f"plan-{DAY}.json").write_text(json.dumps(meta), encoding="utf-8")
+    (tmp_path / "q.csv").write_text("symbol,price\nA,950\nB,970\nC,990\nD,1010\n", encoding="utf-8")
+    env = {"WBJP_STATE_DIR": str(state), "WBJP_DATA_DIR": str(tmp_path / "data"), "WBJP_ENV": "uat"}
+    return cfg, env
+
+
+def _open(tmp_path: Path, max_capital: int) -> tuple[int, str, list[dict[str, object]]]:
+    import json
+
+    from typer.testing import CliRunner
+
+    from daytrade.cli import app
+
+    cfg, env = _cli_env(tmp_path, max_capital)
+    result = CliRunner().invoke(
+        app,
+        [
+            "open",
+            "--date",
+            DAY.isoformat(),
+            "--quote-source",
+            "csv",
+            "--quote-file",
+            str(tmp_path / "q.csv"),
+            "--config-dir",
+            str(cfg),
+        ],
+        env=env,
+    )
+    log_path = Path(env["WBJP_STATE_DIR"]) / "logs" / "daytrade-uat.jsonl"
+    records = (
+        [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        if log_path.is_file()
+        else []
+    )
+    return result.exit_code, result.stdout, records
+
+
+def test_open_dry_run_records_orders_and_logs_context(tmp_path: Path) -> None:
+    code, out, records = _open(tmp_path, 2_000_000)
+    assert code == 0, out
+    with Ledger(tmp_path / "state" / "daytrade-uat.db") as ledger:
+        buys = ledger.orders_on(DAY, Side.BUY)
+    assert [o.symbol for o in buys] == ["A", "B", "C"] and all(o.is_dry_run for o in buys)
+    codes = [r.get("code") for r in records]
+    for expected in (
+        "daytrade.config",
+        "daytrade.quotes",
+        "daytrade.regime",
+        "daytrade.ranking",
+        "daytrade.pick",
+        "daytrade.order",
+        "daytrade.run",
+    ):
+        assert expected in codes, expected
+    ranking = next(r for r in records if r.get("code") == "daytrade.ranking")
+    assert [row["symbol"] for row in ranking["rows"]] == ["A", "B", "C"]  # D はギャップ正で対象外
+    config = next(r for r in records if r.get("code") == "daytrade.config")
+    assert config["positions"] == 3 and config["phase"] == "open"
+
+
+def test_open_with_zero_capital_screens_but_never_orders(tmp_path: Path) -> None:
+    """資金 0: 候補は出すが、台帳に注文（dry-run 含む）を書かない。"""
+    code, out, records = _open(tmp_path, 0)
+    assert code == 0, out
+    assert "買わない" in out
+    with Ledger(tmp_path / "state" / "daytrade-uat.db") as ledger:
+        assert ledger.orders_on(DAY) == []
+    assert not any(r.get("code") == "daytrade.order" for r in records)
+    skip = [r for r in records if r.get("code") == "daytrade.skip"]
+    assert skip and skip[-1]["reason"] == "no_capital"

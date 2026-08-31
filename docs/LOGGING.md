@@ -57,18 +57,27 @@
 
 ### デイトレ（`daytrade`）
 
+不具合の再現に要る 4 つ——**そのとき有効だった設定**（`daytrade.config`）、**入力**（`daytrade.plan` / `daytrade.quotes` /
+`daytrade.regime`）、**判断**（`daytrade.ranking` / `daytrade.pick` / `daytrade.skip`）、**結果**（`daytrade.order` / `daytrade.fill` /
+`daytrade.run` / `daytrade.crash`）——を毎回の実行に残す。1 回の実行は `run_id` で束ねる。
+
 | `code` | いつ | 主な項目 |
 |---|---|---|
-| `daytrade.plan` | 前夜に候補を作った | `day`, `prev_day`, `candidates`（全銘柄）, `eligible`（対象）, `positions`（N）, `budget`, `iv_prev`, `path` |
-| `daytrade.quotes` | 気配を取った／古い気配を除外した | `source`, `requested`, `received` / `stale`, `delayed` |
+| `daytrade.config` | 実行の冒頭（plan / open / close） | `phase`, `day`, `live`, `enabled`, `max_capital`, `positions`（N）, `budget_per_order`, `segments`, `min_turnover`, `max_gap`, `skip_months`, `iv_gate`, `drift_gate`, `equity_curve_days`, `us_skip`, `quote_source`, `entry_window` / `exit_window`, `max_quote_age`, `kill_switch`, `watch_only`, `state_dir`, `data_dir` |
+| `daytrade.plan` | 前夜に候補を作った | `day`, `prev_day`, `candidates`（全銘柄）, `eligible`（対象）, `positions`, `budget`, `iv_prev`, `path` |
+| `daytrade.quotes` | 気配を取った／使えない気配を除外した | `source`, `requested`, `received`, `missing`, `missing_sample`（取れなかった銘柄、最大 20） / `stale`, `stale_sample`, `delayed`, `delayed_sample`, `max_age_sec`, `oldest` |
+| `daytrade.regime` | 危険信号を評価した（毎朝） | `day`, `trade`, `reasons`, `month`, `iv_prev`, `drift_bp`, `market_gap_bp`, `recent_pnl`, `us_ret_bp`, `vix` |
+| `daytrade.ranking` | ギャップ順の順位表（N と次点 5 件） | `day`, `n`, `budget`, `quotes`, `rows`（`rank`, `symbol`, `gap`, `price`, `quantity`, `picked`） |
 | `daytrade.pick` | 買う銘柄を決めた（1 件ごと） | `day`, `symbol`, `code_`（J-Quants の 5 桁）, `rank`, `gap`, `prev_close`, `price`, `quantity`, `amount` |
 | `daytrade.order` | 注文にした結果（1 件ごと。買いも売りも） | `day`, `symbol`, `side`, `client_order_id`, `quantity`, `price`, `amount`, `live`, `outcome`（`発注` / `dry-run` / `見送り …` / `失敗 …`） |
-| `daytrade.skip` | 何もしなかった | `reason`（`window` / `regime` / `already` / `no_quotes` / `no_picks` / `no_buys` / `nothing_to_sell`） |
-| `daytrade.regime` | 危険信号を評価した（毎朝） | `day`, `trade`（取引するか）, `reasons`（止めた理由）, `month`, `iv_prev`, `drift_bp`（市場の日中ドリフト）, `market_gap_bp`（候補の中央値ギャップ）, `recent_pnl`, `us_ret_bp`（前夜の S&P500）, `vix` |
-| `daytrade.us_missing` | 前夜の米国市場を取れず、米国のゲート無しで進んだ | `error` |
-| `daytrade.iv_missing` | 前日の IV がアーカイブに無くゲート無しで進んだ | `prev_day` |
-| `daytrade.run` | 実行の終了 | `phase`（`open` / `close`）, `live`, `reason`, `picks` / `sells`, `failures` |
-| `daytrade.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception` |
+| `daytrade.fill` | close が買い注文をブローカーに照会した | `symbol`, `client_order_id`, `broker_order_id`, `before` / `after`（状態）, `quantity`, `filled`, `avg_fill_price`。照会できなければ warning で `after` が null |
+| `daytrade.skip` | 何もしなかった | `reason`（`disabled` / `window` / `regime` / `already` / `no_quotes` / `no_picks` / `no_capital` / `no_buys` / `nothing_to_sell`）と付随項目 |
+| `daytrade.iv_missing` / `daytrade.us_missing` | 前日の IV／前夜の米国市場を取れず、そのゲート無しで進んだ | `prev_day` / `error` |
+| `daytrade.run` | 実行の終了 | `phase`（`open` / `close`）, `live`, `reason`, `n`, `budget`, `picks` / `sells`, `failures` |
+| `daytrade.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception`（トレースバック） |
+
+ブローカーとのやり取り（送ったペイロード・応答）は `wbcore.broker.webull` が `event` で残す（`発注します` など。`code` 無し）。
+yfinance が取れない銘柄ごとに吐く error は抑止してあり、代わりに `daytrade.quotes` の `missing_sample` に残る。
 
 ### スイング売買（`wbjp`）
 

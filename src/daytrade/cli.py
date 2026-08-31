@@ -52,6 +52,8 @@ _Date = Annotated[
 ]
 
 JST = Market.JP.timezone
+#: ログに残す銘柄名の見本の上限（全部は長い。件数は別に残す）。
+SAMPLE = 20
 P = ParamSpec("P")
 R = TypeVar("R")
 
@@ -91,6 +93,41 @@ def _yen(value: Decimal | float | int) -> str:
 def _settings(ctx: typer.Context) -> AppSettings:
     settings: AppSettings = ctx.obj["settings"]
     return settings
+
+
+def _log_config(config: DaytradeConfig, settings: AppSettings, **extra: Any) -> None:
+    """実行時の設定を 1 レコードに残す。不具合の再現には「そのとき何が有効だったか」が要る。"""
+    r = config.regime
+    log.info(
+        "実行時の設定",
+        code="daytrade.config",
+        strategy="jp_gap_fade",
+        env=settings.env.value,
+        enabled=config.capital.enabled,
+        max_capital=str(config.capital.max_capital),
+        order_budget=str(config.capital.order_budget),
+        positions=config.capital.positions,
+        budget_per_order=str(config.capital.budget_per_order),
+        segments=config.universe.segments,
+        min_turnover=str(config.universe.min_turnover),
+        exclude_cap_terciles=config.universe.exclude_cap_terciles,
+        max_gap=str(config.signal.max_gap),
+        min_gap=str(config.signal.min_gap),
+        skip_months=r.skip_months,
+        iv_gate=str(r.iv_gate),
+        drift_gate=str(r.drift_gate) if r.drift_gate is not None else None,
+        equity_curve_days=r.equity_curve_days,
+        us_skip=[str(r.us_skip_low), str(r.us_skip_high)] if r.us_skip_high is not None else None,
+        us_vix_override=str(r.us_vix_override),
+        quote_source=config.execution.quote_source,
+        entry_window=list(config.execution.entry_window),
+        exit_window=list(config.execution.exit_window),
+        max_quote_age=config.execution.max_quote_age,
+        kill_switch=config.execution.kill_switch,
+        state_dir=str(settings.state_dir),
+        data_dir=str(settings.data_dir),
+        **extra,
+    )
 
 
 def _load(config_dir: Path | None) -> DaytradeConfig:
@@ -350,6 +387,7 @@ def plan_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDir 
         log.info("戦略が無効", code="daytrade.skip", reason="disabled")
         return
     day = _plan_day(settings, _parse_date(date), now_utc())
+    _log_config(config, settings, phase="plan", day=day.isoformat())
     plan = _build_plan(settings, config, day)
     _print_plan(plan, config, settings)
 
@@ -374,12 +412,15 @@ def _quotes_for(
         name, settings.env, quote_file=quote_file or config.execution.quote_file
     )
     quotes = provider.fetch(symbols)
+    missing = [s for s in symbols if s not in quotes]
     log.info(
         "気配を取得",
         code="daytrade.quotes",
         source=name,
         requested=len(symbols),
         received=len(quotes),
+        missing=len(missing),
+        missing_sample=missing[:SAMPLE],
     )
     return quotes
 
@@ -390,17 +431,29 @@ def _fresh(
     """古い気配・遅延の気配を落とす。"""
     limit = dt.timedelta(seconds=config.execution.max_quote_age)
     kept: dict[str, Quote] = {}
-    stale = delayed = 0
+    stale: list[str] = []
+    delayed: list[str] = []
+    oldest: dt.datetime | None = None
     for symbol, quote in quotes.items():
+        oldest = quote.at if oldest is None or quote.at < oldest else oldest
         if quote.delayed and not allow_delayed:
-            delayed += 1
+            delayed.append(symbol)
             continue
         if now - quote.at > limit and not allow_delayed:
-            stale += 1
+            stale.append(symbol)
             continue
         kept[symbol] = quote
     if stale or delayed:
-        log.warning("使えない気配を除外", code="daytrade.quotes", stale=stale, delayed=delayed)
+        log.warning(
+            "使えない気配を除外",
+            code="daytrade.quotes",
+            stale=len(stale),
+            stale_sample=stale[:SAMPLE],
+            delayed=len(delayed),
+            delayed_sample=delayed[:SAMPLE],
+            max_age_sec=config.execution.max_quote_age,
+            oldest=oldest.isoformat() if oldest else None,
+        )
     return kept
 
 
@@ -476,6 +529,16 @@ def open_command(
     now = now_utc()
     day = _parse_date(date) or _today_jst(now)
     watch_only = config.capital.positions == 0
+    _log_config(
+        config,
+        settings,
+        phase="open",
+        day=day.isoformat(),
+        live=live,
+        allow_delayed=allow_delayed,
+        quote_override=quote_source,
+        watch_only=watch_only,
+    )
     if watch_only:
         console.print(
             "[yellow]資金 0（max_capital = 0）: スクリーニングと候補の表示だけ行い、買いません[/yellow]"
@@ -539,17 +602,34 @@ def open_command(
                 "危険信号で見送り", code="daytrade.skip", reason="regime", reasons=verdict.reasons
             )
             return
-        # 様子見モードでは「買うとしたら」の上位を目安の予算で見せる
-        picks = pick_symbols(
-            plan.eligible,
-            quotes,
-            n=WATCH_ROWS if watch_only else plan.meta.positions,
-            budget=config.capital.order_budget
-            if watch_only
-            else Decimal(plan.meta.budget_per_order),
-            config=config.signal,
+        # 様子見モードでは「買うとしたら」の上位を目安の予算で見せる。
+        # 次点（N の先 RANKING_EXTRA 件）も順位表として残す——「なぜ X が選ばれなかったか」を後から追うため
+        n = WATCH_ROWS if watch_only else config.capital.positions
+        budget = config.capital.order_budget if watch_only else config.capital.budget_per_order
+        ranking = pick_symbols(
+            plan.eligible, quotes, n=n + RANKING_EXTRA, budget=budget, config=config.signal
         )
+        picks = ranking[:n]
         _print_picks(picks, quotes, plan, watch_only=watch_only)
+        log.info(
+            "順位表（N と次点）",
+            code="daytrade.ranking",
+            day=day.isoformat(),
+            n=n,
+            budget=str(budget),
+            quotes=len(quotes),
+            rows=[
+                {
+                    "rank": p.rank,
+                    "symbol": p.symbol,
+                    "gap": str(p.gap),
+                    "price": str(p.price),
+                    "quantity": str(p.quantity),
+                    "picked": p in picks,
+                }
+                for p in ranking
+            ],
+        )
         for p in picks:
             log.info(
                 "銘柄を選定",
@@ -567,6 +647,11 @@ def open_command(
         if not picks:
             log.info(
                 "条件に合う銘柄なし", code="daytrade.skip", reason="no_picks", quotes=len(quotes)
+            )
+            return
+        if watch_only:
+            log.info(
+                "資金 0 のため買わない", code="daytrade.skip", reason="no_capital", picks=len(picks)
             )
             return
         _confirm_live(settings, allowed, yes)
@@ -621,6 +706,8 @@ def open_command(
             phase="open",
             live=allowed,
             reason=reason,
+            n=n,
+            budget=str(budget),
             picks=len(picks),
             failures=len(failures),
         )
@@ -630,6 +717,8 @@ def open_command(
 
 #: 様子見モード（資金 0）で見せる候補の数。
 WATCH_ROWS = 5
+#: 順位表に残す次点の数（N の先）。
+RANKING_EXTRA = 5
 
 
 def _print_picks(
@@ -708,6 +797,7 @@ def close_command(
     allowed, reason = allows_live_orders(
         settings.env, live, kill_switch=config.execution.kill_switch
     )
+    _log_config(config, settings, phase="close", day=day.isoformat(), live=live)
     ledger = Ledger(settings.daytrade_db_path)
     try:
         buys = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run]
@@ -741,6 +831,30 @@ def close_command(
                         filled_quantity=filled,
                         avg_fill_price=fill_price,
                         broker_order_id=current.broker_order_id,
+                    )
+                    log.info(
+                        "買い注文の約定状況",
+                        code="daytrade.fill",
+                        day=day.isoformat(),
+                        symbol=order.symbol,
+                        client_order_id=order.client_order_id,
+                        broker_order_id=current.broker_order_id,
+                        before=order.status,
+                        after=current.status.value,
+                        quantity=str(order.quantity),
+                        filled=str(filled),
+                        avg_fill_price=str(fill_price) if fill_price is not None else None,
+                    )
+                else:
+                    log.warning(
+                        "買い注文を照会できず台帳の値で続行",
+                        code="daytrade.fill",
+                        day=day.isoformat(),
+                        symbol=order.symbol,
+                        client_order_id=order.client_order_id,
+                        before=order.status,
+                        after=None,
+                        filled=str(filled),
                     )
             elif (
                 order.status in {OrderStatus.SUBMITTED.value, OrderStatus.PENDING.value}

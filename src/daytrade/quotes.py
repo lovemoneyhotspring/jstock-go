@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import logging
 from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -157,6 +158,9 @@ class YFinanceQuotes:
         if not wanted:
             return {}
         tickers = [f"{s}.T" for s in wanted]
+        # yfinance は取れない銘柄ごとに error を吐く（上場廃止など）。こちらで missing として
+        # 数えるので、code の無い error でログを埋めないよう黙らせる
+        logging.getLogger("yfinance").setLevel(logging.CRITICAL)
         try:
             frame = yf.download(
                 tickers, period="1d", interval="1m", group_by="ticker", progress=False, threads=True
