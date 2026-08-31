@@ -11,6 +11,7 @@ import datetime as dt
 import math
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -192,9 +193,10 @@ class Result:
             self.daily.group_by(pl.col("Date").dt.year().alias("year"))
             .agg(
                 days=pl.len(),
+                traded=(pl.col("n") > 0).sum(),
                 pnl=pl.col("pnl").sum(),
                 mean_daily=pl.col("pnl").mean(),
-                win=(pl.col("pnl") > 0).mean(),
+                win=(pl.col("pnl") > 0).filter(pl.col("n") > 0).mean(),
             )
             .sort("year")
         )
@@ -213,6 +215,7 @@ def simulate(
     *,
     iv: pl.DataFrame | None = None,
     drift: pl.DataFrame | None = None,
+    us: pl.DataFrame | None = None,
 ) -> Result:
     """パネルに規則を当て、資金固定で日次損益を出す。
 
@@ -254,7 +257,7 @@ def simulate(
     market_gap = (
         panel.filter(pl.col("eligible")).group_by("Date").agg(market_gap=pl.col("gap").median())
     )
-    daily = _apply_regime(daily, config, iv=iv, drift=drift, market_gap=market_gap)
+    daily = _apply_regime(daily, config, iv=iv, drift=drift, market_gap=market_gap, us=us)
     picks = picks.join(daily.select("Date", "on"), on="Date", how="left").filter(pl.col("on"))
     return Result(daily=daily, trades=picks.sort("Date", "rank"), summary=_summary(daily, capital))
 
@@ -266,6 +269,7 @@ def _apply_regime(
     iv: pl.DataFrame | None,
     drift: pl.DataFrame | None,
     market_gap: pl.DataFrame,
+    us: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """日ごとに :func:`daytrade.regime.evaluate` を呼び、止めた日の損益を 0 にする。"""
     from daytrade.regime import Signals, evaluate
@@ -275,6 +279,8 @@ def _apply_regime(
         raise ValueError("iv_gate を使うにはオプションのアーカイブが要ります")
     if r.drift_gate is not None and (drift is None or drift.height == 0):
         raise ValueError("drift_gate を使うには TOPIX のアーカイブが要ります")
+    if r.us_skip_high is not None and (us is None or us.height == 0):
+        raise ValueError("us_skip_high を使うには米国市場のデータが要ります（yfinance）")
     frame = daily.join(market_gap, on="Date", how="left")
     frame = (
         frame.join(iv, on="Date", how="left")
@@ -286,6 +292,10 @@ def _apply_regime(
         if drift is not None and drift.height
         else frame.with_columns(drift=None)
     )
+    if us is not None and us.height:
+        frame = frame.join(us, on="Date", how="left")
+    else:
+        frame = frame.with_columns(spx_ret=None, vix=None)
     frame = frame.sort("Date")
     pnl = frame["pnl"].to_list()
     on: list[bool] = []
@@ -300,6 +310,8 @@ def _apply_regime(
             drift=row.get("drift"),
             market_gap=row.get("market_gap"),
             recent_pnl=recent,
+            us_ret=row.get("spx_ret"),
+            vix=row.get("vix"),
         )
         on.append(evaluate(r, signals).trade)
     frame = frame.with_columns(on=pl.Series(on, dtype=pl.Boolean))
@@ -353,13 +365,26 @@ def _summary(daily: pl.DataFrame, capital: float) -> Summary:
     )
 
 
-def run(archive: Archive, config: DaytradeConfig, start: dt.date, end: dt.date) -> Result:
+def run(
+    archive: Archive,
+    config: DaytradeConfig,
+    start: dt.date,
+    end: dt.date,
+    *,
+    us_cache: Path | None = None,
+) -> Result:
+    """アーカイブ（＋米国市場のキャッシュ）から検証する。"""
     from daytrade.regime import topix_drift_series
+    from daytrade.usmarket import as_of_frame, history
 
     panel = load_panel(archive, start, end, config)
     iv = iv_by_day(archive, start, end)
     drift = topix_drift_series(archive, start, end, config.regime.drift_days)
-    return simulate(panel, config, iv=iv, drift=drift)
+    us = None
+    if config.regime.us_skip_high is not None:
+        cache = us_cache or (archive.root.parent / "daytrade" / "us.parquet")
+        us = as_of_frame(history(cache, start, end), panel.select("Date").unique())
+    return simulate(panel, config, iv=iv, drift=drift, us=us)
 
 
 def daily_commission(amount: Decimal) -> Decimal:

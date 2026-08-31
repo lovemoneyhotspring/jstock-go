@@ -426,3 +426,39 @@ def test_backtest_regime_zeroes_gated_days() -> None:
     assert by_day[dt.date(2026, 12, 1)] == 0.0
     assert by_day[dt.date(2026, 11, 30)] != 0.0
     assert result.trades["Date"].unique().to_list() == [dt.date(2026, 11, 30)]
+
+
+def test_regime_us_skip_band_and_vix_override() -> None:
+    from daytrade.config import RegimeConfig
+    from daytrade.regime import Signals, evaluate
+
+    config = RegimeConfig(us_skip_high=Decimal("0.01"))
+    day = dt.date(2026, 9, 1)
+    assert not evaluate(config, Signals(day=day, us_ret=0.004, vix=15.0)).trade
+    assert evaluate(config, Signals(day=day, us_ret=-0.004, vix=15.0)).trade
+    assert evaluate(config, Signals(day=day, us_ret=0.012, vix=15.0)).trade
+    assert evaluate(config, Signals(day=day, us_ret=0.004, vix=30.0)).trade  # 高 VIX は例外
+    assert evaluate(config, Signals(day=day, us_ret=None, vix=None)).trade  # 取れなければ効かない
+    with pytest.raises(ValueError):
+        RegimeConfig(us_skip_low=Decimal("0.01"), us_skip_high=Decimal("0.005"))
+
+
+def test_usmarket_sessions_and_asof() -> None:
+    from daytrade.usmarket import as_of_frame, sessions_from
+
+    closes = pl.DataFrame(
+        {
+            "Date": [dt.date(2026, 8, 27), dt.date(2026, 8, 28), dt.date(2026, 8, 31)],
+            "spx": [100.0, 101.0, 99.99],
+            "vix": [15.0, 16.0, 20.0],
+        }
+    )
+    sessions = sessions_from(closes)
+    assert sessions["Date"].to_list() == [dt.date(2026, 8, 28), dt.date(2026, 8, 31)]
+    assert abs(sessions["spx_ret"][0] - 0.01) < 1e-9
+    # 東証 9/1 の朝には NY 8/31 のセッションが、9/1（月曜の NY 休場後の火曜）にも 8/31 が当たる
+    days = pl.DataFrame({"Date": [dt.date(2026, 8, 31), dt.date(2026, 9, 1), dt.date(2026, 9, 2)]})
+    joined = as_of_frame(sessions, days)
+    assert joined["spx_ret"].to_list()[0] == pytest.approx(0.01)  # 8/31 の朝 → NY 8/28
+    assert joined["vix"].to_list()[1] == 20.0  # 9/1 の朝 → NY 8/31
+    assert joined["vix"].to_list()[2] == 20.0

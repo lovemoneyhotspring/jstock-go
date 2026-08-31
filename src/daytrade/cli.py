@@ -267,6 +267,14 @@ def _verdict(
         with Ledger(settings.daytrade_db_path) as ledger:
             history = realized_pnl(ledger, days)
         recent = sum(history.values())
+    us_ret: float | None = None
+    vix: float | None = None
+    if config.regime.us_skip_high is not None:
+        from daytrade.usmarket import latest_before
+
+        session = latest_before(day)
+        if session is not None:
+            us_ret, vix = session.spx_ret, session.vix
     verdict = evaluate(
         config.regime,
         Signals(
@@ -275,6 +283,8 @@ def _verdict(
             drift=plan.meta.drift,
             market_gap=market_gap,
             recent_pnl=recent,
+            us_ret=us_ret,
+            vix=vix,
         ),
     )
     log.info(
@@ -894,10 +904,10 @@ def backtest_command(
         f"10% 点 {_yen(s.monthly_p10)} 円  勝ち月 {s.monthly_win:.0%}  平均銘柄数 {s.avg_positions:.1f}"
     )
     table = Table(title="年別")
-    for column in ("年", "営業日", "損益", "日平均", "勝率"):
+    for column in ("年", "営業日", "取引日", "損益", "日平均", "勝率(取引日)"):
         table.add_column(column, justify="right")
-    for year, days, pnl, mean, win in result.yearly().iter_rows():
-        table.add_row(str(year), str(days), _yen(pnl), _yen(mean), f"{win:.1%}")
+    for year, days, traded, pnl, mean, win in result.yearly().iter_rows():
+        table.add_row(str(year), str(days), str(traded), _yen(pnl), _yen(mean), f"{(win or 0):.1%}")
     console.print(table)
     if trades:
         console.print(

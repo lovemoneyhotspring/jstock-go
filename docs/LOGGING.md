@@ -64,7 +64,8 @@
 | `daytrade.pick` | 買う銘柄を決めた（1 件ごと） | `day`, `symbol`, `code_`（J-Quants の 5 桁）, `rank`, `gap`, `prev_close`, `price`, `quantity`, `amount` |
 | `daytrade.order` | 注文にした結果（1 件ごと。買いも売りも） | `day`, `symbol`, `side`, `client_order_id`, `quantity`, `price`, `amount`, `live`, `outcome`（`発注` / `dry-run` / `見送り …` / `失敗 …`） |
 | `daytrade.skip` | 何もしなかった | `reason`（`window` / `regime` / `already` / `no_quotes` / `no_picks` / `no_buys` / `nothing_to_sell`） |
-| `daytrade.regime` | 危険信号を評価した（毎朝） | `day`, `trade`（取引するか）, `reasons`（止めた理由）, `month`, `iv_prev`, `drift_bp`（市場の日中ドリフト）, `market_gap_bp`（候補の中央値ギャップ）, `recent_pnl` |
+| `daytrade.regime` | 危険信号を評価した（毎朝） | `day`, `trade`（取引するか）, `reasons`（止めた理由）, `month`, `iv_prev`, `drift_bp`（市場の日中ドリフト）, `market_gap_bp`（候補の中央値ギャップ）, `recent_pnl`, `us_ret_bp`（前夜の S&P500）, `vix` |
+| `daytrade.us_missing` | 前夜の米国市場を取れず、米国のゲート無しで進んだ | `error` |
 | `daytrade.iv_missing` | 前日の IV がアーカイブに無くゲート無しで進んだ | `prev_day` |
 | `daytrade.run` | 実行の終了 | `phase`（`open` / `close`）, `live`, `reason`, `picks` / `sells`, `failures` |
 | `daytrade.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception` |

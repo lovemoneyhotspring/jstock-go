@@ -8,6 +8,9 @@
   黒字にするが OOS では利益を 3 割削る。既定は無効（診断値として記録）
 - 資産曲線（``equity_curve_days``）: 戦略自身の直近損益。DD を抑えるが利益も削る。既定は無効
 - IV（``iv_gate``）: 日経 225 オプションの前日 IV
+- 前夜の米国（``us_skip_high``）: S&P500 が小幅高（0〜+1%）で VIX が低い翌日は、東証の
+  ギャップダウンが市場全体ではなく個別のニュースによるもので、逆張りが効かない（損益 ≈ 0）。
+  IS/OOS ともに改善し、閾値の端（0.8〜1.5%、VIX 20〜99）でも崩れない。既定で有効
 
 市場のギャップ（``|中央値ギャップ| > 1%`` の日）は例外で、ドリフトが負でも取引する。
 急落・急騰の寄付は逆張りが最も効く日（+1.7 万円/日）で、ゲートで外すと損をする。
@@ -40,6 +43,10 @@ class Signals:
     market_gap: float | None = None
     #: 戦略自身の直近 N 日の損益（円、前日まで）
     recent_pnl: float | None = None
+    #: 前夜の S&P500 の終値リターン
+    us_ret: float | None = None
+    #: 前夜の VIX 終値
+    vix: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,12 +78,24 @@ def evaluate(config: RegimeConfig, s: Signals) -> Verdict:
         )
     if config.equity_curve_days > 0 and s.recent_pnl is not None and s.recent_pnl <= 0:
         reasons.append(f"直近 {config.equity_curve_days} 日の損益 {s.recent_pnl:,.0f} 円 ≤ 0")
+    if (
+        config.us_skip_high is not None
+        and s.us_ret is not None
+        and float(config.us_skip_low) <= s.us_ret < float(config.us_skip_high)
+        and (s.vix is None or Decimal(str(s.vix)) <= config.us_vix_override)
+    ):
+        reasons.append(
+            f"前夜の S&P500 {s.us_ret:+.2%} が小幅高（{config.us_skip_low:+.1%}〜{config.us_skip_high:+.1%}）"
+            + (f"、VIX {s.vix:.1f}" if s.vix is not None else "")
+        )
     notes: dict[str, float | int | None] = {
         "month": s.day.month,
         "iv_prev": s.iv_prev,
         "drift_bp": round(s.drift * 1e4, 2) if s.drift is not None else None,
         "market_gap_bp": round(s.market_gap * 1e4, 1) if s.market_gap is not None else None,
         "recent_pnl": s.recent_pnl,
+        "us_ret_bp": round(s.us_ret * 1e4, 1) if s.us_ret is not None else None,
+        "vix": s.vix,
     }
     return Verdict(trade=not reasons, reasons=reasons, notes=notes)
 

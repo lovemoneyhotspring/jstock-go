@@ -134,6 +134,12 @@ class RegimeConfig(BaseModel):
     drift_gap_override: Decimal = Decimal("0.01")
     #: 戦略自身の直近 N 日の損益が 0 以下なら取引しない。0 で無効。
     equity_curve_days: int = 0
+    #: 前夜の S&P500 の終値リターンが ``[us_skip_low, us_skip_high)`` にあれば休む。
+    #: ``us_skip_high`` が None で無効。研究の既定は 0〜+1%。
+    us_skip_low: Decimal = Decimal(0)
+    us_skip_high: Decimal | None = None
+    #: VIX がこれを超えていれば米国のゲートを無視する（高ボラ局面は取引する）。
+    us_vix_override: Decimal = Decimal(24)
 
     @field_validator("skip_months")
     @classmethod
@@ -142,6 +148,14 @@ class RegimeConfig(BaseModel):
         if bad:
             raise ValueError(f"skip_months は 1〜12: {bad}")
         return sorted(set(v))
+
+    @field_validator("us_skip_high")
+    @classmethod
+    def _band(cls, v: Decimal | None, info: Any) -> Decimal | None:
+        low = info.data.get("us_skip_low", Decimal(0))
+        if v is not None and v <= low:
+            raise ValueError("us_skip_high は us_skip_low より大きい値")
+        return v
 
     @field_validator("drift_days", "equity_curve_days")
     @classmethod

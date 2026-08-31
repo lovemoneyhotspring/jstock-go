@@ -64,6 +64,7 @@ https://developer.webull.co.jp/apis/docs/market-data-api/overview.md）。日本
 | | `skip_months` | 取引しない月。既定の設定は `[12]` |
 | | `drift_days` / `drift_gate` / `drift_gap_override` | 市場の日中ドリフトのゲート（下記）。既定は無効 |
 | | `equity_curve_days` | 戦略自身の直近 N 日損益が 0 以下なら休む。0 で無効 |
+| | `us_skip_low` / `us_skip_high` / `us_vix_override` | 前夜の S&P500 が帯の中（既定 0〜+1%）で VIX ≤ 24 なら休む。`us_skip_high` 無しで無効 |
 | `[execution]` | `quote_source` / `quote_file` | 気配の取得元 |
 | | `entry_window` / `exit_window` | 発注してよい時間帯（JST）。外なら何もしない |
 | | `max_quote_age` | 気配がこれより古ければ使わない（秒） |
@@ -79,10 +80,13 @@ https://developer.webull.co.jp/apis/docs/market-data-api/overview.md）。日本
 | 信号 | 検証（2017–2026、200 万円・N3） | 既定 |
 |---|---|---|
 | 12 月を休む | 9 年中 7 年の 12 月がマイナス。IS +23 万・OOS +25 万、Sharpe 1.45→1.63 | **有効** |
+| 前夜の S&P500 が 0〜+1% の小幅高（VIX ≤ 24） | その翌日は損益 ≈ 0（東証のギャップダウンが個別要因）。休むと Sharpe 1.45→1.63、閾値を動かしても崩れない。12 月休みと併用で合計 667 万・Sharpe 1.85・MaxDD −50 万・全年黒字（IS 1.62 / OOS 2.10） | **有効** |
 | 市場の日中ドリフト（TOPIX 寄り→引け 20 日平均 ≤ 0） | 2018 −18→+13、2021 −19→+53 に転じるが、2022 年以降の利益を 3 割削る（IS 限定） | 無効（記録のみ） |
 | 資産曲線（戦略の直近 20 日損益 ≤ 0） | MaxDD −78→−59 万だが利益も 1 割減 | 無効 |
 | IV（前日 ≤ 18） | CAGR 維持で MaxDD 半分、稼働 5 割 | 無効 |
 
+米国の信号は yfinance（`^GSPC` / `^VIX`）を 9:00 の `open` が取りに行く（米国の引けは 6:00 JST）。取れなければ
+信号なしとして取引する（`daytrade.us_missing`）。
 市場ギャップ（候補の中央値ギャップの絶対値 > 1%）の日はドリフトのゲートを無視する。急落・急騰の寄付は
 逆張りが最も効く日（+1.7 万円/日）。
 ドリフトのゲートを入れる場合は `drift_gate = -0.0003`（−3 bp）を目安に。
