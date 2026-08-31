@@ -6,7 +6,7 @@
 1 日の流れ（すべて JST）:
     20:30  ``daytrade plan``          前夜。アーカイブから翌営業日の母集団を作る
     09:00  ``daytrade open --live``   気配でギャップ下位 N 銘柄を選び、成行で買う
-    15:26  ``daytrade close --live``  当日買った分を成行で売る（クロージング・オークション）
+    15:20  ``daytrade close --live``  当日買った分を成行で売る（15:25 以降ならクロージング・オークションで引け値）
 """
 
 from __future__ import annotations
@@ -784,7 +784,7 @@ def close_command(
     date: _Date = None,
     config_dir: _ConfigDir = None,
 ) -> None:
-    """15:26: 今日買った分を成行で売る（クロージング・オークションで引け値）。既定は dry-run。"""
+    """15:20〜: 今日買った分を成行で売る（15:25 以降ならクロージング・オークションで引け値）。既定は dry-run。"""
     from daytrade.ledger import DRY_RUN_STATUS, Ledger
     from wbcore.broker.base import BrokerError
     from wbcore.domain.models import (

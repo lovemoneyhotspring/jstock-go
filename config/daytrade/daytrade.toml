@@ -2,7 +2,7 @@
 #
 # 使い方:  uv run daytrade plan            前夜: 母集団を作る（cron 20:30）
 #          uv run daytrade open --live     9:00: 気配でギャップ下位 N 銘柄を寄付で買う
-#          uv run daytrade close --live    15:26: 当日買った分を成行で売る（引け値）
+#          uv run daytrade close --live    15:20〜: 当日買った分を成行で売る
 #          uv run daytrade backtest        アーカイブで同じ規則を検証する
 #
 # 根拠と数字は docs/research/2026-08-jp-daytrade-selection.md。
@@ -45,6 +45,6 @@ broker = "webull"
 tax_account_type = "SPECIFIC"
 quote_source = "webull"    # webull / yfinance / csv
 entry_window = ["09:00", "09:15"]
-exit_window = ["15:26", "15:30"]
+exit_window = ["15:20", "15:30"]  # 15:20 の成行はその場で約定（引け値ではない）。15:25 以降ならクロージング・オークションで引け値
 kill_switch = false
 max_quote_age = 90

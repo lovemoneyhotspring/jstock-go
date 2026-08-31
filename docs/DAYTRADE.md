@@ -8,8 +8,8 @@
 
 前夜に「プライム・売買代金 20 日中央値 1 億円以上・時価総額下位 1/3 除外・前日引け後の決算なし・
 当日決算予定なし・日々公表信用残の対象でない」銘柄を母集団にし、9:00 の気配で
-**ギャップ（寄付 ÷ 前日終値 − 1）が最も小さい N 銘柄**を成行で買い、15:26 以降の成行売りで
-クロージング・オークションの引け値で手仕舞う。持ち越さない。
+**ギャップ（寄付 ÷ 前日終値 − 1）が最も小さい N 銘柄**を成行で買い、15:20 以降の成行売りで
+手仕舞う（15:25 以降ならクロージング・オークションで引け値）。持ち越さない。
 
 N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万円 ÷ 67 万円 → 3）。
 1 注文は `max_capital ÷ N`。Webull の手数料は 20〜100 万円が一律 275 円なので、1 注文を小さくすると
@@ -21,7 +21,7 @@ bp が跳ね上がる（この規則の理由）。
 |---|---|---|---|
 | 20:30（前夜） | `daytrade plan` | 翌営業日の母集団を `state/daytrade/plan-<日付>.parquet` に保存 | J-Quants アーカイブ（`jquants sync` 済みの前日足・銘柄一覧・決算・日々公表） |
 | 09:00〜09:15 | `daytrade open --live --yes` | 候補の気配を取り、ギャップ下位 N 銘柄を成行買い。台帳に記録 | plan + 気配（`execution.quote_source`） |
-| 15:26〜15:30 | `daytrade close --live --yes` | 台帳の当日買いをブローカーに照会し、約定数量を成行売り | 台帳 + ブローカー |
+| 15:20〜15:30 | `daytrade close --live --yes` | 台帳の当日買いをブローカーに照会し、約定数量を成行売り（15:20 はその場で約定。15:25 以降はクロージング・オークションで引け値） | 台帳 + ブローカー |
 | 随時 | `daytrade status` | 候補と当日の注文 | |
 
 すべて既定は dry-run。`--live` が無ければ判断と記録だけで注文は出さない。本番口座では
@@ -67,7 +67,7 @@ https://developer.webull.co.jp/apis/docs/market-data-api/overview.md）。日本
 | | `equity_curve_days` | 戦略自身の直近 N 日損益が 0 以下なら休む。0 で無効 |
 | | `us_skip_low` / `us_skip_high` / `us_vix_override` | 前夜の S&P500 が帯の中（既定 0〜+1%）で VIX ≤ 24 なら休む。`us_skip_high` 無しで無効 |
 | `[execution]` | `quote_source` / `quote_file` | 気配の取得元 |
-| | `entry_window` / `exit_window` | 発注してよい時間帯（JST）。外なら何もしない |
+| | `entry_window` / `exit_window` | 発注してよい時間帯（JST）。外なら何もしない。`exit_window` の既定は 15:20〜15:30（15:20 の成行はその場で約定、15:25 以降は引け値） |
 | | `max_quote_age` | 気配がこれより古ければ使わない（秒） |
 | | `kill_switch` | true で発注を止める |
 
@@ -106,7 +106,7 @@ uv run daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
 ## cron
 
 `docs/DEPLOY.md` の cron の節を参照。`jquants sync` が前日足を取り込んだ後（20:30）に `plan`、
-9:00 と 15:26 に `open` / `close`。`flock` で重複起動を防ぐ。
+9:00 と 15:20 に `open` / `close`。`flock` で重複起動を防ぐ。
 
 ## ログ
 

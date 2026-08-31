@@ -195,8 +195,9 @@ class ExecutionConfig(BaseModel):
     #: 寄付買いを出してよい時間帯（JST）。外なら何もしない。
     entry_window: tuple[str, str] = ("09:00", "09:15")
     #: 手仕舞いの成行売りを出してよい時間帯（JST）。15:25 以降の注文はクロージング・
-    #: オークションに回り、引け値で約定する。
-    exit_window: tuple[str, str] = ("15:26", "15:30")
+    #: オークションに回り引け値で約定する。それより前の成行はその場の気配で即約定する
+    #: （引け値より少し早い値になるが、確実に手仕舞える方を取る）。
+    exit_window: tuple[str, str] = ("15:20", "15:30")
     kill_switch: bool = False
     #: 気配のタイムスタンプがこれより古ければ使わない（秒）。yfinance は 20 分遅れなので通らない。
     max_quote_age: int = 90
