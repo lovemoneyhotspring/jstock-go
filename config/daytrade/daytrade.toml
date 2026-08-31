@@ -8,7 +8,8 @@
 # 根拠と数字は docs/research/2026-08-jp-daytrade-selection.md。
 
 [capital]
-max_capital = 2000000      # 円。1 日に使う上限
+enabled = true             # false で jp_gap_fade を止める（plan / open は何もしない。close は台帳の買いを売る）
+max_capital = 2000000      # 円。1 日に使う上限。0 にするとスクリーニングはするが買わない（N = 0）
 order_budget = 670000      # 1 注文の目安。N = max_capital ÷ order_budget（200 万なら 3）
 max_positions = 10
 

@@ -299,10 +299,13 @@ def _verdict(
 
 
 def _print_plan(plan: Plan, config: DaytradeConfig, settings: AppSettings) -> None:
+    """候補の概要。N と予算は plan 時点ではなく**今の設定**（資金を変えたら即反映）。"""
     meta = plan.meta
+    n = config.capital.positions
+    budget = "—（資金 0）" if n == 0 else f"{_yen(config.capital.budget_per_order)} 円"
     console.print(
         f"判定日 {meta.day}（前営業日 {meta.prev_day}）  候補 {meta.eligible} / {meta.candidates} 銘柄  "
-        f"N={meta.positions}  1 注文 {_yen(Decimal(meta.budget_per_order))} 円"
+        f"N={n}  1 注文 {budget}"
     )
     signals = []
     if meta.iv_prev is not None:
@@ -342,6 +345,10 @@ def plan_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDir 
     """翌営業日の母集団を作る（前夜に cron で回す）。9:00 の open はこれを読む。"""
     settings = _settings(ctx)
     config = _load(config_dir)
+    if not config.capital.enabled:
+        console.print("[dim]jp_gap_fade は無効（capital.enabled = false）。何もしません[/dim]")
+        log.info("戦略が無効", code="daytrade.skip", reason="disabled")
+        return
     day = _plan_day(settings, _parse_date(date), now_utc())
     plan = _build_plan(settings, config, day)
     _print_plan(plan, config, settings)
@@ -461,9 +468,18 @@ def open_command(
 
     settings = _settings(ctx)
     config = _load(config_dir)
+    if not config.capital.enabled:
+        console.print("[dim]jp_gap_fade は無効（capital.enabled = false）。何もしません[/dim]")
+        log.info("戦略が無効", code="daytrade.skip", reason="disabled")
+        return
     console.print(describe_mode(settings.env, live, kill_switch=config.execution.kill_switch))
     now = now_utc()
     day = _parse_date(date) or _today_jst(now)
+    watch_only = config.capital.positions == 0
+    if watch_only:
+        console.print(
+            "[yellow]資金 0（max_capital = 0）: スクリーニングと候補の表示だけ行い、買いません[/yellow]"
+        )
     if live and not ignore_window and not _in_window(config, "entry", now):
         console.print(
             f"[dim]発注時間帯の外（{_describe_window(config, 'entry')}）。何もしません[/dim]"
@@ -523,14 +539,17 @@ def open_command(
                 "危険信号で見送り", code="daytrade.skip", reason="regime", reasons=verdict.reasons
             )
             return
+        # 様子見モードでは「買うとしたら」の上位を目安の予算で見せる
         picks = pick_symbols(
             plan.eligible,
             quotes,
-            n=plan.meta.positions,
-            budget=Decimal(plan.meta.budget_per_order),
+            n=WATCH_ROWS if watch_only else plan.meta.positions,
+            budget=config.capital.order_budget
+            if watch_only
+            else Decimal(plan.meta.budget_per_order),
             config=config.signal,
         )
-        _print_picks(picks, quotes, plan)
+        _print_picks(picks, quotes, plan, watch_only=watch_only)
         for p in picks:
             log.info(
                 "銘柄を選定",
@@ -609,8 +628,15 @@ def open_command(
         ledger.close()
 
 
-def _print_picks(picks: list[Pick], quotes: dict[str, Quote], plan: Plan) -> None:
-    table = Table(title=f"{plan.meta.day} 寄付の買い（気配 {len(quotes)} 銘柄から）")
+#: 様子見モード（資金 0）で見せる候補の数。
+WATCH_ROWS = 5
+
+
+def _print_picks(
+    picks: list[Pick], quotes: dict[str, Quote], plan: Plan, *, watch_only: bool = False
+) -> None:
+    label = "候補（買わない: 資金 0）" if watch_only else "寄付の買い"
+    table = Table(title=f"{plan.meta.day} {label}（気配 {len(quotes)} 銘柄から）")
     for column in ("#", "銘柄", "名称", "前日終値", "気配", "ギャップ", "株数", "金額", "手数料"):
         table.add_column(column, justify="right" if column not in ("銘柄", "名称") else "left")
     for p in picks:
@@ -808,9 +834,11 @@ def status_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
     settings = _settings(ctx)
     config = _load(config_dir)
     day = _parse_date(date) or _today_jst()
+    state = "有効" if config.capital.enabled else "[red]無効（capital.enabled = false）[/red]"
     console.print(
-        f"資金 {_yen(config.capital.max_capital)} 円 → N={config.capital.positions}、"
+        f"jp_gap_fade: {state}  資金 {_yen(config.capital.max_capital)} 円 → N={config.capital.positions}、"
         f"1 注文 {_yen(config.capital.budget_per_order)} 円"
+        + ("（資金 0: 買わない）" if config.capital.positions == 0 else "")
     )
     plan = planning.load(settings.daytrade_dir, day)
     if plan is None:

@@ -52,7 +52,8 @@ https://developer.webull.co.jp/apis/docs/market-data-api/overview.md）。日本
 
 | 節 | 項目 | 意味 |
 |---|---|---|
-| `[capital]` | `max_capital` | 1 日に使う資金の上限（円） |
+| `[capital]` | `enabled` | 戦略のオン／オフ。false なら `plan` / `open` は何もしない（`close` は台帳の買いを売る） |
+| | `max_capital` | 1 日に使う資金の上限（円）。**0 なら N = 0**: スクリーニングと候補の表示だけ行い買わない |
 | | `order_budget` | 1 注文の目安。N の決定に使う（既定 67 万円） |
 | | `max_positions` | N の上限（既定 10。研究では N10 超で Sharpe が落ちる） |
 | `[universe]` | `segments` | prime / standard / growth。再編前の一部・二部・マザーズも同じ呼び方 |

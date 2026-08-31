@@ -223,6 +223,8 @@ def simulate(
     実運用の ``open`` と同じ判定（:func:`daytrade.regime.evaluate`）を日ごとに呼ぶ。
     """
     n = config.capital.positions
+    if n == 0:
+        raise ValueError("max_capital が 0 のため検証できません（買わない設定）")
     budget = float(config.capital.budget_per_order)
     capital = float(config.capital.max_capital)
     picks = (

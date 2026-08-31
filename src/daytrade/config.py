@@ -29,11 +29,15 @@ SEGMENTS = ("prime", "standard", "growth")
 
 
 class CapitalConfig(BaseModel):
-    """資金（``[capital]``、円）。"""
+    """資金（``[capital]``、円）と戦略のスイッチ。"""
 
     model_config = {"extra": "forbid"}
 
+    #: 戦略のオン／オフ。false なら ``plan`` / ``open`` は何もしない（``close`` は台帳に
+    #: 当日の買いが残っていれば売る——止めた日に建玉を持ち越さないため）。
+    enabled: bool = True
     #: 1 日に使う資金の上限。この額で N 銘柄を等金額に分ける。
+    #: **0 なら N = 0**: スクリーニングと候補の表示はするが買わない（様子見モード）。
     max_capital: Decimal = Decimal(2_000_000)
     #: 1 注文の目安。N = max_capital ÷ order_budget（切り捨て）。
     #: 67 万円は「20〜100 万円は一律 275 円」の手数料段階と分散のバランス（研究の結論）。
@@ -41,22 +45,34 @@ class CapitalConfig(BaseModel):
     #: N の上限。研究では N10 を超えると Sharpe が下がった。
     max_positions: int = 10
 
-    @field_validator("max_capital", "order_budget")
+    @field_validator("order_budget")
     @classmethod
     def _positive(cls, v: Decimal) -> Decimal:
         if v <= 0:
             raise ValueError("正の値")
         return v
 
+    @field_validator("max_capital")
+    @classmethod
+    def _non_negative(cls, v: Decimal) -> Decimal:
+        if v < 0:
+            raise ValueError("0 以上（0 は「買わない」）")
+        return v
+
     @property
     def positions(self) -> int:
-        """この資金で持つ銘柄数 N。"""
+        """この資金で持つ銘柄数 N。資金 0 なら 0。"""
+        if self.max_capital == 0:
+            return 0
         return positions_for(self.max_capital, self.order_budget, self.max_positions)
 
     @property
     def budget_per_order(self) -> Decimal:
-        """1 注文の予算（``max_capital ÷ N``、円未満切り捨て）。"""
-        return (self.max_capital / self.positions).quantize(Decimal(1), rounding=ROUND_DOWN)
+        """1 注文の予算（``max_capital ÷ N``、円未満切り捨て）。N = 0 なら 0。"""
+        n = self.positions
+        if n == 0:
+            return Decimal(0)
+        return (self.max_capital / n).quantize(Decimal(1), rounding=ROUND_DOWN)
 
 
 class UniverseConfig(BaseModel):

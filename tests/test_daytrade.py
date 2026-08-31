@@ -64,6 +64,17 @@ def test_positions_rounds_to_nearest_and_caps(capital: int, n: int) -> None:
     assert positions_for(Decimal(capital), Decimal(670_000), 10) == n
 
 
+def test_capital_zero_means_watch_only() -> None:
+    """資金 0 は「スクリーニングはするが買わない」: N = 0、予算 0。負は不正。"""
+    config = DaytradeConfig.model_validate({"capital": {"max_capital": 0}})
+    assert config.capital.enabled
+    assert config.capital.positions == 0
+    assert config.capital.budget_per_order == Decimal(0)
+    with pytest.raises(ValueError):
+        DaytradeConfig.model_validate({"capital": {"max_capital": -1}})
+    assert not DaytradeConfig.model_validate({"capital": {"enabled": False}}).capital.enabled
+
+
 def test_positions_rejects_too_small_capital() -> None:
     with pytest.raises(ValueError):
         positions_for(Decimal(300_000), Decimal(670_000), 10)
