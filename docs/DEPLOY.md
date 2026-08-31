@@ -83,10 +83,13 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 13,43 * * * *   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants sync                                >> state/logs/jquants-sync.log 2>&1
 30 16 * * *     cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
 50 3 2 * *      cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants backfill                             >> state/logs/jquants-backfill.log 2>&1
+0 20 * * 1-5    cd /home/abobo/webull/wbjp && WBJP_ENV=prod                              /home/abobo/webull/wbjp/.venv/bin/jquants check --notify                       >> state/logs/jquants-check.log 2>&1
 ```
 
 - 月次の `jquants backfill` は保険。更新された一括ファイル（過誤訂正、月末数日の
   取り漏れ）だけを取り直す。変更が無ければ何もダウンロードしない
+- 平日 20:00 の `jquants check --notify` は欠けの監視。当日ぶん（16:30〜18:00 公開）が
+  取れていなければ `WBJP_ALERT_WEBHOOK_URL` に通知する（未設定ならログのみ）
 
 - `accum backup` は `state/` の全 SQLite（積立台帳 `accum-prod.db` とスイング売買の記録
   `wbjp-prod.db`）を `state/backup/<名前>-YYYYMMDD.db` に複製する（各 30 世代、SQLite の

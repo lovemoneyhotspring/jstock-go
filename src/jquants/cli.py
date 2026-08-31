@@ -211,8 +211,15 @@ def check(
         str | None, typer.Option(help="確認する日（YYYY-MM-DD）。既定は直近の営業日")
     ] = None,
     days: Annotated[int, typer.Option(help="欠けを探す範囲（日）")] = 30,
+    notify: Annotated[
+        bool, typer.Option("--notify", help="欠けがあれば WBJP_ALERT_WEBHOOK_URL に通知する")
+    ] = False,
 ) -> None:
-    """営業日ごとの欠けを探す。欠けがあれば非 0 で終了する（監視用）。"""
+    """営業日ごとの欠けを探す。欠けがあれば非 0 で終了する（監視用）。
+
+    cron から回すときは ``--notify`` を付けると、ログを開かなくても気づける
+    （``wbjp data check --notify`` と同じ仕組み）。
+    """
     from wbcore.data.jquants_archive import ENDPOINTS, Mode
 
     ing = _ingestor(ctx, need_client=False)
@@ -222,6 +229,7 @@ def check(
     table.add_column("端点")
     table.add_column("欠けている営業日")
     missing_total = 0
+    lines = []
     for ep in ENDPOINTS:
         if ep.mode is not Mode.DATE:
             continue
@@ -232,9 +240,14 @@ def check(
             if len(gaps) > 8:
                 shown += f" …（計 {len(gaps)}）"
             table.add_row(ep.path, shown)
+            lines.append(f"{ep.path}: {shown}")
     if missing_total:
         console.print(table)
         log.warning("欠けがあります", code="jquants.gap", missing=missing_total)
+        if notify:
+            from wbcore.notify import alert
+
+            alert(f"J-Quants の蓄積に欠け（{missing_total} 件）", "\n".join(lines))
         raise typer.Exit(2)
     console.print(f"欠けはありません（{start} 〜 {end}）")
 
