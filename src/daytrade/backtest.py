@@ -208,9 +208,17 @@ class Result:
 
 
 def simulate(
-    panel: pl.DataFrame, config: DaytradeConfig, *, iv: pl.DataFrame | None = None
+    panel: pl.DataFrame,
+    config: DaytradeConfig,
+    *,
+    iv: pl.DataFrame | None = None,
+    drift: pl.DataFrame | None = None,
 ) -> Result:
-    """パネルに規則を当て、資金固定で日次損益を出す。"""
+    """パネルに規則を当て、資金固定で日次損益を出す。
+
+    危険信号（:mod:`daytrade.regime`）は日次損益に後から掛ける: 止めた日は 0。
+    実運用の ``open`` と同じ判定（:func:`daytrade.regime.evaluate`）を日ごとに呼ぶ。
+    """
     n = config.capital.positions
     budget = float(config.capital.budget_per_order)
     capital = float(config.capital.max_capital)
@@ -238,22 +246,70 @@ def simulate(
         )
         .sort("Date")
     )
-    if config.regime.iv_gate > 0:
-        if iv is None or iv.height == 0:
-            raise ValueError("iv_gate を使うにはオプションのアーカイブが要ります")
-        daily = daily.join(iv, on="Date", how="left").with_columns(
-            on=pl.col("iv_prev") > float(config.regime.iv_gate)
-        )
-        daily = daily.with_columns(
-            pl.when("on").then(pl.col(c)).otherwise(0.0).alias(c)
-            for c in ("pnl", "gross", "fees", "amount")
-        ).with_columns(n=pl.when("on").then(pl.col("n")).otherwise(0))
     # 取引の無い営業日も 0 で並べる（日次の統計を暦日ベースにする）
     all_days = panel.select("Date").unique().sort("Date")
     daily = all_days.join(daily, on="Date", how="left").with_columns(
         pl.col("pnl", "gross", "fees", "amount").fill_null(0.0), pl.col("n").fill_null(0)
     )
+    market_gap = (
+        panel.filter(pl.col("eligible")).group_by("Date").agg(market_gap=pl.col("gap").median())
+    )
+    daily = _apply_regime(daily, config, iv=iv, drift=drift, market_gap=market_gap)
+    picks = picks.join(daily.select("Date", "on"), on="Date", how="left").filter(pl.col("on"))
     return Result(daily=daily, trades=picks.sort("Date", "rank"), summary=_summary(daily, capital))
+
+
+def _apply_regime(
+    daily: pl.DataFrame,
+    config: DaytradeConfig,
+    *,
+    iv: pl.DataFrame | None,
+    drift: pl.DataFrame | None,
+    market_gap: pl.DataFrame,
+) -> pl.DataFrame:
+    """日ごとに :func:`daytrade.regime.evaluate` を呼び、止めた日の損益を 0 にする。"""
+    from daytrade.regime import Signals, evaluate
+
+    r = config.regime
+    if r.iv_gate > 0 and (iv is None or iv.height == 0):
+        raise ValueError("iv_gate を使うにはオプションのアーカイブが要ります")
+    if r.drift_gate is not None and (drift is None or drift.height == 0):
+        raise ValueError("drift_gate を使うには TOPIX のアーカイブが要ります")
+    frame = daily.join(market_gap, on="Date", how="left")
+    frame = (
+        frame.join(iv, on="Date", how="left")
+        if iv is not None and iv.height
+        else frame.with_columns(iv_prev=None)
+    )
+    frame = (
+        frame.join(drift, on="Date", how="left")
+        if drift is not None and drift.height
+        else frame.with_columns(drift=None)
+    )
+    frame = frame.sort("Date")
+    pnl = frame["pnl"].to_list()
+    on: list[bool] = []
+    for i, row in enumerate(frame.iter_rows(named=True)):
+        recent = None
+        if r.equity_curve_days > 0 and i >= r.equity_curve_days:
+            # 前日までの実現損益（止めた日は 0 として数える＝実運用と同じ）
+            recent = sum(pnl[j] if on[j] else 0.0 for j in range(i - r.equity_curve_days, i))
+        signals = Signals(
+            day=row["Date"],
+            iv_prev=row.get("iv_prev"),
+            drift=row.get("drift"),
+            market_gap=row.get("market_gap"),
+            recent_pnl=recent,
+        )
+        on.append(evaluate(r, signals).trade)
+    frame = frame.with_columns(on=pl.Series(on, dtype=pl.Boolean))
+    return frame.with_columns(
+        *(
+            pl.when("on").then(pl.col(c)).otherwise(0.0).alias(c)
+            for c in ("pnl", "gross", "fees", "amount")
+        ),
+        n=pl.when("on").then(pl.col("n")).otherwise(0),
+    )
 
 
 def _f(value: Any) -> float:
@@ -298,9 +354,12 @@ def _summary(daily: pl.DataFrame, capital: float) -> Summary:
 
 
 def run(archive: Archive, config: DaytradeConfig, start: dt.date, end: dt.date) -> Result:
+    from daytrade.regime import topix_drift_series
+
     panel = load_panel(archive, start, end, config)
-    iv = iv_by_day(archive, start, end) if config.regime.iv_gate > 0 else None
-    return simulate(panel, config, iv=iv)
+    iv = iv_by_day(archive, start, end)
+    drift = topix_drift_series(archive, start, end, config.regime.drift_days)
+    return simulate(panel, config, iv=iv, drift=drift)
 
 
 def daily_commission(amount: Decimal) -> Decimal:

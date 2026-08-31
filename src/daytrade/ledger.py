@@ -198,3 +198,26 @@ class Ledger:
             "SELECT * FROM orders ORDER BY placed_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [self._row(r) for r in rows]
+
+
+def realized_pnl(ledger: Ledger, days: list[dt.date]) -> dict[dt.date, float]:
+    """日ごとの実現損益（円）。約定した買いと売りの単価差 × 数量（手数料は含まない）。
+
+    dry-run は数えない。約定単価が無い注文（未約定・照会前）は 0 とみなす。
+    """
+    result: dict[dt.date, float] = {}
+    for day in days:
+        buys = {o.symbol: o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run}
+        total = 0.0
+        for sell in ledger.orders_on(day, Side.SELL):
+            buy = buys.get(sell.symbol)
+            if (
+                sell.is_dry_run
+                or buy is None
+                or sell.avg_fill_price is None
+                or buy.avg_fill_price is None
+            ):
+                continue
+            total += float((sell.avg_fill_price - buy.avg_fill_price) * sell.filled_quantity)
+        result[day] = total
+    return result

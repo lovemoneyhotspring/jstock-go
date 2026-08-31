@@ -116,13 +116,39 @@ class SignalConfig(BaseModel):
 
 
 class RegimeConfig(BaseModel):
-    """局面のゲート（``[regime]``）。"""
+    """危険信号（``[regime]``）。詳細と検証は :mod:`daytrade.regime` と研究ノート。"""
 
     model_config = {"extra": "forbid"}
 
     #: 日経 225 オプションの IV（前日の ``BaseVol`` 中央値）がこれを超える日だけ取引する。
     #: 0 なら常時。18 で CAGR をほぼ保ったまま最大 DD が半分になった（研究）。
     iv_gate: Decimal = Decimal(0)
+    #: 取引しない月（1〜12）。12 月は 9 年中 7 年がマイナスで、IS/OOS ともに外す方が良かった。
+    skip_months: list[int] = Field(default_factory=list)
+    #: 市場の日中ドリフト（TOPIX 寄り→引けの平均）を取る日数。
+    drift_days: int = 20
+    #: ドリフトがこれ以下（比率。−0.0003 = −3 bp）なら取引しない。None で無効。
+    #: 2018・2021 年を黒字にするが 2022 年以降の利益を 3 割削る（IS 限定の効き）。既定は無効
+    drift_gate: Decimal | None = None
+    #: 市場ギャップ（候補の中央値ギャップ）の絶対値がこれを超える日はドリフトのゲートを無視する。
+    drift_gap_override: Decimal = Decimal("0.01")
+    #: 戦略自身の直近 N 日の損益が 0 以下なら取引しない。0 で無効。
+    equity_curve_days: int = 0
+
+    @field_validator("skip_months")
+    @classmethod
+    def _months(cls, v: list[int]) -> list[int]:
+        bad = [m for m in v if not 1 <= m <= 12]
+        if bad:
+            raise ValueError(f"skip_months は 1〜12: {bad}")
+        return sorted(set(v))
+
+    @field_validator("drift_days", "equity_curve_days")
+    @classmethod
+    def _non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("0 以上")
+        return v
 
 
 class ExecutionConfig(BaseModel):

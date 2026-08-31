@@ -239,8 +239,53 @@ def _refresh_iv(settings: AppSettings, config: DaytradeConfig, plan: Plan) -> Pl
             code="daytrade.iv_missing",
             prev_day=plan.meta.prev_day,
         )
-        return replace(plan, meta=replace(plan.meta, iv_gate="0"))
+        return plan
     return replace(plan, meta=replace(plan.meta, iv_prev=value))
+
+
+def _verdict(
+    settings: AppSettings,
+    config: DaytradeConfig,
+    plan: Plan,
+    day: dt.date,
+    market_gap: float | None,
+) -> Any:
+    """危険信号を評価し、ログに残す。"""
+    from daytrade.ledger import Ledger, realized_pnl
+    from daytrade.regime import Signals, evaluate
+
+    recent: float | None = None
+    if config.regime.equity_curve_days > 0:
+        from daytrade.calendar import TradingCalendar
+
+        cal = TradingCalendar.from_archive(_archive(settings))
+        days: list[dt.date] = []
+        cursor = day
+        for _ in range(config.regime.equity_curve_days):
+            cursor = cal.previous_trading_day(cursor)
+            days.append(cursor)
+        with Ledger(settings.daytrade_db_path) as ledger:
+            history = realized_pnl(ledger, days)
+        recent = sum(history.values())
+    verdict = evaluate(
+        config.regime,
+        Signals(
+            day=day,
+            iv_prev=plan.meta.iv_prev,
+            drift=plan.meta.drift,
+            market_gap=market_gap,
+            recent_pnl=recent,
+        ),
+    )
+    log.info(
+        "危険信号",
+        code="daytrade.regime",
+        day=day.isoformat(),
+        trade=verdict.trade,
+        reasons=verdict.reasons,
+        **verdict.notes,
+    )
+    return verdict
 
 
 def _print_plan(plan: Plan, config: DaytradeConfig, settings: AppSettings) -> None:
@@ -249,10 +294,13 @@ def _print_plan(plan: Plan, config: DaytradeConfig, settings: AppSettings) -> No
         f"判定日 {meta.day}（前営業日 {meta.prev_day}）  候補 {meta.eligible} / {meta.candidates} 銘柄  "
         f"N={meta.positions}  1 注文 {_yen(Decimal(meta.budget_per_order))} 円"
     )
+    signals = []
     if meta.iv_prev is not None:
-        state = "取引しない" if meta.gated_out else "取引する"
-        gate = f"ゲート {meta.iv_gate}" if Decimal(meta.iv_gate) > 0 else "ゲート無し"
-        console.print(f"日経 225 IV（前日）{meta.iv_prev:.1f}  {gate} → {state}")
+        signals.append(f"IV {meta.iv_prev:.1f}")
+    if meta.drift is not None:
+        signals.append(f"市場の日中ドリフト {meta.drift * 1e4:+.1f} bp/日")
+    if signals:
+        console.print("[dim]信号: " + "  ".join(signals) + "[/dim]")
     reasons = (
         plan.frame.filter(~pl_col("eligible")).group_by("segment").agg(pl_len()).sort("segment")
     )
@@ -425,12 +473,6 @@ def open_command(
         plan = _build_plan(settings, config, day)
     plan = _refresh_iv(settings, config, plan)
     _print_plan(plan, config, settings)
-    if plan.meta.gated_out:
-        console.print("[dim]IV ゲートにより今日は取引しません[/dim]")
-        log.info(
-            "IV ゲートで見送り", code="daytrade.skip", reason="iv_gate", iv_prev=plan.meta.iv_prev
-        )
-        return
 
     allowed, reason = allows_live_orders(
         settings.env, live, kill_switch=config.execution.kill_switch
@@ -455,6 +497,21 @@ def open_command(
             console.print("[red]使える気配がありません。発注しません[/red]")
             log.error("気配が無いため見送り", code="daytrade.skip", reason="no_quotes")
             alert("デイトレ: 気配が取れず寄付の買いを見送り", f"{day} 候補 {len(symbols)} 銘柄")
+            return
+        from daytrade.regime import market_gap_of
+
+        prev = dict(plan.eligible.select("symbol", "prev_close").iter_rows())
+        gaps = [float(q.price) / prev[sym] - 1 for sym, q in quotes.items() if prev.get(sym)]
+        verdict = _verdict(settings, config, plan, day, market_gap_of(gaps))
+        if not verdict.trade:
+            console.print(
+                "[yellow]危険信号により今日は取引しません: "
+                + "、".join(verdict.reasons)
+                + "[/yellow]"
+            )
+            log.info(
+                "危険信号で見送り", code="daytrade.skip", reason="regime", reasons=verdict.reasons
+            )
             return
         picks = pick_symbols(
             plan.eligible,

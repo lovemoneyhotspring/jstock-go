@@ -10,7 +10,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 from dataclasses import asdict, dataclass
-from decimal import Decimal
 from pathlib import Path
 
 import polars as pl
@@ -29,15 +28,11 @@ class PlanMeta:
     budget_per_order: str
     iv_prev: float | None
     iv_gate: str
+    #: TOPIX の日中ドリフト（前日まで、``regime.drift_days`` 日平均）
+    drift: float | None
     candidates: int
     eligible: int
     created_at: str
-
-    @property
-    def gated_out(self) -> bool:
-        """IV ゲートが有効で、前日の IV が閾値以下（この日は取引しない）。"""
-        gate = Decimal(self.iv_gate)
-        return gate > 0 and (self.iv_prev is None or Decimal(str(self.iv_prev)) <= gate)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +95,8 @@ def build(
     prev_day = cal.previous_trading_day(day)
     inputs = load_inputs(archive, prev_day, day, config)
     frame = candidates(inputs, day, prev_day, config.universe)
+    from daytrade.regime import topix_drift
+
     meta = PlanMeta(
         day=day.isoformat(),
         prev_day=prev_day.isoformat(),
@@ -107,6 +104,7 @@ def build(
         budget_per_order=str(config.capital.budget_per_order),
         iv_prev=iv_on(archive, prev_day),
         iv_gate=str(config.regime.iv_gate),
+        drift=topix_drift(archive, prev_day, config.regime.drift_days),
         candidates=frame.height,
         eligible=int(frame["eligible"].sum()),
         created_at=(now or dt.datetime.now(dt.UTC)).isoformat(timespec="seconds"),
@@ -129,4 +127,5 @@ def load(directory: Path, day: dt.date) -> Plan | None:
     if not parquet.is_file() or not meta.is_file():
         return None
     raw = json.loads(meta.read_text(encoding="utf-8"))
+    raw.setdefault("drift", None)  # 古い plan（信号を持たない）も読める
     return Plan(meta=PlanMeta(**raw), frame=pl.read_parquet(parquet))

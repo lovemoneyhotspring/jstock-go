@@ -331,3 +331,98 @@ def test_ledger_open_orders_exclude_dry_run_and_terminal(tmp_path: Path) -> None
         ledger.record(_request(cid="3" * 32), DAY, OrderStatus.REJECTED.value)
         assert [o.client_order_id for o in ledger.open_orders()] == ["2" * 32]
         assert ledger.orders_on(DAY)[2].is_dead
+
+
+# --------------------------------------------------------------------------
+# 危険信号
+# --------------------------------------------------------------------------
+
+
+def test_regime_default_trades_everything() -> None:
+    from daytrade.config import RegimeConfig
+    from daytrade.regime import Signals, evaluate
+
+    verdict = evaluate(
+        RegimeConfig(),
+        Signals(day=dt.date(2026, 12, 1), drift=-0.001, iv_prev=10.0, recent_pnl=-1.0),
+    )
+    assert verdict.trade and verdict.reasons == []
+    assert verdict.notes["drift_bp"] == -10.0
+
+
+def test_regime_gates_are_independent() -> None:
+    from daytrade.config import RegimeConfig
+    from daytrade.regime import Signals, evaluate
+
+    config = RegimeConfig(
+        skip_months=[12], iv_gate=Decimal(18), drift_gate=Decimal("-0.0003"), equity_curve_days=20
+    )
+    s = Signals(
+        day=dt.date(2026, 12, 1), iv_prev=15.0, drift=-0.0005, market_gap=0.0, recent_pnl=-100.0
+    )
+    verdict = evaluate(config, s)
+    assert not verdict.trade
+    assert len(verdict.reasons) == 4
+    # 信号が無ければそのゲートは効かない。市場ギャップが大きければドリフトも効かない
+    s = Signals(
+        day=dt.date(2026, 11, 1), iv_prev=None, drift=-0.0005, market_gap=-0.02, recent_pnl=None
+    )
+    assert evaluate(config, s).trade
+
+
+def test_regime_config_validates_months() -> None:
+    from daytrade.config import RegimeConfig
+
+    assert RegimeConfig(skip_months=[12, 1, 12]).skip_months == [1, 12]
+    with pytest.raises(ValueError):
+        RegimeConfig(skip_months=[13])
+
+
+def test_realized_pnl_pairs_buys_and_sells(tmp_path: Path) -> None:
+    from daytrade.ledger import realized_pnl
+
+    with Ledger(tmp_path / "l.db") as ledger:
+        ledger.record(_request("7203", Side.BUY, "b" * 32), DAY, OrderStatus.SUBMITTED.value)
+        ledger.update_status(
+            "b" * 32, OrderStatus.FILLED, filled_quantity=Decimal(100), avg_fill_price=Decimal(3000)
+        )
+        ledger.record(_request("7203", Side.SELL, "s" * 32), DAY, OrderStatus.SUBMITTED.value)
+        ledger.update_status(
+            "s" * 32, OrderStatus.FILLED, filled_quantity=Decimal(100), avg_fill_price=Decimal(3050)
+        )
+        ledger.record(_request("9984", Side.BUY, "d" * 32), DAY, DRY_RUN_STATUS)
+        assert realized_pnl(ledger, [DAY, DAY - dt.timedelta(days=1)]) == {
+            DAY: 5000.0,
+            DAY - dt.timedelta(days=1): 0.0,
+        }
+
+
+def test_backtest_regime_zeroes_gated_days() -> None:
+    """止めた日は損益 0、取引一覧からも消える。"""
+    from daytrade.backtest import simulate
+    from daytrade.config import DaytradeConfig
+
+    days = [dt.date(2026, 11, 30), dt.date(2026, 12, 1)]
+    rows = []
+    for day in days:
+        for code, o, c in (("10000", 1000.0, 1010.0), ("20000", 1000.0, 990.0)):
+            rows.append(
+                {
+                    "Date": day,
+                    "Code": code,
+                    "O": o,
+                    "C": c,
+                    "prev_close": 1050.0,
+                    "eligible": True,
+                    "gap": o / 1050 - 1,
+                }
+            )
+    panel = pl.DataFrame(rows)
+    config = DaytradeConfig.model_validate(
+        {"capital": {"max_capital": 2_000_000}, "regime": {"skip_months": [12]}}
+    )
+    result = simulate(panel, config)
+    by_day = dict(result.daily.select("Date", "pnl").iter_rows())
+    assert by_day[dt.date(2026, 12, 1)] == 0.0
+    assert by_day[dt.date(2026, 11, 30)] != 0.0
+    assert result.trades["Date"].unique().to_list() == [dt.date(2026, 11, 30)]
