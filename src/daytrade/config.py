@@ -44,6 +44,18 @@ class CapitalConfig(BaseModel):
     order_budget: Decimal = Decimal(670_000)
     #: N の上限。研究では N10 を超えると Sharpe が下がった。
     max_positions: int = 10
+    #: N 銘柄への配分。"equal"（等金額）か "inverse_vol"（20 日ボラの逆数で按分。荒い銘柄を少なく、
+    #: 穏やかな銘柄を多く持つ。研究では利益 +8%・Sharpe 1.81→2.02 で DD は同じ）。
+    weighting: str = "inverse_vol"
+    #: 資金が増えたら「順位順に 1 銘柄の上限まで詰め込み、余りを次点へ」（稼働 96%、利益 +9%）を
+    #: 再検討する。DD が資金を減らす局面では等分の方が安全なので、今は固定 N。
+
+    @field_validator("weighting")
+    @classmethod
+    def _weighting(cls, v: str) -> str:
+        if v not in {"equal", "inverse_vol"}:
+            raise ValueError(f"weighting は equal か inverse_vol: {v}")
+        return v
 
     @field_validator("order_budget")
     @classmethod
@@ -151,8 +163,10 @@ class RegimeConfig(BaseModel):
     drift_gate: Decimal | None = None
     #: 市場ギャップ（候補の中央値ギャップ）の絶対値がこれを超える日はドリフトのゲートを無視する。
     drift_gap_override: Decimal = Decimal("0.01")
-    #: 戦略自身の直近 N 日の損益が 0 以下なら取引しない。0 で無効。
+    #: 戦略自身の直近 N 日の損益が 0 以下なら、資金を ``equity_curve_scale`` 倍に縮める。0 で無効。
     equity_curve_days: int = 0
+    #: 縮めた後の倍率。0 なら休む。0.5 で MaxDD −50→−30 万、利益 −2%（研究）。
+    equity_curve_scale: Decimal = Decimal("0.5")
     #: 前夜の S&P500 の終値リターンが ``[us_skip_low, us_skip_high)`` にあれば休む。
     #: ``us_skip_high`` が None で無効。研究の既定は 0〜+1%。
     us_skip_low: Decimal = Decimal(0)
@@ -167,6 +181,13 @@ class RegimeConfig(BaseModel):
         if bad:
             raise ValueError(f"skip_months は 1〜12: {bad}")
         return sorted(set(v))
+
+    @field_validator("equity_curve_scale")
+    @classmethod
+    def _scale(cls, v: Decimal) -> Decimal:
+        if not Decimal(0) <= v <= Decimal(1):
+            raise ValueError("equity_curve_scale は 0〜1")
+        return v
 
     @field_validator("us_skip_high")
     @classmethod

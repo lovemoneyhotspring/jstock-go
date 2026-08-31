@@ -21,6 +21,7 @@ from daytrade.fees import commission
 from daytrade.select import gap_rank_expr
 from daytrade.universe import (
     STOCK_PRODUCT,
+    VOL_DAYS,
     cap_tercile_expr,
     eligible_expr,
     num,
@@ -104,6 +105,10 @@ def load_panel(
             prev_close=pl.when(pl.col("AF") == 1).then(pl.col("C").shift(1)).over("Code"),
             turnover_med=pl.col("Va").shift(1).rolling_median(win, min_samples=win).over("Code"),
             mkt_cap=pl.col("MktCap").shift(1).over("Code"),
+            vol20=(pl.col("C") / pl.col("C").shift(1) - 1)
+            .rolling_std(VOL_DAYS)
+            .shift(1)
+            .over("Code"),
         )
         .filter(pl.col("Date") >= start, pl.col("product") == STOCK_PRODUCT)
         .join(days, on="Date")
@@ -251,7 +256,31 @@ def simulate(
         .filter(pl.col("shares") >= 100)
         .with_columns(rank=gap_rank_expr(config.signal, over="Date"))
         .filter(pl.col("rank").is_not_null(), pl.col("rank") <= n)
-        .with_columns(amount=pl.col("shares") * pl.col("O"))
+    )
+    if config.capital.weighting == "inverse_vol":
+        # 選んだ N の中で 20 日ボラの逆数で按分（実運用の select.weights と同じ）
+        from daytrade.select import VOL_FLOOR
+
+        if "vol20" not in picks.columns:
+            picks = picks.with_columns(vol20=pl.lit(None, dtype=pl.Float64))
+
+        picks = (
+            picks.with_columns(
+                w=1.0 / pl.max_horizontal(pl.col("vol20").fill_null(VOL_FLOOR), pl.lit(VOL_FLOOR))
+            )
+            .with_columns(
+                shares=(
+                    pl.lit(capital)
+                    * pl.col("w")
+                    / pl.col("w").sum().over("Date")
+                    / (pl.col("O") * 100)
+                ).floor()
+                * 100
+            )
+            .filter(pl.col("shares") >= 100)
+        )
+    picks = (
+        picks.with_columns(amount=pl.col("shares") * pl.col("O"))
         .with_columns(
             fees=2 * _fee_expr(pl.col("amount")),
             gross=pl.col("shares") * (pl.col("C") - pl.col("O")),
@@ -318,12 +347,12 @@ def _apply_regime(
         frame = frame.with_columns(spx_ret=None, vix=None)
     frame = frame.sort("Date")
     pnl = frame["pnl"].to_list()
-    on: list[bool] = []
+    scales: list[float] = []
     for i, row in enumerate(frame.iter_rows(named=True)):
         recent = None
         if r.equity_curve_days > 0 and i >= r.equity_curve_days:
-            # 前日までの実現損益（止めた日は 0 として数える＝実運用と同じ）
-            recent = sum(pnl[j] if on[j] else 0.0 for j in range(i - r.equity_curve_days, i))
+            # 前日までの実現損益（縮めた日はその倍率で、止めた日は 0 で数える＝実運用と同じ）
+            recent = sum(pnl[j] * scales[j] for j in range(i - r.equity_curve_days, i))
         signals = Signals(
             day=row["Date"],
             iv_prev=row.get("iv_prev"),
@@ -333,13 +362,13 @@ def _apply_regime(
             us_ret=row.get("spx_ret"),
             vix=row.get("vix"),
         )
-        on.append(evaluate(r, signals).trade)
-    frame = frame.with_columns(on=pl.Series(on, dtype=pl.Boolean))
+        verdict = evaluate(r, signals)
+        scales.append(verdict.scale if verdict.trade else 0.0)
+    frame = frame.with_columns(scale=pl.Series(scales, dtype=pl.Float64)).with_columns(
+        on=pl.col("scale") > 0
+    )
     return frame.with_columns(
-        *(
-            pl.when("on").then(pl.col(c)).otherwise(0.0).alias(c)
-            for c in ("pnl", "gross", "fees", "amount")
-        ),
+        *((pl.col(c) * pl.col("scale")).alias(c) for c in ("pnl", "gross", "fees", "amount")),
         n=pl.when("on").then(pl.col("n")).otherwise(0),
     )
 

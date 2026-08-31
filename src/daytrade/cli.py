@@ -117,6 +117,8 @@ def _log_config(config: DaytradeConfig, settings: AppSettings, **extra: Any) -> 
         iv_gate=str(r.iv_gate),
         drift_gate=str(r.drift_gate) if r.drift_gate is not None else None,
         equity_curve_days=r.equity_curve_days,
+        equity_curve_scale=str(r.equity_curve_scale),
+        weighting=config.capital.weighting,
         us_skip=[str(r.us_skip_low), str(r.us_skip_high)] if r.us_skip_high is not None else None,
         us_vix_override=str(r.us_vix_override),
         quote_source=config.execution.quote_source,
@@ -531,6 +533,7 @@ def open_command(
     from daytrade import plan as planning
     from daytrade.ledger import DRY_RUN_STATUS, Ledger
     from daytrade.select import pick as pick_symbols
+    from daytrade.select import rank as rank_symbols
     from wbcore.broker.base import BrokerError
     from wbcore.domain.models import Side
     from wbcore.notify import alert
@@ -624,10 +627,20 @@ def open_command(
         # 次点（N の先 RANKING_EXTRA 件）も順位表として残す——「なぜ X が選ばれなかったか」を後から追うため
         n = WATCH_ROWS if watch_only else config.capital.positions
         budget = config.capital.order_budget if watch_only else config.capital.budget_per_order
-        ranking = pick_symbols(
-            plan.eligible, quotes, n=n + RANKING_EXTRA, budget=budget, config=config.signal
+        if verdict.scale < 1:
+            budget = (budget * Decimal(str(verdict.scale))).quantize(Decimal(1))
+            console.print(f"[yellow]{verdict.scale_reason}（1 注文 {_yen(budget)} 円）[/yellow]")
+        ranking = rank_symbols(plan.eligible, quotes, config.signal)
+        picks = pick_symbols(
+            plan.eligible,
+            quotes,
+            n=n,
+            budget=budget,
+            config=config.signal,
+            weighting="equal" if watch_only else config.capital.weighting,
+            ranked=ranking,
         )
-        picks = ranking[:n]
+        picked = {p.symbol: p for p in picks}
         _print_picks(picks, quotes, plan, watch_only=watch_only)
         log.info(
             "順位表（N と次点）",
@@ -635,17 +648,20 @@ def open_command(
             day=day.isoformat(),
             n=n,
             budget=str(budget),
+            scale=verdict.scale,
+            weighting=config.capital.weighting,
             quotes=len(quotes),
             rows=[
                 {
-                    "rank": p.rank,
-                    "symbol": p.symbol,
-                    "gap": str(p.gap),
-                    "price": str(p.price),
-                    "quantity": str(p.quantity),
-                    "picked": p in picks,
+                    "rank": r.rank,
+                    "symbol": r.symbol,
+                    "gap": str(r.gap),
+                    "price": str(r.price),
+                    "vol": round(r.vol, 4) if r.vol is not None else None,
+                    "quantity": str(picked[r.symbol].quantity) if r.symbol in picked else None,
+                    "picked": r.symbol in picked,
                 }
-                for p in ranking
+                for r in ranking[: n + RANKING_EXTRA]
             ],
         )
         for p in picks:
@@ -726,6 +742,7 @@ def open_command(
             reason=reason,
             n=n,
             budget=str(budget),
+            scale=verdict.scale,
             picks=len(picks),
             failures=len(failures),
         )

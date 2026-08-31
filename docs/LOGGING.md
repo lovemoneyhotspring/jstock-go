@@ -67,7 +67,7 @@
 | `daytrade.plan` | 前夜に候補を作った | `day`, `prev_day`, `candidates`（全銘柄）, `eligible`（対象）, `positions`, `budget`, `iv_prev`, `path` |
 | `daytrade.quotes` | 気配を取った／使えない気配を除外した | `source`, `requested`, `received`, `missing`, `missing_sample`（取れなかった銘柄、最大 20） / `stale`, `stale_sample`, `delayed`, `delayed_sample`, `max_age_sec`, `oldest` |
 | `daytrade.regime` | 危険信号を評価した（毎朝） | `day`, `trade`, `reasons`, `month`, `iv_prev`, `drift_bp`, `market_gap_bp`, `recent_pnl`, `us_ret_bp`, `vix` |
-| `daytrade.ranking` | ギャップ順の順位表（N と次点 5 件） | `day`, `n`, `budget`, `quotes`, `rows`（`rank`, `symbol`, `gap`, `price`, `quantity`, `picked`） |
+| `daytrade.ranking` | ギャップ順の順位表（N と次点 5 件） | `day`, `n`, `budget`, `scale`, `weighting`, `quotes`, `rows`（`rank`, `symbol`, `gap`, `price`, `vol`, `quantity`, `picked`） |
 | `daytrade.pick` | 買う銘柄を決めた（1 件ごと） | `day`, `symbol`, `code_`（J-Quants の 5 桁）, `rank`, `gap`, `prev_close`, `price`, `quantity`, `amount` |
 | `daytrade.order` | 注文にした結果（1 件ごと。買いも売りも） | `day`, `symbol`, `side`, `client_order_id`, `quantity`, `price`, `amount`, `live`, `outcome`（`発注` / `dry-run` / `見送り …` / `失敗 …`） |
 | `daytrade.carry` | verify が売れ残り（持ち越し）を見つけた（通知も送る） | `day`, `positions`（銘柄と株数） |

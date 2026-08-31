@@ -72,26 +72,39 @@ def shares_for(budget: Decimal, price: Decimal, lot: Decimal = DEFAULT_LOT_SIZE)
     return lots * lot
 
 
-def pick(
-    candidates: pl.DataFrame,
-    quotes: dict[str, Quote],
-    *,
-    n: int,
-    budget: Decimal,
-    config: SignalConfig,
-    lot_sizes: dict[str, Decimal] | None = None,
-) -> list[Pick]:
-    """候補（``eligible`` が真）に気配を当て、ギャップ下位 N 銘柄を選ぶ。
+@dataclass(frozen=True, slots=True)
+class Ranked:
+    """ギャップ順に並べた候補 1 つ（数量はまだ決めていない）。"""
 
-    予算で 1 単元に届かない銘柄は飛ばして次点を繰り上げる（研究と同じ）。
-    気配が無い銘柄は対象外（ログは呼び出し側で）。
+    rank: int
+    symbol: str
+    code: str
+    name: str
+    prev_close: Decimal
+    price: Decimal
+    gap: Decimal
+    #: 20 日の日次ボラ（無ければ None）
+    vol: float | None
+
+
+#: ボラが取れない・極端に小さい銘柄に使う下限（日次 2%）。重みが暴れないため。
+VOL_FLOOR = 0.02
+
+
+def rank(candidates: pl.DataFrame, quotes: dict[str, Quote], config: SignalConfig) -> list[Ranked]:
+    """候補（``eligible`` が真）に気配を当て、ギャップの小さい順に並べる。
+
+    気配が無い・ギャップが条件外・ストップ安の銘柄は入らない。
     """
-    if n < 1:
-        return []
-    rows = candidates.filter(pl.col("eligible")).select("Code", "symbol", "name", "prev_close")
-    lots = lot_sizes or {}
-    scored: list[tuple[Decimal, str, str, str, Decimal, Decimal]] = []
-    for code, symbol, name, prev_close in rows.iter_rows():
+    columns = ["Code", "symbol", "name", "prev_close"]
+    has_vol = "vol20" in candidates.columns
+    if has_vol:
+        columns.append("vol20")
+    rows = candidates.filter(pl.col("eligible")).select(columns)
+    scored: list[tuple[Decimal, str, str, str, Decimal, Decimal, float | None]] = []
+    for row in rows.iter_rows():
+        code, symbol, name, prev_close = row[:4]
+        vol = row[4] if has_vol else None
         quote = quotes.get(symbol)
         if quote is None or quote.price <= 0 or prev_close is None or prev_close <= 0:
             continue
@@ -101,27 +114,75 @@ def pick(
             continue
         if config.skip_limit_down and quote.price <= limit_down_price(prev):
             continue
-        scored.append((gap, symbol, code, name or "", prev, quote.price))
+        scored.append((gap, symbol, code, name or "", prev, quote.price, vol))
     scored.sort(key=lambda row: (row[0], row[1]))
+    return [
+        Ranked(
+            rank=i,
+            symbol=symbol,
+            code=code,
+            name=name,
+            prev_close=prev,
+            price=price,
+            gap=gap.quantize(Decimal("0.0001")),
+            vol=float(vol) if vol is not None else None,
+        )
+        for i, (gap, symbol, code, name, prev, price, vol) in enumerate(scored, start=1)
+    ]
+
+
+def weights(rows: list[Ranked], weighting: str) -> list[Decimal]:
+    """N 銘柄への配分比（合計 1）。``inverse_vol`` は 20 日ボラの逆数、``equal`` は等分。"""
+    if not rows:
+        return []
+    if weighting == "inverse_vol":
+        raw = [1.0 / max(r.vol if r.vol is not None else VOL_FLOOR, VOL_FLOOR) for r in rows]
+    else:
+        raw = [1.0 for _ in rows]
+    total = sum(raw)
+    return [Decimal(str(w / total)) for w in raw]
+
+
+def pick(
+    candidates: pl.DataFrame,
+    quotes: dict[str, Quote],
+    *,
+    n: int,
+    budget: Decimal,
+    config: SignalConfig,
+    lot_sizes: dict[str, Decimal] | None = None,
+    weighting: str = "equal",
+    ranked: list[Ranked] | None = None,
+) -> list[Pick]:
+    """ギャップ下位 N 銘柄を選び、株数を決める。
+
+    まず「1 単元が ``budget`` に収まる」銘柄を順位順に N 個取る（届かない銘柄は次点を繰り上げ）。
+    次に ``weighting`` で総予算 ``budget × N`` を按分し、単元に切り捨てる。
+    ``inverse_vol`` で按分が小さすぎて 1 単元に届かない銘柄は落ちる（N が減る）。
+    """
+    if n < 1:
+        return []
+    lots = lot_sizes or {}
+    rows = ranked if ranked is not None else rank(candidates, quotes, config)
+    chosen = [
+        r for r in rows if shares_for(budget, r.price, lots.get(r.symbol, DEFAULT_LOT_SIZE)) > 0
+    ][:n]
     picks: list[Pick] = []
-    rank = 0
-    for gap, symbol, code, name, prev, price in scored:
-        rank += 1
-        quantity = shares_for(budget, price, lots.get(symbol, DEFAULT_LOT_SIZE))
+    total = budget * n
+    for r, w in zip(chosen, weights(chosen, weighting), strict=True):
+        quantity = shares_for(total * w, r.price, lots.get(r.symbol, DEFAULT_LOT_SIZE))
         if quantity <= 0:
             continue
         picks.append(
             Pick(
-                symbol=symbol,
-                code=code,
-                name=name,
-                prev_close=prev,
-                price=price,
-                gap=gap.quantize(Decimal("0.0001")),
+                symbol=r.symbol,
+                code=r.code,
+                name=r.name,
+                prev_close=r.prev_close,
+                price=r.price,
+                gap=r.gap,
                 quantity=quantity,
-                rank=rank,
+                rank=r.rank,
             )
         )
-        if len(picks) >= n:
-            break
     return picks

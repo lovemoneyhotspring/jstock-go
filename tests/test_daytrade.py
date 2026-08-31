@@ -411,7 +411,11 @@ def test_regime_gates_are_independent() -> None:
     from daytrade.regime import Signals, evaluate
 
     config = RegimeConfig(
-        skip_months=[12], iv_gate=Decimal(18), drift_gate=Decimal("-0.0003"), equity_curve_days=20
+        skip_months=[12],
+        iv_gate=Decimal(18),
+        drift_gate=Decimal("-0.0003"),
+        equity_curve_days=20,
+        equity_curve_scale=Decimal(0),  # 0 なら「休む」= 理由に数える
     )
     s = Signals(
         day=dt.date(2026, 12, 1), iv_prev=15.0, drift=-0.0005, market_gap=0.0, recent_pnl=-100.0
@@ -631,3 +635,86 @@ def test_open_with_zero_capital_screens_but_never_orders(tmp_path: Path) -> None
     assert not any(r.get("code") == "daytrade.order" for r in records)
     skip = [r for r in records if r.get("code") == "daytrade.skip"]
     assert skip and skip[-1]["reason"] == "no_capital"
+
+
+# --------------------------------------------------------------------------
+# D + C: ボラ逆比例の配分と資産曲線での縮小
+# --------------------------------------------------------------------------
+
+
+def test_pick_inverse_vol_gives_more_to_calm_stock() -> None:
+    from daytrade.select import rank, weights
+
+    cands = _cands([("A", 1000), ("B", 1000), ("C", 1000)]).with_columns(
+        vol20=pl.Series([0.04, 0.02, None])  # C はボラ不明 → 下限 2% 扱い
+    )
+    quotes = {"A": _q("A", 950), "B": _q("B", 960), "C": _q("C", 970)}
+    ranked = rank(cands, quotes, SignalConfig())
+    assert [r.symbol for r in ranked] == ["A", "B", "C"]
+    w = weights(ranked, "inverse_vol")
+    assert w[1] == w[2] and w[0] < w[1] and abs(sum(w) - 1) < Decimal("0.0001")
+    picks = pick(
+        cands, quotes, n=3, budget=Decimal(666_666), config=SignalConfig(), weighting="inverse_vol"
+    )
+    q = {p.symbol: p.quantity for p in picks}
+    # 総予算 200 万を 1:2:2 で按分 → A 40 万（400 株）、B/C 80 万（800 株）
+    assert q == {"A": Decimal(400), "B": Decimal(800), "C": Decimal(800)}
+    equal = {
+        p.symbol: p.quantity
+        for p in pick(cands, quotes, n=3, budget=Decimal(666_666), config=SignalConfig())
+    }
+    assert equal == {"A": Decimal(700), "B": Decimal(600), "C": Decimal(600)}
+
+
+def test_regime_equity_curve_scales_instead_of_skipping() -> None:
+    from daytrade.config import RegimeConfig
+    from daytrade.regime import Signals, evaluate
+
+    day = dt.date(2026, 9, 1)
+    v = evaluate(
+        RegimeConfig(equity_curve_days=20, equity_curve_scale=Decimal("0.5")),
+        Signals(day=day, recent_pnl=-1.0),
+    )
+    assert v.trade and v.scale == 0.5 and "縮小" in v.scale_reason
+    v = evaluate(
+        RegimeConfig(equity_curve_days=20, equity_curve_scale=Decimal(0)),
+        Signals(day=day, recent_pnl=-1.0),
+    )
+    assert not v.trade
+    v = evaluate(RegimeConfig(equity_curve_days=20), Signals(day=day, recent_pnl=1.0))
+    assert v.trade and v.scale == 1.0
+
+
+def test_backtest_scale_halves_pnl_after_losses() -> None:
+    from daytrade.backtest import simulate
+    from daytrade.config import DaytradeConfig
+
+    days = [dt.date(2026, 6, 1) + dt.timedelta(days=i) for i in range(6)]
+    rows = []
+    for i, day in enumerate(days):
+        # 最初の 3 日は負け、その後は勝ち。直近 2 日の損益が 0 以下なら半分
+        c = 990.0 if i < 3 else 1010.0
+        rows.append(
+            {
+                "Date": day,
+                "Code": "10000",
+                "O": 1000.0,
+                "C": c,
+                "prev_close": 1050.0,
+                "eligible": True,
+                "gap": -0.0476,
+                "vol20": 0.02,
+            }
+        )
+    panel = pl.DataFrame(rows)
+    config = DaytradeConfig.model_validate(
+        {
+            "capital": {"max_capital": 2_000_000, "order_budget": 2_000_000, "weighting": "equal"},
+            "regime": {"equity_curve_days": 2, "equity_curve_scale": 0.5},
+        }
+    )
+    result = simulate(panel, config)
+    scales = result.daily.sort("Date")["scale"].to_list()
+    assert scales[:2] == [1.0, 1.0]  # 履歴が足りない
+    assert scales[2] == 0.5 and scales[3] == 0.5  # 負けが続いた後は半分
+    assert scales[-1] == 1.0  # 勝ちが続けば戻る

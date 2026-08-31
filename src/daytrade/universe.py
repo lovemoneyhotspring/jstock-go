@@ -22,6 +22,9 @@ CLOSE_CHANGED_ON = dt.date(2024, 11, 5)
 #: J-Quants の ``ProdCat``。011 が株式（ETF・REIT・優先株等を除く）。
 STOCK_PRODUCT = "011"
 
+#: 銘柄ごとのボラティリティ（日次リターンの標準偏差）を取る日数。配分の重みに使う。
+VOL_DAYS = 20
+
 
 def to_broker_symbol(code: str) -> str:
     """J-Quants の 5 桁コード（``72030`` / ``130A0``）を Webull の表記（``7203`` / ``130A``）に。"""
@@ -146,7 +149,7 @@ def candidates(
     config: UniverseConfig,
 ) -> pl.DataFrame:
     """判定日 ``day`` の候補。列: Code, symbol, name, segment, prev_close, turnover_med, mkt_cap,
-    cap_tercile, earn_prev, disc_today, alert, eligible。
+    vol20（20 日の日次ボラ）, cap_tercile, earn_prev, disc_today, alert, eligible。
 
     ``eligible`` が真の行が翌朝の対象。真でない行も残す（なぜ外れたかを見せるため）。
     """
@@ -162,6 +165,7 @@ def candidates(
         )
     feats = (
         bars.sort("Code", "Date")
+        .with_columns(ret=(num("C") / num("C").shift(1) - 1).over("Code"))
         .group_by("Code", maintain_order=True)
         .agg(
             prev_close=num("C").last(),
@@ -169,6 +173,7 @@ def candidates(
             turnover_med=num("Va").tail(config.turnover_days).median(),
             turnover_n=num("Va").tail(config.turnover_days).len(),
             mkt_cap=num("MktCap").last(),
+            vol20=pl.col("ret").tail(VOL_DAYS).std(),
         )
         .filter(pl.col("last_date") == prev_day, pl.col("prev_close") > 0)
     )
@@ -209,6 +214,7 @@ def candidates(
             "prev_close",
             "turnover_med",
             "mkt_cap",
+            "vol20",
             "cap_tercile",
             "earn_prev",
             "disc_today",

@@ -6,7 +6,8 @@
 - 月（``skip_months``）: 12 月は 9 年中 7 年がマイナス。IS/OOS ともに改善。既定で有効
 - 市場の日中ドリフト（``drift_gate``）: TOPIX の寄り→引けの 20 日平均。IS では 2018・2021 を
   黒字にするが OOS では利益を 3 割削る。既定は無効（診断値として記録）
-- 資産曲線（``equity_curve_days``）: 戦略自身の直近損益。DD を抑えるが利益も削る。既定は無効
+- 資産曲線（``equity_curve_days`` / ``equity_curve_scale``）: 戦略自身の直近 20 日の実現損益が 0 以下なら
+  資金を半分にする。休むのではなく縮める（MaxDD −50→−30 万、利益 −2%）。既定で有効
 - IV（``iv_gate``）: 日経 225 オプションの前日 IV
 - 前夜の米国（``us_skip_high``）: S&P500 が小幅高（0〜+1%）で VIX が低い翌日は、東証の
   ギャップダウンが市場全体ではなく個別のニュースによるもので、逆張りが効かない（損益 ≈ 0）。
@@ -56,6 +57,10 @@ class Verdict:
     reasons: list[str] = field(default_factory=list)
     #: 記録用の診断値
     notes: dict[str, float | int | None] = field(default_factory=dict)
+    #: 資金に掛ける倍率（1 = そのまま）。資産曲線で縮めるときに 1 未満
+    scale: float = 1.0
+    #: 縮めた理由（縮めていなければ空）
+    scale_reason: str = ""
 
 
 def evaluate(config: RegimeConfig, s: Signals) -> Verdict:
@@ -76,8 +81,15 @@ def evaluate(config: RegimeConfig, s: Signals) -> Verdict:
         reasons.append(
             f"市場の日中ドリフト {s.drift * 1e4:+.1f} bp ≤ {config.drift_gate * 10_000:+.0f} bp"
         )
+    scale = 1.0
+    scale_reason = ""
     if config.equity_curve_days > 0 and s.recent_pnl is not None and s.recent_pnl <= 0:
-        reasons.append(f"直近 {config.equity_curve_days} 日の損益 {s.recent_pnl:,.0f} 円 ≤ 0")
+        text = f"直近 {config.equity_curve_days} 日の損益 {s.recent_pnl:,.0f} 円 ≤ 0"
+        if config.equity_curve_scale <= 0:
+            reasons.append(text)
+        else:
+            scale = float(config.equity_curve_scale)
+            scale_reason = f"{text} → 資金を {scale:g} 倍に縮小"
     if (
         config.us_skip_high is not None
         and s.us_ret is not None
@@ -96,8 +108,11 @@ def evaluate(config: RegimeConfig, s: Signals) -> Verdict:
         "recent_pnl": s.recent_pnl,
         "us_ret_bp": round(s.us_ret * 1e4, 1) if s.us_ret is not None else None,
         "vix": s.vix,
+        "scale": scale,
     }
-    return Verdict(trade=not reasons, reasons=reasons, notes=notes)
+    return Verdict(
+        trade=not reasons, reasons=reasons, notes=notes, scale=scale, scale_reason=scale_reason
+    )
 
 
 # --------------------------------------------------------------------------

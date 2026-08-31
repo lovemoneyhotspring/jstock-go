@@ -12,6 +12,7 @@ enabled = true             # false で jp_gap_fade を止める（plan / open �
 max_capital = 2000000      # 円。1 日に使う上限。0 にするとスクリーニングはするが買わない（N = 0）
 order_budget = 670000      # 1 注文の目安。N = max_capital ÷ order_budget（200 万なら 3）
 max_positions = 10
+weighting = "inverse_vol"  # N 銘柄への配分。equal（等金額）/ inverse_vol（20 日ボラの逆数。荒い銘柄を少なく）
 
 [universe]
 segments = ["prime"]       # prime / standard / growth
@@ -34,7 +35,8 @@ skip_months = [12]         # 12 月は 9 年中 7 年がマイナス（IS/OOS �
 drift_days = 20            # 市場の日中ドリフト（TOPIX 寄り→引け）の平均日数
 # drift_gate = -0.0003     # ドリフトがこれ以下なら休む。2018/2021 は救うが 2022 年以降の利益を 3 割削るので既定は無効
 drift_gap_override = 0.01  # 市場ギャップが ±1% を超える日はドリフトに関係なく取引（急落の寄付が最も効く）
-equity_curve_days = 0      # 戦略の直近 N 日損益が 0 以下なら休む。0 で無効
+equity_curve_days = 20     # 戦略の直近 N 日の実現損益が 0 以下なら資金を equity_curve_scale 倍に縮める。0 で無効
+equity_curve_scale = 0.5   # 縮めた後の倍率（0 なら休む）。MaxDD −50 万 → −30 万、利益 −2%
 # 前夜の米国: S&P500 が 0〜+1% の小幅高で VIX ≤ 24 の翌日は休む（東証のギャップダウンが個別要因になり逆張りが効かない）。
 # 12 月休みと併用で 2017–2026 は合計 667 万・Sharpe 1.85・MaxDD −50 万、全年黒字（IS 1.62 / OOS 2.10）
 us_skip_low = 0.0

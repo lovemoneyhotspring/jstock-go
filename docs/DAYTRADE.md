@@ -34,6 +34,18 @@ bp が跳ね上がる（この規則の理由）。
 - IV ゲート（`regime.iv_gate`）は前日の日経 225 オプション `BaseVol` 中央値。オプションの足は 27:00 頃の更新なので
   20:30 の plan には無く、`open` が朝のアーカイブから取り直す。無ければゲート無しで進む（警告ログ）
 
+## 配分と縮小（MaxDD 対策）
+
+最大 DD は急落ではなく「効かない期間が続く」型（2025-10〜2026-02 の 4.5 か月で −50 万）。対策は 2 つで既定で有効:
+
+- **ボラの逆数で配分**（`capital.weighting = "inverse_vol"`）: 上位 N の中で、20 日の日次ボラが大きい銘柄を少なく、
+  穏やかな銘柄を多く持つ。利益 +8%・Sharpe 2.02 で DD は同じ
+- **資産曲線で縮小**（`regime.equity_curve_days = 20` / `equity_curve_scale = 0.5`）: 直近 20 日の実現損益（台帳）が 0 以下なら
+  その日の資金を半分にする。縮めている日は全体の約 2 割
+
+資金が増えて DD の絶対額を許容できるようになったら、「順位順に 1 銘柄の上限まで詰め込み、余りを次点へ」（資金稼働 83%→96%、
+利益 +9%、DD +12%）を再検討する（研究ノート「配分規則の比較」）。
+
 ## ストップ高・ストップ安
 
 - **寄りでストップ高**: ギャップが正なので買い対象にならない。保有中にストップ高になれば買い殺到の板なので売るのは容易
@@ -66,6 +78,7 @@ https://developer.webull.co.jp/apis/docs/market-data-api/overview.md）。日本
 | | `max_capital` | 1 日に使う資金の上限（円）。**0 なら N = 0**: スクリーニングと候補の表示だけ行い買わない |
 | | `order_budget` | 1 注文の目安。N の決定に使う（既定 67 万円） |
 | | `max_positions` | N の上限（既定 10。研究では N10 超で Sharpe が落ちる） |
+| | `weighting` | N 銘柄への配分。`inverse_vol`（既定。20 日ボラの逆数で按分、利益 +8%・Sharpe 1.81→2.02）か `equal` |
 | `[universe]` | `segments` | prime / standard / growth。再編前の一部・二部・マザーズも同じ呼び方 |
 | | `min_turnover` / `turnover_days` | 売買代金の中央値の下限と日数。上げるほど成績は落ちる |
 | | `exclude_cap_terciles` | 時価総額の下位からいくつ外すか（1 が最良） |
@@ -75,7 +88,7 @@ https://developer.webull.co.jp/apis/docs/market-data-api/overview.md）。日本
 | `[regime]` | `iv_gate` | 0 で常時。18 で高ボラ局面だけ（DD 半分、稼働 5 割） |
 | | `skip_months` | 取引しない月。既定の設定は `[12]` |
 | | `drift_days` / `drift_gate` / `drift_gap_override` | 市場の日中ドリフトのゲート（下記）。既定は無効 |
-| | `equity_curve_days` | 戦略自身の直近 N 日損益が 0 以下なら休む。0 で無効 |
+| | `equity_curve_days` / `equity_curve_scale` | 戦略自身の直近 N 日の実現損益が 0 以下なら資金を `scale` 倍に縮める（既定 20 日・0.5）。scale 0 で休む |
 | | `us_skip_low` / `us_skip_high` / `us_vix_override` | 前夜の S&P500 が帯の中（既定 0〜+1%）で VIX ≤ 24 なら休む。`us_skip_high` 無しで無効 |
 | `[execution]` | `quote_source` / `quote_file` | 気配の取得元 |
 | | `entry_window` / `exit_window` | 発注してよい時間帯（JST）。外なら何もしない。`exit_window` の既定は 15:20〜15:30（15:20 の成行はその場で約定、15:25 以降は引け値） |
@@ -94,7 +107,7 @@ https://developer.webull.co.jp/apis/docs/market-data-api/overview.md）。日本
 | 12 月を休む | 9 年中 7 年の 12 月がマイナス。IS +23 万・OOS +25 万、Sharpe 1.45→1.63 | **有効** |
 | 前夜の S&P500 が 0〜+1% の小幅高（VIX ≤ 24） | その翌日は損益 ≈ 0（東証のギャップダウンが個別要因）。休むと Sharpe 1.45→1.63、閾値を動かしても崩れない。12 月休みと併用で合計 667 万・Sharpe 1.85・MaxDD −50 万・全年黒字（IS 1.62 / OOS 2.10） | **有効** |
 | 市場の日中ドリフト（TOPIX 寄り→引け 20 日平均 ≤ 0） | 2018 −18→+13、2021 −19→+53 に転じるが、2022 年以降の利益を 3 割削る（IS 限定） | 無効（記録のみ） |
-| 資産曲線（戦略の直近 20 日損益 ≤ 0） | MaxDD −78→−59 万だが利益も 1 割減 | 無効 |
+| 資産曲線（戦略の直近 20 日損益 ≤ 0 なら資金を半分） | 休むのではなく縮める。ボラ逆比例の配分と合わせて MaxDD −50→−30 万、利益 −2%、Calmar 1.31→2.14 | **有効** |
 | IV（前日 ≤ 18） | CAGR 維持で MaxDD 半分、稼働 5 割 | 無効 |
 
 米国の信号は yfinance（`^GSPC` / `^VIX`）を 9:00 の `open` が取りに行く（米国の引けは 6:00 JST）。取れなければ
