@@ -91,10 +91,11 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 30 20 * * 1-5   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade plan                                >> state/logs/daytrade-plan.log 2>&1
 1,4,7 9 * * 1-5 cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade open --live --yes                   >> state/logs/daytrade-open.log 2>&1
 20,24,28 15 * * 1-5 cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock /home/abobo/webull/wbjp/.venv/bin/daytrade close --live --yes               >> state/logs/daytrade-close.log 2>&1
+40 15 * * 1-5   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade verify                              >> state/logs/daytrade-verify.log 2>&1
 ```
 
 `daytrade open` は 9:01・9:04・9:07 の 3 回呼ぶ（板寄せ直後は気配の約定時刻が前日のままで「古い」と判定されることがあるため、9:00 ちょうどは避ける。気配を取れなかった回の再試行で、台帳に買いがあれば以降は何もしない）。
-`close` は 15:20・15:24・15:28 の 3 回（1 回目で売れていれば 2 回目以降は何もしない。拒否されていれば送り直す）。15:20 の成行はその場の気配で約定し、15:25 以降ならクロージング・オークションで引け値になる。祝日は `open` が「候補なし／気配なし」で終わるだけで無害。
+`close` は 15:20・15:24・15:28 の 3 回（1 回目で売れていれば 2 回目以降は何もしない。拒否されていれば送り直す）。15:20 の成行はその場の気配で約定し、15:25 以降ならクロージング・オークションで引け値になる。15:40 の `verify` は売りの約定を照会し、売れ残り（ストップ安で板に買いが無い等）があれば持ち越しとして通知する。祝日は `open` が「候補なし／気配なし」で終わるだけで無害。
 
 ### cron を入れる前の検証
 

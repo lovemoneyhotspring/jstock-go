@@ -55,6 +55,20 @@ def _fee_expr(amount: pl.Expr) -> pl.Expr:
     )
 
 
+def limit_width_expr(base: pl.Expr) -> pl.Expr:
+    """:func:`wbcore.domain.jp_rules.price_limit_width` の polars 版。"""
+    from wbcore.domain.jp_rules import price_limit_table
+
+    expr: pl.Expr | None = None
+    for bound, width in reversed(price_limit_table()):
+        if bound == Decimal("Infinity"):
+            expr = pl.lit(float(width))
+            continue
+        expr = pl.when(base < float(bound)).then(pl.lit(float(width))).otherwise(expr)
+    assert expr is not None
+    return expr
+
+
 def load_panel(
     archive: Archive, start: dt.date, end: dt.date, config: DaytradeConfig
 ) -> pl.DataFrame:
@@ -227,9 +241,13 @@ def simulate(
         raise ValueError("max_capital が 0 のため検証できません（買わない設定）")
     budget = float(config.capital.budget_per_order)
     capital = float(config.capital.max_capital)
+    eligible = panel.filter(pl.col("eligible"))
+    if config.signal.skip_limit_down:
+        # 寄付がストップ安（前日終値 − 制限値幅）以下なら買わない。実運用と同じ条件
+        low = (pl.col("prev_close") - limit_width_expr(pl.col("prev_close"))).clip(lower_bound=1.0)
+        eligible = eligible.filter(pl.col("O") > low)
     picks = (
-        panel.filter(pl.col("eligible"))
-        .with_columns(shares=(pl.lit(budget) / (pl.col("O") * 100)).floor() * 100)
+        eligible.with_columns(shares=(pl.lit(budget) / (pl.col("O") * 100)).floor() * 100)
         .filter(pl.col("shares") >= 100)
         .with_columns(rank=gap_rank_expr(config.signal, over="Date"))
         .filter(pl.col("rank").is_not_null(), pl.col("rank") <= n)

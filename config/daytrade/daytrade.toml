@@ -25,6 +25,7 @@ exclude_margin_alert = true
 [signal]
 max_gap = 0.0              # ギャップがこれ未満（負）の銘柄だけ
 min_gap = -1.0             # 下限なし（大きなギャップダウンが利益源）
+skip_limit_down = true     # 気配がストップ安の銘柄は買わない（引けの売りが約定せず持ち越しになる）
 
 [regime]
 # 危険信号（docs/DAYTRADE.md「危険信号」）。毎朝すべて計算してログに残し、有効にしたものだけが取引を止める

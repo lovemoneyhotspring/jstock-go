@@ -122,6 +122,9 @@ class SignalConfig(BaseModel):
     max_gap: Decimal = Decimal(0)
     #: ギャップの下限（これ**以上**）。−1 なら制限なし。研究では下限を切るほど悪化した。
     min_gap: Decimal = Decimal(-1)
+    #: 9:00 の気配が制限値幅の下限（ストップ安）にある銘柄は買わない。売り殺到の板では
+    #: 引けの売りが約定せず持ち越しになる（研究: ストップ安に触れた日は勝率 9%）。
+    skip_limit_down: bool = True
 
     @field_validator("max_gap", "min_gap")
     @classmethod

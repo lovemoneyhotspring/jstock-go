@@ -22,6 +22,7 @@ bp が跳ね上がる（この規則の理由）。
 | 20:30（前夜） | `daytrade plan` | 翌営業日の母集団を `state/daytrade/plan-<日付>.parquet` に保存 | J-Quants アーカイブ（`jquants sync` 済みの前日足・銘柄一覧・決算・日々公表） |
 | 09:00〜09:15 | `daytrade open --live --yes` | 候補の気配を取り、ギャップ下位 N 銘柄を成行買い。台帳に記録 | plan + 気配（`execution.quote_source`） |
 | 15:20〜15:30 | `daytrade close --live --yes` | 台帳の当日買いをブローカーに照会し、約定数量を成行売り（15:20 はその場で約定。15:25 以降はクロージング・オークションで引け値） | 台帳 + ブローカー |
+| 15:40 | `daytrade verify` | 今日の売りが全部約定したか照会し、売れ残り（持ち越し）を通知 | 台帳 + ブローカー |
 | 随時 | `daytrade status` | 候補と当日の注文 | |
 
 すべて既定は dry-run。`--live` が無ければ判断と記録だけで注文は出さない。本番口座では
@@ -32,6 +33,15 @@ bp が跳ね上がる（この規則の理由）。
 - `close` の失敗は持ち越しになるので必ず通知する（`WBJP_ALERT_WEBHOOK_URL`）
 - IV ゲート（`regime.iv_gate`）は前日の日経 225 オプション `BaseVol` 中央値。オプションの足は 27:00 頃の更新なので
   20:30 の plan には無く、`open` が朝のアーカイブから取り直す。無ければゲート無しで進む（警告ログ）
+
+## ストップ高・ストップ安
+
+- **寄りでストップ高**: ギャップが正なので買い対象にならない。保有中にストップ高になれば買い殺到の板なので売るのは容易
+- **寄りでストップ安**: ギャップダウンの候補に入るが、**買わない**（`signal.skip_limit_down`、既定 true）。
+  売り殺到の板では買いは即約定するが、引けの売りは板に買いが無く**約定しない＝持ち越し**になる。研究では
+  ストップ安に触れた日の取引は 78 件（1%）で勝率 9%・平均 −14,156 円、うち 53 件は引けもストップ安だった
+- **保有中にストップ安**: 15:20 以降の売りが約定しないことがある。引け後の `daytrade verify`（15:40）が
+  売りの約定をブローカーに照会し、売れ残りがあれば通知する（`daytrade.carry`）。翌朝に手で売る
 
 ## 気配の取得元（未解決の前提）
 
@@ -61,6 +71,7 @@ https://developer.webull.co.jp/apis/docs/market-data-api/overview.md）。日本
 | | `exclude_cap_terciles` | 時価総額の下位からいくつ外すか（1 が最良） |
 | | `exclude_earnings_prev` / `exclude_earnings_today` / `exclude_margin_alert` | 除外条件 |
 | `[signal]` | `max_gap` / `min_gap` | ギャップの範囲。既定は「負なら全部」 |
+| | `skip_limit_down` | 気配がストップ安の銘柄は買わない（既定 true） |
 | `[regime]` | `iv_gate` | 0 で常時。18 で高ボラ局面だけ（DD 半分、稼働 5 割） |
 | | `skip_months` | 取引しない月。既定の設定は `[12]` |
 | | `drift_days` / `drift_gate` / `drift_gap_override` | 市場の日中ドリフトのゲート（下記）。既定は無効 |

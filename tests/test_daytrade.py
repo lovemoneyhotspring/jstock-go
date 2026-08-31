@@ -253,6 +253,40 @@ def test_pick_orders_by_gap_and_skips_unaffordable() -> None:
     assert picks[0].fee == Decimal(275)
 
 
+def test_pick_skips_limit_down_at_open() -> None:
+    """気配がストップ安（前日終値 1,000 円 → 制限値幅 300 円 → 700 円）なら買わない。"""
+    cands = _cands([("A", 1000), ("B", 1000)])
+    quotes = {"A": _q("A", 700), "B": _q("B", 900)}
+    picks = pick(cands, quotes, n=3, budget=Decimal(500_000), config=SignalConfig())
+    assert [p.symbol for p in picks] == ["B"]
+    picks = pick(
+        cands, quotes, n=3, budget=Decimal(500_000), config=SignalConfig(skip_limit_down=False)
+    )
+    assert [p.symbol for p in picks] == ["A", "B"]
+
+
+def test_backtest_limit_width_matches_rules() -> None:
+    from daytrade.backtest import limit_width_expr
+    from wbcore.domain.jp_rules import price_limit_width
+
+    bases = [
+        50.0,
+        99.0,
+        100.0,
+        999.0,
+        1000.0,
+        1500.0,
+        3000.0,
+        4999.0,
+        5000.0,
+        30_000.0,
+        500_000.0,
+        20_000_000.0,
+    ]
+    frame = pl.DataFrame({"base": bases}).with_columns(width=limit_width_expr(pl.col("base")))
+    assert frame["width"].to_list() == [float(price_limit_width(Decimal(str(b)))) for b in bases]
+
+
 def test_pick_respects_gap_bounds_and_missing_quotes() -> None:
     cands = _cands([("A", 1000), ("B", 1000)])
     quotes = {"A": _q("A", 850)}  # B は気配なし

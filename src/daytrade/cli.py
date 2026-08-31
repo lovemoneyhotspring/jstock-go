@@ -998,6 +998,96 @@ def _warn_unrecorded_positions(settings: AppSettings, config: DaytradeConfig, da
     alert("デイトレ: 台帳に無い建玉（持ち越しの恐れ）", detail)
 
 
+@app.command("verify")
+@_crash("手仕舞いの検証", "daytrade.crash")
+def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDir = None) -> None:
+    """引け後: 今日の売りが全部約定したかをブローカーに照会し、未約定（持ち越し）なら通知する。"""
+    from daytrade.ledger import Ledger
+    from wbcore.broker.base import BrokerError
+    from wbcore.domain.models import Side
+    from wbcore.notify import alert
+
+    settings = _settings(ctx)
+    config = _load(config_dir)
+    day = _parse_date(date) or _today_jst()
+    ledger = Ledger(settings.daytrade_db_path)
+    try:
+        buys = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run]
+        sells = [o for o in ledger.orders_on(day, Side.SELL) if not o.is_dry_run]
+        if not buys:
+            console.print("[dim]今日の本発注はありません[/dim]")
+            return
+        broker = _connect(settings, config)
+        carried: list[str] = []
+        bought: dict[str, Decimal] = {}
+        for order in buys:
+            current = broker.get_order(order.client_order_id)
+            if current is not None:
+                ledger.update_status(
+                    order.client_order_id,
+                    current.status,
+                    filled_quantity=current.filled_quantity,
+                    avg_fill_price=current.avg_fill_price,
+                    broker_order_id=current.broker_order_id,
+                )
+                bought[order.symbol] = (
+                    bought.get(order.symbol, Decimal(0)) + current.filled_quantity
+                )
+            else:
+                bought[order.symbol] = bought.get(order.symbol, Decimal(0)) + order.filled_quantity
+        sold: dict[str, Decimal] = {}
+        for order in sells:
+            current = broker.get_order(order.client_order_id)
+            filled = order.filled_quantity
+            if current is not None:
+                filled = current.filled_quantity
+                ledger.update_status(
+                    order.client_order_id,
+                    current.status,
+                    filled_quantity=filled,
+                    avg_fill_price=current.avg_fill_price,
+                    broker_order_id=current.broker_order_id,
+                )
+                log.info(
+                    "売り注文の約定状況",
+                    code="daytrade.fill",
+                    day=day.isoformat(),
+                    symbol=order.symbol,
+                    client_order_id=order.client_order_id,
+                    broker_order_id=current.broker_order_id,
+                    before=order.status,
+                    after=current.status.value,
+                    quantity=str(order.quantity),
+                    filled=str(filled),
+                    avg_fill_price=str(current.avg_fill_price)
+                    if current.avg_fill_price is not None
+                    else None,
+                )
+            sold[order.symbol] = sold.get(order.symbol, Decimal(0)) + filled
+        for symbol, quantity in sorted(bought.items()):
+            remaining = quantity - sold.get(symbol, Decimal(0))
+            if remaining > 0:
+                carried.append(f"{symbol} {remaining:,.0f} 株")
+                console.print(
+                    f"  {symbol}: [red]{remaining:,.0f} 株が売れていません（持ち越し）[/red]"
+                )
+            elif quantity > 0:
+                console.print(f"  {symbol}: {quantity:,.0f} 株 手仕舞い済み")
+        if carried:
+            log.error("持ち越し", code="daytrade.carry", day=day.isoformat(), positions=carried)
+            alert(
+                "デイトレ: 売れ残りがあります（持ち越し）。翌朝に手で売ってください",
+                "\n".join(carried),
+            )
+        else:
+            log.info("手仕舞いを確認", code="daytrade.run", phase="verify", live=True, carried=0)
+    except BrokerError as exc:
+        console.print(f"[red]照会に失敗: {exc}[/red]")
+        raise typer.Exit(1) from None
+    finally:
+        ledger.close()
+
+
 # --------------------------------------------------------------------------
 # status / quotes / backtest
 # --------------------------------------------------------------------------

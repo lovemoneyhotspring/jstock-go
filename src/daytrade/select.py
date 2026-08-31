@@ -14,7 +14,12 @@ import polars as pl
 
 from daytrade.config import SignalConfig
 from daytrade.fees import commission
-from wbcore.domain.jp_rules import DEFAULT_LOT_SIZE
+from wbcore.domain.jp_rules import DEFAULT_LOT_SIZE, price_limit_range
+
+
+def limit_down_price(prev_close: Decimal) -> Decimal:
+    """前日終値を基準値段とするストップ安の値段。"""
+    return price_limit_range(prev_close)[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +98,8 @@ def pick(
         prev = Decimal(str(prev_close))
         gap = quote.price / prev - Decimal(1)
         if not (gap < config.max_gap and gap >= config.min_gap):
+            continue
+        if config.skip_limit_down and quote.price <= limit_down_price(prev):
             continue
         scored.append((gap, symbol, code, name or "", prev, quote.price))
     scored.sort(key=lambda row: (row[0], row[1]))

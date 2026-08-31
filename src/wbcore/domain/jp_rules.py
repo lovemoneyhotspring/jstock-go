@@ -209,6 +209,11 @@ _PRICE_LIMIT_ABOVE = Decimal("10000000")
 _PRICE_LIMIT_BOUNDS = [b for b, _ in _PRICE_LIMITS]
 
 
+def price_limit_table() -> list[tuple[Decimal, Decimal]]:
+    """制限値幅の表（(基準値段の上限「未満」, 片側の値幅)）と、最上位区分の値幅。ベクトル化したい読み手向け。"""
+    return [*_PRICE_LIMITS, (Decimal("Infinity"), _PRICE_LIMIT_ABOVE)]
+
+
 def price_limit_width(base_price: Decimal) -> Decimal:
     """基準値段に対する制限値幅（上下の片側）を返す。"""
     if base_price <= 0:
