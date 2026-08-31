@@ -162,7 +162,7 @@ uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV
 
 倍率の判定を別の銘柄で行うこともできる（`signal_symbol`）。東証の S&P500 連動 ETF を買いながら、増額の判定は本家の指数 `^GSPC` の配列で行う、といった使い方。判定用は買わないので指数でもよく、暦が違っても「その日以前で最新」の判定値を当てる。判定用の市場の引けが買う市場の判断時刻より後（東証の銘柄を米国指数で判定）なら、同じ日付の足はまだ存在しないので**前日の足**を使う——バックテストでも同じ規則にして、ライブと食い違わないようにしている。省略すれば買う銘柄自身の足で判定する。
 
-`run` は毎回 **「今月の目標（今日まで）− 今月の発注済み」** を銘柄ごとに計算し、差額があればその額を 1 件の成行買いにする。目標は入金日（月初の営業日）を過ぎていれば基本予算を含み、そこに今日までの増額分が積み上がる。発注済みは台帳（`data/accum-<env>.db`）から引く。この 1 本の規則で、月の途中から始めた場合（**開始月は残り暦日数で日割り**: 25,000 円で 9/16 開始なら 15/30 日ぶんの 12,500 円。開始日は銘柄ごとに最初の `--live` の日を台帳に記録し、翌月からは全額）、月の途中で予算を増やした場合（差額だけ）、cron が止まった日があった場合（次の実行で埋まる）、同じ日に 2 回走った場合（2 回目は 0）がすべて同じ扱いになる。ただし差額を**出す日**は増額と同じ規則に揃える: 直前の確定足が入金日か増額のリリース日（どのみち注文が出る日）か、差額が今月の基本目標以上（入金日の注文が通らなかった・cron が止まっていた・月の途中で始めた）のときだけ出し、それ以外の日は持ち越す。単元の端数や小さな予算増が、株価の下がった日に 1 単元だけの小口注文にならないようにするため。判断はバックテストと同じく前日までの確定足で行い、買うのは当日の価格。最終足が `max_stale_days`（既定 4 日）より古い銘柄は判定せず通知する。
+`run` は毎回 **「今月の目標（今日まで）− 今月の発注済み」** を銘柄ごとに計算し、差額があればその額を 1 件の成行買いにする。目標は入金日（月初の営業日）を過ぎていれば基本予算を含み、そこに今日までの増額分が積み上がる。発注済みは台帳（`state/accum-<env>.db`）から引く。この 1 本の規則で、月の途中から始めた場合（**開始月は残り暦日数で日割り**: 25,000 円で 9/16 開始なら 15/30 日ぶんの 12,500 円。開始日は銘柄ごとに最初の `--live` の日を台帳に記録し、翌月からは全額）、月の途中で予算を増やした場合（差額だけ）、cron が止まった日があった場合（次の実行で埋まる）、同じ日に 2 回走った場合（2 回目は 0）がすべて同じ扱いになる。ただし差額を**出す日**は増額と同じ規則に揃える: 直前の確定足が入金日か増額のリリース日（どのみち注文が出る日）か、差額が今月の基本目標以上（入金日の注文が通らなかった・cron が止まっていた・月の途中で始めた）のときだけ出し、それ以外の日は持ち越す。単元の端数や小さな予算増が、株価の下がった日に 1 単元だけの小口注文にならないようにするため。判断はバックテストと同じく前日までの確定足で行い、買うのは当日の価格。最終足が `max_stale_days`（既定 4 日）より古い銘柄は判定せず通知する。
 
 増額分は日ごとに判定して積み上げ、**翌週の最初の営業日（月曜、休場なら火曜以降）に、累積が基本予算以上になっていれば 1 件でまとめて出す**（届かなければ次週へ持ち越して積み続け、入金日には閾値に関係なく基本分と同じ注文に乗せる）。日ごとに出すと 1 件が数千円になり、最低手数料 55 円で 1.5% 取られるうえ 10 口単位の ETF では 1 単元に届かないため。基本予算まで貯めてから出すことで 1 件あたりの手数料率を下げる。投下額の総量は変わらず、出す日が後ろにずれるだけ。単元に届かず買えなかった端数は差額として残り、次に資金が足される月曜か翌月の入金日に自動で繰り越される（台帳に残す「発注済み」は差額ではなく**株数 × 価格**）。月をまたいだ残りは、前月に実際の発注記録がある場合だけ当月の目標に足す——dry-run しかしていない月の分まで本稼働の初月に買わないため。
 
@@ -201,12 +201,12 @@ uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV
 
 ## ログ（後から AI に読ませる用）
 
-**ファイルに残すログは 1 箇所だけ**——`WBJP_LOG_DIR`（既定 `WBJP_DATA_DIR/logs`＝`data/logs`）。機械が読む JSONL も、cron で stderr を残す場合もここに集める。SDK が勝手に作る `webull_*_sdk.log` は抑止してあり、どこにも書かれない。
+**ファイルに残すログは 1 箇所だけ**——`WBJP_LOG_DIR`（既定 `WBJP_STATE_DIR/logs`＝`state/logs`）。機械が読む JSONL も、cron で stderr を残す場合もここに集める。SDK が勝手に作る `webull_*_sdk.log` は抑止してあり、どこにも書かれない。
 
 端末に出る整形表示とは別に、**機械が読む JSON Lines** を常に `<WBJP_LOG_DIR>/<app>-<env>.jsonl` に書く（1 行 1 レコード、日次ローテーション、90 日保持、秘匿情報は伏せる）。全レコードに `schema` / `ts_utc` / `run_id`（1 回の実行の識別子）/ `app` / `env` / `command` が付き、主要な出来事には安定した `code`（`accum.decision` / `accum.order` / `accum.fill` …）が付く。項目の定義は [docs/LOGGING.md](docs/LOGGING.md)。
 
 ```bash
-jq -r 'select(.code == "accum.decision") | [.ts_utc, .symbol, .target, .placed, .due] | @tsv' data/logs/accum-prod.jsonl
+jq -r 'select(.code == "accum.decision") | [.ts_utc, .symbol, .target, .placed, .due] | @tsv' state/logs/accum-prod.jsonl
 ```
 
 「今」を取るのは `wbcore.clock` だけ（`now_utc()` / `today_utc()`）。`date.today()` や tz 無しの `datetime.now()` は cron のサーバーと開発機で結果が変わるので使わない——テストが監視している。tz 無しの datetime を受け取ったら UTC とみなす。
@@ -303,8 +303,8 @@ uv run wbjp data check --config-dir config/collect --notify   # WBJP_ALERT_WEBHO
 ```cron
 CRON_TZ=Asia/Tokyo
 # stderr も JSONL と同じ WBJP_LOG_DIR に残す（ログの置き場は 1 箇所）
-0 12,16 * * 1-5 cd /opt/wbjp && .venv/bin/wbjp data sync --config-dir config/collect --days 7 >> data/logs/collect.log 2>&1
-15 16 * * 1-5   cd /opt/wbjp && .venv/bin/wbjp data check --config-dir config/collect --notify >> data/logs/collect.log 2>&1
+0 12,16 * * 1-5 cd /opt/wbjp && .venv/bin/wbjp data sync --config-dir config/collect --days 7 >> state/logs/collect.log 2>&1
+15 16 * * 1-5   cd /opt/wbjp && .venv/bin/wbjp data check --config-dir config/collect --notify >> state/logs/collect.log 2>&1
 ```
 
 `data sync` 自体が失敗したとき（取得元の障害など）も同じ Webhook に通知する。Webhook は Slack / Discord の Incoming Webhook URL を `WBJP_ALERT_WEBHOOK_URL` に置く。未設定ならエラーログに残るだけ。
@@ -493,7 +493,7 @@ uv run jquants query "SELECT Code, DiscDate, NP FROM fins_summary WHERE Code='72
 
 （zsh の対話シェルは行の途中の `#` をコメントとして扱わないので、コマンドの後ろにコメントを付けたまま貼らないこと）
 
-置き場は `data/jquants/<端点>/<YYYY-MM>.parquet`（生のまま・全列文字列・鍵で後勝ち）と台帳 `data/jquants/ledger.db`。`accum sync` の日本株の足もここを経由する（揃っていれば API を叩かない）。
+置き場は `data/jquants/<端点>/<YYYY-MM>.parquet`（生のまま・全列文字列・鍵で後勝ち）と台帳 `data/jquants/ledger.db`。`data/` は再取得できるキャッシュなのでホスト間でコピーしてよい（発注台帳やログは `state/` にあり、こちらは上書き厳禁）。`accum sync` の日本株の足もここを経由する（揃っていれば API を叩かない）。
 
 ## cron で回す
 
@@ -506,7 +506,7 @@ uv run jquants query "SELECT Code, DiscDate, NP FROM fins_summary WHERE Code='72
 # 平日 16:30 に日次サイクルを実行
 CRON_TZ=Asia/Tokyo
 # stderr も JSONL と同じ WBJP_LOG_DIR に残す（ログの置き場は 1 箇所）。systemd なら journald でよい
-30 16 * * 1-5 cd /opt/wbjp && WBJP_ENV=prod /opt/wbjp/.venv/bin/wbjp run --live --yes >> data/logs/wbjp-run.log 2>&1
+30 16 * * 1-5 cd /opt/wbjp && WBJP_ENV=prod /opt/wbjp/.venv/bin/wbjp run --live --yes >> state/logs/wbjp-run.log 2>&1
 ```
 
 cron で詰まりやすい点:

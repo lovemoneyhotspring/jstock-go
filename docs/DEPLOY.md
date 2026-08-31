@@ -9,7 +9,8 @@
 | コード | `src/` `pyproject.toml` `uv.lock` `.python-version` | ✅ |
 | 設定 | 運用する戦略の `config/<戦略名>/` 一式 | ✅ |
 | 秘密情報 | Webull APIキーと J-Quants APIキー（`.env` または systemd `EnvironmentFile=`） | ❌ 別途用意 |
-| データ | `data/`（価格キャッシュ・台帳DB・ログ） | ❌ 初回は空でOK |
+| キャッシュ | `data/`（足・財務・J-Quants アーカイブ） | ❌ 別ホストからコピーしてよい（または再取得） |
+| 状態 | `state/`（発注台帳・ログ・バックアップ） | ❌ **このホスト固有。他ホストのファイルで上書き厳禁** |
 
 `config/` と `data/` は `src/` の外にあるので、**`src/` だけ配ると動かない**。
 
@@ -72,14 +73,14 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 時間帯の判定は各コマンドの中で完結する。
 
 ```cron
-*/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  /home/abobo/webull/wbjp/.venv/bin/wbjp  run --live --yes --config-dir config/us >> data/logs/wbjp-run.log  2>&1
-*/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum run --live --yes                       >> data/logs/accum-run.log 2>&1
-30 16 * * *  cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> data/logs/accum-backup.log 2>&1
-*/30 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock    /home/abobo/webull/wbjp/.venv/bin/jquants sync                                >> data/logs/jquants-sync.log 2>&1
+*/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  /home/abobo/webull/wbjp/.venv/bin/wbjp  run --live --yes --config-dir config/us >> state/logs/wbjp-run.log  2>&1
+*/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum run --live --yes                       >> state/logs/accum-run.log 2>&1
+30 16 * * *  cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
+*/30 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock    /home/abobo/webull/wbjp/.venv/bin/jquants sync                                >> state/logs/jquants-sync.log 2>&1
 ```
 
-- `accum backup` は台帳 `data/accum-prod.db` を `data/backup/accum-prod-YYYYMMDD.db` に複製する（30 世代）。
-  台帳は「今月いくら発注済みか」の唯一の記録で失うと当月を買い直すので、`data/backup/` は
+- `accum backup` は台帳 `state/accum-prod.db` を `state/backup/accum-prod-YYYYMMDD.db` に複製する（30 世代）。
+  台帳は「今月いくら発注済みか」の唯一の記録で失うと当月を買い直すので、`state/backup/` は
   別ディスクやオブジェクトストレージへ同期しておく。`accum run` は起動時にブローカーの当月の
   約定と台帳を突き合わせ、台帳に無い約定があれば発注を止めて通知する
 - `accum run --live` は発注時間帯（既定 14:00〜15:00 JST、土日除く）の外では足の同期も

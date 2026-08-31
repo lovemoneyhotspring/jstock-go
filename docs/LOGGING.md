@@ -5,7 +5,7 @@
 
 | 何 | どこ |
 |---|---|
-| 置き場 | `WBJP_LOG_DIR`（既定 `WBJP_DATA_DIR/logs`＝`data/logs`）。**ファイルに残すログはこの 1 箇所だけ。** cron で stderr を残すときもここへ。本番では絶対パスで指定する |
+| 置き場 | `WBJP_LOG_DIR`（既定 `WBJP_STATE_DIR/logs`＝`state/logs`）。**ファイルに残すログはこの 1 箇所だけ。** cron で stderr を残すときもここへ。本番では絶対パスで指定する |
 | ファイル | `<WBJP_LOG_DIR>/<app>-<env>.jsonl`。`app` は `wbjp` / `accum`、`env` は `uat` / `prod` |
 | ローテーション | 日次（UTC の 0 時）、90 日保持。ローテーション後は `…jsonl.YYYY-MM-DD` |
 | 文字 | UTF-8、`ensure_ascii=False`（日本語はそのまま） |
@@ -69,19 +69,19 @@
 1 回の実行を追う:
 
 ```bash
-jq -c 'select(.run_id == "3f9a1c…")' data/logs/accum-prod.jsonl
+jq -c 'select(.run_id == "3f9a1c…")' state/logs/accum-prod.jsonl
 ```
 
 積立の判断だけを表にする:
 
 ```bash
-jq -r 'select(.code == "accum.decision") | [.ts_utc, .symbol, .month, .target, .placed, .due, .multiplier] | @tsv' data/logs/accum-prod.jsonl
+jq -r 'select(.code == "accum.decision") | [.ts_utc, .symbol, .month, .target, .placed, .due, .multiplier] | @tsv' state/logs/accum-prod.jsonl
 ```
 
 未約定のまま終わった注文:
 
 ```bash
-jq -c 'select(.code == "accum.fill" and (.lost_ratio | tonumber) > 0)' data/logs/accum-prod.jsonl
+jq -c 'select(.code == "accum.fill" and (.lost_ratio | tonumber) > 0)' state/logs/accum-prod.jsonl
 ```
 
 AI に渡すときは、対象の期間の行をそのまま渡せばよい。1 行が 1 レコードで自己記述的

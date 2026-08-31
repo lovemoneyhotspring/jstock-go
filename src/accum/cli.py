@@ -521,7 +521,7 @@ def _run(
     if not no_sync:
         _sync(settings, config, config_dir, days=30, force=False)
     bars = _bars(settings, config.all_symbols)
-    ledger = Ledger(settings.data_dir / f"accum-{settings.env.value}.db")
+    ledger = Ledger(settings.accum_db_path)
 
     # 市場ごとにブローカーを1つ。積立は市場をまたぐのが普通。
     brokers: dict[Market, Broker] = {}
@@ -855,11 +855,11 @@ def _run(
 @app.command("backup")
 def backup(
     dest: Annotated[
-        Path | None, typer.Option(help="保存先ディレクトリ（既定 data/backup）")
+        Path | None, typer.Option(help="保存先ディレクトリ（既定 state/backup）")
     ] = None,
     keep: Annotated[int, typer.Option(help="残す世代数。古いものから消す")] = 30,
 ) -> None:
-    """台帳（data/accum-<env>.db）を日付付きで複製する。cron で毎日回す。
+    """台帳（state/accum-<env>.db）を日付付きで複製する。cron で毎日回す。
 
     台帳は「今月いくら発注済みか」の唯一の記録で、ブローカーから再構築できない。
     失うと次の実行で当月の予算を買い直す。
@@ -867,10 +867,10 @@ def backup(
     from accum.ledger import Ledger
 
     settings = AppSettings()
-    directory = dest or settings.data_dir / "backup"
+    directory = dest or settings.backup_dir
     stem = f"accum-{settings.env.value}"
     target = directory / f"{stem}-{today_utc():%Y%m%d}.db"
-    with Ledger(settings.data_dir / f"{stem}.db") as ledger:
+    with Ledger(settings.accum_db_path) as ledger:
         ledger.backup(target)
     console.print(f"複製しました: {target}")
     old = sorted(directory.glob(f"{stem}-*.db"))[:-keep] if keep > 0 else []
@@ -903,7 +903,7 @@ def orders(
 
     settings = AppSettings()
     config = _load(config_dir, allow_overlap=True)
-    ledger = Ledger(settings.data_dir / f"accum-{settings.env.value}.db")
+    ledger = Ledger(settings.accum_db_path)
     try:
         if check:
             brokers: dict[Market, Broker] = {}
