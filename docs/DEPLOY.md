@@ -88,7 +88,9 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 - 月次の `jquants backfill` は保険。更新された一括ファイル（過誤訂正、月末数日の
   取り漏れ）だけを取り直す。変更が無ければ何もダウンロードしない
 
-- `accum backup` は台帳 `state/accum-prod.db` を `state/backup/accum-prod-YYYYMMDD.db` に複製する（30 世代）。
+- `accum backup` は `state/` の全 SQLite（積立台帳 `accum-prod.db` とスイング売買の記録
+  `wbjp-prod.db`）を `state/backup/<名前>-YYYYMMDD.db` に複製する（各 30 世代、SQLite の
+  オンラインバックアップなので実行中でも一貫する）。
   台帳は「今月いくら発注済みか」の唯一の記録で失うと当月を買い直すので、`state/backup/` は
   別ディスクやオブジェクトストレージへ同期しておく。`accum run` は起動時にブローカーの当月の
   約定と台帳を突き合わせ、台帳に無い約定があれば発注を止めて通知する

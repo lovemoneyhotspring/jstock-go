@@ -857,28 +857,24 @@ def backup(
     dest: Annotated[
         Path | None, typer.Option(help="保存先ディレクトリ（既定 state/backup）")
     ] = None,
-    keep: Annotated[int, typer.Option(help="残す世代数。古いものから消す")] = 30,
+    keep: Annotated[int, typer.Option(help="元ファイルごとに残す世代数。古いものから消す")] = 30,
 ) -> None:
-    """台帳（state/accum-<env>.db）を日付付きで複製する。cron で毎日回す。
+    """state/ の全 SQLite（積立台帳・スイング売買の記録）を日付付きで複製する。cron で毎日回す。
 
     台帳は「今月いくら発注済みか」の唯一の記録で、ブローカーから再構築できない。
-    失うと次の実行で当月の予算を買い直す。
+    失うと次の実行で当月の予算を買い直す。wbjp の注文・シグナル履歴も同様に
+    このホストにしか無いので、まとめて複製する。
     """
-    from accum.ledger import Ledger
+    from wbcore.backup import backup_state
 
     settings = AppSettings()
-    directory = dest or settings.backup_dir
-    stem = f"accum-{settings.env.value}"
-    target = directory / f"{stem}-{today_utc():%Y%m%d}.db"
-    with Ledger(settings.accum_db_path) as ledger:
-        ledger.backup(target)
-    console.print(f"複製しました: {target}")
-    old = sorted(directory.glob(f"{stem}-*.db"))[:-keep] if keep > 0 else []
-    for path in old:
-        path.unlink()
-    if old:
-        console.print(f"[dim]古い複製を {len(old)} 件削除[/dim]")
-    log.info("台帳を複製", code="accum.backup", path=str(target), removed=len(old))
+    result = backup_state(settings, dest=dest, keep=keep)
+    for path in result.copied:
+        console.print(f"複製しました: {path}")
+    if not result.copied:
+        console.print(f"[yellow]複製対象がありません（{settings.state_dir}/*.db が空）[/yellow]")
+    if result.removed:
+        console.print(f"[dim]古い複製を {len(result.removed)} 件削除[/dim]")
 
 
 @app.command("orders")

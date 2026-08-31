@@ -519,7 +519,7 @@ def test_bulk_month_counts_as_fetched_for_gaps_and_lookback(setup) -> None:  # t
 
 def test_backfill_continues_after_broken_file(setup) -> None:  # type: ignore[no-untyped-def]
     """壊れたファイルは失敗として記録し、残りは取り込む。再実行で取り直せる。"""
-    archive, ledger, client, ing = setup
+    _, ledger, client, ing = setup
     client.bulk_files["equities_bars_daily_202501.csv.gz"] = ("t1", b"\x1f\x8b broken gzip")
     client.bulk_files["equities_bars_daily_202502.csv.gz"] = (
         "t2",
