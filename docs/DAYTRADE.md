@@ -106,7 +106,7 @@ uv run daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
 ## cron
 
 `docs/DEPLOY.md` の cron の節を参照。`jquants sync` が前日足を取り込んだ後（20:30）に `plan`、
-9:00 と 15:20 に `open` / `close`。`flock` で重複起動を防ぐ。
+9:01（再試行 9:04・9:07）と 15:20（再試行 15:24・15:28）に `open` / `close`。`flock` で重複起動を防ぐ。
 
 ## ログ
 

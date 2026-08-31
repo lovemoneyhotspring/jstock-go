@@ -87,13 +87,13 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 37 * * * *      cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
 50 3 2-5 * *    cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants backfill                             >> state/logs/jquants-backfill.log 2>&1
 0 20 * * 1-5    cd /home/abobo/webull/wbjp && WBJP_ENV=prod                              /home/abobo/webull/wbjp/.venv/bin/jquants check --notify                       >> state/logs/jquants-check.log 2>&1
-# daytrade（docs/DAYTRADE.md）: 前夜 20:30 に候補、9:00 に寄付買い、15:20 から引け売り。open/close は時間帯の外では何もしない
+# daytrade（docs/DAYTRADE.md）: 前夜 20:30 に候補、9:01 から寄付買い、15:20 から引け売り。open/close は時間帯の外では何もしない
 30 20 * * 1-5   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade plan                                >> state/logs/daytrade-plan.log 2>&1
-0,3 9 * * 1-5   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade open --live --yes                   >> state/logs/daytrade-open.log 2>&1
+1,4,7 9 * * 1-5 cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade open --live --yes                   >> state/logs/daytrade-open.log 2>&1
 20,24,28 15 * * 1-5 cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock /home/abobo/webull/wbjp/.venv/bin/daytrade close --live --yes               >> state/logs/daytrade-close.log 2>&1
 ```
 
-`daytrade open` は 9:00 と 9:03 の 2 回呼ぶ（1 回目が気配を取れなかったときの再試行。台帳に買いがあれば 2 回目は何もしない）。
+`daytrade open` は 9:01・9:04・9:07 の 3 回呼ぶ（板寄せ直後は気配の約定時刻が前日のままで「古い」と判定されることがあるため、9:00 ちょうどは避ける。気配を取れなかった回の再試行で、台帳に買いがあれば以降は何もしない）。
 `close` は 15:20・15:24・15:28 の 3 回（1 回目で売れていれば 2 回目以降は何もしない。拒否されていれば送り直す）。15:20 の成行はその場の気配で約定し、15:25 以降ならクロージング・オークションで引け値になる。祝日は `open` が「候補なし／気配なし」で終わるだけで無害。
 
 ### cron を入れる前の検証
