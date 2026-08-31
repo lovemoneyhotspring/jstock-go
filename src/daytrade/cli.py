@@ -308,6 +308,7 @@ def _verdict(
     """危険信号を評価し、ログに残す。"""
     from daytrade.ledger import Ledger, realized_pnl
     from daytrade.regime import Signals, evaluate
+    from wbcore.domain.models import Side
 
     recent: float | None = None
     if config.regime.equity_curve_days > 0:
@@ -321,7 +322,9 @@ def _verdict(
             days.append(cursor)
         with Ledger(settings.daytrade_db_path) as ledger:
             history = realized_pnl(ledger, days)
-        recent = sum(history.values())
+            # 本発注の履歴が 1 日も無ければ信号なし（始めたばかりで縮めない）
+            traded = any(not o.is_dry_run for d_ in days for o in ledger.orders_on(d_, Side.BUY))
+        recent = sum(history.values()) if traded else None
     us_ret: float | None = None
     vix: float | None = None
     if config.regime.us_skip_high is not None:
