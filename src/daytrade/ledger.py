@@ -19,6 +19,9 @@ from wbcore.domain.models import OrderRequest, OrderStatus, Side
 #: dry-run の記録に付ける状態。「発注済み」には数えない。
 DRY_RUN_STATUS = "dry_run"
 
+#: 未約定のまま終わった状態。同じ判断を送り直してよい。
+_DEAD = {OrderStatus.CANCELLED.value, OrderStatus.REJECTED.value, OrderStatus.EXPIRED.value}
+
 
 @dataclass(frozen=True, slots=True)
 class LedgerOrder:
@@ -47,11 +50,7 @@ class LedgerOrder:
 
     @property
     def is_dead(self) -> bool:
-        return not self.is_dry_run and self.status in {
-            OrderStatus.CANCELLED.value,
-            OrderStatus.REJECTED.value,
-            OrderStatus.EXPIRED.value,
-        }
+        return not self.is_dry_run and self.status in _DEAD
 
 
 class Ledger:
@@ -170,11 +169,21 @@ class Ledger:
         self._connection.commit()
 
     def was_placed(self, client_order_id: str) -> bool:
-        """本発注として送った記録があるか（dry-run は数えない）。"""
+        """本発注として送り、まだ生きているか約定した記録があるか。
+
+        dry-run は数えない。拒否・取消・失効で終わった注文も数えない——同じ判断を
+        もう一度送ってよい（再送は呼び出し側が ID の種を変える）。
+        """
         row = self._connection.execute(
             "SELECT status FROM orders WHERE client_order_id = ?", (client_order_id,)
         ).fetchone()
-        return row is not None and row["status"] != DRY_RUN_STATUS
+        if row is None or row["status"] == DRY_RUN_STATUS:
+            return False
+        return row["status"] not in _DEAD
+
+    def dead_count(self, day: dt.date, symbol: str, side: Side) -> int:
+        """その日・その銘柄・その売買で、拒否・取消・失効に終わった注文の数（再送の ID の種に使う）。"""
+        return sum(1 for o in self.orders_on(day, side) if o.symbol == symbol and o.is_dead)
 
     def orders_on(self, day: dt.date, side: Side | None = None) -> list[LedgerOrder]:
         """その日の注文（dry-run を含む）。"""

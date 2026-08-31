@@ -335,6 +335,17 @@ def test_ledger_remembers_orders_across_instances(tmp_path: Path) -> None:
         assert ledger.orders_on(DAY - dt.timedelta(days=1)) == []
 
 
+def test_ledger_dead_orders_can_be_resent(tmp_path: Path) -> None:
+    """拒否された売りは「発注済み」に数えない。close は種を変えて送り直す。"""
+    with Ledger(tmp_path / "l.db") as ledger:
+        ledger.record(_request("7203", Side.SELL, "r" * 32), DAY, OrderStatus.REJECTED.value)
+        assert not ledger.was_placed("r" * 32)
+        assert ledger.dead_count(DAY, "7203", Side.SELL) == 1
+        assert ledger.dead_count(DAY, "7203", Side.BUY) == 0
+        ledger.record(_request("7203", Side.SELL, "s" * 32), DAY, OrderStatus.SUBMITTED.value)
+        assert ledger.was_placed("s" * 32)
+
+
 def test_ledger_open_orders_exclude_dry_run_and_terminal(tmp_path: Path) -> None:
     with Ledger(tmp_path / "l.db") as ledger:
         ledger.record(_request(cid="1" * 32), DAY, DRY_RUN_STATUS)

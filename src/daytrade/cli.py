@@ -172,6 +172,22 @@ def _describe_window(config: DaytradeConfig, name: str) -> str:
     return f"{start:%H:%M}〜{end:%H:%M} JST"
 
 
+def _is_trading_day(settings: AppSettings, day: dt.date) -> bool:
+    """東証の営業日か。カレンダーが無ければ平日扱い。"""
+    from daytrade.calendar import TradingCalendar
+
+    return TradingCalendar.from_archive(_archive(settings)).is_trading_day(day)
+
+
+def _skip_holiday(settings: AppSettings, day: dt.date, phase: str) -> bool:
+    """休場日なら何もしない（気配が取れずに毎回アラートを飛ばさないため）。"""
+    if _is_trading_day(settings, day):
+        return False
+    console.print(f"[dim]{day} は休場日。何もしません[/dim]")
+    log.info("休場日", code="daytrade.skip", reason="holiday", phase=phase, day=day.isoformat())
+    return True
+
+
 def _connect(settings: AppSettings, config: DaytradeConfig) -> Broker:
     from wbcore.broker.registry import connect
 
@@ -543,6 +559,8 @@ def open_command(
         console.print(
             "[yellow]資金 0（max_capital = 0）: スクリーニングと候補の表示だけ行い、買いません[/yellow]"
         )
+    if _skip_holiday(settings, day, "open"):
+        return
     if live and not ignore_window and not _in_window(config, "entry", now):
         console.print(
             f"[dim]発注時間帯の外（{_describe_window(config, 'entry')}）。何もしません[/dim]"
@@ -783,6 +801,8 @@ def close_command(
     console.print(describe_mode(settings.env, live, kill_switch=config.execution.kill_switch))
     now = now_utc()
     day = _parse_date(date) or _today_jst(now)
+    if _skip_holiday(settings, day, "close"):
+        return
     if live and not ignore_window and not _in_window(config, "exit", now):
         console.print(
             f"[dim]手仕舞いの時間帯の外（{_describe_window(config, 'exit')}）。何もしません[/dim]"
@@ -801,13 +821,20 @@ def close_command(
     ledger = Ledger(settings.daytrade_db_path)
     try:
         buys = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run]
-        sells = {o.symbol: o for o in ledger.orders_on(day, Side.SELL) if not o.is_dry_run}
+        # 生きている／約定した売りだけが「発注済み」。拒否・失効した売りは数えない（再送する）
+        sells = {
+            o.symbol: o
+            for o in ledger.orders_on(day, Side.SELL)
+            if not o.is_dry_run and not o.is_dead
+        }
         if not buys:
             dry = [o for o in ledger.orders_on(day, Side.BUY) if o.is_dry_run]
             console.print(
                 f"[dim]今日の買いが台帳にありません（dry-run {len(dry)} 件）。何もしません[/dim]"
             )
             log.info("売る対象なし", code="daytrade.skip", reason="no_buys", dry_run=len(dry))
+            if allowed:
+                _warn_unrecorded_positions(settings, config, day)
             return
         broker = _connect(settings, config) if allowed else None
         # 約定数量はブローカーに聞く（部分約定・拒否をそのまま売り数量に反映する）
@@ -876,9 +903,11 @@ def close_command(
         _confirm_live(settings, allowed, yes)
         failures: list[str] = []
         for symbol, quantity, fill_price in targets:
+            # 前回の売りが拒否されていたら種を変えて送り直す（同じ ID はブローカーが弾く）
+            attempt = ledger.dead_count(day, symbol, Side.SELL)
             request = OrderRequest(
                 client_order_id=make_client_order_id(
-                    f"daytrade-close|{day}", symbol, Side.SELL, quantity
+                    f"daytrade-close|{day}|{attempt}", symbol, Side.SELL, quantity
                 ),
                 symbol=symbol,
                 side=Side.SELL,
@@ -932,6 +961,41 @@ def close_command(
         )
     finally:
         ledger.close()
+
+
+def _warn_unrecorded_positions(settings: AppSettings, config: DaytradeConfig, day: dt.date) -> None:
+    """台帳に今日の買いが無いのに、今日の候補だった銘柄をブローカーが保有していれば知らせる。
+
+    台帳を失う・open が送信後に落ちて記録できない、といったときの保険。自動では売らない
+    （他の戦略の保有かもしれない）。人が確かめて手で売る。
+    """
+    from daytrade import plan as planning
+    from wbcore.broker.base import BrokerError
+    from wbcore.notify import alert
+
+    plan = planning.load(settings.daytrade_dir, day)
+    if plan is None:
+        return
+    symbols = set(plan.eligible["symbol"].to_list())
+    try:
+        positions = _connect(settings, config).positions_by_symbol()
+    except BrokerError as exc:
+        log.warning("建玉を照会できず保険の確認を省略", code="daytrade.reconcile", error=str(exc))
+        return
+    held = {s: p.quantity for s, p in positions.items() if s in symbols and p.quantity > 0}
+    if not held:
+        return
+    detail = "、".join(f"{s} {q:,.0f} 株" for s, q in sorted(held.items()))
+    console.print(
+        f"[red]台帳に無い建玉があります（今日の候補の銘柄）: {detail}。手で確かめてください[/red]"
+    )
+    log.error(
+        "台帳に無い建玉",
+        code="daytrade.reconcile",
+        day=day.isoformat(),
+        held={s: str(q) for s, q in held.items()},
+    )
+    alert("デイトレ: 台帳に無い建玉（持ち越しの恐れ）", detail)
 
 
 # --------------------------------------------------------------------------
