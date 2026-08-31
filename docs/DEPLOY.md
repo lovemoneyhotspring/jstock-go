@@ -47,10 +47,13 @@ sudo vi /etc/wbjp/wbjp.env
 # 中身がプロセスの環境変数として読み込まれる（cronで動かす場合は不要、
 # 4節のcron行で直接 .env を読ませる）
 
-# 4. 価格データの初期取り込み（運用する戦略のconfigごとに）
+# 4. cron のリダイレクト先を先に作る（アプリが作るのは起動後のため）
+mkdir -p state/logs
+
+# 5. 価格データの初期取り込み（運用する戦略のconfigごとに）
 uv run wbjp data sync --config-dir config/us --days 1500
 
-# 5. dry-runで確認（--live無しは常に発注しない）
+# 6. dry-runで確認（--live無しは常に発注しない）
 WBJP_ENV=prod uv run wbjp run --config-dir config/us
 ```
 
@@ -85,6 +88,36 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 50 3 2-5 * *    cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants backfill                             >> state/logs/jquants-backfill.log 2>&1
 0 20 * * 1-5    cd /home/abobo/webull/wbjp && WBJP_ENV=prod                              /home/abobo/webull/wbjp/.venv/bin/jquants check --notify                       >> state/logs/jquants-check.log 2>&1
 ```
+
+### cron を入れる前の検証
+
+cron 専用の「実行せずに全部検証する」コマンドは無い。次の 3 段で確かめる:
+
+```bash
+# 1. 構文チェック。cronie 系（RHEL / 新しめの Ubuntu）なら投入せずに検証できる
+crontab -T /path/to/crontab.txt
+#    -T が無い環境（Debian 系・macOS）でも、crontab は投入時に構文を検証して
+#    不正なら "errors in crontab file" で丸ごと拒否する（部分投入はされない）
+crontab /path/to/crontab.txt && crontab -l
+
+# 2. リダイレクト先を先に作る。>> state/logs/… の評価はプロセス起動より前なので、
+#    ディレクトリが無いと本体が一度も走らずに失敗する（アプリが作るのは起動後）
+mkdir -p /home/abobo/webull/wbjp/state/logs
+
+# 3. コマンド部分の検証は 1 回手で流すしかない。cron と同じ最小環境を再現して実行する
+#    （--live は外す。発注以外のデータ取得・判断・記録はすべて動く）
+cd /home/abobo/webull/wbjp && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
+  .venv/bin/wbjp run --config-dir config/us
+cd /home/abobo/webull/wbjp && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
+  .venv/bin/jquants sync --dry-run
+```
+
+構文チェックが見てくれるのは「5 つの時刻フィールド＋コマンドの形」だけで、
+パスの誤り・権限・環境変数はコマンドを実際に流さないと分からない。
+`env -i` で流すのは、対話シェルの PATH や .zshrc に助けられて「手では動くが
+cron では動かない」を潰すため。ほかに cron 固有の罠は `%` （cron では改行の
+意味。コマンドに書くなら `\%`）と、`MAILTO` 未設定時にエラーメールが捨てられる
+こと（このリポジトリは stderr をログへリダイレクトしているので影響しない）。
 
 - **1 回きりの cron を作らない。** 失敗すると次の機会（翌日・翌月）までバックアップや
   取り込みの無い状態が続くため、どのジョブも「何度叩いても同じ（冪等）」に作り、
