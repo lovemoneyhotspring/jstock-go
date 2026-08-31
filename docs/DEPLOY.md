@@ -72,11 +72,16 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 なので**市場が開いているか・引けたかを cron 側で計算する必要はない**。固定間隔で叩き続ければ、
 時間帯の判定は各コマンドの中で完結する。
 
+開始の分は**互いにずらす**。同時に走ると yfinance が同一 IP からのバーストとして
+遮断しやすく、同じ銘柄の足を二つのプロセスが同時に書く競合も避けられる。
+`sleep` でずらすより cron の分指定の方が、crontab を見ただけでタイミングが分かる。
+
 ```cron
-*/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  /home/abobo/webull/wbjp/.venv/bin/wbjp  run --live --yes --config-dir config/us >> state/logs/wbjp-run.log  2>&1
-*/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum run --live --yes                       >> state/logs/accum-run.log 2>&1
-30 16 * * *  cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
-*/30 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock    /home/abobo/webull/wbjp/.venv/bin/jquants sync                                >> state/logs/jquants-sync.log 2>&1
+# wbjp: 0,20,40 分 / accum: 7,27,47 分 / jquants: 13,43 分（互いに重ねない）
+*/20 * * * *    cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  /home/abobo/webull/wbjp/.venv/bin/wbjp  run --live --yes --config-dir config/us >> state/logs/wbjp-run.log  2>&1
+7-59/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum run --live --yes                       >> state/logs/accum-run.log 2>&1
+13,43 * * * *   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants sync                                >> state/logs/jquants-sync.log 2>&1
+30 16 * * *     cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
 ```
 
 - `accum backup` は台帳 `state/accum-prod.db` を `state/backup/accum-prod-YYYYMMDD.db` に複製する（30 世代）。
