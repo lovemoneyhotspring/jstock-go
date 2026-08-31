@@ -324,7 +324,15 @@ def _verdict(
             history = realized_pnl(ledger, days)
             # 本発注の履歴が 1 日も無ければ信号なし（始めたばかりで縮めない）
             traded = any(not o.is_dry_run for d_ in days for o in ledger.orders_on(d_, Side.BUY))
-        recent = sum(history.values()) if traded else None
+        incomplete = [d_ for d_, v in history.items() if v is None]
+        if incomplete:
+            log.warning(
+                "実現損益が確定していない日があり、その日を除いて資産曲線を評価",
+                code="daytrade.pnl_incomplete",
+                days=[d_.isoformat() for d_ in incomplete],
+            )
+        known = [v for v in history.values() if v is not None]
+        recent = sum(known) if traded and known else None
     us_ret: float | None = None
     vix: float | None = None
     if config.regime.us_skip_high is not None:
@@ -478,13 +486,15 @@ def _fresh(
     return kept
 
 
-def _buy_request(pick: Pick, day: dt.date, config: DaytradeConfig) -> OrderRequest:
+def _buy_request(
+    pick: Pick, day: dt.date, config: DaytradeConfig, *, attempt: int = 0
+) -> OrderRequest:
     from wbcore.domain.models import OrderRequest, OrderType, Side, make_client_order_id
 
+    # 前回が拒否されていたら種を変える（同じ ID はブローカーが弾く）。attempt 0 は従来と同じ ID
+    seed = f"daytrade|{day}" if attempt == 0 else f"daytrade|{day}|{attempt}"
     return OrderRequest(
-        client_order_id=make_client_order_id(
-            f"daytrade|{day}", pick.symbol, Side.BUY, pick.quantity
-        ),
+        client_order_id=make_client_order_id(seed, pick.symbol, Side.BUY, pick.quantity),
         symbol=pick.symbol,
         side=Side.BUY,
         order_type=OrderType.MARKET,
@@ -502,10 +512,17 @@ def _place_recorded(
     送信後に落ちても台帳には残るので、次の実行で同じ注文を送り直さない
     （二重買付より買い漏れの方がまし）。
     """
+    from wbcore.broker.base import OrderRejectedError
     from wbcore.domain.models import OrderStatus
 
     ledger.record(request, day, OrderStatus.PENDING.value, price=price)
-    ack = broker.place(request)
+    try:
+        ack = broker.place(request)
+    except OrderRejectedError:
+        # 明確な拒否は台帳にも拒否と書く。PENDING のままだと「送信結果不明」と区別できず、
+        # 次の実行が再送しない
+        ledger.update_status(request.client_order_id, OrderStatus.REJECTED)
+        raise
     ledger.update_status(request.client_order_id, ack.status, broker_order_id=ack.broker_order_id)
 
 
@@ -592,7 +609,11 @@ def open_command(
     )
     ledger = Ledger(settings.daytrade_db_path)
     try:
-        already = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run]
+        if not allowed:
+            # dry-run は確認のたびに増える。その日の古い dry-run は消して最新だけ残す
+            ledger.clear_dry_run(day)
+        # 生きている／約定した買いがあれば今日は終わり。拒否・失効だけなら送り直す
+        already = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run and not o.is_dead]
         if already:
             console.print(
                 f"[dim]今日の買いは発注済み（{len(already)} 件、冪等）。何もしません[/dim]"
@@ -696,7 +717,9 @@ def open_command(
         broker = _connect(settings, config) if allowed else None
         remaining: Decimal | None = None
         for p in picks:
-            request = _buy_request(p, day, config)
+            request = _buy_request(
+                p, day, config, attempt=ledger.dead_count(day, p.symbol, Side.BUY)
+            )
             if ledger.was_placed(request.client_order_id):
                 console.print(f"  {p.symbol}: [dim]発注済み（冪等）[/dim]")
                 continue
@@ -1030,12 +1053,14 @@ def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
     settings = _settings(ctx)
     config = _load(config_dir)
     day = _parse_date(date) or _today_jst()
+    _log_config(config, settings, phase="verify", day=day.isoformat())
     ledger = Ledger(settings.daytrade_db_path)
     try:
         buys = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run]
         sells = [o for o in ledger.orders_on(day, Side.SELL) if not o.is_dry_run]
         if not buys:
             console.print("[dim]今日の本発注はありません[/dim]")
+            log.info("検証の対象なし", code="daytrade.skip", reason="no_buys", phase="verify")
             return
         broker = _connect(settings, config)
         carried: list[str] = []
@@ -1093,6 +1118,28 @@ def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
                 )
             elif quantity > 0:
                 console.print(f"  {symbol}: {quantity:,.0f} 株 手仕舞い済み")
+        # 台帳と食い違う建玉（送信結果不明の買いが実は通っていた等）はブローカー側で確かめる
+        try:
+            positions = broker.positions_by_symbol()
+        except BrokerError as exc:
+            log.warning("建玉を照会できず突合を省略", code="daytrade.reconcile", error=str(exc))
+            positions = {}
+        flagged = {c.split(" ")[0] for c in carried}
+        for symbol in sorted(bought):
+            held = positions.get(symbol)
+            if held is not None and held.quantity > 0 and symbol not in flagged:
+                carried.append(f"{symbol} {held.quantity:,.0f} 株（台帳と不一致）")
+                console.print(
+                    f"  {symbol}: [red]ブローカーに {held.quantity:,.0f} 株の建玉"
+                    "（台帳では手仕舞い済み）[/red]"
+                )
+                log.error(
+                    "台帳と建玉が不一致",
+                    code="daytrade.reconcile",
+                    day=day.isoformat(),
+                    symbol=symbol,
+                    held=str(held.quantity),
+                )
         if carried:
             log.error("持ち越し", code="daytrade.carry", day=day.isoformat(), positions=carried)
             alert(

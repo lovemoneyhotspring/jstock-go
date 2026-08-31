@@ -168,6 +168,14 @@ class Ledger:
         )
         self._connection.commit()
 
+    def clear_dry_run(self, day: dt.date) -> int:
+        """その日の dry-run の記録を消す（確認のたびに増えて台帳が読みにくくなるため）。"""
+        cursor = self._connection.execute(
+            "DELETE FROM orders WHERE day = ? AND status = ?", (day.isoformat(), DRY_RUN_STATUS)
+        )
+        self._connection.commit()
+        return int(cursor.rowcount or 0)
+
     def was_placed(self, client_order_id: str) -> bool:
         """本発注として送り、まだ生きているか約定した記録があるか。
 
@@ -209,24 +217,31 @@ class Ledger:
         return [self._row(r) for r in rows]
 
 
-def realized_pnl(ledger: Ledger, days: list[dt.date]) -> dict[dt.date, float]:
+def realized_pnl(ledger: Ledger, days: list[dt.date]) -> dict[dt.date, float | None]:
     """日ごとの実現損益（円）。約定した買いと売りの単価差 × 数量（手数料は含まない）。
 
-    dry-run は数えない。約定単価が無い注文（未約定・照会前）は 0 とみなす。
+    dry-run は数えない。本発注の買いが無い日は 0。買いはあるのに売りの約定単価が
+    無い（照会前・未約定）日は **None**——0 と混ぜると「負けた」と誤読する。
     """
-    result: dict[dt.date, float] = {}
+    result: dict[dt.date, float | None] = {}
     for day in days:
         buys = {o.symbol: o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run}
+        if not buys:
+            result[day] = 0.0
+            continue
+        sells = [o for o in ledger.orders_on(day, Side.SELL) if not o.is_dry_run and not o.is_dead]
         total = 0.0
-        for sell in ledger.orders_on(day, Side.SELL):
+        complete = True
+        for sell in sells:
             buy = buys.get(sell.symbol)
-            if (
-                sell.is_dry_run
-                or buy is None
-                or sell.avg_fill_price is None
-                or buy.avg_fill_price is None
-            ):
+            if buy is None:
+                continue
+            if sell.avg_fill_price is None or buy.avg_fill_price is None:
+                complete = False
                 continue
             total += float((sell.avg_fill_price - buy.avg_fill_price) * sell.filled_quantity)
-        result[day] = total
+        bought = {s for s, b in buys.items() if b.filled_quantity > 0}
+        if bought - {o.symbol for o in sells}:
+            complete = False  # 買ったのに売りの記録が無い
+        result[day] = total if complete else None
     return result
