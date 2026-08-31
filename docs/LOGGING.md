@@ -6,7 +6,7 @@
 | 何 | どこ |
 |---|---|
 | 置き場 | `WBJP_LOG_DIR`（既定 `WBJP_STATE_DIR/logs`＝`state/logs`）。**ファイルに残すログはこの 1 箇所だけ。** cron で stderr を残すときもここへ。本番では絶対パスで指定する |
-| ファイル | `<WBJP_LOG_DIR>/<app>-<env>.jsonl`。`app` は `wbjp` / `accum`、`env` は `uat` / `prod` |
+| ファイル | `<WBJP_LOG_DIR>/<app>-<env>.jsonl`。`app` は `wbjp` / `accum` / `jquants` / `daytrade`、`env` は `uat` / `prod` |
 | ローテーション | 日次（UTC の 0 時）、90 日保持。ローテーション後は `…jsonl.YYYY-MM-DD` |
 | 文字 | UTF-8、`ensure_ascii=False`（日本語はそのまま） |
 | 鍵の並び | 辞書順（`sort_keys`）。差分を取りやすくするため |
@@ -54,6 +54,19 @@
 | `accum.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception`（トレースバック本文。`log.exception` / `exc_info=True` のログはすべてこの項目を持つ） |
 
 金額・数量・価格は **文字列**（`"25000"`）で入っている。JSON の数値にすると Decimal の精度が失われるため。
+
+### デイトレ（`daytrade`）
+
+| `code` | いつ | 主な項目 |
+|---|---|---|
+| `daytrade.plan` | 前夜に候補を作った | `day`, `prev_day`, `candidates`（全銘柄）, `eligible`（対象）, `positions`（N）, `budget`, `iv_prev`, `path` |
+| `daytrade.quotes` | 気配を取った／古い気配を除外した | `source`, `requested`, `received` / `stale`, `delayed` |
+| `daytrade.pick` | 買う銘柄を決めた（1 件ごと） | `day`, `symbol`, `code_`（J-Quants の 5 桁）, `rank`, `gap`, `prev_close`, `price`, `quantity`, `amount` |
+| `daytrade.order` | 注文にした結果（1 件ごと。買いも売りも） | `day`, `symbol`, `side`, `client_order_id`, `quantity`, `price`, `amount`, `live`, `outcome`（`発注` / `dry-run` / `見送り …` / `失敗 …`） |
+| `daytrade.skip` | 何もしなかった | `reason`（`window` / `iv_gate` / `already` / `no_quotes` / `no_picks` / `no_buys` / `nothing_to_sell`） |
+| `daytrade.iv_missing` | 前日の IV がアーカイブに無くゲート無しで進んだ | `prev_day` |
+| `daytrade.run` | 実行の終了 | `phase`（`open` / `close`）, `live`, `reason`, `picks` / `sells`, `failures` |
+| `daytrade.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception` |
 
 ### スイング売買（`wbjp`）
 

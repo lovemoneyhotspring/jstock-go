@@ -87,7 +87,14 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 37 * * * *      cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
 50 3 2-5 * *    cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants backfill                             >> state/logs/jquants-backfill.log 2>&1
 0 20 * * 1-5    cd /home/abobo/webull/wbjp && WBJP_ENV=prod                              /home/abobo/webull/wbjp/.venv/bin/jquants check --notify                       >> state/logs/jquants-check.log 2>&1
+# daytrade（docs/DAYTRADE.md）: 前夜 20:30 に候補、9:00 に寄付買い、15:26 に引け売り。open/close は時間帯の外では何もしない
+30 20 * * 1-5   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade plan                                >> state/logs/daytrade-plan.log 2>&1
+0,3 9 * * 1-5   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade open --live --yes                   >> state/logs/daytrade-open.log 2>&1
+26,28 15 * * 1-5 cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock /home/abobo/webull/wbjp/.venv/bin/daytrade close --live --yes                  >> state/logs/daytrade-close.log 2>&1
 ```
+
+`daytrade open` は 9:00 と 9:03 の 2 回呼ぶ（1 回目が気配を取れなかったときの再試行。台帳に買いがあれば 2 回目は何もしない）。
+`close` も同様に 15:26 と 15:28。祝日は `open` が「候補なし／気配なし」で終わるだけで無害。
 
 ### cron を入れる前の検証
 

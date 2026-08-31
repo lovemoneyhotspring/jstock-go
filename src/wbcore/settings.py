@@ -84,6 +84,16 @@ class AppSettings(BaseSettings):
         return self._stateful(f"accum-{self.env.value}.db")
 
     @property
+    def daytrade_db_path(self) -> Path:
+        """デイトレの発注台帳（``daytrade``）。当日の買いと手仕舞いを実行をまたいで覚える。"""
+        return self._stateful(f"daytrade-{self.env.value}.db")
+
+    @property
+    def daytrade_dir(self) -> Path:
+        """デイトレの候補リスト（前夜の ``daytrade plan`` の出力）の置き場。"""
+        return self._stateful("daytrade", directory=True)
+
+    @property
     def backup_dir(self) -> Path:
         """台帳バックアップの置き場（``accum backup``）。"""
         return self._stateful("backup", directory=True)

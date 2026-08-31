@@ -1,0 +1,848 @@
+"""デイトレのコマンドライン（``daytrade``）。
+
+安全の原則は ``wbjp`` / ``accum`` と同じ: ``open`` / ``close`` は既定で **dry-run**。
+実際に発注するには ``--live`` が要り、本番口座ではさらに ``WBJP_ENV=prod`` が要る。
+
+1 日の流れ（すべて JST）:
+    20:30  ``daytrade plan``          前夜。アーカイブから翌営業日の母集団を作る
+    09:00  ``daytrade open --live``   気配でギャップ下位 N 銘柄を選び、成行で買う
+    15:26  ``daytrade close --live``  当日買った分を成行で売る（クロージング・オークション）
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import functools
+import re
+import sys
+from collections.abc import Callable
+from decimal import Decimal
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any, ParamSpec, TypeVar
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from daytrade.config import DEFAULT_CONFIG_DIR, DaytradeConfig, load
+from wbcore.clock import fmt, now_utc, to_zone
+from wbcore.domain.models import Market
+from wbcore.logging import bind_run_context, configure_logging, get_logger
+from wbcore.settings import AppSettings, allows_live_orders, describe_mode
+
+if TYPE_CHECKING:
+    from daytrade.ledger import Ledger
+    from daytrade.plan import Plan
+    from daytrade.select import Pick, Quote
+    from wbcore.broker.base import Broker
+    from wbcore.data.jquants_archive import Archive
+    from wbcore.domain.models import OrderRequest
+
+app = typer.Typer(
+    help="デイトレ（寄付で買い、大引で売る）", no_args_is_help=True, add_completion=False
+)
+console = Console()
+log = get_logger(__name__)
+
+_ConfigDir = Annotated[
+    Path | None, typer.Option(help=f"設定ディレクトリ（既定 {DEFAULT_CONFIG_DIR}）")
+]
+_Date = Annotated[
+    str | None, typer.Option("--date", help="判定日（YYYY-MM-DD、既定は今日／次の営業日）")
+]
+
+JST = Market.JP.timezone
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+@app.callback()
+def main(
+    ctx: typer.Context,
+    log_level: Annotated[str, typer.Option(help="ログレベル")] = "INFO",
+    json_logs: Annotated[bool, typer.Option("--json-logs", help="端末にも JSON で出力")] = False,
+) -> None:
+    settings = AppSettings()
+    configure_logging(
+        log_level,
+        json_output=json_logs,
+        timezone=settings.timezone,
+        log_file=settings.log_file("daytrade"),
+    )
+    run_id = bind_run_context(
+        app="daytrade", env=settings.env.value, command=ctx.invoked_subcommand or ""
+    )
+    ctx.obj = {"settings": settings, "run_id": run_id}
+
+
+# --------------------------------------------------------------------------
+# 補助
+# --------------------------------------------------------------------------
+
+
+def _plain(markup: str) -> str:
+    return re.sub(r"\[/?[a-z ]+\]", "", markup)
+
+
+def _yen(value: Decimal | float | int) -> str:
+    return f"{float(value):,.0f}"
+
+
+def _settings(ctx: typer.Context) -> AppSettings:
+    settings: AppSettings = ctx.obj["settings"]
+    return settings
+
+
+def _load(config_dir: Path | None) -> DaytradeConfig:
+    try:
+        return load(config_dir or DEFAULT_CONFIG_DIR)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    except ValueError as exc:
+        console.print(f"[red]設定が不正です: {exc}[/red]")
+        raise typer.Exit(1) from None
+
+
+def _archive(settings: AppSettings) -> Archive:
+    from wbcore.data.jquants_archive import Archive
+
+    return Archive(settings.data_dir / "jquants")
+
+
+def _parse_date(text: str | None) -> dt.date | None:
+    if text is None:
+        return None
+    try:
+        return dt.date.fromisoformat(text)
+    except ValueError:
+        console.print(f"[red]日付の形式が不正です: {text}（YYYY-MM-DD）[/red]")
+        raise typer.Exit(1) from None
+
+
+def _today_jst(now: dt.datetime | None = None) -> dt.date:
+    return to_zone(now or now_utc(), JST).date()
+
+
+def _in_window(config: DaytradeConfig, name: str, now: dt.datetime) -> bool:
+    start, end = config.execution.window(name)
+    local = to_zone(now, JST).time()
+    return start <= local <= end
+
+
+def _describe_window(config: DaytradeConfig, name: str) -> str:
+    start, end = config.execution.window(name)
+    return f"{start:%H:%M}〜{end:%H:%M} JST"
+
+
+def _connect(settings: AppSettings, config: DaytradeConfig) -> Broker:
+    from wbcore.broker.registry import connect
+
+    return connect(
+        config.execution.broker,
+        settings.env,
+        market=Market.JP,
+        tax_type=config.execution.tax_account_type,
+        notify=lambda message: console.print(f"[yellow]{message}[/yellow]"),
+    )
+
+
+def _confirm_live(settings: AppSettings, allowed: bool, yes: bool) -> None:
+    if allowed and settings.env.is_production and not yes:
+        console.print("[bold red]本番環境で実際に発注します[/bold red]")
+        if not sys.stdin.isatty():
+            console.print(
+                "[red]非対話環境では確認を取れません。cron から回すなら --yes を付けてください[/red]"
+            )
+            raise typer.Exit(1)
+        if not typer.confirm("続行しますか?"):
+            raise typer.Abort()
+
+
+def _crash(title: str, code: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """cron では誰も端末を見ていない。理由を通知してから落とす。"""
+
+    def wrap(func: Callable[P, R]) -> Callable[P, R]:
+        @functools.wraps(func)
+        def inner(*args: P.args, **kwargs: P.kwargs) -> R:
+            from wbcore.notify import alert
+
+            try:
+                return func(*args, **kwargs)
+            except typer.Exit, typer.Abort:
+                raise
+            except Exception as exc:
+                log.exception(f"{title}が異常終了", code=code, error=str(exc))
+                alert(f"デイトレ: {title}が異常終了", f"{type(exc).__name__}: {exc}")
+                raise typer.Exit(1) from exc
+
+        return inner
+
+    return wrap
+
+
+# --------------------------------------------------------------------------
+# plan
+# --------------------------------------------------------------------------
+
+
+def _plan_day(settings: AppSettings, date: dt.date | None, now: dt.datetime) -> dt.date:
+    """判定日。指定が無ければ「引け前なら今日、引け後なら次の営業日」。"""
+    from daytrade.calendar import TradingCalendar
+
+    if date is not None:
+        return date
+    cal = TradingCalendar.from_archive(_archive(settings))
+    local = to_zone(now, JST)
+    if local.time() < dt.time(15, 30):
+        return cal.next_trading_day(local.date(), inclusive=True)
+    return cal.next_trading_day(local.date())
+
+
+def _build_plan(settings: AppSettings, config: DaytradeConfig, day: dt.date) -> Plan:
+    from daytrade import plan as planning
+
+    plan = planning.build(_archive(settings), config, day)
+    parquet, _ = planning.save(plan, settings.daytrade_dir)
+    log.info(
+        "候補を作成",
+        code="daytrade.plan",
+        day=plan.meta.day,
+        prev_day=plan.meta.prev_day,
+        candidates=plan.meta.candidates,
+        eligible=plan.meta.eligible,
+        positions=plan.meta.positions,
+        budget=plan.meta.budget_per_order,
+        iv_prev=plan.meta.iv_prev,
+        path=str(parquet),
+    )
+    return plan
+
+
+def _refresh_iv(settings: AppSettings, config: DaytradeConfig, plan: Plan) -> Plan:
+    """前夜の plan に IV が無ければ取り直す。
+
+    オプションの足は 27:00 頃の更新なので、20:30 の plan には前日の IV がまだ無い。
+    朝の sync で入っていればここで拾う。それでも無ければゲートは効かせず取引する
+    （低 IV の日は期待値がほぼ 0 で、負ではない）。
+    """
+    from dataclasses import replace
+
+    from daytrade.plan import iv_on
+
+    if config.regime.iv_gate <= 0 or plan.meta.iv_prev is not None:
+        return plan
+    value = iv_on(_archive(settings), dt.date.fromisoformat(plan.meta.prev_day))
+    if value is None:
+        log.warning(
+            "前日の IV がアーカイブに無いためゲート無しで進行",
+            code="daytrade.iv_missing",
+            prev_day=plan.meta.prev_day,
+        )
+        return replace(plan, meta=replace(plan.meta, iv_gate="0"))
+    return replace(plan, meta=replace(plan.meta, iv_prev=value))
+
+
+def _print_plan(plan: Plan, config: DaytradeConfig, settings: AppSettings) -> None:
+    meta = plan.meta
+    console.print(
+        f"判定日 {meta.day}（前営業日 {meta.prev_day}）  候補 {meta.eligible} / {meta.candidates} 銘柄  "
+        f"N={meta.positions}  1 注文 {_yen(Decimal(meta.budget_per_order))} 円"
+    )
+    if meta.iv_prev is not None:
+        state = "取引しない" if meta.gated_out else "取引する"
+        gate = f"ゲート {meta.iv_gate}" if Decimal(meta.iv_gate) > 0 else "ゲート無し"
+        console.print(f"日経 225 IV（前日）{meta.iv_prev:.1f}  {gate} → {state}")
+    reasons = (
+        plan.frame.filter(~pl_col("eligible")).group_by("segment").agg(pl_len()).sort("segment")
+    )
+    console.print(
+        "[dim]除外: "
+        + "、".join(f"{s} {n}" for s, n in reasons.iter_rows())
+        + f"  決算(前日引け後) {int(plan.frame['earn_prev'].sum())}"
+        + f"  決算(当日予定) {int(plan.frame['disc_today'].sum())}"
+        + f"  日々公表 {int(plan.frame['alert'].sum())}[/dim]"
+    )
+    console.print(f"[dim]保存先 {settings.daytrade_dir}[/dim]")
+
+
+def pl_col(name: str) -> Any:
+    import polars as pl
+
+    return pl.col(name)
+
+
+def pl_len() -> Any:
+    import polars as pl
+
+    return pl.len()
+
+
+@app.command("plan")
+@_crash("候補の作成", "daytrade.crash")
+def plan_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDir = None) -> None:
+    """翌営業日の母集団を作る（前夜に cron で回す）。9:00 の open はこれを読む。"""
+    settings = _settings(ctx)
+    config = _load(config_dir)
+    day = _plan_day(settings, _parse_date(date), now_utc())
+    plan = _build_plan(settings, config, day)
+    _print_plan(plan, config, settings)
+
+
+# --------------------------------------------------------------------------
+# open
+# --------------------------------------------------------------------------
+
+
+def _quotes_for(
+    settings: AppSettings,
+    config: DaytradeConfig,
+    symbols: list[str],
+    *,
+    source: str | None,
+    quote_file: Path | None,
+) -> dict[str, Quote]:
+    from daytrade.quotes import quote_source
+
+    name = source or config.execution.quote_source
+    provider = quote_source(
+        name, settings.env, quote_file=quote_file or config.execution.quote_file
+    )
+    quotes = provider.fetch(symbols)
+    log.info(
+        "気配を取得",
+        code="daytrade.quotes",
+        source=name,
+        requested=len(symbols),
+        received=len(quotes),
+    )
+    return quotes
+
+
+def _fresh(
+    quotes: dict[str, Quote], config: DaytradeConfig, now: dt.datetime, *, allow_delayed: bool
+) -> dict[str, Quote]:
+    """古い気配・遅延の気配を落とす。"""
+    limit = dt.timedelta(seconds=config.execution.max_quote_age)
+    kept: dict[str, Quote] = {}
+    stale = delayed = 0
+    for symbol, quote in quotes.items():
+        if quote.delayed and not allow_delayed:
+            delayed += 1
+            continue
+        if now - quote.at > limit and not allow_delayed:
+            stale += 1
+            continue
+        kept[symbol] = quote
+    if stale or delayed:
+        log.warning("使えない気配を除外", code="daytrade.quotes", stale=stale, delayed=delayed)
+    return kept
+
+
+def _buy_request(pick: Pick, day: dt.date, config: DaytradeConfig) -> OrderRequest:
+    from wbcore.domain.models import OrderRequest, OrderType, Side, make_client_order_id
+
+    return OrderRequest(
+        client_order_id=make_client_order_id(
+            f"daytrade|{day}", pick.symbol, Side.BUY, pick.quantity
+        ),
+        symbol=pick.symbol,
+        side=Side.BUY,
+        order_type=OrderType.MARKET,
+        quantity=pick.quantity,
+        tax_type=config.execution.tax_account_type,
+        reason=f"jp_gap_fade {day} gap {pick.gap:+.2%} #{pick.rank}",
+    )
+
+
+def _place_recorded(
+    broker: Broker, ledger: Ledger, request: OrderRequest, day: dt.date, price: Decimal
+) -> None:
+    """送る前に台帳へ PENDING を書き、送ったら結果で更新する。
+
+    送信後に落ちても台帳には残るので、次の実行で同じ注文を送り直さない
+    （二重買付より買い漏れの方がまし）。
+    """
+    from wbcore.domain.models import OrderStatus
+
+    ledger.record(request, day, OrderStatus.PENDING.value, price=price)
+    ack = broker.place(request)
+    ledger.update_status(request.client_order_id, ack.status, broker_order_id=ack.broker_order_id)
+
+
+@app.command("open")
+@_crash("寄付の買い", "daytrade.crash")
+def open_command(
+    ctx: typer.Context,
+    live: Annotated[
+        bool, typer.Option("--live", help="注文を出す。無ければ判断だけ行い、注文は出さない")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="本番の確認を省く（cron 用）")] = False,
+    ignore_window: Annotated[
+        bool, typer.Option("--ignore-window", help="時間帯の外でも判断する")
+    ] = False,
+    allow_delayed: Annotated[
+        bool, typer.Option("--allow-delayed", help="遅延した気配でも使う（検証用）")
+    ] = False,
+    quote_source: Annotated[
+        str | None, typer.Option("--quote-source", help="気配の取得元を上書き")
+    ] = None,
+    quote_file: Annotated[
+        Path | None, typer.Option("--quote-file", help="csv のときのファイル")
+    ] = None,
+    date: _Date = None,
+    config_dir: _ConfigDir = None,
+) -> None:
+    """9:00: 気配でギャップ下位 N 銘柄を選び、成行で買う。既定は dry-run。"""
+    from daytrade import plan as planning
+    from daytrade.ledger import DRY_RUN_STATUS, Ledger
+    from daytrade.select import pick as pick_symbols
+    from wbcore.broker.base import BrokerError
+    from wbcore.domain.models import Side
+    from wbcore.notify import alert
+
+    settings = _settings(ctx)
+    config = _load(config_dir)
+    console.print(describe_mode(settings.env, live, kill_switch=config.execution.kill_switch))
+    now = now_utc()
+    day = _parse_date(date) or _today_jst(now)
+    if live and not ignore_window and not _in_window(config, "entry", now):
+        console.print(
+            f"[dim]発注時間帯の外（{_describe_window(config, 'entry')}）。何もしません[/dim]"
+        )
+        log.info(
+            "発注時間帯の外",
+            code="daytrade.skip",
+            reason="window",
+            window=_describe_window(config, "entry"),
+        )
+        return
+    plan = planning.load(settings.daytrade_dir, day)
+    if plan is None:
+        console.print(
+            f"[yellow]{day} の候補が無いので今作ります（前夜の plan が走っていません）[/yellow]"
+        )
+        plan = _build_plan(settings, config, day)
+    plan = _refresh_iv(settings, config, plan)
+    _print_plan(plan, config, settings)
+    if plan.meta.gated_out:
+        console.print("[dim]IV ゲートにより今日は取引しません[/dim]")
+        log.info(
+            "IV ゲートで見送り", code="daytrade.skip", reason="iv_gate", iv_prev=plan.meta.iv_prev
+        )
+        return
+
+    allowed, reason = allows_live_orders(
+        settings.env, live, kill_switch=config.execution.kill_switch
+    )
+    ledger = Ledger(settings.daytrade_db_path)
+    try:
+        already = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run]
+        if already:
+            console.print(
+                f"[dim]今日の買いは発注済み（{len(already)} 件、冪等）。何もしません[/dim]"
+            )
+            log.info("発注済み", code="daytrade.skip", reason="already", orders=len(already))
+            return
+        symbols = plan.eligible["symbol"].to_list()
+        quotes = _fresh(
+            _quotes_for(settings, config, symbols, source=quote_source, quote_file=quote_file),
+            config,
+            now,
+            allow_delayed=allow_delayed,
+        )
+        if not quotes:
+            console.print("[red]使える気配がありません。発注しません[/red]")
+            log.error("気配が無いため見送り", code="daytrade.skip", reason="no_quotes")
+            alert("デイトレ: 気配が取れず寄付の買いを見送り", f"{day} 候補 {len(symbols)} 銘柄")
+            return
+        picks = pick_symbols(
+            plan.eligible,
+            quotes,
+            n=plan.meta.positions,
+            budget=Decimal(plan.meta.budget_per_order),
+            config=config.signal,
+        )
+        _print_picks(picks, quotes, plan)
+        for p in picks:
+            log.info(
+                "銘柄を選定",
+                code="daytrade.pick",
+                day=day.isoformat(),
+                symbol=p.symbol,
+                code_=p.code,
+                rank=p.rank,
+                gap=str(p.gap),
+                prev_close=str(p.prev_close),
+                price=str(p.price),
+                quantity=str(p.quantity),
+                amount=str(p.amount),
+            )
+        if not picks:
+            log.info(
+                "条件に合う銘柄なし", code="daytrade.skip", reason="no_picks", quotes=len(quotes)
+            )
+            return
+        _confirm_live(settings, allowed, yes)
+        failures: list[str] = []
+        broker = _connect(settings, config) if allowed else None
+        remaining: Decimal | None = None
+        for p in picks:
+            request = _buy_request(p, day, config)
+            if ledger.was_placed(request.client_order_id):
+                console.print(f"  {p.symbol}: [dim]発注済み（冪等）[/dim]")
+                continue
+            if broker is None:
+                ledger.record(request, day, DRY_RUN_STATUS, price=p.price)
+                outcome = "dry-run"
+            else:
+                try:
+                    if remaining is None:
+                        remaining = broker.get_balance().buying_power
+                    need = p.amount + p.fee
+                    if need > remaining:
+                        outcome = (
+                            f"見送り 買付余力不足（必要 {_yen(need)} / 余力 {_yen(remaining)}）"
+                        )
+                        failures.append(f"{p.symbol}: {outcome}")
+                        console.print(f"  {p.symbol}: [red]{outcome}[/red]")
+                        continue
+                    remaining -= need
+                    _place_recorded(broker, ledger, request, day, p.price)
+                    outcome = "発注"
+                except BrokerError as exc:
+                    outcome = f"失敗 {exc}"
+                    failures.append(f"{p.symbol}: {exc}")
+                    console.print(f"  {p.symbol}: [red]{outcome}[/red]")
+            log.info(
+                "寄付の買い注文",
+                code="daytrade.order",
+                day=day.isoformat(),
+                symbol=p.symbol,
+                side="BUY",
+                client_order_id=request.client_order_id,
+                quantity=str(p.quantity),
+                price=str(p.price),
+                amount=str(p.amount),
+                live=broker is not None,
+                outcome=_plain(outcome),
+            )
+        if failures:
+            alert(f"デイトレ: {len(failures)} 件の買いが通らず", "\n".join(failures))
+        log.info(
+            "寄付の買いを終了",
+            code="daytrade.run",
+            phase="open",
+            live=allowed,
+            reason=reason,
+            picks=len(picks),
+            failures=len(failures),
+        )
+    finally:
+        ledger.close()
+
+
+def _print_picks(picks: list[Pick], quotes: dict[str, Quote], plan: Plan) -> None:
+    table = Table(title=f"{plan.meta.day} 寄付の買い（気配 {len(quotes)} 銘柄から）")
+    for column in ("#", "銘柄", "名称", "前日終値", "気配", "ギャップ", "株数", "金額", "手数料"):
+        table.add_column(column, justify="right" if column not in ("銘柄", "名称") else "left")
+    for p in picks:
+        table.add_row(
+            str(p.rank),
+            p.symbol,
+            p.name[:12],
+            _yen(p.prev_close),
+            _yen(p.price),
+            f"{p.gap:+.2%}",
+            f"{p.quantity:,.0f}",
+            _yen(p.amount),
+            _yen(p.fee),
+        )
+    console.print(table)
+    if not picks:
+        console.print(
+            "[dim]条件に合う銘柄がありません（ギャップダウンが無いか、1 単元が予算に届かない）[/dim]"
+        )
+
+
+# --------------------------------------------------------------------------
+# close
+# --------------------------------------------------------------------------
+
+
+@app.command("close")
+@_crash("引けの売り", "daytrade.crash")
+def close_command(
+    ctx: typer.Context,
+    live: Annotated[
+        bool, typer.Option("--live", help="注文を出す。無ければ対象を示すだけ")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="本番の確認を省く（cron 用）")] = False,
+    ignore_window: Annotated[
+        bool, typer.Option("--ignore-window", help="時間帯の外でも売る")
+    ] = False,
+    date: _Date = None,
+    config_dir: _ConfigDir = None,
+) -> None:
+    """15:26: 今日買った分を成行で売る（クロージング・オークションで引け値）。既定は dry-run。"""
+    from daytrade.ledger import DRY_RUN_STATUS, Ledger
+    from wbcore.broker.base import BrokerError
+    from wbcore.domain.models import (
+        OrderRequest,
+        OrderStatus,
+        OrderType,
+        Side,
+        make_client_order_id,
+    )
+    from wbcore.notify import alert
+
+    settings = _settings(ctx)
+    config = _load(config_dir)
+    console.print(describe_mode(settings.env, live, kill_switch=config.execution.kill_switch))
+    now = now_utc()
+    day = _parse_date(date) or _today_jst(now)
+    if live and not ignore_window and not _in_window(config, "exit", now):
+        console.print(
+            f"[dim]手仕舞いの時間帯の外（{_describe_window(config, 'exit')}）。何もしません[/dim]"
+        )
+        log.info(
+            "手仕舞いの時間帯の外",
+            code="daytrade.skip",
+            reason="window",
+            window=_describe_window(config, "exit"),
+        )
+        return
+    allowed, reason = allows_live_orders(
+        settings.env, live, kill_switch=config.execution.kill_switch
+    )
+    ledger = Ledger(settings.daytrade_db_path)
+    try:
+        buys = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run]
+        sells = {o.symbol: o for o in ledger.orders_on(day, Side.SELL) if not o.is_dry_run}
+        if not buys:
+            dry = [o for o in ledger.orders_on(day, Side.BUY) if o.is_dry_run]
+            console.print(
+                f"[dim]今日の買いが台帳にありません（dry-run {len(dry)} 件）。何もしません[/dim]"
+            )
+            log.info("売る対象なし", code="daytrade.skip", reason="no_buys", dry_run=len(dry))
+            return
+        broker = _connect(settings, config) if allowed else None
+        # 約定数量はブローカーに聞く（部分約定・拒否をそのまま売り数量に反映する）
+        targets: list[tuple[str, Decimal, Decimal | None]] = []
+        for order in buys:
+            filled = order.filled_quantity
+            fill_price = order.avg_fill_price
+            if broker is not None:
+                try:
+                    current = broker.get_order(order.client_order_id)
+                except BrokerError as exc:
+                    console.print(
+                        f"  {order.symbol}: [yellow]照会に失敗、台帳の値で続行: {exc}[/yellow]"
+                    )
+                    current = None
+                if current is not None:
+                    filled, fill_price = current.filled_quantity, current.avg_fill_price
+                    ledger.update_status(
+                        order.client_order_id,
+                        current.status,
+                        filled_quantity=filled,
+                        avg_fill_price=fill_price,
+                        broker_order_id=current.broker_order_id,
+                    )
+            elif (
+                order.status in {OrderStatus.SUBMITTED.value, OrderStatus.PENDING.value}
+                and filled == 0
+            ):
+                filled = order.quantity  # dry-run では全約定とみなして対象を示す
+            if filled <= 0:
+                console.print(
+                    f"  {order.symbol}: [dim]約定なし（{order.status}）。売る数量がありません[/dim]"
+                )
+                continue
+            if order.symbol in sells:
+                console.print(f"  {order.symbol}: [dim]売り発注済み（冪等）[/dim]")
+                continue
+            targets.append((order.symbol, filled, fill_price))
+        if not targets:
+            log.info("売る対象なし", code="daytrade.skip", reason="nothing_to_sell")
+            return
+        _confirm_live(settings, allowed, yes)
+        failures: list[str] = []
+        for symbol, quantity, fill_price in targets:
+            request = OrderRequest(
+                client_order_id=make_client_order_id(
+                    f"daytrade-close|{day}", symbol, Side.SELL, quantity
+                ),
+                symbol=symbol,
+                side=Side.SELL,
+                order_type=OrderType.MARKET,
+                quantity=quantity,
+                tax_type=config.execution.tax_account_type,
+                reason=f"jp_gap_fade {day} 引けで手仕舞い",
+            )
+            if ledger.was_placed(request.client_order_id):
+                console.print(f"  {symbol}: [dim]売り発注済み（冪等）[/dim]")
+                continue
+            if broker is None:
+                ledger.record(request, day, DRY_RUN_STATUS, price=fill_price)
+                outcome = "dry-run"
+                console.print(f"  {symbol}: {quantity:,.0f} 株 [yellow]dry-run[/yellow]")
+            else:
+                try:
+                    _place_recorded(broker, ledger, request, day, fill_price or Decimal(0))
+                    outcome = "発注"
+                    console.print(f"  {symbol}: {quantity:,.0f} 株 [green]発注[/green]")
+                except BrokerError as exc:
+                    outcome = f"失敗 {exc}"
+                    failures.append(f"{symbol}: {exc}")
+                    console.print(f"  {symbol}: [red]{outcome}[/red]")
+            log.info(
+                "引けの売り注文",
+                code="daytrade.order",
+                day=day.isoformat(),
+                symbol=symbol,
+                side="SELL",
+                client_order_id=request.client_order_id,
+                quantity=str(quantity),
+                price=str(fill_price) if fill_price is not None else None,
+                live=broker is not None,
+                outcome=_plain(outcome),
+            )
+        if failures:
+            # 売れ残りは持ち越しになる。人が手で売る必要があるので必ず知らせる
+            alert(
+                f"デイトレ: {len(failures)} 件の手仕舞いが通らず（持ち越しの恐れ）",
+                "\n".join(failures),
+            )
+        log.info(
+            "引けの売りを終了",
+            code="daytrade.run",
+            phase="close",
+            live=allowed,
+            reason=reason,
+            sells=len(targets),
+            failures=len(failures),
+        )
+    finally:
+        ledger.close()
+
+
+# --------------------------------------------------------------------------
+# status / quotes / backtest
+# --------------------------------------------------------------------------
+
+
+@app.command("status")
+def status_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDir = None) -> None:
+    """今日の候補と台帳の注文を表示する。"""
+    from daytrade import plan as planning
+    from daytrade.ledger import Ledger
+
+    settings = _settings(ctx)
+    config = _load(config_dir)
+    day = _parse_date(date) or _today_jst()
+    console.print(
+        f"資金 {_yen(config.capital.max_capital)} 円 → N={config.capital.positions}、"
+        f"1 注文 {_yen(config.capital.budget_per_order)} 円"
+    )
+    plan = planning.load(settings.daytrade_dir, day)
+    if plan is None:
+        console.print(f"[yellow]{day} の候補がありません（daytrade plan を実行）[/yellow]")
+    else:
+        _print_plan(plan, config, settings)
+    with Ledger(settings.daytrade_db_path) as ledger:
+        orders = ledger.orders_on(day)
+    if not orders:
+        console.print("[dim]今日の注文はありません[/dim]")
+        return
+    table = Table(title=f"{day} の注文")
+    for column in ("時刻", "銘柄", "売買", "株数", "約定", "価格", "約定単価", "状態"):
+        table.add_column(column)
+    for o in orders:
+        table.add_row(
+            fmt(dt.datetime.fromisoformat(o.placed_at), settings.timezone),
+            o.symbol,
+            o.side.value,
+            f"{o.quantity:,.0f}",
+            f"{o.filled_quantity:,.0f}",
+            _yen(o.price) if o.price is not None else "",
+            _yen(o.avg_fill_price) if o.avg_fill_price is not None else "",
+            o.status,
+        )
+    console.print(table)
+
+
+@app.command("quotes")
+def quotes_command(
+    ctx: typer.Context,
+    symbols: Annotated[list[str], typer.Argument(help="銘柄（7203 9984 …）")],
+    source: Annotated[str | None, typer.Option("--source", help="webull / yfinance / csv")] = None,
+    quote_file: Annotated[Path | None, typer.Option("--quote-file")] = None,
+    config_dir: _ConfigDir = None,
+) -> None:
+    """気配の取得元の疎通を確かめる。Webull が日本株を返すかはこれで見る。"""
+    from daytrade.quotes import QuoteError
+
+    settings = _settings(ctx)
+    config = _load(config_dir)
+    try:
+        quotes = _quotes_for(settings, config, symbols, source=source, quote_file=quote_file)
+    except QuoteError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    now = now_utc()
+    for symbol in symbols:
+        q = quotes.get(symbol)
+        if q is None:
+            console.print(f"  {symbol}: [red]取れませんでした[/red]")
+            continue
+        age = int((now - q.at).total_seconds())
+        flag = "（遅延）" if q.delayed else ""
+        console.print(
+            f"  {symbol}: {_yen(q.price)} 円  {fmt(q.at, settings.timezone, seconds=True)}  {age} 秒前 {q.source}{flag}"
+        )
+
+
+@app.command("backtest")
+def backtest_command(
+    ctx: typer.Context,
+    since: Annotated[str, typer.Option("--since", help="開始日")] = "2017-01-01",
+    until: Annotated[str | None, typer.Option("--until", help="終了日（既定は最新）")] = None,
+    trades: Annotated[bool, typer.Option("--trades", help="個別の取引も出す")] = False,
+    config_dir: _ConfigDir = None,
+) -> None:
+    """アーカイブで同じ規則を検証する（資金固定・100 株単位・段階手数料）。"""
+    from daytrade import backtest as bt
+
+    settings = _settings(ctx)
+    config = _load(config_dir)
+    start = _parse_date(since) or dt.date(2017, 1, 1)
+    end = _parse_date(until) or _today_jst()
+    try:
+        result = bt.run(_archive(settings), config, start, end)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    s = result.summary
+    console.print(
+        f"{start}〜{end}  資金 {_yen(s.capital)} 円  N={config.capital.positions}  "
+        f"営業日 {s.days}（取引 {s.traded_days}）  往復手数料 {s.round_trip_bp:.1f} bp"
+    )
+    console.print(
+        f"損益合計 {_yen(s.total_pnl)} 円  日平均 {_yen(s.mean_daily)} 円  年率 {s.annual_return:.1%}  "
+        f"Sharpe {s.sharpe:.2f}  最大 DD {_yen(s.max_drawdown)} 円  勝率(日) {s.win_rate:.1%}"
+    )
+    console.print(
+        f"月次: 平均 {_yen(s.monthly_mean)} 円  中央値 {_yen(s.monthly_median)} 円  "
+        f"10% 点 {_yen(s.monthly_p10)} 円  勝ち月 {s.monthly_win:.0%}  平均銘柄数 {s.avg_positions:.1f}"
+    )
+    table = Table(title="年別")
+    for column in ("年", "営業日", "損益", "日平均", "勝率"):
+        table.add_column(column, justify="right")
+    for year, days, pnl, mean, win in result.yearly().iter_rows():
+        table.add_row(str(year), str(days), _yen(pnl), _yen(mean), f"{win:.1%}")
+    console.print(table)
+    if trades:
+        console.print(
+            result.trades.select("Date", "Code", "gap", "shares", "O", "C", "pnl").tail(30)
+        )

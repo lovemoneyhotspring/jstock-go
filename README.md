@@ -7,6 +7,7 @@ Webull証券の OpenAPI を使って日本株・米国株を売買するシス�
 | `wbcore` | 共通基盤。ブローカー・足データ・指標・認証情報・登録簿の仕組み | — |
 | `wbjp` | スイング売買。複数の戦略を差し替え・合成し、差分だけを発注する | `uv run wbjp` |
 | `accum` | 積立。ドル平均法＋下落局面での増額。売らない | `uv run accum` |
+| `daytrade` | デイトレ。日本株のギャップ逆張りを寄付で買い大引で売る（[docs/DAYTRADE.md](docs/DAYTRADE.md)） | `uv run daytrade` |
 
 `wbjp` と `accum` は互いに import しない。どちらも `wbcore` の部品を組み合わせて動く。
 
