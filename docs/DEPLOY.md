@@ -81,13 +81,18 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 */20 * * * *    cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  /home/abobo/webull/wbjp/.venv/bin/wbjp  run --live --yes --config-dir config/us >> state/logs/wbjp-run.log  2>&1
 7-59/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum run --live --yes                       >> state/logs/accum-run.log 2>&1
 13,43 * * * *   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants sync                                >> state/logs/jquants-sync.log 2>&1
-30 16 * * *     cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
-50 3 2 * *      cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants backfill                             >> state/logs/jquants-backfill.log 2>&1
+37 * * * *      cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
+50 3 2-5 * *    cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants backfill                             >> state/logs/jquants-backfill.log 2>&1
 0 20 * * 1-5    cd /home/abobo/webull/wbjp && WBJP_ENV=prod                              /home/abobo/webull/wbjp/.venv/bin/jquants check --notify                       >> state/logs/jquants-check.log 2>&1
 ```
 
-- 月次の `jquants backfill` は保険。更新された一括ファイル（過誤訂正、月末数日の
-  取り漏れ）だけを取り直す。変更が無ければ何もダウンロードしない
+- **1 回きりの cron を作らない。** 失敗すると次の機会（翌日・翌月）までバックアップや
+  取り込みの無い状態が続くため、どのジョブも「何度叩いても同じ（冪等）」に作り、
+  頻度を上げて失敗を次の実行で自動回復させる。失敗自体は `WBJP_ALERT_WEBHOOK_URL` に通知される
+  - `accum backup` は毎時（37 分）。同日分は上書きなので世代は 1 日 1 つのまま。
+    1 回失敗しても 1 時間後に取り直し、失敗が続けば毎時通知が来る
+  - 月次の `jquants backfill` は 2〜5 日の 4 回。成功していれば 2 回目以降は
+    更新された一括ファイル（過誤訂正、月末数日の取り漏れ）だけを取り直す
 - 平日 20:00 の `jquants check --notify` は欠けの監視。当日ぶん（16:30〜18:00 公開）が
   取れていなければ `WBJP_ALERT_WEBHOOK_URL` に通知する（未設定ならログのみ）
 

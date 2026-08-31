@@ -233,7 +233,16 @@ def check(
     for ep in ENDPOINTS:
         if ep.mode is not Mode.DATE:
             continue
-        gaps = ing.gaps(ep, start, end)
+        try:
+            gaps = ing.gaps(ep, start, end)
+        except Exception as exc:
+            # 監視役が黙って死ぬと、欠けにも監視の停止にも気づけない
+            if notify:
+                from wbcore.notify import alert
+
+                alert("jquants check が失敗", f"{ep.path}: {exc}")
+            console.print(f"[red]{ep.path} の確認に失敗しました: {exc}[/red]")
+            raise typer.Exit(1) from None
         if gaps:
             missing_total += len(gaps)
             shown = ", ".join(d.isoformat() for d in gaps[:8])

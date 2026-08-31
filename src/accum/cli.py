@@ -868,7 +868,16 @@ def backup(
     from wbcore.backup import backup_state
 
     settings = AppSettings()
-    result = backup_state(settings, dest=dest, keep=keep)
+    try:
+        result = backup_state(settings, dest=dest, keep=keep)
+    except Exception as exc:
+        # cron の中で黙って落ちると、バックアップの無い日が続いても気づけない。
+        # 毎時叩く前提なので、通知して次の時間の再試行に任せる
+        from wbcore.notify import alert
+
+        alert("state のバックアップに失敗", str(exc))
+        console.print(f"[red]バックアップに失敗しました: {exc}[/red]")
+        raise typer.Exit(1) from None
     for path in result.copied:
         console.print(f"複製しました: {path}")
     if not result.copied:
