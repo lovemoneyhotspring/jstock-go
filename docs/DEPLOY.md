@@ -82,7 +82,11 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 7-59/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum run --live --yes                       >> state/logs/accum-run.log 2>&1
 13,43 * * * *   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants sync                                >> state/logs/jquants-sync.log 2>&1
 30 16 * * *     cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
+50 3 2 * *      cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants backfill                             >> state/logs/jquants-backfill.log 2>&1
 ```
+
+- 月次の `jquants backfill` は保険。更新された一括ファイル（過誤訂正、月末数日の
+  取り漏れ）だけを取り直す。変更が無ければ何もダウンロードしない
 
 - `accum backup` は台帳 `state/accum-prod.db` を `state/backup/accum-prod-YYYYMMDD.db` に複製する（30 世代）。
   台帳は「今月いくら発注済みか」の唯一の記録で失うと当月を買い直すので、`state/backup/` は

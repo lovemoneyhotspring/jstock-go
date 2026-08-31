@@ -14,13 +14,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import gzip
 import hashlib
 import io
 import json
 import os
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -499,6 +501,10 @@ class Archive:
 
         月ごとに: 既存を読む → 新しい行を後ろに足す → 鍵で最後を残す → 一時ファイルに
         書いて rename。途中で落ちても壊れたファイルは残らない。
+
+        端点ごとにファイルロックを取る。``jquants sync``（cron）と ``accum sync``
+        （足の取得の書き戻し）は別プロセスで、同じ月ファイルを同時に
+        読んで書き戻すと後から rename した側が先の更新を握り潰すため。
         """
         if frame.height == 0:
             return 0
@@ -508,10 +514,23 @@ class Archive:
         frame = frame.filter(pl.col(ep.date_column).is_not_null())
         changed = 0
         months = frame.with_columns(pl.col(ep.date_column).dt.strftime("%Y-%m").alias("__month"))
-        for (month,), part in months.group_by(["__month"], maintain_order=True):
-            part = part.drop("__month")
-            changed += self._upsert_month(ep, str(month), part)
+        with self._locked(ep):
+            for (month,), part in months.group_by(["__month"], maintain_order=True):
+                part = part.drop("__month")
+                changed += self._upsert_month(ep, str(month), part)
         return changed
+
+    @contextmanager
+    def _locked(self, ep: Endpoint) -> Iterator[None]:
+        """端点ディレクトリの排他ロック（プロセス間）。"""
+        directory = self.directory(ep)
+        directory.mkdir(parents=True, exist_ok=True)
+        with open(directory / ".lock", "w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _upsert_month(self, ep: Endpoint, month: str, new: pl.DataFrame) -> int:
         path = self.path_for(ep, month)
@@ -594,6 +613,7 @@ class Ingestor:
         self.archive = archive
         self.ledger = ledger
         self.run_id = run_id
+        self._warned_no_calendar = False
 
     # -- 1 回ぶん -----------------------------------------------------------
 
@@ -637,15 +657,17 @@ class Ingestor:
 
     def backfill(
         self, ep: Endpoint, *, since: str | None = None, keep_raw: bool = True
-    ) -> list[Ingest]:
+    ) -> SyncResult:
         """一括ダウンロードで全期間を取り込む。``since`` は ``YYYY-MM``。
 
         ファイル名に年月が入っている（``equities_bars_daily_202501.csv.gz``）ので、
         それで絞る。台帳に同じ ``Key`` と同じ ``LastModified`` があれば飛ばす。
+        1 ファイルの失敗（壊れた CSV 等）で残りを止めない。失敗したファイルは
+        台帳に書かれないので、再実行すればそこだけ取り直す。
         """
         if not ep.bulk:
             raise ValueError(f"{ep.path} は一括ダウンロードに無い。`sync --days` で遡ってください")
-        results = []
+        result = SyncResult()
         for item in self.client.bulk_list(ep.path):
             key = str(item.get("Key", ""))
             month = _month_in(key)
@@ -656,34 +678,49 @@ class Ingestor:
             stamp = str(item.get("LastModified", ""))
             if previous is not None and previous.digest == stamp:
                 continue
-            payload = self.client.bulk_download(key)
-            if keep_raw:
-                raw = self.archive.raw_dir(ep) / Path(key).name
-                raw.parent.mkdir(parents=True, exist_ok=True)
-                raw.write_bytes(payload)
-            frame = csv_to_frame(payload, ep)
-            changed = self.archive.upsert(ep, frame)
-            # 一括は LastModified を digest に入れ、変わらなければ次回飛ばす
-            self.ledger.record(
-                ep,
-                target,
-                source="bulk",
-                rows=frame.height,
-                changed=changed,
-                digest=stamp,
-                run_id=self.run_id,
-            )
-            log.info(
-                "一括取り込み",
-                code="jquants.ingest",
-                endpoint=ep.path,
-                target=target,
-                source="bulk",
-                rows=frame.height,
-                changed=changed,
-            )
-            results.append(Ingest(ep.path, target, "bulk", frame.height, changed))
-        return results
+            try:
+                self._backfill_one(ep, key, target, stamp, keep_raw=keep_raw, into=result)
+            except (MarketDataError, ValueError, OSError) as exc:
+                log.error(
+                    "一括取り込みに失敗",
+                    code="jquants.ingest_failed",
+                    endpoint=ep.path,
+                    target=target,
+                    error=str(exc),
+                )
+                result.failures.append(Failure(ep.path, target, str(exc)))
+        return result
+
+    def _backfill_one(
+        self, ep: Endpoint, key: str, target: str, stamp: str, *, keep_raw: bool, into: SyncResult
+    ) -> None:
+        payload = self.client.bulk_download(key)
+        if keep_raw:
+            raw = self.archive.raw_dir(ep) / Path(key).name
+            raw.parent.mkdir(parents=True, exist_ok=True)
+            raw.write_bytes(payload)
+        frame = csv_to_frame(payload, ep)
+        changed = self.archive.upsert(ep, frame)
+        # 一括は LastModified を digest に入れ、変わらなければ次回飛ばす
+        self.ledger.record(
+            ep,
+            target,
+            source="bulk",
+            rows=frame.height,
+            changed=changed,
+            digest=stamp,
+            run_id=self.run_id,
+        )
+        log.info(
+            "一括取り込み",
+            code="jquants.ingest",
+            endpoint=ep.path,
+            target=target,
+            source="bulk",
+            rows=frame.height,
+            changed=changed,
+        )
+        into.ingests.append(Ingest(ep.path, target, "bulk", frame.height, changed))
 
     # -- 日次（増分） --------------------------------------------------------
 
@@ -694,7 +731,9 @@ class Ingestor:
         if frame.height and "HolDiv" in frame.columns:
             days = frame.filter(pl.col("HolDiv").is_in(list(TRADING_DAY_DIVISIONS)))["Date"]
             return sorted(d for d in days.to_list() if d is not None)
-        log.warning("取引カレンダーが無いので平日で代用します", code="jquants.no_calendar")
+        if not self._warned_no_calendar:
+            self._warned_no_calendar = True
+            log.warning("取引カレンダーが無いので平日で代用します", code="jquants.no_calendar")
         return [d for d in _each_day(start, end) if d.weekday() < 5]
 
     def plan(

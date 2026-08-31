@@ -14,6 +14,7 @@ from typing import ClassVar
 import polars as pl
 import pytest
 
+from wbcore.clock import today_utc
 from wbcore.credentials import Environment
 from wbcore.data.csv_replay import CsvReplayProvider, InMemoryProvider
 from wbcore.data.provider import (
@@ -194,7 +195,9 @@ def test_yfinance_extracts_intraday_index_as_utc_timestamp() -> None:
 
 
 def test_yfinance_clamps_intraday_lookback_and_warns() -> None:
-    today = dt.date.today()
+    # 実装は today_utc() を基準にする。dt.date.today()（ローカル時間帯）と
+    # 突き合わせると、JST の 0〜9 時に日付がずれて落ちる
+    today = today_utc()
     limit = MAX_LOOKBACK_DAYS[Interval.M5]
     clamped = YFinanceProvider._clamp_start(today - dt.timedelta(days=400), today, Interval.M5)
     assert clamped == today - dt.timedelta(days=limit - 1)

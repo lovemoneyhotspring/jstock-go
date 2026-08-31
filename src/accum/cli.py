@@ -289,7 +289,7 @@ def sync_13f(config_dir: _ConfigDir = None) -> None:
         periods = frame["period"].n_unique()
         console.print(
             f"  CIK {cik}: {periods} 四半期、{frame.height} 行 "
-            f"({frame['period'].min()} 〜 {frame['period'].max()}) → {client.holdings_path}"
+            f"({frame['period'].min()!s} 〜 {frame['period'].max()!s}) → {client.holdings_path}"
         )
 
 

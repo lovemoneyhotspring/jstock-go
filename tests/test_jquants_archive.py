@@ -368,15 +368,17 @@ def test_backfill_converts_bulk_files_and_skips_unchanged(setup) -> None:  # typ
         gzip.compress(b"Date,Code,AdjC\n2024-12-30,72030,99\n"),
     )
 
-    results = ing.backfill(BARS, since="2025-01")
+    results = ing.backfill(BARS, since="2025-01").ingests
     assert [r.rows for r in results] == [2]
     assert archive.months(BARS) == ["2025-01"]
     assert (archive.raw_dir(BARS) / "equities_bars_daily_202501.csv.gz").exists()
 
     # 2 回目は LastModified が同じなので飛ばす
-    assert ing.backfill(BARS, since="2025-01") == []
+    assert ing.backfill(BARS, since="2025-01").ingests == []
     # 全期間なら 2024-12 も
-    assert [r.target for r in ing.backfill(BARS)] == ["bulk:equities_bars_daily_202412.csv.gz"]
+    assert [r.target for r in ing.backfill(BARS).ingests] == [
+        "bulk:equities_bars_daily_202412.csv.gz"
+    ]
 
 
 def test_backfill_refuses_endpoints_without_bulk(setup) -> None:  # type: ignore[no-untyped-def]
@@ -513,3 +515,18 @@ def test_bulk_month_counts_as_fetched_for_gaps_and_lookback(setup) -> None:  # t
     # 遡り（--days）も 7 月を叩き直さない
     targets = [t for ep, t, _ in ing.plan(later, lookback_days=40) if ep is BARS]
     assert targets and all(not t.startswith("2026-07") for t in targets)
+
+
+def test_backfill_continues_after_broken_file(setup) -> None:  # type: ignore[no-untyped-def]
+    """壊れたファイルは失敗として記録し、残りは取り込む。再実行で取り直せる。"""
+    archive, ledger, client, ing = setup
+    client.bulk_files["equities_bars_daily_202501.csv.gz"] = ("t1", b"\x1f\x8b broken gzip")
+    client.bulk_files["equities_bars_daily_202502.csv.gz"] = (
+        "t2",
+        gzip.compress(b"Date,Code,AdjC\n2025-02-03,72030,100\n"),
+    )
+    result = ing.backfill(BARS)
+    assert [f.target for f in result.failures] == ["bulk:equities_bars_daily_202501.csv.gz"]
+    assert [r.target for r in result.ingests] == ["bulk:equities_bars_daily_202502.csv.gz"]
+    # 失敗したファイルは台帳に無いので、再実行の対象に残る
+    assert ledger.last(BARS, "bulk:equities_bars_daily_202501.csv.gz") is None

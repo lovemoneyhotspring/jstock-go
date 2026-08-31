@@ -247,7 +247,8 @@ class FundamentalsStore:
         path = self.path_for(symbol)
         if not path.exists():
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        return data
 
     def get(self, symbol: str, *, refresh: bool = False) -> dict[str, Any] | None:
         """キャッシュを返す。無ければ取りに行く。取れなければ None。"""

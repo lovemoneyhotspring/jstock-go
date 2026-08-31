@@ -119,7 +119,8 @@ class Edgar13F:
     def _get(self, url: str) -> str:
         request = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
         with urllib.request.urlopen(request, timeout=60) as response:
-            return response.read().decode("latin-1")
+            text: str = response.read().decode("latin-1")
+            return text
 
     def list_filings(self, since: dt.date = XML_SINCE) -> list[FilingRef]:
         """提出済みの 13F-HR を四半期末の昇順で返す（訂正 13F-HR/A は含めない）。"""

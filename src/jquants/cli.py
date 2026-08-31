@@ -157,15 +157,26 @@ def backfill(
     ing = _ingestor(ctx)
     targets = [endpoint(n) for n in only] if only else [e for e in ENDPOINTS if e.bulk]
     all_results = []
+    failures = []
     for ep in targets:
         if not ep.bulk:
             console.print(f"[yellow]{ep.path} は一括に無いので `sync --days N` で遡ります[/yellow]")
             continue
         with console.status(f"{ep.path} を一括取り込み中"):
-            results = ing.backfill(ep, since=since, keep_raw=not no_raw)
-        all_results.extend(results)
-        console.print(f"{ep.path}: {len(results)} ファイル、{sum(r.rows for r in results):,} 行")
+            result = ing.backfill(ep, since=since, keep_raw=not no_raw)
+        all_results.extend(result.ingests)
+        failures.extend(result.failures)
+        console.print(
+            f"{ep.path}: {len(result.ingests)} ファイル、{sum(r.rows for r in result.ingests):,} 行"
+        )
     _print_results(all_results, title="一括取り込み")
+    if failures:
+        for f in failures:
+            console.print(f"[red]{f.endpoint} {f.target}: {f.error}[/red]")
+        console.print(
+            f"[red]{len(failures)} 件に失敗しました（再実行すればそこだけ取り直します）[/red]"
+        )
+        raise typer.Exit(1)
 
 
 @app.command()
