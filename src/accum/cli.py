@@ -245,7 +245,7 @@ def _sync(
 
     counts: dict[str, int] = {}
     for market, symbols in grouped.items():
-        provider = connect_provider(config.data_provider, settings.env, market=market)
+        provider = connect_provider(config.provider_for(market), settings.env, market=market)
         counts.update(store.sync(provider, symbols, start, end, force=force))
     return counts
 

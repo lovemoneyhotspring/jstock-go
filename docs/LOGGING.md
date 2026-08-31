@@ -32,6 +32,14 @@
 
 ## `code` の一覧
 
+### J-Quants の蓄積（`jquants`）
+
+| `code` | いつ | 主な項目 |
+|---|---|---|
+| `jquants.ingest` | 端点 1 つ・対象 1 つを取り込んだ | `endpoint`, `target`（日付 / `bulk:<file>`）, `source`（`api` / `bulk`）, `rows`, `changed`（鍵で上書きして実際に変わった行数） |
+| `jquants.gap` | `check` が営業日の欠けを見つけた | `missing` |
+| `jquants.no_calendar` | 取引カレンダーが無く平日で代用した | — |
+
 ### 積立（`accum`）
 
 | `code` | いつ | 主な項目 |

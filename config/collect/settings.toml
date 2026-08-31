@@ -17,7 +17,7 @@
 # 市場は 1 設定 1 市場。米国株を集めるなら config/collect-us/ を別に作る。
 [universe]
 market = "JP"
-data_provider = "yfinance"
+data_provider = "yfinance"    # 日中足が要るので yfinance（jquants は日足のみ）
 interval = "5m"          # 直接取る日中足。1分足と日足はこれとは別に必ず取る
 base_interval = "1m"     # 蓄積の基準。ここから粗い足を合成する
 symbols_file = "universe.txt"

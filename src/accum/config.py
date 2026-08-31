@@ -266,8 +266,9 @@ class AccumConfig(BaseModel):
     kill_switch: bool = False
 
     #: 足データの取得元。:data:`wbcore.data.registry.PROVIDERS` の名前。
-    #: 積立は市場をまたぐので、両市場に対応する取得元（yfinance）が既定。
-    data_provider: str = "yfinance"
+    #: 積立は市場をまたぐので、省略すると市場ごとの既定（日本株 jquants /
+    #: 米国株 yfinance）を使う。指定すると全市場でその取得元を使う。
+    data_provider: str = ""
 
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
 
@@ -275,6 +276,12 @@ class AccumConfig(BaseModel):
     baskets: list[BasketEntry] = Field(default_factory=list)
     """複数銘柄への配分。戦略と違い1銘柄が複数のバスケットに現れてもよい
     （バスケットは比較検証が主用途で、実発注は id を指定して行う）。"""
+
+    def provider_for(self, market: Market) -> str:
+        """この市場の足の取得元の名前。"""
+        from wbcore.data.registry import default_provider
+
+        return self.data_provider or default_provider(market)
 
     @property
     def active(self) -> list[TacticEntry]:

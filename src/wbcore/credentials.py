@@ -296,6 +296,19 @@ def load_credentials(
     )
 
 
+def load_api_key(var: str, *, env_file: Path | None = None) -> str | None:
+    """単体の API キー（J-Quants など、口座と紐づかないデータ源の鍵）を解決する。
+
+    環境変数 → ``.env`` の順に ``var`` の名前で探す。見つからなければ None を
+    返し、どう設定するかの案内は呼び出し側（取得元）が出す。キーチェーンは
+    使わない（口座の認証情報と違い、環境ごとに分ける意味が無い）。
+    """
+    value = os.environ.get(var)
+    if value:
+        return value
+    return _read_dotenv(_resolve_env_file(env_file)).get(var) or None
+
+
 def credential_source(
     env: Environment, *, env_file: Path | None = None, namespace: str = DEFAULT_NAMESPACE
 ) -> str:

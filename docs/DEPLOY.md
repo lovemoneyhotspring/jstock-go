@@ -8,7 +8,7 @@
 |---|---|---|
 | コード | `src/` `pyproject.toml` `uv.lock` `.python-version` | ✅ |
 | 設定 | 運用する戦略の `config/<戦略名>/` 一式 | ✅ |
-| 秘密情報 | APIキー（`.env` または systemd `EnvironmentFile=`） | ❌ 別途用意 |
+| 秘密情報 | Webull APIキーと J-Quants APIキー（`.env` または systemd `EnvironmentFile=`） | ❌ 別途用意 |
 | データ | `data/`（価格キャッシュ・台帳DB・ログ） | ❌ 初回は空でOK |
 
 `config/` と `data/` は `src/` の外にあるので、**`src/` だけ配ると動かない**。
@@ -39,6 +39,7 @@ sudo vi /etc/wbjp/wbjp.env
 #   WBJP_PROD_APP_KEY=...
 #   WBJP_PROD_APP_SECRET=...
 #   WBJP_PROD_ACCOUNT_ID=...
+#   WBJP_JQUANTS_API_KEY=...   # 日本株の足（J-Quants）。環境で分けない
 #
 # systemdサービス定義（/etc/systemd/system/wbjp.service）に
 # EnvironmentFile=/etc/wbjp/wbjp.env を1行書けば、起動時にこのファイルの
@@ -74,6 +75,7 @@ WBJP_ENV=prod uv run wbjp run --config-dir config/us
 */20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  /home/abobo/webull/wbjp/.venv/bin/wbjp  run --live --yes --config-dir config/us >> data/logs/wbjp-run.log  2>&1
 */20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum run --live --yes                       >> data/logs/accum-run.log 2>&1
 30 16 * * *  cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> data/logs/accum-backup.log 2>&1
+*/30 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock    /home/abobo/webull/wbjp/.venv/bin/jquants sync                                >> data/logs/jquants-sync.log 2>&1
 ```
 
 - `accum backup` は台帳 `data/accum-prod.db` を `data/backup/accum-prod-YYYYMMDD.db` に複製する（30 世代）。

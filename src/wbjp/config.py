@@ -146,8 +146,9 @@ class UniverseConfig(BaseModel):
     #: 日本株と米国株を両方回すなら、設定ディレクトリを分けて別プロセスで動かす。
     market: Market = Market.JP
     #: 足データの取得元。:data:`wbcore.data.registry.PROVIDERS` の名前
-    #: （"yfinance" は両市場、"webull" は米国株のみ）。
-    data_provider: str = "yfinance"
+    #: （"jquants" は日本株のみ、"yfinance" は両市場、"webull" は米国株のみ）。
+    #: 省略すると市場の既定（日本株 jquants / 米国株 yfinance）。
+    data_provider: str = ""
     #: 判断に使う足の間隔。"1d"（日足、既定）/ "1h" / "30m" / "15m" / "5m" / "1m"。
     #: 戦略の指標は「本数」で書かれているので、間隔を変えると同じ本数が
     #: 別の時間幅を指す。時間で窓を持つ戦略は :meth:`Strategy.bind` で本数に直す。
@@ -184,13 +185,18 @@ class UniverseConfig(BaseModel):
         if self.market is not Market.JP and self.topix500_symbols:
             raise ValueError('topix500_symbols は market = "JP" のときだけ指定できます')
         from wbcore.data.registry import available as available_providers
+        from wbcore.data.registry import default_provider
 
+        if not self.data_provider:
+            self.data_provider = default_provider(self.market)
         if self.data_provider not in available_providers():
             raise ValueError(
                 f"data_provider は {available_providers()} のいずれか: {self.data_provider}"
             )
         if self.data_provider == "webull" and self.market is not Market.US:
             raise ValueError('data_provider = "webull" は米国株（market = "US"）専用です')
+        if self.data_provider == "jquants" and self.market is not Market.JP:
+            raise ValueError('data_provider = "jquants" は日本株（market = "JP"）専用です')
         return self
 
     @field_validator("interval")

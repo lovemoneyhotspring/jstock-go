@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from wbcore.credentials import Environment
+from wbcore.data.jquants_provider import JQuantsProvider
 from wbcore.data.provider import MarketDataProvider
 from wbcore.data.webull_provider import WebullMarketDataProvider
 from wbcore.data.yfinance_provider import YFinanceProvider
@@ -31,5 +32,18 @@ def connect(name: str, env: Environment, *, market: Market) -> MarketDataProvide
     return get(name).connect(env, market=market)
 
 
-for _cls in (YFinanceProvider, WebullMarketDataProvider):
+#: 設定で取得元を省略したときの既定。日本株は公式の J-Quants、米国株は
+#: J-Quants が対応しないので yfinance。
+DEFAULT_PROVIDERS: dict[Market, str] = {
+    Market.JP: JQuantsProvider.name,
+    Market.US: YFinanceProvider.name,
+}
+
+
+def default_provider(market: Market) -> str:
+    """市場ごとの既定の取得元の名前。"""
+    return DEFAULT_PROVIDERS[market]
+
+
+for _cls in (JQuantsProvider, YFinanceProvider, WebullMarketDataProvider):
     register(_cls)

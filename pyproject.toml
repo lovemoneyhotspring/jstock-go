@@ -12,7 +12,8 @@ dependencies = [
     # --- データ ---
     "polars>=1.44.0",
     "pyarrow>=25.0.0",          # pl.from_pandas() / DuckDB 連携に必要
-    "yfinance>=1.6.0",
+    "yfinance>=1.6.0",      # 米国株・米国指数（J-Quants は日本株のみ）
+    "requests>=2.32",       # J-Quants API（公式 SDK は使わず、端点を直接叩く）
     "duckdb>=1.5.0",
     # --- 永続化 ---
     # SQLite は標準ライブラリの sqlite3 を直接使う。単一プロセス・単一
@@ -35,6 +36,7 @@ dependencies = [
 [project.scripts]
 wbjp = "wbjp.cli:app"
 accum = "accum.cli:app"
+jquants = "jquants.cli:app"
 
 [dependency-groups]
 dev = [
@@ -51,7 +53,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/wbcore", "src/wbjp", "src/accum"]
+packages = ["src/wbcore", "src/wbjp", "src/accum", "src/jquants"]
 
 [tool.ruff]
 line-length = 100
@@ -71,12 +73,12 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.14"
-packages = ["wbcore", "wbjp", "accum"]
+packages = ["wbcore", "wbjp", "accum", "jquants"]
 mypy_path = "src"
 strict = true
 # SDK は型情報を持たないため
 [[tool.mypy.overrides]]
-module = ["webull.*", "yfinance.*", "duckdb.*", "keyring.*", "backtrader.*"]
+module = ["webull.*", "yfinance.*", "duckdb.*", "keyring.*", "backtrader.*", "requests.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

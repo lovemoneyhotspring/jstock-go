@@ -25,7 +25,7 @@ Webull JP OpenAPI には、設計を左右する2つの制約がある。
 Webull の市場データAPI（`bars` / `snapshot`）は `US_STOCK` / `US_ETF` にしか対応していない。
 日本株は **発注はできるが、足データは取れない**。
 
-→ **価格データ層とブローカー層を完全に分離**し、価格は yfinance（`7203.T` 形式）から取得する。
+→ **価格データ層とブローカー層を完全に分離**し、価格は日本株が J-Quants API（公式）、米国株が yfinance から取得する。
 
 ### 2. 日本株は成行・指値のみ。逆指値は使えない
 
@@ -62,7 +62,7 @@ uv run wbjp run --config-dir config/us            # 判断まで（注文は出�
 | 逆指値 | API 非対応 → エンジン合成 | **STOP_LOSS を GTC でブローカーに置く** |
 | 差金決済の回避 | 当日買った銘柄は当日売らない | 不要 |
 | 通貨 | JPY | USD（`risk` の金額もドル建て） |
-| 足データ | yfinance | yfinance か Webull 市場データ API |
+| 足データ | J-Quants API | yfinance か Webull 市場データ API |
 | 売買手数料 | 約 0.11%（UAT 実測） | 無料（2026-07-27〜）＋ SEC/FINRA 手数料 |
 
 米国株で逆指値をブローカーに置く場合の要点:
@@ -231,14 +231,14 @@ broker = "webull"   # webull | paper（ネットワークに繋がないシミ�
 
 ## 足データの取得元と足の間隔
 
-取得元も同じ形で差し替える。`wbcore.data.provider.MarketDataProvider` 抽象クラスの裏に yfinance / Webull 市場データ API が並び、設定の名前で選ぶ。
+取得元も同じ形で差し替える。`wbcore.data.provider.MarketDataProvider` 抽象クラスの裏に J-Quants / yfinance / Webull 市場データ API が並び、設定の名前で選ぶ。省略すると市場の既定（日本株 `jquants` / 米国株 `yfinance`）。
 
 ```toml
 [universe]
-data_provider = "yfinance"   # yfinance（両市場）| webull（米国株のみ）
+data_provider = "jquants"    # jquants（日本株のみ・日足のみ）| yfinance（両市場）| webull（米国株のみ）
 ```
 
-足の間隔（`Interval`: `1d` / `1h` / `30m` / `15m` / `5m` / `1m`）は抽象の一部で、取得元ごとに対応範囲を申告する（yfinance の 1 分足は直近 7 日、5〜30 分足は 60 日まで）。日中足は UTC の `ts` と暦日 `date` の両方を持ち、`data/bars/<間隔>/` に日足とは別に保存される。
+足の間隔（`Interval`: `1d` / `1h` / `30m` / `15m` / `5m` / `1m`）は抽象の一部で、取得元ごとに対応範囲を申告する（yfinance の 1 分足は直近 7 日、5〜30 分足は 60 日まで）。J-Quants は日足のみで、API キー `WBJP_JQUANTS_API_KEY`（環境変数か `.env`）が要る。Free プランは直近 12 週が取れないため当日の判断には Light 以上を使う。日中足は UTC の `ts` と暦日 `date` の両方を持ち、`data/bars/<間隔>/` に日足とは別に保存される。
 
 ```bash
 uv run wbjp data sync --interval 5m --days 5    # 5分足を取る（data/bars/5m/）
@@ -374,7 +374,7 @@ Broker                WebullBroker / PaperBroker
 | 言語 | Python 3.14 | SDK が `<3.15` のため上限。全依存のcp314ホイールを確認済み |
 | パッケージ管理 | uv | ランタイムごと管理。ロックファイルで再現性 |
 | データフレーム | polars | インジケーターは polars 式で自前実装 |
-| 価格データ | yfinance | 日足スイングには十分。取得済みは必ずローカルキャッシュ |
+| 価格データ | J-Quants API（日本株）/ yfinance（米国株） | 日本株は JPX 公式・調整済み四本値。米国株と米国指数は J-Quants に無いので yfinance。取得済みは必ずローカルキャッシュ |
 | 状態の保存 | SQLite | 注文・シグナル・実行履歴。ACID と冪等性の担保 |
 | 時系列の保存 | Parquet + DuckDB | 足データの高速な集計・分析 |
 | 発注 | webull-openapi-python-sdk | 公式SDK |
@@ -474,6 +474,27 @@ WBJP_ENV=prod uv run wbjp run --live
 
 ---
 
+## J-Quants データの蓄積（`jquants`）
+
+日本株の四本値だけでなく、財務・決算予定・投資部門別・信用残・空売り・指数・EDINET など Standard プランで取れる**全端点**をローカルに溜める（設計は [docs/JQUANTS_ARCHIVE.md](docs/JQUANTS_ARCHIVE.md)）。API は 10 年しか遡れないので、溜め始めた日から手元の履歴が伸びる。
+
+```bash
+# 初回: 一括ダウンロード（月次 csv.gz）で全期間（約 15 分）
+uv run jquants backfill
+# 一括に無い端点（EDINET 3 種・決算予定）を日付で遡る（約 75 分。夜に）
+uv run jquants sync --days 3650
+# 日次: 台帳を見て必要な分だけ（cron で固定間隔）
+uv run jquants sync
+# 端点ごとの保存状況 / 直近 30 日の営業日に欠けが無いか（あれば非 0）
+uv run jquants status
+uv run jquants check
+uv run jquants query "SELECT Code, DiscDate, NP FROM fins_summary WHERE Code='72030' ORDER BY DiscDate DESC LIMIT 4"
+```
+
+（zsh の対話シェルは行の途中の `#` をコメントとして扱わないので、コマンドの後ろにコメントを付けたまま貼らないこと）
+
+置き場は `data/jquants/<端点>/<YYYY-MM>.parquet`（生のまま・全列文字列・鍵で後勝ち）と台帳 `data/jquants/ledger.db`。`accum sync` の日本株の足もここを経由する（揃っていれば API を叩かない）。
+
 ## cron で回す
 
 `wbjp run` は**1サイクルだけ**実行して終了する。定期実行はここに書く cron が担当する。
@@ -522,7 +543,7 @@ src/wbcore/              共通基盤（wbjp / accum のどちらからも使う
 │   ├── models.py        Bar / Signal / Order / Position（すべて Decimal）、決定論的な注文ID
 │   ├── market_rules.py  JP / US の取引ルールの抽象化
 │   └── jp_rules.py      呼値・値幅制限・単元株・取引時間・差金決済
-├── data/                MarketDataProvider → yfinance / Webull / CSV / Parquet+DuckDB / EDGAR 13F
+├── data/                MarketDataProvider → J-Quants / yfinance / Webull / CSV / Parquet+DuckDB / EDGAR 13F
 ├── indicators/ohlcv.py  polars 式で SMA/EMA/RSI/ATR/MACD/BB/ADX/Donchian
 └── broker/              Broker ABC → Webull / Paper / レート制限 / 接続の組み立て（factory）
 

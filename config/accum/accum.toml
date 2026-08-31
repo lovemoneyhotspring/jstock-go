@@ -33,9 +33,11 @@ monthly_budget = 25_000
 # 緊急停止。true にすると `accum run --live` でも発注しない。
 kill_switch = false
 
-# 足データの取得元。登録済みの名前（yfinance | webull）。積立は市場をまたぐので
-# 両市場に対応する yfinance が既定。webull は米国株のみ。
-data_provider = "yfinance"
+# 足データの取得元。登録済みの名前（jquants | yfinance | webull）。積立は市場を
+# またぐので、省略すると市場ごとの既定を使う: 日本株は J-Quants（公式 API、
+# WBJP_JQUANTS_API_KEY が要る）、米国株と米国指数（^GSPC 等）は yfinance。
+# 指定すると全市場でその取得元を使う（jquants は日本株専用なので通常は書かない）。
+# data_provider = "yfinance"
 
 # 発注の振る舞い。積立は当日の投下額を成行の買いにする。
 [execution]
