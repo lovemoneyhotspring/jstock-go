@@ -15,7 +15,7 @@ from daytrade.ledger import DRY_RUN_STATUS, Ledger
 from daytrade.quotes import CsvQuotes, parse_snapshot
 from daytrade.select import Quote, pick, shares_for
 from daytrade.universe import Inputs, candidates, segment_expr, to_broker_symbol
-from wbcore.domain.models import OrderRequest, OrderStatus, OrderType, Side
+from wbcore.domain.models import OrderRequest, OrderStatus, OrderType, Side, TradeType
 
 UTC = dt.UTC
 DAY = dt.date(2026, 9, 1)
@@ -840,3 +840,212 @@ def test_margin_long_shrink_off_keeps_long_full_but_triggers_short() -> None:
     daily = simulate_margin(panel, config).daily.sort("Date")
     assert daily["long_scale"].to_list()[:4] == [1.0, 1.0, 1.0, 1.0]
     assert daily["short_multiplier"].to_list()[:4] == [0.0, 0.0, 1.0, 1.0]
+
+
+# --------------------------------------------------------------------------
+# 信用（発注側）: 台帳の脚・ショートの順位・paper の売建
+# --------------------------------------------------------------------------
+
+
+def _req(symbol: str, side: Side, trade: TradeType, qty: int = 100, seed: str = "s") -> OrderRequest:
+    from wbcore.domain.models import OrderType, make_client_order_id
+
+    return OrderRequest(
+        client_order_id=make_client_order_id(seed, symbol, side, Decimal(qty)),
+        symbol=symbol,
+        side=side,
+        order_type=OrderType.MARKET,
+        quantity=Decimal(qty),
+        trade=trade,
+    )
+
+
+def test_ledger_adds_trade_column_to_old_db_and_keeps_legs(tmp_path: Path) -> None:
+    import sqlite3
+
+    from daytrade.ledger import Ledger, realized_pnl
+
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as conn:  # trade 列の無い旧スキーマ
+        conn.execute(
+            "CREATE TABLE orders (client_order_id TEXT PRIMARY KEY, broker_order_id TEXT, day TEXT NOT NULL,"
+            " symbol TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL,"
+            " filled_quantity TEXT NOT NULL DEFAULT '0', status TEXT NOT NULL, price TEXT,"
+            " avg_fill_price TEXT, reason TEXT, placed_at TEXT NOT NULL, updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO orders VALUES ('old', NULL, '2026-09-01', '7203', 'BUY', '100', '100',"
+            " 'FILLED', NULL, '1000', '', 'x', NULL)"
+        )
+    day = dt.date(2026, 9, 1)
+    with Ledger(path) as ledger:
+        old = ledger.orders_on(day)[0]
+        assert old.trade is TradeType.CASH and old.is_entry and old.leg == "long"
+        # ロング（信用買い→返済売り）とショート（売建→返済買い）を同じ日に
+        ledger.record(_req("7203", Side.SELL, TradeType.MARGIN_CLOSE), day, "FILLED")
+        ledger.update_status(_req("7203", Side.SELL, TradeType.MARGIN_CLOSE).client_order_id,
+                             OrderStatus.FILLED, filled_quantity=Decimal(100), avg_fill_price=Decimal(1010))
+        s_open = _req("9984", Side.SELL, TradeType.MARGIN_OPEN)
+        s_close = _req("9984", Side.BUY, TradeType.MARGIN_CLOSE)
+        ledger.record(s_open, day, "FILLED")
+        ledger.update_status(s_open.client_order_id, OrderStatus.FILLED, filled_quantity=Decimal(100), avg_fill_price=Decimal(5000))
+        ledger.record(s_close, day, "FILLED")
+        ledger.update_status(s_close.client_order_id, OrderStatus.FILLED, filled_quantity=Decimal(100), avg_fill_price=Decimal(4900))
+        assert {o.leg for o in ledger.entries_on(day)} == {"long", "short"}
+        assert {o.symbol for o in ledger.exits_on(day)} == {"7203", "9984"}
+        assert realized_pnl(ledger, [day], leg="long") == {day: 1000.0}   # (1010−1000)×100
+        assert realized_pnl(ledger, [day], leg="short") == {day: 10000.0}  # (5000−4900)×100
+        assert realized_pnl(ledger, [day]) == {day: 11000.0}
+
+        # 売建てたのに返済の記録が無い日は None（0 と混ぜない）
+        day2 = dt.date(2026, 9, 2)
+        s2 = _req("9984", Side.SELL, TradeType.MARGIN_OPEN, seed="d2")
+        ledger.record(s2, day2, "FILLED")
+        ledger.update_status(s2.client_order_id, OrderStatus.FILLED, filled_quantity=Decimal(100), avg_fill_price=Decimal(1))
+        assert realized_pnl(ledger, [day2], leg="short") == {day2: None}
+        assert realized_pnl(ledger, [day2], leg="long") == {day2: 0.0}
+
+
+def test_rank_short_orders_by_largest_gap_and_skips_limit_up() -> None:
+    from daytrade.config import MarginConfig
+    from daytrade.select import Quote, pick, rank_short
+
+    candidates = pl.DataFrame(
+        {
+            "Code": ["10000", "20000", "30000", "40000"],
+            "symbol": ["1000", "2000", "3000", "4000"],
+            "name": ["a", "b", "c", "d"],
+            "prev_close": [1000.0, 1000.0, 1000.0, 1000.0],
+            "eligible": [True, True, True, True],
+        }
+    )
+    at = dt.datetime(2026, 9, 2, 0, 0, tzinfo=dt.UTC)
+    quotes = {
+        "1000": Quote("1000", Decimal(1050), at),  # +5%
+        "2000": Quote("2000", Decimal(1080), at),  # +8% → 1 位
+        "3000": Quote("3000", Decimal(1020), at),  # +2% → min_gap 未満
+        "4000": Quote("4000", Decimal(1300), at),  # +30% はストップ高（1,000 円の値幅は 300）→ 外す
+    }
+    config = MarginConfig(enabled=True, max_capital=1_000_000, min_gap=Decimal("0.03"))
+    ranked = rank_short(candidates, quotes, config)
+    assert [r.symbol for r in ranked] == ["2000", "1000"]
+    picks = pick(candidates, quotes, n=2, budget=Decimal(500_000), config=config, ranked=ranked, side=Side.SELL)
+    assert [(p.symbol, p.side, p.quantity) for p in picks] == [("2000", Side.SELL, Decimal(400)), ("1000", Side.SELL, Decimal(400))]
+
+
+def test_paper_broker_short_open_and_close() -> None:
+    from wbcore.broker.paper import PaperBroker
+
+    broker = PaperBroker(initial_cash=Decimal(1_000_000), commission_rate=Decimal(0), slippage_rate=Decimal(0))
+    broker.mark({"7203": Decimal(2500)})
+    open_ = _req("7203", Side.SELL, TradeType.MARGIN_OPEN, seed="o")
+    broker.place(open_)
+    broker.settle({"7203": Decimal(2500)})
+    position = broker.positions_by_symbol()["7203"]
+    assert position.quantity == Decimal(-100) and position.trade is TradeType.MARGIN_OPEN
+    # 現物の売りとして出すと拒否（保有が無い）
+    from wbcore.broker.base import OrderRejectedError
+
+    with pytest.raises(OrderRejectedError):
+        broker.place(_req("7203", Side.SELL, TradeType.CASH, seed="x"))
+    close = _req("7203", Side.BUY, TradeType.MARGIN_CLOSE, seed="c")
+    broker.place(close)
+    broker.settle({"7203": Decimal(2400)})
+    assert broker.positions_by_symbol() == {}
+    assert broker.realized_pnl == Decimal(10000)  # 2500 で売建て 2400 で買戻し
+
+
+def test_webull_refuses_margin_orders() -> None:
+    from wbcore.broker.webull import WebullBroker
+    from wbcore.credentials import Credentials, Environment
+
+    broker = WebullBroker(Credentials("k" * 8, "s" * 8, "a" * 8), Environment.UAT, "x")
+    with pytest.raises(ValueError):
+        broker._to_payload(_req("7203", Side.SELL, TradeType.MARGIN_OPEN))
+
+
+def _cli_env_margin(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """信用の設定（ロング信用買い + ショート）で open/close の発注経路を通すための環境。"""
+    import json
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "daytrade.toml").write_text(
+        "[capital]\nmax_capital = 2000000\n"
+        "[regime]\nskip_months = []\n"
+        "[margin]\nenabled = true\ncash = 2000000\nmax_capital = 1000000\norder_budget = 500000\n"
+        "min_gap = 0.03\nmultiplier_normal = 1.0\nmultiplier_long_weak = 1.0\nlong_via_margin = true\n"
+        '[execution]\nbroker = "paper"\n',
+        encoding="utf-8",
+    )
+    state = tmp_path / "state"
+    plans = state / "daytrade"
+    plans.mkdir(parents=True)
+    # A〜C はギャップダウン（ロング）、E/F はギャップアップ（ショート候補。F は貸借銘柄でない）
+    frame = _cands([("A", 1000), ("B", 1000), ("C", 1000), ("E", 1000), ("F", 1000)]).with_columns(
+        segment=pl.lit("prime"),
+        prev_close=pl.col("prev_close").cast(pl.Float64),
+        turnover_med=pl.lit(5e8),
+        mkt_cap=pl.lit(9000.0),
+        cap_tercile=pl.lit(3, dtype=pl.Int32),
+        earn_prev=pl.lit(False),
+        disc_today=pl.lit(False),
+        alert=pl.lit(False),
+        shortable=pl.Series([True, True, True, True, False]),
+    )
+    frame.write_parquet(plans / f"plan-{DAY}.parquet")
+    meta = {
+        "day": DAY.isoformat(),
+        "prev_day": PREV.isoformat(),
+        "positions": 3,
+        "budget_per_order": "666666",
+        "iv_prev": None,
+        "iv_gate": "0",
+        "drift": None,
+        "candidates": 5,
+        "eligible": 5,
+        "created_at": "2026-08-31T12:00:00+00:00",
+    }
+    (plans / f"plan-{DAY}.json").write_text(json.dumps(meta), encoding="utf-8")
+    (tmp_path / "q.csv").write_text(
+        "symbol,price\nA,950\nB,970\nC,990\nE,1060\nF,1080\n", encoding="utf-8"
+    )
+    env = {"WBJP_STATE_DIR": str(state), "WBJP_DATA_DIR": str(tmp_path / "data"), "WBJP_ENV": "uat"}
+    return cfg, env
+
+
+def test_open_and_close_dry_run_with_margin(tmp_path: Path) -> None:
+    """ロングは信用買い、ショートは貸借銘柄のギャップ上位を売建て、close は返済（反対売買）を作る。"""
+    from typer.testing import CliRunner
+
+    from daytrade.cli import app
+
+    cfg, env = _cli_env_margin(tmp_path)
+    common = ["--date", DAY.isoformat(), "--config-dir", str(cfg)]
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["open", *common, "--quote-source", "csv", "--quote-file", str(tmp_path / "q.csv")], env=env
+    )
+    assert result.exit_code == 0, result.stdout
+    with Ledger(tmp_path / "state" / "daytrade-uat.db") as ledger:
+        entries = ledger.entries_on(DAY)
+        longs = [o for o in entries if o.side is Side.BUY]
+        shorts = [o for o in entries if o.side is Side.SELL]
+        assert [o.symbol for o in longs] == ["A", "B", "C"]
+        assert all(o.trade is TradeType.MARGIN_OPEN and o.leg == "long" for o in longs)
+        assert [o.symbol for o in shorts] == ["E"]  # F は貸借銘柄でないので売れない
+        assert shorts[0].trade is TradeType.MARGIN_OPEN and shorts[0].leg == "short"
+        # N=2 の総予算 100 万円を、条件に合った 1 銘柄に按分 → 1,000,000 ÷ 1,060 → 900 株（ロングと同じ規則）
+        assert shorts[0].quantity == Decimal(900)
+        assert all(o.is_dry_run for o in entries)
+        # dry-run のまま close: 全約定とみなして返済（反対売買）を作る
+        for o in entries:
+            ledger.update_status(o.client_order_id, OrderStatus.SUBMITTED)  # 本発注扱いにする
+    result = runner.invoke(app, ["close", *common], env=env)
+    assert result.exit_code == 0, result.stdout
+    with Ledger(tmp_path / "state" / "daytrade-uat.db") as ledger:
+        exits = {o.symbol: o for o in ledger.exits_on(DAY)}
+        assert set(exits) == {"A", "B", "C", "E"}
+        assert exits["A"].side is Side.SELL and exits["A"].trade is TradeType.MARGIN_CLOSE
+        assert exits["E"].side is Side.BUY and exits["E"].trade is TradeType.MARGIN_CLOSE
+        assert exits["E"].quantity == Decimal(900) and exits["E"].leg == "short"

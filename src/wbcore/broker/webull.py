@@ -465,8 +465,8 @@ class WebullBroker(Broker):
                 break
         return orders
 
-    def get_order(self, client_order_id: str) -> Order | None:
-        """注文を照会する。無ければ None。
+    def get_order(self, client_order_id: str, *, broker_order_id: str | None = None) -> Order | None:
+        """注文を照会する。無ければ None（``broker_order_id`` は使わない。client_order_id で引ける）。
 
         認証エラーや通信断は None にせず :class:`BrokerError` を上げる。
         None に丸めると、照会できていないだけの注文が「ブローカーに無い」
@@ -548,6 +548,9 @@ class WebullBroker(Broker):
             raise ValueError(f"発注できない注文種別です: {request.order_type.value}")
         if request.order_type.is_stop and self._market is Market.JP:
             raise ValueError("日本株では逆指値を発注できません（API 非対応）")
+        if request.trade.is_margin:
+            # 信用の売りを現物の売りに丸めると、保有していない株の売却になる。黙って丸めない
+            raise ValueError(f"Webull では信用取引を発注できません（trade={request.trade.value}）")
 
         extended = self._extended_hours and self._market is Market.US
         payload = {

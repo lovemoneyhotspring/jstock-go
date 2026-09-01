@@ -379,43 +379,34 @@ def _parse_date(value: str | None) -> dt.date | None:
 # --------------------------------------------------------------------------
 
 #: 立花証券 e支店 API（e_api_v4r10）の認証情報を構成する項目。
+#: 出典: API リファレンスと公式サンプル（e_api_sample_v4r10.py / .txt）。
 #:
-#: 公開されている API リファレンス
-#: （https://www.e-shiten.jp/e_api/mfds_json_api_ref_text.html）によると:
-#:     - ``user_id`` — ログイン電文（``CLMAuthLoginRequest``）の ``sAuthId``
-#:       （認証ID）に対応
-#:     - ``order_password`` — 新規注文・取消注文の必須パラメータ
-#:       ``sSecondPassword``（二次パスワード）に対応。**確認済み。**
-#:     - ``login_password`` — ``CLMAuthLoginRequest`` のリクエスト例には
-#:       ``sAuthId`` しか現れず、パスワード相当のフィールドが見当たらなかった。
-#:       HTTP 側の認証（Basic 認証等、電文に載らない形）で使う可能性があるが
-#:       未確認。**リファレンス一次資料で要確認**（自動要約経由の調査のため
-#:       見落としの可能性がある）
-#:     - ``account_id`` — API 上どの電文にも明示的には現れなかった。
-#:       ログ・診断表示用に保持する（``sAuthId`` が口座に紐づくトークンで
-#:       あれば実質不要になる可能性もある）
+#:     - ``auth_id`` — ログイン電文 ``CLMAuthLoginRequest`` の ``sAuthId``。
+#:       e支店 Web の「ｅ支店・ＡＰＩ利用設定」で自動生成される認証ID
+#:     - ``private_key_file`` — 同画面で登録した公開鍵と対の**秘密鍵（PEM）のファイルパス**。
+#:       ログイン応答の仮想URL（``sUrlRequest`` 等）は公開鍵で暗号化されて返るので、
+#:       これで復号する（RSA 2048/4096、OAEP、SHA-256）。立花証券側は秘密鍵を保存しない
+#:     - ``order_password`` — 新規注文・取消注文の必須パラメータ ``sSecondPassword``
+#:       （第二暗証番号）。API 利用時は Web 側で「暗証番号省略」を無効にしておくこと
 #:
-#: ``host`` / ``port`` は不要。e支店 API はホスト常駐クライアント経由ではなく、
-#: 環境ごとに固定のホスト型 HTTPS エンドポイントを直接叩く方式だった
-#: （:data:`wbcore.broker.tachibana.BASE_URLS` 参照）。
-_TACHIBANA_CREDENTIAL_FIELDS = ("user_id", "login_password", "order_password", "account_id")
+#: 認証ID・公開鍵は本番とデモで別管理（環境ごとの名前空間 ``TACHIBANA_<ENV>_...``）。
+_TACHIBANA_CREDENTIAL_FIELDS = ("auth_id", "private_key_file", "order_password")
 
 
 @dataclass(frozen=True, slots=True)
 class TachibanaCredentials:
     """立花証券 e支店 API（e_api_v4r10）の認証情報。
 
-    フィールドの対応は :data:`_TACHIBANA_CREDENTIAL_FIELDS` の注記を参照。
     ``__repr__`` を潰してあるので、うっかりログや例外に出しても秘密が漏れない。
     """
 
-    user_id: str
-    login_password: str
+    auth_id: str
+    #: 秘密鍵（PEM、``-----BEGIN PRIVATE KEY-----`` から）。
+    private_key_pem: bytes
     order_password: str
-    account_id: str
 
     def __repr__(self) -> str:
-        return f"TachibanaCredentials(user_id='***{self.user_id[-2:]}', account_id='***')"
+        return f"TachibanaCredentials(auth_id='***{self.auth_id[-2:]}')"
 
     __str__ = __repr__
 
@@ -429,11 +420,11 @@ def load_tachibana_credentials(
     """立花証券の認証情報を解決する。
 
     優先順位は :func:`load_credentials` と同じ（環境変数 → ``.env`` →
-    OS キーチェーン）。公開テスト口座のフォールバックは無い
-    （立花証券にそのような共有口座は無いため）。
+    OS キーチェーン）。公開テスト口座のフォールバックは無い。秘密鍵は
+    ``private_key_file`` のパスから読む（``chmod 600`` のこと）。
 
     Raises:
-        MissingCredentialsError: どこにも見つからないとき。
+        MissingCredentialsError: どこにも見つからない、または秘密鍵のファイルが無いとき。
     """
     path = _resolve_env_file(env_file)
     dotenv = _read_dotenv(path)
@@ -442,17 +433,23 @@ def load_tachibana_credentials(
     )
 
     if all(resolved.values()):
+        key_path = Path(str(resolved["private_key_file"])).expanduser()
+        if not key_path.is_file():
+            raise MissingCredentialsError(
+                f"立花証券の秘密鍵ファイルがありません: {key_path}"
+                f"（{namespace}_{env.value.upper()}_PRIVATE_KEY_FILE）"
+            )
+        _warn_if_readable_by_others(key_path)
         return TachibanaCredentials(
-            user_id=str(resolved["user_id"]),
-            login_password=str(resolved["login_password"]),
+            auth_id=str(resolved["auth_id"]),
+            private_key_pem=key_path.read_bytes(),
             order_password=str(resolved["order_password"]),
-            account_id=str(resolved["account_id"]),
         )
 
     missing = [k for k, v in resolved.items() if not v]
     upper = env.value.upper()
     raise MissingCredentialsError(
         f"{env.value} 環境の認証情報（{namespace}）が不足しています: {', '.join(missing)}\n"
-        f"  環境変数:     {namespace}_{upper}_USER_ID 等を設定\n"
-        f"  または .env に記載: {namespace}_{upper}_USER_ID=... （chmod 600 のこと）"
+        f"  環境変数:     {namespace}_{upper}_AUTH_ID / _PRIVATE_KEY_FILE / _ORDER_PASSWORD\n"
+        f"  または .env に記載: {namespace}_{upper}_AUTH_ID=... （chmod 600 のこと）"
     )

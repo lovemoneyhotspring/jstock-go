@@ -101,7 +101,7 @@ def _log_config(config: DaytradeConfig, settings: AppSettings, **extra: Any) -> 
     log.info(
         "実行時の設定",
         code="daytrade.config",
-        strategy="jp_gap_fade",
+        strategy=_strategy_name(config),
         env=settings.env.value,
         enabled=config.capital.enabled,
         max_capital=str(config.capital.max_capital),
@@ -308,7 +308,6 @@ def _verdict(
     """危険信号を評価し、ログに残す。"""
     from daytrade.ledger import Ledger, realized_pnl
     from daytrade.regime import Signals, evaluate
-    from wbcore.domain.models import Side
 
     recent: float | None = None
     if config.regime.equity_curve_days > 0:
@@ -321,9 +320,14 @@ def _verdict(
             cursor = cal.previous_trading_day(cursor)
             days.append(cursor)
         with Ledger(settings.daytrade_db_path) as ledger:
-            history = realized_pnl(ledger, days)
+            # 資産曲線の合図は**ロング側**の実現損益で見る（バックテストと同じ。ショートは含めない）
+            history = realized_pnl(ledger, days, leg="long")
             # 本発注の履歴が 1 日も無ければ信号なし（始めたばかりで縮めない）
-            traded = any(not o.is_dry_run for d_ in days for o in ledger.orders_on(d_, Side.BUY))
+            traded = any(
+                not o.is_dry_run and o.leg == "long"
+                for d_ in days
+                for o in ledger.entries_on(d_)
+            )
         incomplete = [d_ for d_, v in history.items() if v is None]
         if incomplete:
             log.warning(
@@ -486,21 +490,35 @@ def _fresh(
     return kept
 
 
-def _buy_request(
+def _strategy_name(config: DaytradeConfig) -> str:
+    """ログと注文の理由に書く戦略名。ショートの脚が有効なら ``jp_gap_fade_margin``。"""
+    return "jp_gap_fade_margin" if config.margin.enabled else "jp_gap_fade"
+
+
+def _entry_request(
     pick: Pick, day: dt.date, config: DaytradeConfig, *, attempt: int = 0
 ) -> OrderRequest:
-    from wbcore.domain.models import OrderRequest, OrderType, Side, make_client_order_id
+    """建てる注文。ロング（``pick.side`` が BUY）は現物か信用買い、ショート（SELL）は信用新規売り。"""
+    from wbcore.domain.models import OrderRequest, OrderType, Side, TradeType, make_client_order_id
 
     # 前回が拒否されていたら種を変える（同じ ID はブローカーが弾く）。attempt 0 は従来と同じ ID
     seed = f"daytrade|{day}" if attempt == 0 else f"daytrade|{day}|{attempt}"
+    if pick.side is Side.SELL:
+        trade = TradeType.MARGIN_OPEN  # 売建（空売り）
+    elif config.margin.enabled and config.margin.long_via_margin:
+        trade = TradeType.MARGIN_OPEN  # 信用買い（日計り。手数料 0 円）
+    else:
+        trade = TradeType.CASH
+    action = "売建" if pick.side is Side.SELL else "買い"
     return OrderRequest(
-        client_order_id=make_client_order_id(seed, pick.symbol, Side.BUY, pick.quantity),
+        client_order_id=make_client_order_id(seed, pick.symbol, pick.side, pick.quantity),
         symbol=pick.symbol,
-        side=Side.BUY,
+        side=pick.side,
         order_type=OrderType.MARKET,
         quantity=pick.quantity,
         tax_type=config.execution.tax_account_type,
-        reason=f"jp_gap_fade {day} gap {pick.gap:+.2%} #{pick.rank}",
+        reason=f"{_strategy_name(config)} {day} gap {pick.gap:+.2%} #{pick.rank} {action}",
+        trade=trade,
     )
 
 
@@ -549,11 +567,13 @@ def open_command(
     date: _Date = None,
     config_dir: _ConfigDir = None,
 ) -> None:
-    """9:00: 気配でギャップ下位 N 銘柄を選び、成行で買う。既定は dry-run。"""
+    """9:00: 気配でギャップ下位 N 銘柄を選び、成行で買う（``[margin]`` が有効なら
+    ギャップ上位の貸借銘柄を信用で売建てる）。既定は dry-run。"""
     from daytrade import plan as planning
     from daytrade.ledger import DRY_RUN_STATUS, Ledger
     from daytrade.select import pick as pick_symbols
     from daytrade.select import rank as rank_symbols
+    from daytrade.select import rank_short
     from wbcore.broker.base import BrokerError
     from wbcore.domain.models import Side
     from wbcore.notify import alert
@@ -612,11 +632,11 @@ def open_command(
         if not allowed:
             # dry-run は確認のたびに増える。その日の古い dry-run は消して最新だけ残す
             ledger.clear_dry_run(day)
-        # 生きている／約定した買いがあれば今日は終わり。拒否・失効だけなら送り直す
-        already = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run and not o.is_dead]
+        # 生きている／約定した建玉（買い・売建）があれば今日は終わり。拒否・失効だけなら送り直す
+        already = [o for o in ledger.entries_on(day) if not o.is_dry_run and not o.is_dead]
         if already:
             console.print(
-                f"[dim]今日の買いは発注済み（{len(already)} 件、冪等）。何もしません[/dim]"
+                f"[dim]今日の建玉は発注済み（{len(already)} 件、冪等）。何もしません[/dim]"
             )
             log.info("発注済み", code="daytrade.skip", reason="already", orders=len(already))
             return
@@ -651,9 +671,16 @@ def open_command(
         # 次点（N の先 RANKING_EXTRA 件）も順位表として残す——「なぜ X が選ばれなかったか」を後から追うため
         n = WATCH_ROWS if watch_only else config.capital.positions
         budget = config.capital.order_budget if watch_only else config.capital.budget_per_order
-        if verdict.scale < 1:
+        weak = verdict.scale < 1  # 資産曲線の合図（地合いが弱い）
+        # ショートが無い設定では従来どおりロングを縮める。ショートがあれば margin.long_shrink に従う
+        if weak and (not config.margin.enabled or config.margin.long_shrink):
             budget = (budget * Decimal(str(verdict.scale))).quantize(Decimal(1))
             console.print(f"[yellow]{verdict.scale_reason}（1 注文 {_yen(budget)} 円）[/yellow]")
+        elif weak:
+            console.print(
+                f"[yellow]{verdict.scale_reason.split('→')[0].strip()}"
+                " → ロングは縮めず、ショートを建てる合図にする[/yellow]"
+            )
         ranking = rank_symbols(plan.eligible, quotes, config.signal)
         picks = pick_symbols(
             plan.eligible,
@@ -688,6 +715,53 @@ def open_command(
                 for r in ranking[: n + RANKING_EXTRA]
             ],
         )
+        # ショートの脚（[margin]）: 貸借銘柄 × ギャップ上位を売建てる。資金はシーソー
+        short_multiplier = Decimal(0)
+        if config.margin.enabled and config.margin.positions > 0 and not watch_only:
+            short_multiplier = (
+                config.margin.multiplier_long_weak if weak else config.margin.multiplier_normal
+            )
+            if "shortable" not in plan.frame.columns:
+                console.print("[yellow]候補に貸借フラグが無い（古い plan）。ショートは建てません[/yellow]")
+                log.warning("plan に shortable 列が無くショートを省略", code="daytrade.skip")
+                short_multiplier = Decimal(0)
+        if short_multiplier > 0:
+            short_budget = (config.margin.budget_per_order * short_multiplier).quantize(Decimal(1))
+            short_universe = plan.eligible.filter(pl_col("shortable"))
+            short_ranking = rank_short(short_universe, quotes, config.margin)
+            short_picks = pick_symbols(
+                short_universe,
+                quotes,
+                n=config.margin.positions,
+                budget=short_budget,
+                config=config.signal,
+                weighting=config.margin.weighting,
+                ranked=short_ranking,
+                side=Side.SELL,
+            )
+            console.print(
+                f"[dim]ショート: {'弱い日' if weak else '通常日'}の倍率 {short_multiplier:g} × "
+                f"1 注文 {_yen(config.margin.budget_per_order)} 円 = {_yen(short_budget)} 円  "
+                f"貸借銘柄 {short_universe.height}[/dim]"
+            )
+            _print_picks(short_picks, quotes, plan, label="寄付の売建（信用）")
+            log.info(
+                "順位表（ショート）",
+                code="daytrade.ranking",
+                day=day.isoformat(),
+                side="SELL",
+                n=config.margin.positions,
+                budget=str(short_budget),
+                multiplier=str(short_multiplier),
+                weak=weak,
+                rows=[
+                    {"rank": r.rank, "symbol": r.symbol, "gap": str(r.gap), "price": str(r.price)}
+                    for r in short_ranking[: config.margin.positions + RANKING_EXTRA]
+                ],
+            )
+            picks = picks + short_picks
+        elif config.margin.enabled and not watch_only:
+            console.print("[dim]ショート: この日は建てない（倍率 0）[/dim]")
         for p in picks:
             log.info(
                 "銘柄を選定",
@@ -695,6 +769,7 @@ def open_command(
                 day=day.isoformat(),
                 symbol=p.symbol,
                 code_=p.code,
+                side=p.side.value,
                 rank=p.rank,
                 gap=str(p.gap),
                 prev_close=str(p.prev_close),
@@ -715,42 +790,46 @@ def open_command(
         _confirm_live(settings, allowed, yes)
         failures: list[str] = []
         broker = _connect(settings, config) if allowed else None
-        remaining: Decimal | None = None
+        # 余力は取引区分ごと（現物は買付余力、信用は新規建可能額）。同じ枠を使う注文で減らしていく
+        remaining: dict[str, Decimal] = {}
         for p in picks:
-            request = _buy_request(
-                p, day, config, attempt=ledger.dead_count(day, p.symbol, Side.BUY)
+            request = _entry_request(
+                p, day, config, attempt=ledger.dead_count(day, p.symbol, p.side)
             )
+            label = "売建" if p.side is Side.SELL else "買い"
             if ledger.was_placed(request.client_order_id):
-                console.print(f"  {p.symbol}: [dim]発注済み（冪等）[/dim]")
+                console.print(f"  {p.symbol}: [dim]{label}は発注済み（冪等）[/dim]")
                 continue
             if broker is None:
                 ledger.record(request, day, DRY_RUN_STATUS, price=p.price)
                 outcome = "dry-run"
             else:
                 try:
-                    if remaining is None:
-                        remaining = broker.get_balance().buying_power
+                    key = request.trade.value
+                    if key not in remaining:
+                        remaining[key] = broker.get_balance().buying_power_for(request.trade)
                     need = p.amount + p.fee
-                    if need > remaining:
+                    if need > remaining[key]:
                         outcome = (
-                            f"見送り 買付余力不足（必要 {_yen(need)} / 余力 {_yen(remaining)}）"
+                            f"見送り 余力不足（必要 {_yen(need)} / 余力 {_yen(remaining[key])}）"
                         )
-                        failures.append(f"{p.symbol}: {outcome}")
+                        failures.append(f"{p.symbol} {label}: {outcome}")
                         console.print(f"  {p.symbol}: [red]{outcome}[/red]")
                         continue
-                    remaining -= need
+                    remaining[key] -= need
                     _place_recorded(broker, ledger, request, day, p.price)
                     outcome = "発注"
                 except BrokerError as exc:
                     outcome = f"失敗 {exc}"
-                    failures.append(f"{p.symbol}: {exc}")
+                    failures.append(f"{p.symbol} {label}: {exc}")
                     console.print(f"  {p.symbol}: [red]{outcome}[/red]")
             log.info(
-                "寄付の買い注文",
+                "寄付の注文",
                 code="daytrade.order",
                 day=day.isoformat(),
                 symbol=p.symbol,
-                side="BUY",
+                side=p.side.value,
+                trade=request.trade.value,
                 client_order_id=request.client_order_id,
                 quantity=str(p.quantity),
                 price=str(p.price),
@@ -759,7 +838,7 @@ def open_command(
                 outcome=_plain(outcome),
             )
         if failures:
-            alert(f"デイトレ: {len(failures)} 件の買いが通らず", "\n".join(failures))
+            alert(f"デイトレ: {len(failures)} 件の建玉が通らず", "\n".join(failures))
         log.info(
             "寄付の買いを終了",
             code="daytrade.run",
@@ -783,17 +862,23 @@ RANKING_EXTRA = 5
 
 
 def _print_picks(
-    picks: list[Pick], quotes: dict[str, Quote], plan: Plan, *, watch_only: bool = False
+    picks: list[Pick],
+    quotes: dict[str, Quote],
+    plan: Plan,
+    *,
+    watch_only: bool = False,
+    label: str | None = None,
 ) -> None:
-    label = "候補（買わない: 資金 0）" if watch_only else "寄付の買い"
+    label = label or ("候補（買わない: 資金 0）" if watch_only else "寄付の買い")
     table = Table(title=f"{plan.meta.day} {label}（気配 {len(quotes)} 銘柄から）")
-    for column in ("#", "銘柄", "名称", "前日終値", "気配", "ギャップ", "株数", "金額", "手数料"):
+    for column in ("#", "銘柄", "名称", "売買", "前日終値", "気配", "ギャップ", "株数", "金額", "手数料"):
         table.add_column(column, justify="right" if column not in ("銘柄", "名称") else "left")
     for p in picks:
         table.add_row(
             str(p.rank),
             p.symbol,
             p.name[:12],
+            "売建" if p.side.value == "SELL" else "買い",
             _yen(p.prev_close),
             _yen(p.price),
             f"{p.gap:+.2%}",
@@ -804,7 +889,7 @@ def _print_picks(
     console.print(table)
     if not picks:
         console.print(
-            "[dim]条件に合う銘柄がありません（ギャップダウンが無いか、1 単元が予算に届かない）[/dim]"
+            "[dim]条件に合う銘柄がありません（条件のギャップが無いか、1 単元が予算に届かない）[/dim]"
         )
 
 
@@ -827,14 +912,16 @@ def close_command(
     date: _Date = None,
     config_dir: _ConfigDir = None,
 ) -> None:
-    """15:20〜: 今日買った分を成行で売る（15:25 以降ならクロージング・オークションで引け値）。既定は dry-run。"""
-    from daytrade.ledger import DRY_RUN_STATUS, Ledger
+    """15:20〜: 今日建てた分を成行で手仕舞う——現物の買いは売却、信用の買建は返済売り、
+    売建は返済買い（15:25 以降ならクロージング・オークションで引け値）。既定は dry-run。"""
+    from daytrade.ledger import DRY_RUN_STATUS, Ledger, LedgerOrder
     from wbcore.broker.base import BrokerError
     from wbcore.domain.models import (
         OrderRequest,
         OrderStatus,
         OrderType,
         Side,
+        TradeType,
         make_client_order_id,
     )
     from wbcore.notify import alert
@@ -863,31 +950,33 @@ def close_command(
     _log_config(config, settings, phase="close", day=day.isoformat(), live=live)
     ledger = Ledger(settings.daytrade_db_path)
     try:
-        buys = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run]
-        # 生きている／約定した売りだけが「発注済み」。拒否・失効した売りは数えない（再送する）
-        sells = {
-            o.symbol: o
-            for o in ledger.orders_on(day, Side.SELL)
+        entries = [o for o in ledger.entries_on(day) if not o.is_dry_run]
+        # 生きている／約定した手仕舞いだけが「発注済み」。拒否・失効したものは数えない（再送する）
+        exits = {
+            (o.symbol, o.leg): o
+            for o in ledger.exits_on(day)
             if not o.is_dry_run and not o.is_dead
         }
-        if not buys:
-            dry = [o for o in ledger.orders_on(day, Side.BUY) if o.is_dry_run]
+        if not entries:
+            dry = [o for o in ledger.entries_on(day) if o.is_dry_run]
             console.print(
-                f"[dim]今日の買いが台帳にありません（dry-run {len(dry)} 件）。何もしません[/dim]"
+                f"[dim]今日の建玉が台帳にありません（dry-run {len(dry)} 件）。何もしません[/dim]"
             )
             log.info("売る対象なし", code="daytrade.skip", reason="no_buys", dry_run=len(dry))
             if allowed:
                 _warn_unrecorded_positions(settings, config, day)
             return
         broker = _connect(settings, config) if allowed else None
-        # 約定数量はブローカーに聞く（部分約定・拒否をそのまま売り数量に反映する）
-        targets: list[tuple[str, Decimal, Decimal | None]] = []
-        for order in buys:
+        # 約定数量はブローカーに聞く（部分約定・拒否をそのまま手仕舞いの数量に反映する）
+        targets: list[tuple[LedgerOrder, Decimal, Decimal | None]] = []
+        for order in entries:
             filled = order.filled_quantity
             fill_price = order.avg_fill_price
             if broker is not None:
                 try:
-                    current = broker.get_order(order.client_order_id)
+                    current = broker.get_order(
+                        order.client_order_id, broker_order_id=order.broker_order_id
+                    )
                 except BrokerError as exc:
                     console.print(
                         f"  {order.symbol}: [yellow]照会に失敗、台帳の値で続行: {exc}[/yellow]"
@@ -933,54 +1022,67 @@ def close_command(
                 filled = order.quantity  # dry-run では全約定とみなして対象を示す
             if filled <= 0:
                 console.print(
-                    f"  {order.symbol}: [dim]約定なし（{order.status}）。売る数量がありません[/dim]"
+                    f"  {order.symbol}: [dim]約定なし（{order.status}）。手仕舞う数量がありません[/dim]"
                 )
                 continue
-            if order.symbol in sells:
-                console.print(f"  {order.symbol}: [dim]売り発注済み（冪等）[/dim]")
+            if (order.symbol, order.leg) in exits:
+                console.print(f"  {order.symbol}: [dim]手仕舞い発注済み（冪等）[/dim]")
                 continue
-            targets.append((order.symbol, filled, fill_price))
+            targets.append((order, filled, fill_price))
         if not targets:
             log.info("売る対象なし", code="daytrade.skip", reason="nothing_to_sell")
             return
         _confirm_live(settings, allowed, yes)
         failures: list[str] = []
-        for symbol, quantity, fill_price in targets:
-            # 前回の売りが拒否されていたら種を変えて送り直す（同じ ID はブローカーが弾く）
-            attempt = ledger.dead_count(day, symbol, Side.SELL)
+        for entry, quantity, fill_price in targets:
+            symbol = entry.symbol
+            # 反対売買。信用で建てたものは返済、現物の買いは売却
+            exit_side = Side.SELL if entry.side is Side.BUY else Side.BUY
+            exit_trade = (
+                TradeType.MARGIN_CLOSE if entry.trade is TradeType.MARGIN_OPEN else TradeType.CASH
+            )
+            action = {
+                (Side.SELL, TradeType.CASH): "売り",
+                (Side.SELL, TradeType.MARGIN_CLOSE): "返済売り",
+                (Side.BUY, TradeType.MARGIN_CLOSE): "返済買い",
+            }.get((exit_side, exit_trade), exit_side.value)
+            # 前回の手仕舞いが拒否されていたら種を変えて送り直す（同じ ID はブローカーが弾く）
+            attempt = ledger.dead_count(day, symbol, exit_side)
             request = OrderRequest(
                 client_order_id=make_client_order_id(
-                    f"daytrade-close|{day}|{attempt}", symbol, Side.SELL, quantity
+                    f"daytrade-close|{day}|{attempt}", symbol, exit_side, quantity
                 ),
                 symbol=symbol,
-                side=Side.SELL,
+                side=exit_side,
                 order_type=OrderType.MARKET,
                 quantity=quantity,
                 tax_type=config.execution.tax_account_type,
-                reason=f"jp_gap_fade {day} 引けで手仕舞い",
+                reason=f"{_strategy_name(config)} {day} 引けで手仕舞い（{action}）",
+                trade=exit_trade,
             )
             if ledger.was_placed(request.client_order_id):
-                console.print(f"  {symbol}: [dim]売り発注済み（冪等）[/dim]")
+                console.print(f"  {symbol}: [dim]{action}発注済み（冪等）[/dim]")
                 continue
             if broker is None:
                 ledger.record(request, day, DRY_RUN_STATUS, price=fill_price)
                 outcome = "dry-run"
-                console.print(f"  {symbol}: {quantity:,.0f} 株 [yellow]dry-run[/yellow]")
+                console.print(f"  {symbol}: {action} {quantity:,.0f} 株 [yellow]dry-run[/yellow]")
             else:
                 try:
                     _place_recorded(broker, ledger, request, day, fill_price or Decimal(0))
                     outcome = "発注"
-                    console.print(f"  {symbol}: {quantity:,.0f} 株 [green]発注[/green]")
+                    console.print(f"  {symbol}: {action} {quantity:,.0f} 株 [green]発注[/green]")
                 except BrokerError as exc:
                     outcome = f"失敗 {exc}"
-                    failures.append(f"{symbol}: {exc}")
+                    failures.append(f"{symbol} {action}: {exc}")
                     console.print(f"  {symbol}: [red]{outcome}[/red]")
             log.info(
-                "引けの売り注文",
+                "引けの手仕舞い注文",
                 code="daytrade.order",
                 day=day.isoformat(),
                 symbol=symbol,
-                side="SELL",
+                side=exit_side.value,
+                trade=exit_trade.value,
                 client_order_id=request.client_order_id,
                 quantity=str(quantity),
                 price=str(fill_price) if fill_price is not None else None,
@@ -1025,10 +1127,12 @@ def _warn_unrecorded_positions(settings: AppSettings, config: DaytradeConfig, da
     except BrokerError as exc:
         log.warning("建玉を照会できず保険の確認を省略", code="daytrade.reconcile", error=str(exc))
         return
-    held = {s: p.quantity for s, p in positions.items() if s in symbols and p.quantity > 0}
+    held = {s: p.quantity for s, p in positions.items() if s in symbols and p.quantity != 0}
     if not held:
         return
-    detail = "、".join(f"{s} {q:,.0f} 株" for s, q in sorted(held.items()))
+    detail = "、".join(
+        f"{s} {q:,.0f} 株{'（売建）' if q < 0 else ''}" for s, q in sorted(held.items())
+    )
     console.print(
         f"[red]台帳に無い建玉があります（今日の候補の銘柄）: {detail}。手で確かめてください[/red]"
     )
@@ -1044,10 +1148,10 @@ def _warn_unrecorded_positions(settings: AppSettings, config: DaytradeConfig, da
 @app.command("verify")
 @_crash("手仕舞いの検証", "daytrade.crash")
 def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDir = None) -> None:
-    """引け後: 今日の売りが全部約定したかをブローカーに照会し、未約定（持ち越し）なら通知する。"""
+    """引け後: 今日の手仕舞いが全部約定したかをブローカーに照会し、未約定（持ち越し）なら通知する。
+    ロング（買い→売り）もショート（売建→返済買い）も脚ごとに突き合わせる。"""
     from daytrade.ledger import Ledger
     from wbcore.broker.base import BrokerError
-    from wbcore.domain.models import Side
     from wbcore.notify import alert
 
     settings = _settings(ctx)
@@ -1056,17 +1160,18 @@ def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
     _log_config(config, settings, phase="verify", day=day.isoformat())
     ledger = Ledger(settings.daytrade_db_path)
     try:
-        buys = [o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run]
-        sells = [o for o in ledger.orders_on(day, Side.SELL) if not o.is_dry_run]
-        if not buys:
+        entries = [o for o in ledger.entries_on(day) if not o.is_dry_run]
+        exits = [o for o in ledger.exits_on(day) if not o.is_dry_run]
+        if not entries:
             console.print("[dim]今日の本発注はありません[/dim]")
             log.info("検証の対象なし", code="daytrade.skip", reason="no_buys", phase="verify")
             return
         broker = _connect(settings, config)
         carried: list[str] = []
-        bought: dict[str, Decimal] = {}
-        for order in buys:
-            current = broker.get_order(order.client_order_id)
+        opened: dict[tuple[str, str], Decimal] = {}
+        for order in entries:
+            current = broker.get_order(order.client_order_id, broker_order_id=order.broker_order_id)
+            key = (order.symbol, order.leg)
             if current is not None:
                 ledger.update_status(
                     order.client_order_id,
@@ -1075,14 +1180,12 @@ def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
                     avg_fill_price=current.avg_fill_price,
                     broker_order_id=current.broker_order_id,
                 )
-                bought[order.symbol] = (
-                    bought.get(order.symbol, Decimal(0)) + current.filled_quantity
-                )
+                opened[key] = opened.get(key, Decimal(0)) + current.filled_quantity
             else:
-                bought[order.symbol] = bought.get(order.symbol, Decimal(0)) + order.filled_quantity
-        sold: dict[str, Decimal] = {}
-        for order in sells:
-            current = broker.get_order(order.client_order_id)
+                opened[key] = opened.get(key, Decimal(0)) + order.filled_quantity
+        closed: dict[tuple[str, str], Decimal] = {}
+        for order in exits:
+            current = broker.get_order(order.client_order_id, broker_order_id=order.broker_order_id)
             filled = order.filled_quantity
             if current is not None:
                 filled = current.filled_quantity
@@ -1094,10 +1197,12 @@ def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
                     broker_order_id=current.broker_order_id,
                 )
                 log.info(
-                    "売り注文の約定状況",
+                    "手仕舞い注文の約定状況",
                     code="daytrade.fill",
                     day=day.isoformat(),
                     symbol=order.symbol,
+                    side=order.side.value,
+                    trade=order.trade.value,
                     client_order_id=order.client_order_id,
                     broker_order_id=current.broker_order_id,
                     before=order.status,
@@ -1108,26 +1213,32 @@ def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
                     if current.avg_fill_price is not None
                     else None,
                 )
-            sold[order.symbol] = sold.get(order.symbol, Decimal(0)) + filled
-        for symbol, quantity in sorted(bought.items()):
-            remaining = quantity - sold.get(symbol, Decimal(0))
+            key = (order.symbol, order.leg)
+            closed[key] = closed.get(key, Decimal(0)) + filled
+        for (symbol, leg), quantity in sorted(opened.items()):
+            remaining = quantity - closed.get((symbol, leg), Decimal(0))
+            what = "売建" if leg == "short" else "買い"
             if remaining > 0:
-                carried.append(f"{symbol} {remaining:,.0f} 株")
+                carried.append(f"{symbol} {what} {remaining:,.0f} 株")
                 console.print(
-                    f"  {symbol}: [red]{remaining:,.0f} 株が売れていません（持ち越し）[/red]"
+                    f"  {symbol}: [red]{what} {remaining:,.0f} 株が手仕舞えていません（持ち越し）[/red]"
                 )
             elif quantity > 0:
-                console.print(f"  {symbol}: {quantity:,.0f} 株 手仕舞い済み")
-        # 台帳と食い違う建玉（送信結果不明の買いが実は通っていた等）はブローカー側で確かめる
+                console.print(f"  {symbol}: {what} {quantity:,.0f} 株 手仕舞い済み")
+        # 台帳と食い違う建玉（送信結果不明の注文が実は通っていた等）はブローカー側で確かめる
         try:
             positions = broker.positions_by_symbol()
         except BrokerError as exc:
             log.warning("建玉を照会できず突合を省略", code="daytrade.reconcile", error=str(exc))
             positions = {}
         flagged = {c.split(" ")[0] for c in carried}
-        for symbol in sorted(bought):
+        for symbol, leg in sorted(opened):
             held = positions.get(symbol)
-            if held is not None and held.quantity > 0 and symbol not in flagged:
+            if held is None or symbol in flagged:
+                continue
+            # ロングの脚なら正の建玉、ショートの脚なら負（売建）の建玉が残っていれば不一致
+            leftover = held.quantity > 0 if leg == "long" else held.quantity < 0
+            if leftover:
                 carried.append(f"{symbol} {held.quantity:,.0f} 株（台帳と不一致）")
                 console.print(
                     f"  {symbol}: [red]ブローカーに {held.quantity:,.0f} 株の建玉"
@@ -1138,6 +1249,7 @@ def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
                     code="daytrade.reconcile",
                     day=day.isoformat(),
                     symbol=symbol,
+                    leg=leg,
                     held=str(held.quantity),
                 )
         if carried:

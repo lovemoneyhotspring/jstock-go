@@ -91,6 +91,27 @@ class TimeInForce(StrEnum):
     GTC = "GTC"
 
 
+class TradeType(StrEnum):
+    """現物か信用か、信用なら新規建てか返済か。
+
+    - ``CASH``: 現物。買いは買付、売りは保有の売却
+    - ``MARGIN_OPEN``: 信用新規建て。買いは買建、**売りは売建（空売り）**
+    - ``MARGIN_CLOSE``: 信用返済。買いは売建の返済（買戻し）、売りは買建の返済
+
+    信用の売りを現物の売りと取り違えると、保有していない株の売却として拒否されるか、
+    別の建玉を閉じてしまう。ブローカーは ``MARGIN_*`` に対応していなければ
+    :class:`ValueError` で落とす（黙って現物に丸めない）。
+    """
+
+    CASH = "CASH"
+    MARGIN_OPEN = "MARGIN_OPEN"
+    MARGIN_CLOSE = "MARGIN_CLOSE"
+
+    @property
+    def is_margin(self) -> bool:
+        return self is not TradeType.CASH
+
+
 class TaxAccountType(StrEnum):
     """日本の証券口座の課税区分。発注時に指定が要る。"""
 
@@ -226,6 +247,10 @@ class Position:
 
     ``available_quantity`` は売却可能数量。約定前の買付や貸株などで
     保有数量より小さくなることがあるため、売り注文はこちらを見る。
+
+    信用の売建は ``quantity`` / ``available_quantity`` を**負**で表す。
+    ``market_value`` と ``unrealized_pnl`` は符号込みでそのまま正しい
+    （売建は値下がりで含み益）。
     """
 
     symbol: str
@@ -235,6 +260,8 @@ class Position:
     last_price: Decimal
     currency: str = "JPY"
     tax_type: TaxAccountType = TaxAccountType.GENERAL
+    #: 現物か信用建玉か。信用なら ``quantity`` の符号が買建（+）/ 売建（−）。
+    trade: TradeType = TradeType.CASH
 
     @property
     def market_value(self) -> Decimal:
@@ -254,6 +281,14 @@ class Balance:
     buying_power: Decimal
     market_value: Decimal = Decimal(0)
     unrealized_pnl: Decimal = Decimal(0)
+    #: 信用新規建可能額。信用口座の無いブローカーは None（呼び出し側は ``buying_power`` に倒す）。
+    margin_buying_power: Decimal | None = None
+
+    def buying_power_for(self, trade: TradeType) -> Decimal:
+        """その取引区分で使える余力。信用新規は ``margin_buying_power``、それ以外は ``buying_power``。"""
+        if trade is TradeType.MARGIN_OPEN and self.margin_buying_power is not None:
+            return self.margin_buying_power
+        return self.buying_power
 
 
 # --------------------------------------------------------------------------
@@ -292,6 +327,8 @@ class OrderRequest:
     time_in_force: TimeInForce = TimeInForce.DAY
     tax_type: TaxAccountType = TaxAccountType.GENERAL
     reason: str = ""
+    #: 現物 / 信用新規 / 信用返済。既定は現物（既存の呼び出し側は変更不要）。
+    trade: TradeType = TradeType.CASH
 
     def __post_init__(self) -> None:
         if self.quantity <= 0:
@@ -355,6 +392,8 @@ class Order:
     avg_fill_price: Decimal | None = None
     created_at: dt.datetime | None = None
     time_in_force: TimeInForce = TimeInForce.DAY
+    #: 現物 / 信用新規 / 信用返済（ブローカーが区別を返さなければ CASH）。
+    trade: TradeType = TradeType.CASH
 
     def __post_init__(self) -> None:
         _require_aware("created_at", self.created_at)

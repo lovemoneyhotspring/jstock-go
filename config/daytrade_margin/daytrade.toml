@@ -8,7 +8,8 @@
 #          uv run daytrade backtest --config-dir config/daytrade_margin
 #
 # 根拠と数字は docs/research/2026-08-jp-daytrade-selection.md「信用売り（2026-09-01 追記）」。
-# 発注側（open / close のショート対応）は未実装。バックテストのみ通る。
+# 発注側: open はロングを信用買い（long_via_margin）・ショートを信用新規売り、close は返済、verify は脚ごとに突き合わせる。
+# 秘密は .env: TACHIBANA_<ENV>_AUTH_ID / _PRIVATE_KEY_FILE / _ORDER_PASSWORD（docs/DEPLOY.md）。
 
 [capital]
 enabled = true
@@ -71,7 +72,7 @@ long_extra_cost_bp = 5.7
 [execution]
 broker = "tachibana"
 tax_account_type = "SPECIFIC"
-quote_source = "webull"    # 未解決（Webull の市場データは US のみ）。立花証券の CLMMfdsGetMarketPrice への切替が要る
+quote_source = "tachibana" # 立花証券の時価問合（CLMMfdsGetMarketPrice）。寄付後は始値、無ければ現在値
 entry_window = ["09:00", "09:15"]
 exit_window = ["15:20", "15:30"]
 kill_switch = false

@@ -56,6 +56,16 @@ def segment_expr(column: str = "MktNm") -> pl.Expr:
     )
 
 
+def shortable_expr(master: pl.DataFrame) -> pl.Expr:
+    """貸借銘柄（制度信用で新規売りができる）か。``equities/master`` の ``Mrgn``: 1=信用 2=貸借 3=その他。
+
+    列が無いフレーム（古い断片・テストの最小データ）では全て偽＝売れない側に倒す。
+    """
+    if "Mrgn" not in master.columns:
+        return pl.lit(False)
+    return pl.col("Mrgn").cast(pl.String) == "2"
+
+
 def num(column: str) -> pl.Expr:
     """アーカイブは全列が文字列。数値に読む（読めなければ null）。"""
     return pl.col(column).cast(pl.Float64, strict=False)
@@ -182,6 +192,7 @@ def candidates(
         name=pl.col("CoName"),
         segment=segment_expr(),
         product=pl.col("ProdCat"),
+        shortable=shortable_expr(inputs.master),
     )
     frame = (
         feats.join(master, on="Code", how="inner")
@@ -200,7 +211,7 @@ def candidates(
         frame.join(_flag(fins, "earn_prev"), on="Code", how="left")
         .join(_flag(inputs.earnings_dates, "disc_today"), on="Code", how="left")
         .join(_flag(inputs.margin_alert, "alert"), on="Code", how="left")
-        .with_columns(pl.col("earn_prev", "disc_today", "alert").fill_null(False))
+        .with_columns(pl.col("earn_prev", "disc_today", "alert", "shortable").fill_null(False))
         .with_columns(
             cap_tercile=pl.col("cap_tercile").fill_null(0).cast(pl.Int32),
             symbol=pl.col("Code").map_elements(to_broker_symbol, return_dtype=pl.String),
@@ -219,6 +230,7 @@ def candidates(
             "earn_prev",
             "disc_today",
             "alert",
+            "shortable",
             "eligible",
         )
         .sort("Code")

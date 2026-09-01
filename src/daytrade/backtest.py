@@ -27,6 +27,7 @@ from daytrade.universe import (
     num,
     post_close_expr,
     segment_expr,
+    shortable_expr,
 )
 from wbcore.data.jquants_archive import Archive, endpoint
 
@@ -91,13 +92,13 @@ def load_panel(
     )
     if bars.height == 0:
         raise ValueError("足がありません。jquants backfill / sync を先に")
-    master = archive.read(endpoint("equities_master"), lookback, end).select(
+    master_raw = archive.read(endpoint("equities_master"), lookback, end)
+    master = master_raw.select(
         "Date",
         pl.col("Code").cast(pl.String),
         segment=segment_expr(),
         product=pl.col("ProdCat"),
-        # 貸借銘柄（信用売りができる）。"2" = 貸借（出典: equities/master の Mrgn/MrgnNm）。
-        shortable=pl.col("Mrgn") == "2",
+        shortable=shortable_expr(master_raw),
     )
     days = bars.select("Date").unique().sort("Date").with_row_index("di")
     win = config.universe.turnover_days

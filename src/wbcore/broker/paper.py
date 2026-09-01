@@ -43,6 +43,7 @@ from wbcore.domain.models import (
     Side,
     TaxAccountType,
     TimeInForce,
+    TradeType,
 )
 from wbcore.logging import get_logger
 
@@ -65,9 +66,11 @@ class _Holding:
 
 @dataclass
 class PaperBroker(Broker):
-    """現金口座のシミュレータ。
+    """現金口座のシミュレータ（信用の新規・返済も最低限まねる）。
 
-    信用取引は扱わない。空売りもできない: 保有数を超える売り注文は拒否する。
+    現物の売りは保有数を超えれば拒否する。信用（``TradeType.MARGIN_OPEN`` の売り）は
+    保有が無くても売建てられ、建玉は ``quantity`` を負にして持つ。返済（``MARGIN_CLOSE``）は
+    反対売買で建玉を消す。保証金・金利・貸株料は再現しない（発注経路の確認用）。
     ``currency`` は表示と手数料の丸め単位にだけ効く（円は整数、ドルはセント）。
     """
 
@@ -138,15 +141,16 @@ class PaperBroker(Broker):
                 last_price=self._marks.get(symbol, holding.cost_price),
                 currency=self.currency,
                 tax_type=self.tax_type,
+                trade=TradeType.MARGIN_OPEN if holding.quantity < 0 else TradeType.CASH,
             )
             for symbol, holding in sorted(self._holdings.items())
-            if holding.quantity > 0
+            if holding.quantity != 0
         ]
 
     def get_open_orders(self) -> list[Order]:
         return [o for o in self._orders.values() if o.status.is_open]
 
-    def get_order(self, client_order_id: str) -> Order | None:
+    def get_order(self, client_order_id: str, *, broker_order_id: str | None = None) -> Order | None:
         return self._orders.get(client_order_id)
 
     def get_order_history(self, start: dt.date, end: dt.date) -> list[Order]:
@@ -198,13 +202,22 @@ class PaperBroker(Broker):
             log.info("既知の注文IDのため再送を無視", client_order_id=request.client_order_id)
             return OrderAck(request.client_order_id, request.client_order_id, existing.status)
 
-        if request.side is Side.SELL:
-            holding = self._holdings.get(request.symbol)
-            available = holding.quantity if holding else Decimal(0)
-            if request.quantity > available:
+        holding = self._holdings.get(request.symbol)
+        held = holding.quantity if holding else Decimal(0)
+        if request.side is Side.SELL and request.trade is not TradeType.MARGIN_OPEN:
+            # 現物の売り・買建の返済: 持っている分しか売れない
+            if request.quantity > held:
                 raise OrderRejectedError(
-                    f"{request.symbol}: 保有 {available} 株に対し {request.quantity} 株の売り注文"
+                    f"{request.symbol}: 保有 {held} 株に対し {request.quantity} 株の売り注文"
                 )
+        elif request.side is Side.BUY and request.trade is TradeType.MARGIN_CLOSE:
+            # 売建の返済（買戻し）: 売建玉（負の保有）が要る
+            if request.quantity > -held:
+                raise OrderRejectedError(
+                    f"{request.symbol}: 売建 {-held} 株に対し {request.quantity} 株の返済買い"
+                )
+        elif request.side is Side.SELL:
+            pass  # 売建（空売り）。保証金は再現しない
         elif request.order_type.is_stop:
             raise OrderRejectedError("買いの逆指値はこのシステムでは扱わない")
         else:
@@ -227,6 +240,7 @@ class PaperBroker(Broker):
             limit_price=request.limit_price,
             stop_price=request.stop_price,
             time_in_force=request.time_in_force,
+            trade=request.trade,
         )
         self._orders[order.client_order_id] = order
         return OrderAck(order.client_order_id, order.broker_order_id, order.status)
@@ -331,6 +345,7 @@ class PaperBroker(Broker):
                 avg_fill_price=price,
                 created_at=order.created_at,
                 time_in_force=order.time_in_force,
+                trade=order.trade,
             )
 
         self._fills.extend(filled)
@@ -387,7 +402,18 @@ class PaperBroker(Broker):
         gross = (price * order.quantity).quantize(self._cent, rounding=ROUND_HALF_UP)
         fee = self._commission(gross)
 
-        if order.side is Side.BUY:
+        if order.side is Side.BUY and order.trade is TradeType.MARGIN_CLOSE:
+            # 売建の返済（買戻し）
+            existing = self._holdings.get(order.symbol)
+            if existing is None or -existing.quantity < order.quantity:
+                raise OrderRejectedError(f"{order.symbol}: 返済できる売建が不足")
+            self._realized_pnl += (existing.cost_price - price) * order.quantity - fee
+            existing.quantity += order.quantity
+            holding = existing
+            self._cash -= gross + fee
+            if holding.quantity == 0:
+                del self._holdings[order.symbol]
+        elif order.side is Side.BUY:
             if gross + fee > self._cash:
                 raise InsufficientFundsError(
                     f"{order.symbol}: 必要 {gross + fee} に対し残高 {self._cash} ({self.currency})"
@@ -400,6 +426,16 @@ class PaperBroker(Broker):
             ) / total
             holding.quantity = total
             self._bought_today.add(order.symbol)
+        elif order.trade is TradeType.MARGIN_OPEN:
+            # 売建（空売り）。建玉は負の数量で持つ
+            holding = self._holdings.setdefault(order.symbol, _Holding(Decimal(0), Decimal(0)))
+            if holding.quantity > 0:
+                raise OrderRejectedError(f"{order.symbol}: 買いの保有がある銘柄の売建は扱わない")
+            short = -holding.quantity
+            total = short + order.quantity
+            holding.cost_price = (holding.cost_price * short + price * order.quantity) / total
+            holding.quantity = -total
+            self._cash += gross - fee
         else:
             existing = self._holdings.get(order.symbol)
             if existing is None or existing.quantity < order.quantity:
