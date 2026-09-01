@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from wbcore.broker.base import Broker
 from wbcore.broker.paper import PaperBroker
+from wbcore.broker.tachibana import TachibanaBroker
 from wbcore.broker.webull import WebullBroker
 from wbcore.credentials import Environment
 from wbcore.domain.models import Market, TaxAccountType
@@ -43,5 +44,5 @@ def connect(
     )
 
 
-for _cls in (WebullBroker, PaperBroker):
+for _cls in (WebullBroker, TachibanaBroker, PaperBroker):
     register(_cls)
