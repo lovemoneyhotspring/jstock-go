@@ -324,9 +324,7 @@ def _verdict(
             history = realized_pnl(ledger, days, leg="long")
             # 本発注の履歴が 1 日も無ければ信号なし（始めたばかりで縮めない）
             traded = any(
-                not o.is_dry_run and o.leg == "long"
-                for d_ in days
-                for o in ledger.entries_on(d_)
+                not o.is_dry_run and o.leg == "long" for d_ in days for o in ledger.entries_on(d_)
             )
         incomplete = [d_ for d_, v in history.items() if v is None]
         if incomplete:
@@ -394,6 +392,13 @@ def _print_plan(plan: Plan, config: DaytradeConfig, settings: AppSettings) -> No
         + f"  決算(当日予定) {int(plan.frame['disc_today'].sum())}"
         + f"  日々公表 {int(plan.frame['alert'].sum())}[/dim]"
     )
+    if config.margin.enabled:
+        stopped = int(plan.frame["jsf_stop"].sum()) if "jsf_stop" in plan.frame.columns else 0
+        console.print(
+            f"[dim]ショート: 対象 {plan.short_eligible.height} 銘柄（{'/'.join(config.margin.segments)}・"
+            f"貸借・ギャップ ≥ {float(config.margin.min_gap):.0%}）  売り禁 {stopped}  "
+            f"N={config.margin.positions}  1 注文 {_yen(config.margin.budget_per_order)} 円[/dim]"
+        )
     console.print(f"[dim]保存先 {settings.daytrade_dir}[/dim]")
 
 
@@ -641,6 +646,9 @@ def open_command(
             log.info("発注済み", code="daytrade.skip", reason="already", orders=len(already))
             return
         symbols = plan.eligible["symbol"].to_list()
+        if config.margin.enabled and not watch_only:
+            # ショートの母集団はロングと別なので、気配はその和集合で取る
+            symbols = sorted(set(symbols) | set(plan.short_eligible["symbol"].to_list()))
         quotes = _fresh(
             _quotes_for(settings, config, symbols, source=quote_source, quote_file=quote_file),
             config,
@@ -721,13 +729,16 @@ def open_command(
             short_multiplier = (
                 config.margin.multiplier_long_weak if weak else config.margin.multiplier_normal
             )
-            if "shortable" not in plan.frame.columns:
-                console.print("[yellow]候補に貸借フラグが無い（古い plan）。ショートは建てません[/yellow]")
-                log.warning("plan に shortable 列が無くショートを省略", code="daytrade.skip")
+            if "short_eligible" not in plan.frame.columns:
+                console.print(
+                    "[yellow]候補にショートの母集団（short_eligible）が無い（古い plan）。"
+                    "ショートは建てません[/yellow]"
+                )
+                log.warning("plan に short_eligible 列が無くショートを省略", code="daytrade.skip")
                 short_multiplier = Decimal(0)
         if short_multiplier > 0:
             short_budget = (config.margin.budget_per_order * short_multiplier).quantize(Decimal(1))
-            short_universe = plan.eligible.filter(pl_col("shortable"))
+            short_universe = plan.short_eligible
             short_ranking = rank_short(short_universe, quotes, config.margin)
             short_picks = pick_symbols(
                 short_universe,
@@ -742,7 +753,7 @@ def open_command(
             console.print(
                 f"[dim]ショート: {'弱い日' if weak else '通常日'}の倍率 {short_multiplier:g} × "
                 f"1 注文 {_yen(config.margin.budget_per_order)} 円 = {_yen(short_budget)} 円  "
-                f"貸借銘柄 {short_universe.height}[/dim]"
+                f"対象 {short_universe.height} 銘柄[/dim]"
             )
             _print_picks(short_picks, quotes, plan, label="寄付の売建（信用）")
             log.info(
@@ -871,7 +882,18 @@ def _print_picks(
 ) -> None:
     label = label or ("候補（買わない: 資金 0）" if watch_only else "寄付の買い")
     table = Table(title=f"{plan.meta.day} {label}（気配 {len(quotes)} 銘柄から）")
-    for column in ("#", "銘柄", "名称", "売買", "前日終値", "気配", "ギャップ", "株数", "金額", "手数料"):
+    for column in (
+        "#",
+        "銘柄",
+        "名称",
+        "売買",
+        "前日終値",
+        "気配",
+        "ギャップ",
+        "株数",
+        "金額",
+        "手数料",
+    ):
         table.add_column(column, justify="right" if column not in ("銘柄", "名称") else "left")
     for p in picks:
         table.add_row(
@@ -953,9 +975,7 @@ def close_command(
         entries = [o for o in ledger.entries_on(day) if not o.is_dry_run]
         # 生きている／約定した手仕舞いだけが「発注済み」。拒否・失効したものは数えない（再送する）
         exits = {
-            (o.symbol, o.leg): o
-            for o in ledger.exits_on(day)
-            if not o.is_dry_run and not o.is_dead
+            (o.symbol, o.leg): o for o in ledger.exits_on(day) if not o.is_dry_run and not o.is_dead
         }
         if not entries:
             dry = [o for o in ledger.entries_on(day) if o.is_dry_run]
@@ -1121,7 +1141,7 @@ def _warn_unrecorded_positions(settings: AppSettings, config: DaytradeConfig, da
     plan = planning.load(settings.daytrade_dir, day)
     if plan is None:
         return
-    symbols = set(plan.eligible["symbol"].to_list())
+    symbols = set(plan.eligible["symbol"].to_list()) | set(plan.short_eligible["symbol"].to_list())
     try:
         positions = _connect(settings, config).positions_by_symbol()
     except BrokerError as exc:
@@ -1435,6 +1455,17 @@ def _backtest_margin(
             f"{float(s.total_pnl) / (s.days / bt.TRADING_DAYS) / float(cash):6.1%}  "
             f"Sharpe {s.sharpe:5.2f}  最大 DD {_yen(s.max_drawdown):>10} 円  "
             f"取引日 {s.traded_days}  往復コスト {s.round_trip_bp:.1f} bp"
+        )
+    short = result.short_trades
+    if short.height and "carried" in short.columns:
+        carried = short.filter(pl_col("carried"))
+        carried_pnl = (
+            float((carried["pnl"] * carried["short_multiplier"]).sum()) if carried.height else 0.0
+        )
+        console.print(
+            f"[dim]ショートの張り付き（引けストップ高 → 翌寄りで返済、係数 {float(m.carry_penalty):g}）: "
+            f"{carried.height} / {short.height} 件（{carried.height / short.height:.1%}）  "
+            f"該当の損益 {_yen(carried_pnl)} 円[/dim]"
         )
     table = Table(title="年別（ロング / ショート）")
     for column in ("年", "営業日", "取引日", "合算", "ロング", "ショート", "勝率(取引日)"):

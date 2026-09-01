@@ -154,14 +154,21 @@ def rank_short(
 ) -> list[Ranked]:
     """信用売りの候補を、ギャップの**大きい**順に並べる（:func:`rank` の鏡像）。
 
-    ``candidates`` は貸借銘柄（``shortable``）に絞ってから渡すこと。気配が無い・
+    ``candidates`` は ``short_eligible`` 列（前夜の plan がショート専用の母集団で判定したもの）
+    が真の行だけを使う。列が無い古い plan は ``eligible & shortable`` で代用する。気配が無い・
     ギャップが ``[min_gap, max_gap)`` の外・ストップ高（``skip_limit_up``）の銘柄は入らない。
     """
     columns = ["Code", "symbol", "name", "prev_close"]
     has_vol = "vol20" in candidates.columns
     if has_vol:
         columns.append("vol20")
-    rows = candidates.filter(pl.col("eligible")).select(columns)
+    if "short_eligible" in candidates.columns:
+        universe = candidates.filter(pl.col("short_eligible"))
+    elif "shortable" in candidates.columns:
+        universe = candidates.filter(pl.col("eligible") & pl.col("shortable"))
+    else:
+        universe = candidates.filter(pl.col("eligible"))
+    rows = universe.select(columns)
     scored: list[tuple[Decimal, str, str, str, Decimal, Decimal, float | None]] = []
     for row in rows.iter_rows():
         code, symbol, name, prev_close = row[:4]

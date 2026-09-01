@@ -24,9 +24,11 @@ from daytrade.universe import (
     VOL_DAYS,
     cap_tercile_expr,
     eligible_expr,
+    jsf_stop_expr,
     num,
     post_close_expr,
     segment_expr,
+    short_eligible_expr,
     shortable_expr,
 )
 from wbcore.data.jquants_archive import Archive, endpoint
@@ -106,6 +108,8 @@ def load_panel(
         bars.join(master, on=["Date", "Code"], how="left")
         .with_columns(
             prev_close=pl.when(pl.col("AF") == 1).then(pl.col("C").shift(1)).over("Code"),
+            # 翌営業日の寄付。ショートが引けストップ高で返済できなかったときの返済値（最終日は null）
+            next_open=pl.col("O").shift(-1).over("Code"),
             turnover_med=pl.col("Va").shift(1).rolling_median(win, min_samples=win).over("Code"),
             mkt_cap=pl.col("MktCap").shift(1).over("Code"),
             vol20=(pl.col("C") / pl.col("C").shift(1) - 1)
@@ -148,21 +152,31 @@ def load_panel(
         panel = panel.with_columns(disc_today=pl.lit(False))
     alert = archive.read(endpoint("markets_margin_alert"), start - dt.timedelta(days=7), end)
     if alert.height and "PubDate" in alert.columns:
-        flagged = (
-            alert.select(pl.col("Code").cast(pl.String), Date=pl.col("PubDate"))
-            .join(days, on="Date")
-            .select("Code", edi=pl.col("di") + 1)
-            .unique()
-            .with_columns(alert=True)
-        )
-        panel = panel.join(flagged, left_on=["Code", "di"], right_on=["Code", "edi"], how="left")
+        # 規制の理由を問わず「載った」フラグと、売り禁（新規売り不可）のフラグ。どちらも翌営業日に効く
+        for name, rows in (("alert", alert), ("jsf_stop", alert.filter(jsf_stop_expr(alert)))):
+            flagged = (
+                rows.select(pl.col("Code").cast(pl.String), Date=pl.col("PubDate"))
+                .join(days, on="Date")
+                .select("Code", edi=pl.col("di") + 1)
+                .unique()
+                .with_columns(pl.lit(True).alias(name))
+            )
+            panel = panel.join(
+                flagged, left_on=["Code", "di"], right_on=["Code", "edi"], how="left"
+            )
     else:
-        panel = panel.with_columns(alert=pl.lit(False))
+        panel = panel.with_columns(alert=pl.lit(False), jsf_stop=pl.lit(False))
+    has_prev = pl.col("prev_close").is_not_null()
+    short_eligible = (
+        short_eligible_expr(config.margin) & has_prev if config.margin.enabled else pl.lit(False)
+    )
     return (
-        panel.with_columns(pl.col("earn_prev", "disc_today", "alert").fill_null(False))
+        panel.with_columns(pl.col("earn_prev", "disc_today", "alert", "jsf_stop").fill_null(False))
         .with_columns(segment=pl.col("segment").fill_null("other"))
         .with_columns(shortable=pl.col("shortable").fill_null(False))
-        .with_columns(eligible=eligible_expr(config.universe) & pl.col("prev_close").is_not_null())
+        .with_columns(
+            eligible=eligible_expr(config.universe) & has_prev, short_eligible=short_eligible
+        )
         .with_columns(gap=pl.col("O") / pl.col("prev_close") - 1)
     )
 
@@ -375,6 +389,27 @@ def _pick_and_price(
     )
 
 
+def _apply_carry(picks: pl.DataFrame, limit_up: pl.Expr, penalty: float) -> pl.DataFrame:
+    """引けがストップ高（``C`` が制限値幅の上限）の売建は、買い気配に張り付いて返済買いが
+    約定しないので翌営業日の寄付（``next_open``）で返済したことにする。
+
+    損益は ``penalty`` の割合だけ翌寄りに置き換える（1 で全額、0 で無視）——実際に約定しない
+    割合は日足からは分からないため。``carried`` 列に該当を残す。最終日（翌寄りが無い）は引け値のまま。
+    """
+    if "next_open" not in picks.columns:
+        return picks.with_columns(carried=pl.lit(False))
+    # 浮動小数の丸め（952.4 + 150 など）で上限をわずかに下回ることがあるので 1e-6 の余裕を持つ
+    carried = (pl.col("C") >= limit_up - 1e-6) & pl.col("next_open").is_not_null()
+    extra = (
+        pl.when(carried)
+        .then(penalty * pl.col("shares") * (pl.col("C") - pl.col("next_open")))
+        .otherwise(0.0)
+    )
+    return picks.with_columns(carried=carried, gross=pl.col("gross") + extra).with_columns(
+        pnl=pl.col("gross") - pl.col("fees")
+    )
+
+
 def _daily_from_picks(picks: pl.DataFrame, panel: pl.DataFrame) -> pl.DataFrame:
     """1 レッグぶんの日次集計（取引の無い日も 0 で並べる）。"""
     daily = (
@@ -470,14 +505,17 @@ def simulate_margin(
         weighting=config.capital.weighting,
         sign=1,
         # 信用買い（日計り）なら手数料 0 円。金利・滑りは long_extra_cost_bp で見る
-        extra_cost_bp=float(config.margin.long_extra_cost_bp) if config.margin.long_via_margin else 0.0,
+        extra_cost_bp=float(config.margin.long_extra_cost_bp)
+        if config.margin.long_via_margin
+        else 0.0,
         commission=not config.margin.long_via_margin,
     )
 
-    short_eligible = panel.filter(pl.col("eligible") & pl.col("shortable"))
+    # ショートの母集団はロングと別（[margin] の segments / 除外。前夜の plan と同じ式）
+    short_eligible = panel.filter(pl.col("short_eligible"))
+    limit_up = pl.col("prev_close") + limit_width_expr(pl.col("prev_close"))
     if config.margin.skip_limit_up:
-        high = pl.col("prev_close") + limit_width_expr(pl.col("prev_close"))
-        short_eligible = short_eligible.filter(pl.col("O") < high)
+        short_eligible = short_eligible.filter(pl.col("O") < limit_up)
     short_picks = _pick_and_price(
         short_eligible,
         short_rank_expr(config.margin, over="Date"),
@@ -489,6 +527,7 @@ def simulate_margin(
         extra_cost_bp=float(config.margin.extra_cost_bp),
         commission=False,  # 立花証券の信用取引は手数料 0 円
     )
+    short_picks = _apply_carry(short_picks, limit_up, float(config.margin.carry_penalty))
 
     long_daily = _daily_from_picks(long_picks, panel)
     short_daily = _daily_from_picks(short_picks, panel)
@@ -565,7 +604,13 @@ def _apply_regime_seesaw(
 
     frame = (
         long_daily.rename(
-            {"pnl": "long_pnl", "gross": "long_gross", "fees": "long_fees", "amount": "long_amount", "n": "long_n"}
+            {
+                "pnl": "long_pnl",
+                "gross": "long_gross",
+                "fees": "long_fees",
+                "amount": "long_amount",
+                "n": "long_n",
+            }
         )
         .join(
             short_daily.rename(
@@ -591,8 +636,10 @@ def _apply_regime_seesaw(
         if drift is not None and drift.height
         else frame.with_columns(drift=None)
     )
-    frame = frame.join(us, on="Date", how="left") if us is not None and us.height else frame.with_columns(
-        spx_ret=None, vix=None
+    frame = (
+        frame.join(us, on="Date", how="left")
+        if us is not None and us.height
+        else frame.with_columns(spx_ret=None, vix=None)
     )
     frame = frame.sort("Date")
 

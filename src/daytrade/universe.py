@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import polars as pl
 
-from daytrade.config import UniverseConfig
+from daytrade.config import MarginConfig, UniverseConfig
 
 #: 東証の引け時刻が 15:00 → 15:30 に変わった日。決算開示が「引け後」かの判定に使う。
 CLOSE_CHANGED_ON = dt.date(2024, 11, 5)
@@ -64,6 +64,16 @@ def shortable_expr(master: pl.DataFrame) -> pl.Expr:
     if "Mrgn" not in master.columns:
         return pl.lit(False)
     return pl.col("Mrgn").cast(pl.String) == "2"
+
+
+def jsf_stop_expr(alert: pl.DataFrame) -> pl.Expr:
+    """日証金の申込停止（売り禁）か。``markets/margin-alert`` の ``PubReason`` は JSON 文字列で、
+    日々公表・監視・注意喚起・増担保・売り禁のどれで載ったかのフラグを持つ。
+    ``RestrictedByJSF`` が "1" なら新規売りが出せない。列が無ければ全て偽。
+    """
+    if "PubReason" not in alert.columns:
+        return pl.lit(False)
+    return pl.col("PubReason").fill_null("").str.contains('"RestrictedByJSF": "1"')
 
 
 def num(column: str) -> pl.Expr:
@@ -118,6 +128,29 @@ def eligible_expr(config: UniverseConfig) -> pl.Expr:
     return cond
 
 
+def short_eligible_expr(config: MarginConfig) -> pl.Expr:
+    """ショート（信用新規売り）の母集団。:func:`eligible_expr` と同じ列に加えて
+    ``shortable``（貸借銘柄）と ``jsf_stop``（売り禁）を持つフレームに適用する。
+    ロングとは区分・分位・規制の扱いが違う（``[margin]`` の各項目）。
+    """
+    cond = (
+        pl.col("shortable")
+        & pl.col("segment").is_in(config.segments)
+        & (pl.col("turnover_med") >= float(config.min_turnover))
+    )
+    if config.exclude_cap_terciles:
+        cond = cond & (pl.col("cap_tercile") > config.exclude_cap_terciles)
+    if config.exclude_earnings_prev:
+        cond = cond & ~pl.col("earn_prev")
+    if config.exclude_earnings_today:
+        cond = cond & ~pl.col("disc_today")
+    if config.exclude_margin_alert:
+        cond = cond & ~pl.col("alert")
+    if config.exclude_jsf_stop:
+        cond = cond & ~pl.col("jsf_stop")
+    return cond
+
+
 # --------------------------------------------------------------------------
 # 1 日ぶんの候補（前夜の plan）
 # --------------------------------------------------------------------------
@@ -157,11 +190,14 @@ def candidates(
     day: dt.date,
     prev_day: dt.date,
     config: UniverseConfig,
+    margin: MarginConfig | None = None,
 ) -> pl.DataFrame:
     """判定日 ``day`` の候補。列: Code, symbol, name, segment, prev_close, turnover_med, mkt_cap,
-    vol20（20 日の日次ボラ）, cap_tercile, earn_prev, disc_today, alert, eligible。
+    vol20（20 日の日次ボラ）, cap_tercile, earn_prev, disc_today, alert, jsf_stop, shortable,
+    eligible, short_eligible。
 
-    ``eligible`` が真の行が翌朝の対象。真でない行も残す（なぜ外れたかを見せるため）。
+    ``eligible`` が真の行が翌朝のロングの対象、``short_eligible`` が真の行がショートの対象
+    （``margin`` を省くか無効なら全て偽）。真でない行も残す（なぜ外れたかを見せるため）。
     """
     bars = inputs.bars.filter(pl.col("Date") <= prev_day).with_columns(
         pl.col("Code").cast(pl.String)
@@ -207,16 +243,24 @@ def candidates(
     fins = inputs.fins
     if fins.height and "DiscTime" in fins.columns:
         fins = fins.filter(pl.col("DiscDate") == prev_day, post_close_expr())
+    alert = inputs.margin_alert
+    stopped = alert.filter(jsf_stop_expr(alert)) if alert.height else alert
+    short_eligible = (
+        short_eligible_expr(margin) if margin is not None and margin.enabled else pl.lit(False)
+    )
     frame = (
         frame.join(_flag(fins, "earn_prev"), on="Code", how="left")
         .join(_flag(inputs.earnings_dates, "disc_today"), on="Code", how="left")
-        .join(_flag(inputs.margin_alert, "alert"), on="Code", how="left")
-        .with_columns(pl.col("earn_prev", "disc_today", "alert", "shortable").fill_null(False))
+        .join(_flag(alert, "alert"), on="Code", how="left")
+        .join(_flag(stopped, "jsf_stop"), on="Code", how="left")
+        .with_columns(
+            pl.col("earn_prev", "disc_today", "alert", "jsf_stop", "shortable").fill_null(False)
+        )
         .with_columns(
             cap_tercile=pl.col("cap_tercile").fill_null(0).cast(pl.Int32),
             symbol=pl.col("Code").map_elements(to_broker_symbol, return_dtype=pl.String),
         )
-        .with_columns(eligible=eligible_expr(config))
+        .with_columns(eligible=eligible_expr(config), short_eligible=short_eligible)
         .select(
             "Code",
             "symbol",
@@ -230,8 +274,10 @@ def candidates(
             "earn_prev",
             "disc_today",
             "alert",
+            "jsf_stop",
             "shortable",
             "eligible",
+            "short_eligible",
         )
         .sort("Code")
     )

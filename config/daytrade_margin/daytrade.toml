@@ -1,13 +1,15 @@
 # デイトレ jp_gap_fade_margin の設定。**秘密はここに書かない。**
 #
-# jp_gap_fade（config/daytrade）に信用売り（ショート）の脚を足したもの。立花証券 e支店で
-# 運用する前提（信用手数料 0 円・貸借銘柄の新規売り・日計り）。ロング側の規則は
-# jp_gap_fade と同じで、ショート側はその鏡像（ギャップ「上位」を寄付で売り、大引で買い戻す）。
+# jp_gap_fade（config/daytrade）に信用売り（ショート）の脚 jp_gap_up_short を足したもの。立花証券 e支店で
+# 運用する前提（信用手数料 0 円・貸借銘柄の新規売り・日計り）。ロング側の規則は jp_gap_fade と同じ。
+# ショート側は独立した母集団（margin 節の segments 等）で「決算なし × ギャップ +5% 以上」を寄付で売り、
+# 大引で買い戻す（常時）。
 #
 # 使い方:  uv run daytrade plan  --config-dir config/daytrade_margin
 #          uv run daytrade backtest --config-dir config/daytrade_margin
 #
-# 根拠と数字は docs/research/2026-08-jp-daytrade-selection.md「信用売り（2026-09-01 追記）」。
+# 根拠と数字は docs/research/2026-09-jp-gap-up-short.md（ショート）と
+# docs/research/2026-08-jp-daytrade-selection.md「信用売り（2026-09-01 追記）」（ロングの信用買い）。
 # 発注側: open はロングを信用買い（long_via_margin）・ショートを信用新規売り、close は返済、verify は脚ごとに突き合わせる。
 # 秘密は .env: TACHIBANA_<ENV>_AUTH_ID / _PRIVATE_KEY_FILE / _ORDER_PASSWORD（docs/DEPLOY.md）。
 
@@ -22,13 +24,14 @@ max_positions = 10
 weighting = "inverse_vol"
 
 [universe]
+# ロング側の母集団。ショート側は [margin] に別に持つ
 segments = ["prime"]
 min_turnover = 100000000
 turnover_days = 20
 exclude_cap_terciles = 1
 exclude_earnings_prev = true
 exclude_earnings_today = true
-exclude_margin_alert = true  # ショート側にも同じ除外を使う（慎重側。研究ノート「事実 4」の逆用は未検証）
+exclude_margin_alert = true
 
 [signal]
 max_gap = 0.0
@@ -40,8 +43,8 @@ iv_gate = 0.0
 skip_months = [12]
 drift_days = 20
 drift_gap_override = 0.01
-equity_curve_days = 20     # ロング側の直近 20 日損益 ≤ 0 が「地合いが弱い」合図。ショートはこの日に建てる（シーソー）
-equity_curve_scale = 0.5   # 合図の日にロングを縮める倍率。margin.long_shrink = false のときロングには効かない（合図だけ使う）
+equity_curve_days = 20     # ロング側の直近 20 日損益 ≤ 0 が「地合いが弱い」合図。ショートは常時なので記録のみ
+equity_curve_scale = 0.5   # 合図の日にロングを縮める倍率。margin.long_shrink = false のときロングには効かない
 us_skip_low = 0.0
 us_skip_high = 0.01
 us_vix_override = 24
@@ -53,21 +56,30 @@ max_capital = 2000000      # ショート側の 1 日の上限（円）。倍率
 order_budget = 670000      # ロングと同額（1 注文が小さいと滑りの bp 負担が上がる）
 max_positions = 10
 weighting = "inverse_vol"
-min_gap = 0.03             # ギャップ +3% 以上だけ売る。0〜1% は負け、+3% が Sharpe の頂点（研究ノート）
+# ショート専用の母集団（ロングの [universe] とは別。研究ノート 2026-09-jp-gap-up-short）
+segments = ["prime"]       # プライムは張り付き（引けストップ高で返済できない）率 2.1%。全区分だと利益は増えるが OOS が崩れる
+min_turnover = 100000000   # 上げるほど悪くなる（3 億で Sharpe 1.44）
+exclude_cap_terciles = 0   # 小型に効きが厚い。外さない
+exclude_earnings_prev = true   # 決算翌日のギャップアップは順張り（−30 bp/取引）
+exclude_earnings_today = true
+exclude_margin_alert = false   # 日々公表・注意喚起・増担保は外さない（建てられる規制銘柄に効きの差は無い）
+exclude_jsf_stop = true        # 売り禁（日証金 申込停止）は新規売りが出せない
+min_gap = 0.05             # ギャップ +5% 以上だけ、大きい順。5〜7% は +29 bp/取引、7〜10% +79、10% 以上 +112〜304
 max_gap = 1.0
 skip_limit_up = true       # 寄付がストップ高の銘柄は売らない
-# シーソー: ロング側が通常運転の日はショート 0（＝売らない）、ロング側が資産曲線で縮小された日だけ 1.0 倍で売る。
-# 検証ではロング縮小日のショート平均が通常日の 6 倍。常時売る（normal 0.5〜1.0）と利益は増えるが DD も増える。
-multiplier_normal = 0.0
+# 常時建てる（通常日 1.0 / ロングが弱い日 1.0）。弱い日限定は Sharpe 2.94 だが稼働が 606 日に減る
+multiplier_normal = 1.0
 multiplier_long_weak = 1.0
-# jp_gap_fade はショートが無い前提で、合図の日にロングを 1/2 に縮めて DD を抑えていた。ここではショートが
-# 下げを受け止めるので、ロングは縮めず利益を追う。縮小あり→なしで合算利益は同じ、DD −58→−52 万・最長 DD 242→190 日。
+# ロングは縮めない（jp_gap_fade の DD 抑制を外した経緯は研究ノート「ロングの DD 抑制を外す」）
 long_shrink = false
 # 往復コスト（bp）。信用手数料 0 円 + 貸株料（年 1.15%、日計り 1 日分 ≈ 0.3 bp）+ 滑り 5 bp の見込み。
 extra_cost_bp = 5.3
 # ロングも信用買い（日計り）で建てる。手数料 0 円、金利 年 2.50% の 1 日分 ≈ 0.7 bp + 滑り 5 bp
 long_via_margin = true
 long_extra_cost_bp = 5.7
+# 検証のみ: 引けがストップ高の売建を「翌営業日の寄付で返済」として計上する係数（1 = 全額、0 = 無視）。
+# 実態は 0〜1 の間で、運用で約定率を測って決める。プライム限定なら 1.0 でも負け年 0（研究ノート）
+carry_penalty = 1.0
 
 [execution]
 broker = "tachibana"

@@ -732,16 +732,46 @@ def _margin_panel(days: list[dt.date]) -> pl.DataFrame:
     for day in days:
         rows += [
             # ロング: −5% で寄って +1% 戻す
-            {"Date": day, "Code": "10000", "O": 1000.0, "C": 1010.0, "prev_close": 1052.6,
-             "gap": 1000 / 1052.6 - 1, "eligible": True, "shortable": True, "vol20": 0.02},
+            {
+                "Date": day,
+                "Code": "10000",
+                "O": 1000.0,
+                "C": 1010.0,
+                "prev_close": 1052.6,
+                "gap": 1000 / 1052.6 - 1,
+                "eligible": True,
+                "shortable": True,
+                "vol20": 0.02,
+            },
             # ショート: +5% で寄って引けに 990 → 売り方の利益
-            {"Date": day, "Code": "20000", "O": 1000.0, "C": 990.0, "prev_close": 952.4,
-             "gap": 1000 / 952.4 - 1, "eligible": True, "shortable": True, "vol20": 0.02},
+            {
+                "Date": day,
+                "Code": "20000",
+                "O": 1000.0,
+                "C": 990.0,
+                "prev_close": 952.4,
+                "gap": 1000 / 952.4 - 1,
+                "eligible": True,
+                "shortable": True,
+                "vol20": 0.02,
+            },
             # 同じ形だが貸借銘柄でない → 売れない
-            {"Date": day, "Code": "30000", "O": 1000.0, "C": 900.0, "prev_close": 952.4,
-             "gap": 1000 / 952.4 - 1, "eligible": True, "shortable": False, "vol20": 0.02},
+            {
+                "Date": day,
+                "Code": "30000",
+                "O": 1000.0,
+                "C": 900.0,
+                "prev_close": 952.4,
+                "gap": 1000 / 952.4 - 1,
+                "eligible": True,
+                "shortable": False,
+                "vol20": 0.02,
+            },
         ]
-    return pl.DataFrame(rows)
+    return pl.DataFrame(rows).with_columns(
+        short_eligible=pl.col("eligible") & pl.col("shortable"),
+        next_open=pl.lit(None, dtype=pl.Float64),
+    )
 
 
 def _margin_config(**margin: object):
@@ -812,10 +842,91 @@ def test_margin_config_defaults_off_and_validates() -> None:
     from daytrade.config import DaytradeConfig, MarginConfig
 
     assert not MarginConfig().enabled and MarginConfig().positions == 0
+    # jp_gap_up_short の既定: プライム・ギャップ +5%・常時・売り禁だけ除外
+    assert MarginConfig().segments == ["prime"] and MarginConfig().min_gap == Decimal("0.05")
+    assert MarginConfig().multiplier_normal == 1 and MarginConfig().exclude_jsf_stop
     with pytest.raises(ValueError):
         DaytradeConfig.model_validate({"margin": {"multiplier_long_weak": -1}})
     with pytest.raises(ValueError):
         DaytradeConfig.model_validate({"margin": {"min_gap": 2}})
+    with pytest.raises(ValueError):
+        DaytradeConfig.model_validate({"margin": {"segments": ["tokyo"]}})
+    with pytest.raises(ValueError):
+        DaytradeConfig.model_validate({"margin": {"carry_penalty": 1.5}})
+
+
+def test_margin_carry_penalty_closes_at_next_open_when_limit_up() -> None:
+    """引けがストップ高の売建は翌寄りで返済したことにする（係数で按分）。"""
+    from daytrade.backtest import simulate_margin
+
+    day = dt.date(2026, 6, 1)
+    # 前日終値 952.4 → 値幅 ±150 → ストップ高 1102.4。寄付 1000 で売り、引け 1102.4（張り付き）、翌寄り 1150
+    panel = _margin_panel([day]).with_columns(
+        C=pl.when(pl.col("Code") == "20000").then(1102.4).otherwise(pl.col("C")),
+        next_open=pl.when(pl.col("Code") == "20000").then(1150.0).otherwise(None),
+    )
+    full = simulate_margin(panel, _margin_config(carry_penalty=1.0)).short_trades.row(0, named=True)
+    assert full["carried"]
+    assert full["gross"] == pytest.approx(1000 * (1000.0 - 1150.0))  # 翌寄りで返済
+    half = simulate_margin(panel, _margin_config(carry_penalty=0.5)).short_trades.row(0, named=True)
+    assert half["gross"] == pytest.approx(1000 * ((1000.0 - 1102.4) + 0.5 * (1102.4 - 1150.0)))
+    none = simulate_margin(panel, _margin_config(carry_penalty=0)).short_trades.row(0, named=True)
+    assert none["gross"] == pytest.approx(1000 * (1000.0 - 1102.4)) and none["carried"]
+    # 引けがストップ高でなければ翌寄りは無関係
+    normal = simulate_margin(_margin_panel([day]), _margin_config()).short_trades.row(0, named=True)
+    assert not normal["carried"]
+
+
+def test_margin_short_universe_is_separate_from_long() -> None:
+    """ショートの母集団は [margin] の条件（区分・売り禁）で決まり、ロングの eligible とは独立。"""
+    from daytrade.config import MarginConfig, UniverseConfig
+    from daytrade.universe import candidates
+
+    codes = {
+        # 時価総額は同順位を避けて全て違う値にする（3 分位: 500/5000 が下位、6000/7000 が中位、8000/9000 が上位）
+        "10000": (1000, 5e8, 9000),  # プライム・貸借・大型 → 長短とも対象
+        "20000": (1000, 5e8, 500),  # プライム・貸借・最小型 → ロングは分位で除外、ショートは対象
+        "30000": (
+            1000,
+            5e8,
+            8000,
+        ),  # スタンダード・貸借 → 区分で両方除外（margin.segments = prime）
+        "40000": (
+            1000,
+            5e8,
+            7000,
+        ),  # プライム・貸借・売り禁 → ロングは規制で、ショートは売り禁で除外
+        "50000": (1000, 5e8, 6000),  # プライム・貸借・注意喚起 → ロングは規制で除外、ショートは対象
+        "60000": (1000, 5e8, 5000),  # プライム・信用銘柄（貸借でない）・小型 → 両方除外
+    }
+    segs = {c: "プライム" for c in codes}
+    segs["30000"] = "スタンダード"
+    master = _master(segs).with_columns(Mrgn=pl.Series(["2", "2", "2", "2", "2", "1"]))
+    alert = pl.DataFrame(
+        {
+            "Code": ["40000", "50000"],
+            "PubDate": [PREV, PREV],
+            "PubReason": [
+                '{"DailyPublication": "0", "PrecautionByJSF": "0", "RestrictedByJSF": "1"}',
+                '{"DailyPublication": "0", "PrecautionByJSF": "1", "RestrictedByJSF": "0"}',
+            ],
+        }
+    )
+    frame = candidates(
+        Inputs(_bars(codes), master, _empty(), _empty(), alert),
+        DAY,
+        PREV,
+        UniverseConfig(),
+        MarginConfig(enabled=True, max_capital=1_000_000),
+    )
+    assert set(frame.filter(pl.col("eligible"))["Code"]) == {"10000"}
+    assert set(frame.filter(pl.col("short_eligible"))["Code"]) == {"10000", "20000", "50000"}
+    assert set(frame.filter(pl.col("jsf_stop"))["Code"]) == {"40000"}
+    # margin を渡さない／無効なら short_eligible は全て偽
+    off = candidates(
+        Inputs(_bars(codes), master, _empty(), _empty(), alert), DAY, PREV, UniverseConfig()
+    )
+    assert not off["short_eligible"].any()
 
 
 def test_margin_long_shrink_off_keeps_long_full_but_triggers_short() -> None:
@@ -847,7 +958,9 @@ def test_margin_long_shrink_off_keeps_long_full_but_triggers_short() -> None:
 # --------------------------------------------------------------------------
 
 
-def _req(symbol: str, side: Side, trade: TradeType, qty: int = 100, seed: str = "s") -> OrderRequest:
+def _req(
+    symbol: str, side: Side, trade: TradeType, qty: int = 100, seed: str = "s"
+) -> OrderRequest:
     from wbcore.domain.models import OrderType, make_client_order_id
 
     return OrderRequest(
@@ -883,17 +996,31 @@ def test_ledger_adds_trade_column_to_old_db_and_keeps_legs(tmp_path: Path) -> No
         assert old.trade is TradeType.CASH and old.is_entry and old.leg == "long"
         # ロング（信用買い→返済売り）とショート（売建→返済買い）を同じ日に
         ledger.record(_req("7203", Side.SELL, TradeType.MARGIN_CLOSE), day, "FILLED")
-        ledger.update_status(_req("7203", Side.SELL, TradeType.MARGIN_CLOSE).client_order_id,
-                             OrderStatus.FILLED, filled_quantity=Decimal(100), avg_fill_price=Decimal(1010))
+        ledger.update_status(
+            _req("7203", Side.SELL, TradeType.MARGIN_CLOSE).client_order_id,
+            OrderStatus.FILLED,
+            filled_quantity=Decimal(100),
+            avg_fill_price=Decimal(1010),
+        )
         s_open = _req("9984", Side.SELL, TradeType.MARGIN_OPEN)
         s_close = _req("9984", Side.BUY, TradeType.MARGIN_CLOSE)
         ledger.record(s_open, day, "FILLED")
-        ledger.update_status(s_open.client_order_id, OrderStatus.FILLED, filled_quantity=Decimal(100), avg_fill_price=Decimal(5000))
+        ledger.update_status(
+            s_open.client_order_id,
+            OrderStatus.FILLED,
+            filled_quantity=Decimal(100),
+            avg_fill_price=Decimal(5000),
+        )
         ledger.record(s_close, day, "FILLED")
-        ledger.update_status(s_close.client_order_id, OrderStatus.FILLED, filled_quantity=Decimal(100), avg_fill_price=Decimal(4900))
+        ledger.update_status(
+            s_close.client_order_id,
+            OrderStatus.FILLED,
+            filled_quantity=Decimal(100),
+            avg_fill_price=Decimal(4900),
+        )
         assert {o.leg for o in ledger.entries_on(day)} == {"long", "short"}
         assert {o.symbol for o in ledger.exits_on(day)} == {"7203", "9984"}
-        assert realized_pnl(ledger, [day], leg="long") == {day: 1000.0}   # (1010−1000)×100
+        assert realized_pnl(ledger, [day], leg="long") == {day: 1000.0}  # (1010−1000)×100
         assert realized_pnl(ledger, [day], leg="short") == {day: 10000.0}  # (5000−4900)×100
         assert realized_pnl(ledger, [day]) == {day: 11000.0}
 
@@ -901,7 +1028,12 @@ def test_ledger_adds_trade_column_to_old_db_and_keeps_legs(tmp_path: Path) -> No
         day2 = dt.date(2026, 9, 2)
         s2 = _req("9984", Side.SELL, TradeType.MARGIN_OPEN, seed="d2")
         ledger.record(s2, day2, "FILLED")
-        ledger.update_status(s2.client_order_id, OrderStatus.FILLED, filled_quantity=Decimal(100), avg_fill_price=Decimal(1))
+        ledger.update_status(
+            s2.client_order_id,
+            OrderStatus.FILLED,
+            filled_quantity=Decimal(100),
+            avg_fill_price=Decimal(1),
+        )
         assert realized_pnl(ledger, [day2], leg="short") == {day2: None}
         assert realized_pnl(ledger, [day2], leg="long") == {day2: 0.0}
 
@@ -929,14 +1061,27 @@ def test_rank_short_orders_by_largest_gap_and_skips_limit_up() -> None:
     config = MarginConfig(enabled=True, max_capital=1_000_000, min_gap=Decimal("0.03"))
     ranked = rank_short(candidates, quotes, config)
     assert [r.symbol for r in ranked] == ["2000", "1000"]
-    picks = pick(candidates, quotes, n=2, budget=Decimal(500_000), config=config, ranked=ranked, side=Side.SELL)
-    assert [(p.symbol, p.side, p.quantity) for p in picks] == [("2000", Side.SELL, Decimal(400)), ("1000", Side.SELL, Decimal(400))]
+    picks = pick(
+        candidates,
+        quotes,
+        n=2,
+        budget=Decimal(500_000),
+        config=config,
+        ranked=ranked,
+        side=Side.SELL,
+    )
+    assert [(p.symbol, p.side, p.quantity) for p in picks] == [
+        ("2000", Side.SELL, Decimal(400)),
+        ("1000", Side.SELL, Decimal(400)),
+    ]
 
 
 def test_paper_broker_short_open_and_close() -> None:
     from wbcore.broker.paper import PaperBroker
 
-    broker = PaperBroker(initial_cash=Decimal(1_000_000), commission_rate=Decimal(0), slippage_rate=Decimal(0))
+    broker = PaperBroker(
+        initial_cash=Decimal(1_000_000), commission_rate=Decimal(0), slippage_rate=Decimal(0)
+    )
     broker.mark({"7203": Decimal(2500)})
     open_ = _req("7203", Side.SELL, TradeType.MARGIN_OPEN, seed="o")
     broker.place(open_)
@@ -982,16 +1127,21 @@ def _cli_env_margin(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     plans = state / "daytrade"
     plans.mkdir(parents=True)
     # A〜C はギャップダウン（ロング）、E/F はギャップアップ（ショート候補。F は貸借銘柄でない）
-    frame = _cands([("A", 1000), ("B", 1000), ("C", 1000), ("E", 1000), ("F", 1000)]).with_columns(
-        segment=pl.lit("prime"),
-        prev_close=pl.col("prev_close").cast(pl.Float64),
-        turnover_med=pl.lit(5e8),
-        mkt_cap=pl.lit(9000.0),
-        cap_tercile=pl.lit(3, dtype=pl.Int32),
-        earn_prev=pl.lit(False),
-        disc_today=pl.lit(False),
-        alert=pl.lit(False),
-        shortable=pl.Series([True, True, True, True, False]),
+    frame = (
+        _cands([("A", 1000), ("B", 1000), ("C", 1000), ("E", 1000), ("F", 1000)])
+        .with_columns(
+            segment=pl.lit("prime"),
+            prev_close=pl.col("prev_close").cast(pl.Float64),
+            turnover_med=pl.lit(5e8),
+            mkt_cap=pl.lit(9000.0),
+            cap_tercile=pl.lit(3, dtype=pl.Int32),
+            earn_prev=pl.lit(False),
+            disc_today=pl.lit(False),
+            alert=pl.lit(False),
+            jsf_stop=pl.lit(False),
+            shortable=pl.Series([True, True, True, True, False]),
+        )
+        .with_columns(short_eligible=pl.col("shortable"))
     )
     frame.write_parquet(plans / f"plan-{DAY}.parquet")
     meta = {
@@ -1024,7 +1174,9 @@ def test_open_and_close_dry_run_with_margin(tmp_path: Path) -> None:
     common = ["--date", DAY.isoformat(), "--config-dir", str(cfg)]
     runner = CliRunner()
     result = runner.invoke(
-        app, ["open", *common, "--quote-source", "csv", "--quote-file", str(tmp_path / "q.csv")], env=env
+        app,
+        ["open", *common, "--quote-source", "csv", "--quote-file", str(tmp_path / "q.csv")],
+        env=env,
     )
     assert result.exit_code == 0, result.stdout
     with Ledger(tmp_path / "state" / "daytrade-uat.db") as ledger:

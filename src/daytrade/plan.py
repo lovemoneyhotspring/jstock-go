@@ -33,6 +33,8 @@ class PlanMeta:
     candidates: int
     eligible: int
     created_at: str
+    #: ショート（``[margin]``）の対象数。古い plan には無い
+    short_eligible: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,13 @@ class Plan:
     @property
     def eligible(self) -> pl.DataFrame:
         return self.frame.filter(pl.col("eligible"))
+
+    @property
+    def short_eligible(self) -> pl.DataFrame:
+        """ショートの対象（``short_eligible`` 列が無い古い plan は空）。"""
+        if "short_eligible" not in self.frame.columns:
+            return self.frame.clear()
+        return self.frame.filter(pl.col("short_eligible"))
 
 
 def plan_paths(directory: Path, day: dt.date) -> tuple[Path, Path]:
@@ -94,7 +103,7 @@ def build(
     cal = calendar or TradingCalendar.from_archive(archive)
     prev_day = cal.previous_trading_day(day)
     inputs = load_inputs(archive, prev_day, day, config)
-    frame = candidates(inputs, day, prev_day, config.universe)
+    frame = candidates(inputs, day, prev_day, config.universe, config.margin)
     from daytrade.regime import topix_drift
 
     meta = PlanMeta(
@@ -108,6 +117,7 @@ def build(
         candidates=frame.height,
         eligible=int(frame["eligible"].sum()),
         created_at=(now or dt.datetime.now(dt.UTC)).isoformat(timespec="seconds"),
+        short_eligible=int(frame["short_eligible"].sum()),
     )
     return Plan(meta=meta, frame=frame)
 
