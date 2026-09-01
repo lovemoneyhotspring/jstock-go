@@ -1292,12 +1292,26 @@ def _backtest_margin(
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from None
-    cash = config.capital.max_capital
+    m = config.margin
+    cash = m.cash or config.capital.max_capital
+    # 立花証券の委託保証金率 33%。長短を同時に最大で建てた日に要る保証金
+    peak = config.capital.max_capital + m.max_capital * max(
+        m.multiplier_normal, m.multiplier_long_weak
+    )
+    required = peak * Decimal("0.33")
     console.print(
-        f"{start}〜{end}  現金 {_yen(cash)} 円（保証金）  ロング N={config.capital.positions} "
-        f"{_yen(config.capital.max_capital)} 円  ショート N={config.margin.positions} "
-        f"{_yen(config.margin.max_capital)} 円 × 通常 {config.margin.multiplier_normal:g} / "
-        f"弱 {config.margin.multiplier_long_weak:g}  営業日 {result.summary.days}"
+        f"{start}〜{end}  現金 {_yen(cash)} 円  ロング N={config.capital.positions} "
+        f"{_yen(config.capital.max_capital)} 円（縮小{'あり' if m.long_shrink else 'なし'}）  "
+        f"ショート N={m.positions} {_yen(m.max_capital)} 円 × 通常 {m.multiplier_normal:g} / "
+        f"弱 {m.multiplier_long_weak:g}  営業日 {result.summary.days}"
+    )
+    console.print(
+        f"建玉の最大 {_yen(peak)} 円 → 保証金 33% で {_yen(required)} 円"
+        + (
+            f"  [red]現金 {_yen(cash)} 円を超えています[/red]"
+            if required > cash
+            else f"（現金の {float(required / cash):.0%}）"
+        )
     )
     for label, s in (
         ("合算", result.summary),

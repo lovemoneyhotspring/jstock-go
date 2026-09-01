@@ -816,3 +816,27 @@ def test_margin_config_defaults_off_and_validates() -> None:
         DaytradeConfig.model_validate({"margin": {"multiplier_long_weak": -1}})
     with pytest.raises(ValueError):
         DaytradeConfig.model_validate({"margin": {"min_gap": 2}})
+
+
+def test_margin_long_shrink_off_keeps_long_full_but_triggers_short() -> None:
+    """long_shrink=false: 合図の日もロングは 1.0 のまま、ショートだけ建つ。"""
+    from daytrade.backtest import simulate_margin
+    from daytrade.config import DaytradeConfig
+
+    days = [dt.date(2026, 6, 1) + dt.timedelta(days=i) for i in range(5)]
+    panel = _margin_panel(days).with_columns(
+        C=pl.when((pl.col("Code") == "10000") & (pl.col("Date") <= days[2]))
+        .then(990.0)
+        .otherwise(pl.col("C"))
+    )
+    config = DaytradeConfig.model_validate(
+        {
+            **_margin_config(
+                multiplier_normal=0.0, multiplier_long_weak=1.0, long_shrink=False
+            ).model_dump(),
+            "regime": {"equity_curve_days": 2, "equity_curve_scale": 0.5},
+        }
+    )
+    daily = simulate_margin(panel, config).daily.sort("Date")
+    assert daily["long_scale"].to_list()[:4] == [1.0, 1.0, 1.0, 1.0]
+    assert daily["short_multiplier"].to_list()[:4] == [0.0, 0.0, 1.0, 1.0]

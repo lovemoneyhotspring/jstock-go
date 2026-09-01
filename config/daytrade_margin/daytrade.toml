@@ -12,8 +12,11 @@
 
 [capital]
 enabled = true
-max_capital = 2000000      # 円。ロング側の 1 日の上限（現金 200 万円がそのまま保証金になる）
-order_budget = 670000
+# ロング側の 1 日の建玉上限（円）。信用買いなので現金（200 万円 = 保証金）より大きくできる。
+# 200 万 = 現行 jp_gap_fade と同じ DD、300 万 = Sharpe・DD% を保ったまま利益 +46%、400 万 = DD −41%。
+# 保証金率 33% なので長短合計 600 万円まで（300 万 + ショート 200 万 = 500 万、保証金 165 万）。
+max_capital = 3000000
+order_budget = 1000000     # N = 3。手数料 0 円なので 67 万円の段階（20〜100 万一律）に縛られない
 max_positions = 10
 weighting = "inverse_vol"
 
@@ -36,14 +39,15 @@ iv_gate = 0.0
 skip_months = [12]
 drift_days = 20
 drift_gap_override = 0.01
-equity_curve_days = 20     # ロング側の直近 20 日損益 ≤ 0 → ロング 1/2 に縮小。**ショートはこの日に増強する**（シーソー）
-equity_curve_scale = 0.5
+equity_curve_days = 20     # ロング側の直近 20 日損益 ≤ 0 が「地合いが弱い」合図。ショートはこの日に建てる（シーソー）
+equity_curve_scale = 0.5   # 合図の日にロングを縮める倍率。margin.long_shrink = false のときロングには効かない（合図だけ使う）
 us_skip_low = 0.0
 us_skip_high = 0.01
 us_vix_override = 24
 
 [margin]
 enabled = true
+cash = 2000000             # 保証金として差し入れる現金（円）。年率・DD はこれに対して見る
 max_capital = 2000000      # ショート側の 1 日の上限（円）。倍率 1.0 のときの建玉金額
 order_budget = 670000      # ロングと同額（1 注文が小さいと滑りの bp 負担が上がる）
 max_positions = 10
@@ -55,6 +59,9 @@ skip_limit_up = true       # 寄付がストップ高の銘柄は売らない
 # 検証ではロング縮小日のショート平均が通常日の 6 倍。常時売る（normal 0.5〜1.0）と利益は増えるが DD も増える。
 multiplier_normal = 0.0
 multiplier_long_weak = 1.0
+# jp_gap_fade はショートが無い前提で、合図の日にロングを 1/2 に縮めて DD を抑えていた。ここではショートが
+# 下げを受け止めるので、ロングは縮めず利益を追う。縮小あり→なしで合算利益は同じ、DD −58→−52 万・最長 DD 242→190 日。
+long_shrink = false
 # 往復コスト（bp）。信用手数料 0 円 + 貸株料（年 1.15%、日計り 1 日分 ≈ 0.3 bp）+ 滑り 5 bp の見込み。
 extra_cost_bp = 5.3
 # ロングも信用買い（日計り）で建てる。手数料 0 円、金利 年 2.50% の 1 日分 ≈ 0.7 bp + 滑り 5 bp

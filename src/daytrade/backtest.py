@@ -615,12 +615,18 @@ def _apply_regime_seesaw(
             vix=row.get("vix"),
         )
         verdict = evaluate(r, signals)
-        long_scale = verdict.scale if verdict.trade else 0.0
+        weak = verdict.trade and verdict.scale < 1.0  # 資産曲線の合図（地合いが弱い）
+        if not verdict.trade:
+            long_scale = 0.0
+        elif weak and not m.long_shrink:
+            long_scale = 1.0  # 合図はショートにだけ使い、ロングは縮めない
+        else:
+            long_scale = verdict.scale
         long_scales.append(long_scale)
         if not verdict.trade:
             short_multiplier = 0.0  # 危険信号そのものはショートも止める
-        elif long_scale < 1.0:
-            short_multiplier = float(m.multiplier_long_weak)  # ロングが縮小＝シーソーで増強
+        elif weak:
+            short_multiplier = float(m.multiplier_long_weak)  # シーソーで増強
         else:
             short_multiplier = float(m.multiplier_normal)
         short_multipliers.append(short_multiplier)

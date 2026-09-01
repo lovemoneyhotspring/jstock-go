@@ -101,6 +101,10 @@ class MarginConfig(BaseModel):
 
     #: ショートのオン／オフ。false なら ``jp_gap_fade`` と同じ動き（ロングのみ）。
     enabled: bool = False
+    #: 保証金として差し入れる現金（円）。信用取引では建玉（``capital.max_capital`` +
+    #: ``margin.max_capital``）が現金より大きくなるため、年率や DD はこれに対して見る。
+    #: 0 なら ``capital.max_capital`` を現金とみなす。
+    cash: Decimal = Decimal(0)
     #: 1 日に使う資金の上限（円）。``[capital]`` と同じ意味だがショート専用の枠。
     max_capital: Decimal = Decimal(0)
     order_budget: Decimal = Decimal(670_000)
@@ -119,6 +123,10 @@ class MarginConfig(BaseModel):
     #: 「弱い日だけ売る」にする選択肢もある。
     multiplier_normal: Decimal = Decimal(1)
     multiplier_long_weak: Decimal = Decimal("1.5")
+    #: ロング側の資産曲線による縮小（``regime.equity_curve_scale``）を効かせるか。
+    #: false にすると、合図（直近 N 日の損益 ≤ 0）はショートのシーソーにだけ使い、
+    #: ロングは縮めない——ドローダウンをショートで受け止め、買いは利益を追う設計。
+    long_shrink: bool = True
     #: ショートの往復コスト（bp、約定代金に対して）。立花証券は信用手数料 0 円で、
     #: 貸株料 年 1.15% の日計り 1 日分 ≈ 0.3 bp。残りは滑り（板の厚さ）の見込み。
     extra_cost_bp: Decimal = Decimal(5)
@@ -135,6 +143,7 @@ class MarginConfig(BaseModel):
         return v
 
     @field_validator(
+        "cash",
         "max_capital",
         "extra_cost_bp",
         "long_extra_cost_bp",
