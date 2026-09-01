@@ -18,7 +18,7 @@ import polars as pl
 
 from daytrade.config import DaytradeConfig
 from daytrade.fees import commission
-from daytrade.select import gap_rank_expr
+from daytrade.select import gap_rank_expr, short_rank_expr
 from daytrade.universe import (
     STOCK_PRODUCT,
     VOL_DAYS,
@@ -96,6 +96,8 @@ def load_panel(
         pl.col("Code").cast(pl.String),
         segment=segment_expr(),
         product=pl.col("ProdCat"),
+        # 貸借銘柄（信用売りができる）。"2" = 貸借（出典: equities/master の Mrgn/MrgnNm）。
+        shortable=pl.col("Mrgn") == "2",
     )
     days = bars.select("Date").unique().sort("Date").with_row_index("di")
     win = config.universe.turnover_days
@@ -158,6 +160,7 @@ def load_panel(
     return (
         panel.with_columns(pl.col("earn_prev", "disc_today", "alert").fill_null(False))
         .with_columns(segment=pl.col("segment").fill_null("other"))
+        .with_columns(shortable=pl.col("shortable").fill_null(False))
         .with_columns(eligible=eligible_expr(config.universe) & pl.col("prev_close").is_not_null())
         .with_columns(gap=pl.col("O") / pl.col("prev_close") - 1)
     )
@@ -311,6 +314,343 @@ def simulate(
     return Result(daily=daily, trades=picks.sort("Date", "rank"), summary=_summary(daily, capital))
 
 
+# --------------------------------------------------------------------------
+# jp_gap_fade_margin: ロング（gap_fade）+ ショート（信用売り）
+# --------------------------------------------------------------------------
+
+
+def _pick_and_price(
+    eligible: pl.DataFrame,
+    rank_expr: pl.Expr,
+    *,
+    n: int,
+    budget: float,
+    capital: float,
+    weighting: str,
+    sign: int,
+    extra_cost_bp: float = 0.0,
+    commission: bool = True,
+) -> pl.DataFrame:
+    """ランク付け・按分・価格付けの共通部分（:func:`simulate` のロング側の計算を一般化）。
+
+    ``sign`` が損益の向き（買い +1: ``C − O``、売り −1: ``O − C``）。``extra_cost_bp`` は
+    約定代金に対する往復の概算コスト（貸株料・金利・滑り、bp）。``commission`` を
+    偽にすると段階制の手数料（:func:`_fee_expr`）を掛けない（立花証券の信用取引は 0 円）。
+    """
+    picks = (
+        eligible.with_columns(shares=(pl.lit(budget) / (pl.col("O") * 100)).floor() * 100)
+        .filter(pl.col("shares") >= 100)
+        .with_columns(rank=rank_expr)
+        .filter(pl.col("rank").is_not_null(), pl.col("rank") <= n)
+    )
+    if weighting == "inverse_vol":
+        from daytrade.select import VOL_FLOOR
+
+        if "vol20" not in picks.columns:
+            picks = picks.with_columns(vol20=pl.lit(None, dtype=pl.Float64))
+        picks = (
+            picks.with_columns(
+                w=1.0 / pl.max_horizontal(pl.col("vol20").fill_null(VOL_FLOOR), pl.lit(VOL_FLOOR))
+            )
+            .with_columns(
+                shares=(
+                    pl.lit(capital)
+                    * pl.col("w")
+                    / pl.col("w").sum().over("Date")
+                    / (pl.col("O") * 100)
+                ).floor()
+                * 100
+            )
+            .filter(pl.col("shares") >= 100)
+        )
+    base_fee = 2 * _fee_expr(pl.col("amount")) if commission else pl.lit(0.0)
+    return (
+        picks.with_columns(amount=pl.col("shares") * pl.col("O"))
+        .with_columns(
+            fees=base_fee + pl.col("amount") * (extra_cost_bp / 1e4),
+            gross=pl.col("shares") * sign * (pl.col("C") - pl.col("O")),
+        )
+        .with_columns(pnl=pl.col("gross") - pl.col("fees"))
+    )
+
+
+def _daily_from_picks(picks: pl.DataFrame, panel: pl.DataFrame) -> pl.DataFrame:
+    """1 レッグぶんの日次集計（取引の無い日も 0 で並べる）。"""
+    daily = (
+        picks.group_by("Date")
+        .agg(
+            pnl=pl.col("pnl").sum(),
+            gross=pl.col("gross").sum(),
+            fees=pl.col("fees").sum(),
+            amount=pl.col("amount").sum(),
+            n=pl.len(),
+        )
+        .sort("Date")
+    )
+    all_days = panel.select("Date").unique().sort("Date")
+    return all_days.join(daily, on="Date", how="left").with_columns(
+        pl.col("pnl", "gross", "fees", "amount").fill_null(0.0), pl.col("n").fill_null(0)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MarginResult:
+    """:func:`simulate_margin` の結果。ロング・ショートを合算した ``daily`` に加え、
+    レッグごとの内訳（``long_*`` / ``short_*`` 列と個別の :class:`Summary`）を持つ。
+    """
+
+    daily: pl.DataFrame
+    long_trades: pl.DataFrame
+    short_trades: pl.DataFrame
+    summary: Summary
+    long_summary: Summary
+    short_summary: Summary
+
+    def yearly(self) -> pl.DataFrame:
+        return (
+            self.daily.group_by(pl.col("Date").dt.year().alias("year"))
+            .agg(
+                days=pl.len(),
+                traded=(pl.col("n") > 0).sum(),
+                pnl=pl.col("pnl").sum(),
+                long_pnl=pl.col("long_pnl").sum(),
+                short_pnl=pl.col("short_pnl").sum(),
+                mean_daily=pl.col("pnl").mean(),
+                win=(pl.col("pnl") > 0).filter(pl.col("n") > 0).mean(),
+            )
+            .sort("year")
+        )
+
+
+def simulate_margin(
+    panel: pl.DataFrame,
+    config: DaytradeConfig,
+    *,
+    iv: pl.DataFrame | None = None,
+    drift: pl.DataFrame | None = None,
+    us: pl.DataFrame | None = None,
+) -> MarginResult:
+    """ロング（``jp_gap_fade`` と同じ規則）とショート（信用売り）を合わせて検証する。
+
+    ショート側の資金配分は、ロング側の資産曲線ゲート（``regime.equity_curve_days`` /
+    ``equity_curve_scale``）に連動する「シーソー」——ロング側が通常運転の日は
+    ``margin.multiplier_normal`` 倍、縮小された日は ``margin.multiplier_long_weak`` 倍。
+    危険信号そのもの（月・IV 等、``verdict.trade is False``）で止まる日は両側とも休む。
+
+    倍率によるショートの増減は、実際にその倍率で銘柄を
+    選び直す（単元の切り捨てをやり直す）のではなく、基準資金で選んだ結果の
+    損益を後から掛け増す近似——既存の ``equity_curve_scale`` によるロングの
+    縮小と同じ手法。
+    """
+    if not config.margin.enabled:
+        raise ValueError(
+            "margin.enabled が false です（jp_gap_fade と同じ結果になるので simulate を使う）"
+        )
+    n_long = config.capital.positions
+    n_short = config.margin.positions
+    if n_long == 0:
+        raise ValueError("capital.max_capital が 0 のため検証できません")
+    if n_short == 0:
+        raise ValueError("margin.max_capital が 0 のためショートを検証できません")
+
+    long_capital = float(config.capital.max_capital)
+    short_capital = float(config.margin.max_capital)
+
+    long_eligible = panel.filter(pl.col("eligible"))
+    if config.signal.skip_limit_down:
+        low = (pl.col("prev_close") - limit_width_expr(pl.col("prev_close"))).clip(lower_bound=1.0)
+        long_eligible = long_eligible.filter(pl.col("O") > low)
+    long_picks = _pick_and_price(
+        long_eligible,
+        gap_rank_expr(config.signal, over="Date"),
+        n=n_long,
+        budget=float(config.capital.budget_per_order),
+        capital=long_capital,
+        weighting=config.capital.weighting,
+        sign=1,
+        # 信用買い（日計り）なら手数料 0 円。金利・滑りは long_extra_cost_bp で見る
+        extra_cost_bp=float(config.margin.long_extra_cost_bp) if config.margin.long_via_margin else 0.0,
+        commission=not config.margin.long_via_margin,
+    )
+
+    short_eligible = panel.filter(pl.col("eligible") & pl.col("shortable"))
+    if config.margin.skip_limit_up:
+        high = pl.col("prev_close") + limit_width_expr(pl.col("prev_close"))
+        short_eligible = short_eligible.filter(pl.col("O") < high)
+    short_picks = _pick_and_price(
+        short_eligible,
+        short_rank_expr(config.margin, over="Date"),
+        n=n_short,
+        budget=float(config.margin.budget_per_order),
+        capital=short_capital,
+        weighting=config.margin.weighting,
+        sign=-1,
+        extra_cost_bp=float(config.margin.extra_cost_bp),
+        commission=False,  # 立花証券の信用取引は手数料 0 円
+    )
+
+    long_daily = _daily_from_picks(long_picks, panel)
+    short_daily = _daily_from_picks(short_picks, panel)
+
+    market_gap = (
+        panel.filter(pl.col("eligible")).group_by("Date").agg(market_gap=pl.col("gap").median())
+    )
+    combined = _apply_regime_seesaw(
+        long_daily, short_daily, config, iv=iv, drift=drift, market_gap=market_gap, us=us
+    )
+
+    long_trades = long_picks.join(
+        combined.select("Date", "long_scale"), on="Date", how="left"
+    ).filter(pl.col("long_scale") > 0)
+    short_trades = short_picks.join(
+        combined.select("Date", "short_multiplier"), on="Date", how="left"
+    ).filter(pl.col("short_multiplier") > 0)
+
+    return MarginResult(
+        daily=combined,
+        long_trades=long_trades.sort("Date", "rank"),
+        short_trades=short_trades.sort("Date", "rank"),
+        summary=_summary(combined, long_capital + short_capital),
+        long_summary=_summary(
+            combined.select(
+                "Date",
+                pnl=pl.col("long_pnl"),
+                amount=pl.col("long_amount"),
+                fees=pl.col("long_fees"),
+                n=pl.col("long_n"),
+            ),
+            long_capital,
+        ),
+        short_summary=_summary(
+            combined.select(
+                "Date",
+                pnl=pl.col("short_pnl"),
+                amount=pl.col("short_amount"),
+                fees=pl.col("short_fees"),
+                n=pl.col("short_n"),
+            ),
+            short_capital,
+        ),
+    )
+
+
+def _apply_regime_seesaw(
+    long_daily: pl.DataFrame,
+    short_daily: pl.DataFrame,
+    config: DaytradeConfig,
+    *,
+    iv: pl.DataFrame | None,
+    drift: pl.DataFrame | None,
+    market_gap: pl.DataFrame,
+    us: pl.DataFrame | None,
+) -> pl.DataFrame:
+    """日ごとに :func:`daytrade.regime.evaluate` を呼び、ロングの資産曲線ゲートに
+    応じてショートの資金をシーソーさせる。
+
+    「戦略自身の直近の損益」（資産曲線ゲートの入力）は :func:`_apply_regime` と同じ定義
+    ——**ロング側**（gap_fade）の実現損益のみを見る。ショート側の成績でロング側を
+    動かすことはしない（ロングは既存 ``jp_gap_fade`` と同じ挙動を保つため）。
+    """
+    from daytrade.regime import Signals, evaluate
+
+    r = config.regime
+    m = config.margin
+    if r.iv_gate > 0 and (iv is None or iv.height == 0):
+        raise ValueError("iv_gate を使うにはオプションのアーカイブが要ります")
+    if r.drift_gate is not None and (drift is None or drift.height == 0):
+        raise ValueError("drift_gate を使うには TOPIX のアーカイブが要ります")
+    if r.us_skip_high is not None and (us is None or us.height == 0):
+        raise ValueError("us_skip_high を使うには米国市場のデータが要ります（yfinance）")
+
+    frame = (
+        long_daily.rename(
+            {"pnl": "long_pnl", "gross": "long_gross", "fees": "long_fees", "amount": "long_amount", "n": "long_n"}
+        )
+        .join(
+            short_daily.rename(
+                {
+                    "pnl": "short_pnl",
+                    "gross": "short_gross",
+                    "fees": "short_fees",
+                    "amount": "short_amount",
+                    "n": "short_n",
+                }
+            ),
+            on="Date",
+        )
+        .join(market_gap, on="Date", how="left")
+    )
+    frame = (
+        frame.join(iv, on="Date", how="left")
+        if iv is not None and iv.height
+        else frame.with_columns(iv_prev=None)
+    )
+    frame = (
+        frame.join(drift, on="Date", how="left")
+        if drift is not None and drift.height
+        else frame.with_columns(drift=None)
+    )
+    frame = frame.join(us, on="Date", how="left") if us is not None and us.height else frame.with_columns(
+        spx_ret=None, vix=None
+    )
+    frame = frame.sort("Date")
+
+    long_pnl_list = frame["long_pnl"].to_list()
+    long_scales: list[float] = []
+    short_multipliers: list[float] = []
+    for i, row in enumerate(frame.iter_rows(named=True)):
+        recent = None
+        if r.equity_curve_days > 0 and i >= r.equity_curve_days:
+            # 前日までの「ロング側」実現損益（縮めた日はその倍率で数える＝実運用と同じ）
+            recent = sum(
+                long_pnl_list[j] * long_scales[j] for j in range(i - r.equity_curve_days, i)
+            )
+        signals = Signals(
+            day=row["Date"],
+            iv_prev=row.get("iv_prev"),
+            drift=row.get("drift"),
+            market_gap=row.get("market_gap"),
+            recent_pnl=recent,
+            us_ret=row.get("spx_ret"),
+            vix=row.get("vix"),
+        )
+        verdict = evaluate(r, signals)
+        long_scale = verdict.scale if verdict.trade else 0.0
+        long_scales.append(long_scale)
+        if not verdict.trade:
+            short_multiplier = 0.0  # 危険信号そのものはショートも止める
+        elif long_scale < 1.0:
+            short_multiplier = float(m.multiplier_long_weak)  # ロングが縮小＝シーソーで増強
+        else:
+            short_multiplier = float(m.multiplier_normal)
+        short_multipliers.append(short_multiplier)
+
+    frame = frame.with_columns(
+        long_scale=pl.Series(long_scales, dtype=pl.Float64),
+        short_multiplier=pl.Series(short_multipliers, dtype=pl.Float64),
+    )
+    frame = frame.with_columns(
+        long_pnl=pl.col("long_pnl") * pl.col("long_scale"),
+        long_gross=pl.col("long_gross") * pl.col("long_scale"),
+        long_fees=pl.col("long_fees") * pl.col("long_scale"),
+        long_amount=pl.col("long_amount") * pl.col("long_scale"),
+        long_n=pl.when(pl.col("long_scale") > 0).then(pl.col("long_n")).otherwise(0),
+        short_pnl=pl.col("short_pnl") * pl.col("short_multiplier"),
+        short_gross=pl.col("short_gross") * pl.col("short_multiplier"),
+        short_fees=pl.col("short_fees") * pl.col("short_multiplier"),
+        short_amount=pl.col("short_amount") * pl.col("short_multiplier"),
+        short_n=pl.when(pl.col("short_multiplier") > 0).then(pl.col("short_n")).otherwise(0),
+    )
+    return frame.with_columns(
+        pnl=pl.col("long_pnl") + pl.col("short_pnl"),
+        gross=pl.col("long_gross") + pl.col("short_gross"),
+        fees=pl.col("long_fees") + pl.col("short_fees"),
+        amount=pl.col("long_amount") + pl.col("short_amount"),
+        n=pl.col("long_n") + pl.col("short_n"),
+        on=(pl.col("long_scale") > 0) | (pl.col("short_multiplier") > 0),
+    )
+
+
 def _apply_regime(
     daily: pl.DataFrame,
     config: DaytradeConfig,
@@ -434,6 +774,28 @@ def run(
         cache = us_cache or (archive.root.parent / "daytrade" / "us.parquet")
         us = as_of_frame(history(cache, start, end), panel.select("Date").unique())
     return simulate(panel, config, iv=iv, drift=drift, us=us)
+
+
+def run_margin(
+    archive: Archive,
+    config: DaytradeConfig,
+    start: dt.date,
+    end: dt.date,
+    *,
+    us_cache: Path | None = None,
+) -> MarginResult:
+    """:func:`run` のロング＋ショート版（:func:`simulate_margin`）。"""
+    from daytrade.regime import topix_drift_series
+    from daytrade.usmarket import as_of_frame, history
+
+    panel = load_panel(archive, start, end, config)
+    iv = iv_by_day(archive, start, end)
+    drift = topix_drift_series(archive, start, end, config.regime.drift_days)
+    us = None
+    if config.regime.us_skip_high is not None:
+        cache = us_cache or (archive.root.parent / "daytrade" / "us.parquet")
+        us = as_of_frame(history(cache, start, end), panel.select("Date").unique())
+    return simulate_margin(panel, config, iv=iv, drift=drift, us=us)
 
 
 def daily_commission(amount: Decimal) -> Decimal:

@@ -1,0 +1,71 @@
+# デイトレ jp_gap_fade_margin の設定。**秘密はここに書かない。**
+#
+# jp_gap_fade（config/daytrade）に信用売り（ショート）の脚を足したもの。立花証券 e支店で
+# 運用する前提（信用手数料 0 円・貸借銘柄の新規売り・日計り）。ロング側の規則は
+# jp_gap_fade と同じで、ショート側はその鏡像（ギャップ「上位」を寄付で売り、大引で買い戻す）。
+#
+# 使い方:  uv run daytrade plan  --config-dir config/daytrade_margin
+#          uv run daytrade backtest --config-dir config/daytrade_margin
+#
+# 根拠と数字は docs/research/2026-08-jp-daytrade-selection.md「信用売り（2026-09-01 追記）」。
+# 発注側（open / close のショート対応）は未実装。バックテストのみ通る。
+
+[capital]
+enabled = true
+max_capital = 2000000      # 円。ロング側の 1 日の上限（現金 200 万円がそのまま保証金になる）
+order_budget = 670000
+max_positions = 10
+weighting = "inverse_vol"
+
+[universe]
+segments = ["prime"]
+min_turnover = 100000000
+turnover_days = 20
+exclude_cap_terciles = 1
+exclude_earnings_prev = true
+exclude_earnings_today = true
+exclude_margin_alert = true  # ショート側にも同じ除外を使う（慎重側。研究ノート「事実 4」の逆用は未検証）
+
+[signal]
+max_gap = 0.0
+min_gap = -1.0
+skip_limit_down = true
+
+[regime]
+iv_gate = 0.0
+skip_months = [12]
+drift_days = 20
+drift_gap_override = 0.01
+equity_curve_days = 20     # ロング側の直近 20 日損益 ≤ 0 → ロング 1/2 に縮小。**ショートはこの日に増強する**（シーソー）
+equity_curve_scale = 0.5
+us_skip_low = 0.0
+us_skip_high = 0.01
+us_vix_override = 24
+
+[margin]
+enabled = true
+max_capital = 2000000      # ショート側の 1 日の上限（円）。倍率 1.0 のときの建玉金額
+order_budget = 670000      # ロングと同額（1 注文が小さいと滑りの bp 負担が上がる）
+max_positions = 10
+weighting = "inverse_vol"
+min_gap = 0.03             # ギャップ +3% 以上だけ売る。0〜1% は負け、+3% が Sharpe の頂点（研究ノート）
+max_gap = 1.0
+skip_limit_up = true       # 寄付がストップ高の銘柄は売らない
+# シーソー: ロング側が通常運転の日はショート 0（＝売らない）、ロング側が資産曲線で縮小された日だけ 1.0 倍で売る。
+# 検証ではロング縮小日のショート平均が通常日の 6 倍。常時売る（normal 0.5〜1.0）と利益は増えるが DD も増える。
+multiplier_normal = 0.0
+multiplier_long_weak = 1.0
+# 往復コスト（bp）。信用手数料 0 円 + 貸株料（年 1.15%、日計り 1 日分 ≈ 0.3 bp）+ 滑り 5 bp の見込み。
+extra_cost_bp = 5.3
+# ロングも信用買い（日計り）で建てる。手数料 0 円、金利 年 2.50% の 1 日分 ≈ 0.7 bp + 滑り 5 bp
+long_via_margin = true
+long_extra_cost_bp = 5.7
+
+[execution]
+broker = "tachibana"
+tax_account_type = "SPECIFIC"
+quote_source = "webull"    # 未解決（Webull の市場データは US のみ）。立花証券の CLMMfdsGetMarketPrice への切替が要る
+entry_window = ["09:00", "09:15"]
+exit_window = ["15:20", "15:30"]
+kill_switch = false
+max_quote_age = 90

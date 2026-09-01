@@ -718,3 +718,101 @@ def test_backtest_scale_halves_pnl_after_losses() -> None:
     assert scales[:2] == [1.0, 1.0]  # 履歴が足りない
     assert scales[2] == 0.5 and scales[3] == 0.5  # 負けが続いた後は半分
     assert scales[-1] == 1.0  # 勝ちが続けば戻る
+
+
+# --------------------------------------------------------------------------
+# jp_gap_fade_margin（信用売り）
+# --------------------------------------------------------------------------
+
+
+def _margin_panel(days: list[dt.date]) -> pl.DataFrame:
+    """ロング候補（ギャップダウン）1 つとショート候補（ギャップアップ）2 つ。
+    ショート候補のうち 1 つは貸借銘柄でない。"""
+    rows = []
+    for day in days:
+        rows += [
+            # ロング: −5% で寄って +1% 戻す
+            {"Date": day, "Code": "10000", "O": 1000.0, "C": 1010.0, "prev_close": 1052.6,
+             "gap": 1000 / 1052.6 - 1, "eligible": True, "shortable": True, "vol20": 0.02},
+            # ショート: +5% で寄って引けに 990 → 売り方の利益
+            {"Date": day, "Code": "20000", "O": 1000.0, "C": 990.0, "prev_close": 952.4,
+             "gap": 1000 / 952.4 - 1, "eligible": True, "shortable": True, "vol20": 0.02},
+            # 同じ形だが貸借銘柄でない → 売れない
+            {"Date": day, "Code": "30000", "O": 1000.0, "C": 900.0, "prev_close": 952.4,
+             "gap": 1000 / 952.4 - 1, "eligible": True, "shortable": False, "vol20": 0.02},
+        ]
+    return pl.DataFrame(rows)
+
+
+def _margin_config(**margin: object):
+    from daytrade.config import DaytradeConfig
+
+    return DaytradeConfig.model_validate(
+        {
+            "capital": {"max_capital": 1_000_000, "order_budget": 1_000_000, "weighting": "equal"},
+            "margin": {
+                "enabled": True,
+                "max_capital": 1_000_000,
+                "order_budget": 1_000_000,
+                "weighting": "equal",
+                "min_gap": 0.03,
+                "extra_cost_bp": 0,
+                "long_via_margin": True,
+                "long_extra_cost_bp": 0,
+                **margin,
+            },
+        }
+    )
+
+
+def test_margin_short_pnl_is_open_minus_close_and_only_shortable() -> None:
+    from daytrade.backtest import simulate_margin
+
+    result = simulate_margin(_margin_panel([dt.date(2026, 6, 1)]), _margin_config())
+    short = result.short_trades
+    assert short["Code"].to_list() == ["20000"]  # 貸借銘柄でない 30000 は入らない
+    assert short["gross"][0] == 1000 * (1000.0 - 990.0)  # 1,000 株 × (O − C)
+    long = result.long_trades
+    assert long["Code"].to_list() == ["10000"]
+    assert long["fees"][0] == 0.0  # 信用買いは手数料 0 円
+    day = result.daily.row(0, named=True)
+    assert day["pnl"] == day["long_pnl"] + day["short_pnl"]
+
+
+def test_margin_seesaw_follows_long_equity_curve() -> None:
+    """ロング側が資産曲線で縮小された日だけショートを建てる（通常 0 / 弱 1.5）。"""
+    from daytrade.backtest import simulate_margin
+    from daytrade.config import DaytradeConfig
+
+    days = [dt.date(2026, 6, 1) + dt.timedelta(days=i) for i in range(5)]
+    panel = _margin_panel(days)
+    # ロングを最初の 3 日負けさせる（C < O）。ショート側の行はそのまま
+    panel = panel.with_columns(
+        C=pl.when((pl.col("Code") == "10000") & (pl.col("Date") <= days[2]))
+        .then(990.0)
+        .otherwise(pl.col("C"))
+    )
+    config = DaytradeConfig.model_validate(
+        {
+            **_margin_config(multiplier_normal=0.0, multiplier_long_weak=1.5).model_dump(),
+            "regime": {"equity_curve_days": 2, "equity_curve_scale": 0.5},
+        }
+    )
+    result = simulate_margin(panel, config)
+    daily = result.daily.sort("Date")
+    assert daily["long_scale"].to_list()[:4] == [1.0, 1.0, 0.5, 0.5]
+    assert daily["short_multiplier"].to_list()[:4] == [0.0, 0.0, 1.5, 1.5]
+    # 通常日はショートの損益 0、縮小日は 1.5 倍
+    assert daily["short_pnl"][0] == 0.0
+    assert daily["short_pnl"][2] == 1.5 * 1000 * (1000.0 - 990.0)
+    assert daily["short_n"][0] == 0 and daily["short_n"][2] == 1
+
+
+def test_margin_config_defaults_off_and_validates() -> None:
+    from daytrade.config import DaytradeConfig, MarginConfig
+
+    assert not MarginConfig().enabled and MarginConfig().positions == 0
+    with pytest.raises(ValueError):
+        DaytradeConfig.model_validate({"margin": {"multiplier_long_weak": -1}})
+    with pytest.raises(ValueError):
+        DaytradeConfig.model_validate({"margin": {"min_gap": 2}})

@@ -87,6 +87,95 @@ class CapitalConfig(BaseModel):
         return (self.max_capital / n).quantize(Decimal(1), rounding=ROUND_DOWN)
 
 
+class MarginConfig(BaseModel):
+    """信用売り（ショート）の資金と条件（``[margin]``）。``jp_gap_fade_margin`` 専用。
+
+    ``[capital]`` のロング側と対になる、ショート側の資金枠。銘柄選定はロングと
+    対称（ギャップの符号を反転し、貸借銘柄に限定）。資金配分はロング側の
+    資産曲線ゲート（``regime.equity_curve_days`` / ``equity_curve_scale``）に
+    連動させる：ロング側が縮小した日（地合いが弱い日）ほどショート側を
+    ``long_weak_multiplier`` 倍に増強する「シーソー」。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    #: ショートのオン／オフ。false なら ``jp_gap_fade`` と同じ動き（ロングのみ）。
+    enabled: bool = False
+    #: 1 日に使う資金の上限（円）。``[capital]`` と同じ意味だがショート専用の枠。
+    max_capital: Decimal = Decimal(0)
+    order_budget: Decimal = Decimal(670_000)
+    max_positions: int = 10
+    weighting: str = "inverse_vol"
+    #: ギャップ（寄付 ÷ 前日終値 − 1）がこれ**以上**の銘柄だけ（ロングの逆）。
+    min_gap: Decimal = Decimal(0)
+    #: ギャップの上限（これ**未満**）。1 なら実質上限なし。
+    max_gap: Decimal = Decimal(1)
+    #: 9:00 の気配がストップ高の銘柄は売らない（踏み上げの初動を売る危険を避ける。
+    #: ``signal.skip_limit_down`` の逆）。
+    skip_limit_up: bool = True
+    #: ショート側の資金の倍率（シーソー）。``multiplier_normal`` はロング側が通常運転の日、
+    #: ``multiplier_long_weak`` はロング側が資産曲線で縮小された日（地合いが弱い日）。
+    #: 検証ではロング縮小日のショートの平均損益が通常日の 6 倍で、通常日を 0 にして
+    #: 「弱い日だけ売る」にする選択肢もある。
+    multiplier_normal: Decimal = Decimal(1)
+    multiplier_long_weak: Decimal = Decimal("1.5")
+    #: ショートの往復コスト（bp、約定代金に対して）。立花証券は信用手数料 0 円で、
+    #: 貸株料 年 1.15% の日計り 1 日分 ≈ 0.3 bp。残りは滑り（板の厚さ）の見込み。
+    extra_cost_bp: Decimal = Decimal(5)
+    #: ロング側も信用買い（日計り）で建てる。手数料 0 円になり、代わりに金利
+    #: （年 2.50% の 1 日分 ≈ 0.7 bp）を ``long_extra_cost_bp`` で見る。
+    long_via_margin: bool = False
+    long_extra_cost_bp: Decimal = Decimal(5)
+
+    @field_validator("weighting")
+    @classmethod
+    def _weighting(cls, v: str) -> str:
+        if v not in {"equal", "inverse_vol"}:
+            raise ValueError(f"weighting は equal か inverse_vol: {v}")
+        return v
+
+    @field_validator(
+        "max_capital",
+        "extra_cost_bp",
+        "long_extra_cost_bp",
+        "multiplier_normal",
+        "multiplier_long_weak",
+    )
+    @classmethod
+    def _non_negative(cls, v: Decimal) -> Decimal:
+        if v < 0:
+            raise ValueError("0 以上")
+        return v
+
+    @field_validator("order_budget")
+    @classmethod
+    def _positive(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("正の値")
+        return v
+
+    @field_validator("min_gap", "max_gap")
+    @classmethod
+    def _range(cls, v: Decimal) -> Decimal:
+        if not Decimal(-1) <= v <= Decimal(1):
+            raise ValueError("ギャップは −1〜1 の比率で書く")
+        return v
+
+    @property
+    def positions(self) -> int:
+        """この資金で持つ銘柄数 N。無効か資金 0 なら 0。"""
+        if not self.enabled or self.max_capital == 0:
+            return 0
+        return positions_for(self.max_capital, self.order_budget, self.max_positions)
+
+    @property
+    def budget_per_order(self) -> Decimal:
+        n = self.positions
+        if n == 0:
+            return Decimal(0)
+        return (self.max_capital / n).quantize(Decimal(1), rounding=ROUND_DOWN)
+
+
 class UniverseConfig(BaseModel):
     """母集団（``[universe]``）。前夜に確定する条件だけを置く。"""
 
@@ -247,6 +336,7 @@ class DaytradeConfig(BaseModel):
     signal: SignalConfig = Field(default_factory=SignalConfig)
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    margin: MarginConfig = Field(default_factory=MarginConfig)
 
 
 def load(config_dir: Path) -> DaytradeConfig:
@@ -264,6 +354,7 @@ def load(config_dir: Path) -> DaytradeConfig:
     try:
         config = DaytradeConfig.model_validate(raw)
         _ = config.capital.positions  # 資金と目安の整合をここで確かめる
+        _ = config.margin.positions  # 同上（ショート側。無効なら 0 のまま素通り）
     except ValueError as exc:
         raise ValueError(f"{path}: {exc}") from None
     return config

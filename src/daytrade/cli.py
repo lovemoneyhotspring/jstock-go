@@ -1248,6 +1248,9 @@ def backtest_command(
     config = _load(config_dir)
     start = _parse_date(since) or dt.date(2017, 1, 1)
     end = _parse_date(until) or _today_jst()
+    if config.margin.enabled:
+        _backtest_margin(settings, config, start, end, trades=trades)
+        return
     try:
         result = bt.run(_archive(settings), config, start, end)
     except ValueError as exc:
@@ -1275,4 +1278,53 @@ def backtest_command(
     if trades:
         console.print(
             result.trades.select("Date", "Code", "gap", "shares", "O", "C", "pnl").tail(30)
+        )
+
+
+def _backtest_margin(
+    settings: AppSettings, config: DaytradeConfig, start: dt.date, end: dt.date, *, trades: bool
+) -> None:
+    """ロング + 信用売り（``[margin]``）の検証。ロング・ショートの内訳も出す。"""
+    from daytrade import backtest as bt
+
+    try:
+        result = bt.run_margin(_archive(settings), config, start, end)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    cash = config.capital.max_capital
+    console.print(
+        f"{start}〜{end}  現金 {_yen(cash)} 円（保証金）  ロング N={config.capital.positions} "
+        f"{_yen(config.capital.max_capital)} 円  ショート N={config.margin.positions} "
+        f"{_yen(config.margin.max_capital)} 円 × 通常 {config.margin.multiplier_normal:g} / "
+        f"弱 {config.margin.multiplier_long_weak:g}  営業日 {result.summary.days}"
+    )
+    for label, s in (
+        ("合算", result.summary),
+        ("ロング", result.long_summary),
+        ("ショート", result.short_summary),
+    ):
+        console.print(
+            f"{label:<5} 損益 {_yen(s.total_pnl):>12} 円  年率(対現金) "
+            f"{float(s.total_pnl) / (s.days / bt.TRADING_DAYS) / float(cash):6.1%}  "
+            f"Sharpe {s.sharpe:5.2f}  最大 DD {_yen(s.max_drawdown):>10} 円  "
+            f"取引日 {s.traded_days}  往復コスト {s.round_trip_bp:.1f} bp"
+        )
+    table = Table(title="年別（ロング / ショート）")
+    for column in ("年", "営業日", "取引日", "合算", "ロング", "ショート", "勝率(取引日)"):
+        table.add_column(column, justify="right")
+    for row in result.yearly().iter_rows(named=True):
+        table.add_row(
+            str(row["year"]),
+            str(row["days"]),
+            str(row["traded"]),
+            _yen(row["pnl"]),
+            _yen(row["long_pnl"]),
+            _yen(row["short_pnl"]),
+            f"{(row['win'] or 0):.1%}",
+        )
+    console.print(table)
+    if trades:
+        console.print(
+            result.short_trades.select("Date", "Code", "gap", "shares", "O", "C", "pnl").tail(30)
         )

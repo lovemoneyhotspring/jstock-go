@@ -12,7 +12,7 @@ from decimal import ROUND_DOWN, Decimal
 
 import polars as pl
 
-from daytrade.config import SignalConfig
+from daytrade.config import MarginConfig, SignalConfig
 from daytrade.fees import commission
 from wbcore.domain.jp_rules import DEFAULT_LOT_SIZE, price_limit_range
 
@@ -20,6 +20,11 @@ from wbcore.domain.jp_rules import DEFAULT_LOT_SIZE, price_limit_range
 def limit_down_price(prev_close: Decimal) -> Decimal:
     """前日終値を基準値段とするストップ安の値段。"""
     return price_limit_range(prev_close)[0]
+
+
+def limit_up_price(prev_close: Decimal) -> Decimal:
+    """前日終値を基準値段とするストップ高の値段。"""
+    return price_limit_range(prev_close)[1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +66,17 @@ def gap_rank_expr(config: SignalConfig, over: str | None = "Date") -> pl.Expr:
     """``gap`` 列を条件で絞り、小さい順に順位を付ける（条件外は null）。パネルと 1 日で共用。"""
     ok = (pl.col("gap") < float(config.max_gap)) & (pl.col("gap") >= float(config.min_gap))
     rank = pl.when(ok).then(pl.col("gap")).rank("ordinal")
+    return rank.over(over) if over else rank
+
+
+def short_rank_expr(config: MarginConfig, over: str | None = "Date") -> pl.Expr:
+    """信用売り側の順位付け。``gap_rank_expr`` と対称（ギャップの大きい順、条件外は null）。
+
+    ``shortable`` 列（貸借銘柄=true）を持つフレームに適用すること。ここでは
+    貸借の絞り込みはしない（呼び出し側で ``pl.col("shortable")`` と組み合わせる）。
+    """
+    ok = (pl.col("gap") >= float(config.min_gap)) & (pl.col("gap") < float(config.max_gap))
+    rank = pl.when(ok).then(-pl.col("gap")).rank("ordinal")
     return rank.over(over) if over else rank
 
 
