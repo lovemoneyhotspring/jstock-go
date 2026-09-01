@@ -411,7 +411,10 @@ def sync_order_status(
     for row in ledger.open_orders():
         if row.market is None:
             continue
-        order = broker_for(row.market).get_order(row.client_order_id)
+        # broker_order_id は client_order_id で引けないブローカー（立花証券）のためのヒント
+        order = broker_for(row.market).get_order(
+            row.client_order_id, broker_order_id=row.broker_order_id
+        )
         if order is None:
             placed_at = dt.datetime.fromisoformat(row.placed_at)
             if row.status != OrderStatus.PENDING.value or now - placed_at < UNCONFIRMED_GRACE:
@@ -593,8 +596,15 @@ def to_order(
 
 
 def should_fallback_to_limit(request: OrderRequest, error: Exception) -> bool:
-    """成行が「気配値が無い」で拒否された注文か。指値で出し直す対象。"""
-    return request.order_type is OrderType.MARKET and QUOTE_NOT_FOUND in str(error)
+    """成行が「気配値が無い／成行禁止」で拒否された注文か。指値で出し直す対象。
+
+    Webull は ``QUOTE_NOT_FOUND``、立花証券は「当該銘柄の成行注文はできません」（11142 等）や
+    「前日終値なし(成行禁止)」（11109）と返す。どちらも指値なら通る種類の拒否。
+    """
+    if request.order_type is not OrderType.MARKET:
+        return False
+    text = str(error)
+    return QUOTE_NOT_FOUND in text or "成行" in text
 
 
 def build_orders(

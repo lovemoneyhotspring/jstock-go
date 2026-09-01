@@ -377,3 +377,85 @@ def test_market_prices_prefers_open(tmp_path: Path) -> None:
     assert prices["7203"]["open"] == Decimal(2510) and prices["7203"]["prev_close"] == Decimal(2480)
     assert prices["7203"]["at"] == dt.datetime(2026, 9, 2, 0, 1, 30, tzinfo=dt.UTC)
     assert prices["9984"]["open"] == Decimal(0) and prices["9984"]["last"] == Decimal(8000)
+
+
+def test_lot_sizes_from_master_and_history_is_today_only(tmp_path: Path) -> None:
+    master = {
+        "aCLMStkIssueMstKabu": [
+            {"sIssueCode": "1305", "sBaibaiTani": "10"},
+            {"sIssueCode": "563A", "sBaibaiTani": "1"},
+            {"sIssueCode": "7203", "sBaibaiTani": "100"},
+        ]
+    }
+    orders = {
+        "sResultCode": "0",
+        "aOrderList": [
+            {"sOrderOrderNumber": "1", "sOrderSikkouDay": "20260902", "sOrderIssueCode": "1305",
+             "sOrderBaibaiKubun": "3", "sGenkinSinyouKubun": "0", "sOrderOrderPriceKubun": "2",
+             "sOrderOrderPrice": "3000", "sOrderOrderSuryou": "10", "sOrderYakuzyouSuryo": "10",
+             "sOrderYakuzyouPrice": "2990", "sOrderStatusCode": "10", "sOrderOrderDateTime": "20260902140102"}
+        ],
+    }
+    broker, fake = _broker(tmp_path, {"CLMStkGetIssueMstKabu": master, "CLMOrderList": orders})
+    lots = broker.lot_sizes(["1305", "563A", "9999"])
+    assert lots == {"1305": Decimal(10), "563A": Decimal(1)}  # 無い銘柄は含めない
+    assert fake.calls[-1][0] == "https://x/master/"  # マスタ機能の仮想URL
+    broker.lot_sizes(["7203"])
+    assert sum(1 for _, b in fake.calls if b["sCLMID"] == "CLMStkGetIssueMstKabu") == 1  # 1 日 1 回
+
+    history = broker.get_order_history(dt.date(2026, 9, 1), dt.date(2026, 9, 2))
+    assert len(history) == 1
+    order = history[0]
+    assert order.symbol == "1305" and order.side is Side.BUY and order.trade is TradeType.CASH
+    assert order.order_type is OrderType.LIMIT and order.limit_price == Decimal(3000)
+    assert order.filled_quantity == Decimal(10) and order.avg_fill_price == Decimal(2990)
+    assert order.broker_order_id == "1/20260902"
+    assert broker.get_order_history(dt.date(2026, 8, 1), dt.date(2026, 8, 31)) == []  # 過去日は取れない
+
+
+def test_sequence_number_is_shared_across_instances(tmp_path: Path) -> None:
+    """別プロセス（別インスタンス）が進めた通番に追いついてから +1 する。"""
+    summary = {"sResultCode": "0", "sGenbutuKabuKaituke": "1"}
+    first, fake1 = _broker(tmp_path, {"CLMZanKaiSummary": summary})
+    second, fake2 = _broker(tmp_path, {"CLMZanKaiSummary": summary})
+    first.get_balance()  # login(1) + summary(2)
+    second.get_balance()  # 保存を読んで 3
+    first.invalidate_cache()
+    first.get_balance()  # 自分は 2 だと思っているが、保存の 3 に追いついて 4
+    assert [b["p_no"] for _, b in fake1.calls] == ["1", "2", "4"]
+    assert [b["p_no"] for _, b in fake2.calls] == ["3"]
+
+
+def test_nisa_buys_use_growth_quota_code(tmp_path: Path) -> None:
+    broker, _ = _broker(tmp_path, {})
+    payload = broker._to_payload(_request(Side.BUY, TradeType.CASH, tax_type=TaxAccountType.NISA))
+    assert payload["sZyoutoekiKazeiC"] == "6"  # 2024 年以降の NISA 買付は N成長（"5" は売却のみ）
+
+
+def test_flat_rate_commission_table_and_marginal_fee(tmp_path: Path) -> None:
+    from wbcore.broker.tachibana import flat_rate_commission, marginal_flat_rate_commission
+
+    assert flat_rate_commission(Decimal(0)) == 0
+    assert flat_rate_commission(Decimal(120_000)) == 0
+    assert flat_rate_commission(Decimal(120_001)) == 176
+    assert flat_rate_commission(Decimal(1_000_000)) == 506
+    assert flat_rate_commission(Decimal(10_000_000)) == 2_783
+    assert flat_rate_commission(Decimal(10_000_001)) == 2_783 + 253
+    assert flat_rate_commission(Decimal(12_000_000)) == 2_783 + 253 * 2
+    # 既に 10 万円買っている日に 5 万円買うと、合計 15 万円で 176 円の段階に入る
+    assert marginal_flat_rate_commission(Decimal(100_000), Decimal(50_000)) == 176
+    assert marginal_flat_rate_commission(Decimal(0), Decimal(100_000)) == 0
+
+    # preview: 現物は当日の既約定分込みの差分、信用は 0
+    broker, _ = _broker(
+        tmp_path,
+        {"CLMZanKaiSummary": {"sResultCode": "0", "sGenbutuKabuKaituke": "1", "sGenbutuBaibaiDaikin": "100000"}},
+    )
+    cash = broker.preview(
+        _request(Side.BUY, TradeType.CASH, quantity=100, order_type=OrderType.LIMIT, limit_price=Decimal(500))
+    )
+    assert cash.estimated_cost == Decimal(50_000) and cash.estimated_fee == Decimal(176)
+    margin = broker.preview(
+        _request(Side.BUY, TradeType.MARGIN_OPEN, quantity=100, order_type=OrderType.LIMIT, limit_price=Decimal(500))
+    )
+    assert margin.estimated_fee == Decimal(0)

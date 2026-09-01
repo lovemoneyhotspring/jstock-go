@@ -37,11 +37,13 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import os
 import stat
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -90,6 +92,7 @@ class _CLM:
     NEW_ORDER = "CLMKabuNewOrder"
     CANCEL_ORDER = "CLMKabuCancelOrder"
     MARKET_PRICE = "CLMMfdsGetMarketPrice"
+    STOCK_MASTER = "CLMStkGetIssueMstKabu"
 
 
 #: 環境ごとの接続先（末尾のスラッシュまで）。ログインは ``auth/`` を足す。
@@ -125,10 +128,12 @@ JST = Market.JP.timezone
 _SIDE_CODE: dict[Side, str] = {Side.SELL: "1", Side.BUY: "3"}
 _SIDE_FROM_CODE: dict[str, Side] = {"1": Side.SELL, "3": Side.BUY}
 
+#: NISA は "5"（一般NISA。2024 年以降は**売却のみ**）と "6"（N成長＝新NISA 成長投資枠）がある。
+#: このシステムが NISA で出すのは買付なので "6"。つみたて投資枠は API に区分が無い（Web のみ）。
 _TAX_CODE: dict[TaxAccountType, str] = {
     TaxAccountType.SPECIFIC: "1",
     TaxAccountType.GENERAL: "3",
-    TaxAccountType.NISA: "5",
+    TaxAccountType.NISA: "6",
 }
 _TAX_FROM_CODE: dict[str, TaxAccountType] = {
     "1": TaxAccountType.SPECIFIC,
@@ -185,6 +190,44 @@ _ORDER_TYPE_FROM_CODE: dict[str, OrderType] = {
 
 #: 結果コードのうち認証系（セッションを捨てて再ログインが要る）。
 _AUTH_ERROR_CODES = {"10001", "10002", "10031", "10033", "10035", "10038", "10039"}
+
+#: 現物の**定額手数料コース**（1 日の現物約定代金の合計で決まる、税込）。
+#: (合計の上限, 手数料)。1,000 万円超は 100 万円ごとに 253 円加算。信用は手数料 0 円で、
+#: 現物と信用の代金は別々に計算される。出典: https://www.e-shiten.jp/TorihikiRule/cost/
+FLAT_RATE_TABLE: tuple[tuple[Decimal, Decimal], ...] = (
+    (Decimal(120_000), Decimal(0)),
+    (Decimal(200_000), Decimal(176)),
+    (Decimal(500_000), Decimal(253)),
+    (Decimal(1_000_000), Decimal(506)),
+    (Decimal(2_000_000), Decimal(759)),
+    (Decimal(3_000_000), Decimal(1_012)),
+    (Decimal(4_000_000), Decimal(1_265)),
+    (Decimal(5_000_000), Decimal(1_518)),
+    (Decimal(6_000_000), Decimal(1_771)),
+    (Decimal(7_000_000), Decimal(2_024)),
+    (Decimal(8_000_000), Decimal(2_277)),
+    (Decimal(9_000_000), Decimal(2_530)),
+    (Decimal(10_000_000), Decimal(2_783)),
+)
+FLAT_RATE_STEP = (Decimal(1_000_000), Decimal(253))
+
+
+def flat_rate_commission(day_total: Decimal) -> Decimal:
+    """定額コースの、その日の現物約定代金合計 ``day_total`` に対する手数料（1 日分の総額）。"""
+    if day_total <= 0:
+        return Decimal(0)
+    for bound, fee in FLAT_RATE_TABLE:
+        if day_total <= bound:
+            return fee
+    top_bound, top_fee = FLAT_RATE_TABLE[-1]
+    extra = (day_total - top_bound) / FLAT_RATE_STEP[0]
+    steps = int(extra) if extra == int(extra) else int(extra) + 1
+    return top_fee + FLAT_RATE_STEP[1] * steps
+
+
+def marginal_flat_rate_commission(day_total_before: Decimal, amount: Decimal) -> Decimal:
+    """この注文で増える手数料。定額コースは合計で段階が決まるので、当日の既約定分を含めて差分を取る。"""
+    return flat_rate_commission(day_total_before + amount) - flat_rate_commission(day_total_before)
 
 
 def parse_side(value: Any) -> Side:
@@ -350,6 +393,10 @@ class TachibanaBroker(Broker):
         self._session: _Session | None = None
         #: 発注した注文の client_order_id → (sOrderNumber, sEigyouDay)。プロセス内メモリ。
         self._native_order_ids: dict[str, tuple[str, str]] = {}
+        #: 株式銘柄マスタの売買単位（銘柄コード → 単元）。初回の lot_sizes で取る
+        self._lot_master: dict[str, Decimal] | None = None
+        #: 当日の現物約定代金の合計（可能額サマリーの sGenbutuBaibaiDaikin）。定額コースの見積りに使う
+        self._cash_traded_today = Decimal(0)
 
         register_secret(credentials.auth_id, credentials.order_password)
 
@@ -432,17 +479,40 @@ class TachibanaBroker(Broker):
             self._session.discard(self._session_dir, self._env)
         self._session = None
 
+    @contextlib.contextmanager
+    def _lock(self) -> Iterator[None]:
+        """通番の更新をプロセス間で直列化する（``flock``）。"""
+        self._session_dir.mkdir(parents=True, exist_ok=True)
+        path = self._session_dir / f"session-{self._env.value}.lock"
+        with path.open("a+") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
     # -- 電文の送受信 -------------------------------------------------------
 
     def _post(self, url: str, body: dict[str, Any], session: _Session) -> dict[str, Any]:
-        """1電文を送り、応答を dict にして返す。通番を進めて保存する。"""
-        session.p_no += 1
-        message = {
-            "p_no": str(session.p_no),
-            "p_sd_date": self._sd_date(),
-            "sJsonOfmt": JSON_FORMAT,
-            **body,
-        }
+        """1電文を送り、応答を dict にして返す。通番を進めて保存する。
+
+        通番は**プロセスをまたいで**単調に増やす必要がある（積立 ``accum run`` と
+        デイトレ ``daytrade open`` は別プロセスで、cron の時刻が重なる）。送る前に
+        ロックを取り、保存ファイルの通番を読み直してから +1 する。
+        """
+        with self._lock():
+            saved = _Session.load(self._session_dir, self._env, session.day)
+            if saved is not None and saved.p_no > session.p_no:
+                session.p_no = saved.p_no  # 他のプロセスが進めた分に追いつく
+            session.p_no += 1
+            message = {
+                "p_no": str(session.p_no),
+                "p_sd_date": self._sd_date(),
+                "sJsonOfmt": JSON_FORMAT,
+                **body,
+            }
+            if session.is_valid:
+                session.save(self._session_dir, self._env)
         text = json.dumps(message, ensure_ascii=False)
         try:
             response = self.http.post(
@@ -453,9 +523,6 @@ class TachibanaBroker(Broker):
             )
         except requests.RequestException as exc:
             raise BrokerError(f"立花証券 API への接続に失敗しました（{body.get('sCLMID')}）: {exc}") from exc
-        finally:
-            if session.is_valid:
-                session.save(self._session_dir, self._env)
         if response.status_code != 200:
             raise BrokerError(
                 f"立花証券 API が HTTP {response.status_code} を返しました（{body.get('sCLMID')}）"
@@ -483,13 +550,16 @@ class TachibanaBroker(Broker):
         return payload
 
     def _request(self, clmid: str, params: dict[str, Any], *, interface: str = "request") -> dict[str, Any]:
-        """ログイン後の電文。``interface`` は ``request``（取引系）か ``price``（時価）。
+        """ログイン後の電文。``interface`` は ``request``（取引系）/ ``price``（時価）/ ``master``（マスタ）。
 
         セッション切断（p_errno=2）なら 1 回だけログインし直して送り直す。
         """
         for attempt in (1, 2):
             session = self.session()
-            url = session.url_price if interface == "price" else session.url_request
+            url = {
+                "price": session.url_price,
+                "master": session.url_master,
+            }.get(interface, session.url_request)
             try:
                 payload = self._post(url, {"sCLMID": clmid, **params}, session)
             except _SessionLost:
@@ -535,6 +605,8 @@ class TachibanaBroker(Broker):
         self._account_limiter.acquire()
         payload = self._request(_CLM.BALANCE_SUMMARY, {})
         cash = _decimal(payload.get("sGenbutuKabuKaituke"))
+        # 定額コースの手数料は当日の現物約定代金の合計で決まる。見積りのために覚えておく
+        self._cash_traded_today = _decimal(payload.get("sGenbutuBaibaiDaikin"))
         return Balance(
             currency="JPY",
             cash_balance=cash,
@@ -613,6 +685,52 @@ class TachibanaBroker(Broker):
             )
         return orders
 
+    def get_order_history(self, start: dt.date, end: dt.date) -> list[Order]:
+        """期間内の注文。**当日（＋繰越）分しか返らない**（``CLMOrderList`` の制約。過去日は取れない）。
+
+        積立の「台帳に無い当月の約定」の突合に使われる。当日の再実行（台帳を消した直後など）は
+        これで捕まえられるが、前日以前の約定は見えない。範囲が当日より前まで及ぶときは警告を残す。
+        """
+        today = self._clock().date()
+        if start < today:
+            log.warning(
+                "立花証券の注文一覧は当日分のみ。前日以前の注文は突合できません",
+                start=start.isoformat(),
+                end=end.isoformat(),
+            )
+        if end < today:
+            return []
+        self._order_read_limiter.acquire()
+        payload = self._request(
+            _CLM.ORDER_LIST, {"sIssueCode": "", "sSikkouDay": "", "sOrderSyoukaiStatus": ""}
+        )
+        return [
+            self._to_order(
+                entry,
+                number=str(entry.get("sOrderOrderNumber", "")),
+                day=str(entry.get("sOrderSikkouDay", "")),
+                filled_key="sOrderYakuzyouSuryo",
+                fill_price_key="sOrderYakuzyouPrice",
+                symbol_key="sOrderIssueCode",
+            )
+            for entry in _rows(payload.get("aOrderList"))
+        ]
+
+    def lot_sizes(self, symbols: Iterable[str]) -> dict[str, Decimal]:
+        """売買単位（``CLMStkGetIssueMstKabu.sBaibaiTani``）。マスタは全銘柄が一括で返るので 1 日 1 回だけ取る。"""
+        wanted = [s for s in dict.fromkeys(symbols) if s]
+        if not wanted:
+            return {}
+        if self._lot_master is None:
+            self._account_limiter.acquire()
+            payload = self._request(_CLM.STOCK_MASTER, {}, interface="master")
+            self._lot_master = {
+                str(row.get("sIssueCode")): _decimal(row.get("sBaibaiTani"))
+                for row in _rows(payload.get("aCLMStkIssueMstKabu"))
+                if row.get("sIssueCode")
+            }
+        return {s: self._lot_master[s] for s in wanted if self._lot_master.get(s, Decimal(0)) > 0}
+
     def get_order(self, client_order_id: str, *, broker_order_id: str | None = None) -> Order | None:
         """注文を照会する。``broker_order_id``（``"<sOrderNumber>/<sEigyouDay>"``）が要る。
 
@@ -643,8 +761,18 @@ class TachibanaBroker(Broker):
         )
 
     def preview(self, request: OrderRequest) -> OrderPreview:
-        """見積り電文は無い。指値なら概算代金、成行は 0。手数料は信用 0 円、現物は未実装で 0。"""
-        return OrderPreview(estimated_cost=request.notional or Decimal(0), estimated_fee=Decimal(0))
+        """見積り電文は無い。指値なら概算代金、成行は 0。
+
+        手数料は信用 0 円。現物は**定額コース**（1 日の現物合計 12 万円まで 0 円）の前提で、
+        当日の既約定分（``sGenbutuBaibaiDaikin``）にこの注文を足したときの増分を見積もる。
+        個別手数料コースの口座では過小になる（コースは Web で選ぶ）。
+        """
+        cost = request.notional or Decimal(0)
+        if request.trade.is_margin or cost <= 0:
+            return OrderPreview(estimated_cost=cost, estimated_fee=Decimal(0))
+        self.get_balance()  # 当日の現物約定代金を最新にする（キャッシュ付き）
+        fee = marginal_flat_rate_commission(self._cash_traded_today, cost)
+        return OrderPreview(estimated_cost=cost, estimated_fee=fee)
 
     def place(self, request: OrderRequest) -> OrderAck:
         payload_in = self._to_payload(request)

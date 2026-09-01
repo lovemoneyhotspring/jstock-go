@@ -80,6 +80,12 @@ TACHIBANA_UAT_PRIVATE_KEY_FILE=/etc/wbjp/tachibana-uat.pem
 TACHIBANA_UAT_ORDER_PASSWORD=...
 ```
 
+- 手数料コースは Web で**定額手数料コース**を選ぶ（現物は 1 日の約定代金合計 12 万円まで 0 円、
+  20 万円まで 176 円…。信用は 0 円で現物とは別計算）。積立（月 2〜2.5 万、4 倍でも 10 万）は
+  ほぼ無料の範囲。`preview` の手数料見積りはこのコース前提で、当日の既約定分
+  （`sGenbutuBaibaiDaikin`）を足した段階の差分を出す
+- 積立（`accum`）と信用デイトレは同じ現金を使う。デイトレの建玉が 9:00〜15:20 に保証金を拘束するので、
+  14 時台の積立が見る現物買付可能額はその残り。月の積立額が収まるかを一度確かめる
 - その日の通番（`p_no`）と復号した仮想URLは `state/tachibana/session-<env>-<YYYYMMDD>.json`（0600）に
   残し、同じ日は再ログインしない（公式サンプルと同じ）。仮想URLが無効化されたらこのファイルを消す
 - 初回は**デモで** `WBJP_ENV=uat uv run daytrade quotes 7203 9984 --config-dir config/daytrade_margin` と
