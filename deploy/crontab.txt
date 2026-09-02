@@ -1,0 +1,46 @@
+# wbjp（/home/abobo/jstock）の cron。`crontab -l` の既存行のうち /home/abobo/webull/wbjp を指す
+# 旧デプロイ（Webull）の行をこの内容で置き換える。他のジョブ（暗号資産・rcguard）はそのまま。
+#
+# 方針（docs/DEPLOY.md）:
+#   - 固定間隔で叩き続ける。時間帯の判定は各コマンドの中で完結する
+#   - 開始の分は互いにずらす（J-Quants のレート制限と、同じファイルへの同時書き込みを避ける）
+#   - flock -n で同じジョブの重なりを防ぐ
+#   - --live が無い行は判断と記録だけで注文を出さない（dry-run）
+#
+# 有効化の段階:
+#   1. 今: データ（J-Quants / FRED）・候補（daytrade plan）・監視だけ。発注経路は止めたまま
+#   2. .env に TACHIBANA_PROD_* を入れ `wbjp credentials check --env prod` が通ったら、
+#      下の「発注経路」の行のコメントを外す（まず --live 無しで数日、次に --live）
+
+WBJP_HOME=/home/abobo/jstock
+WBJP_BIN=/home/abobo/jstock/.venv/bin
+
+# --- データ ------------------------------------------------------------------
+# J-Quants: 台帳とカレンダーを見て必要な端点・日付だけ取る（冪等）。16:30〜の更新を 30 分刻みで拾う
+13,43 * * * *   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/jquants.lock   $WBJP_BIN/jquants sync                                     >> state/logs/jquants-sync.log     2>&1
+# 月初に一括ダウンロードで取りこぼしを埋める（更新分だけ取る）
+50 3 2-5 * *    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/jquants.lock   $WBJP_BIN/jquants backfill                                 >> state/logs/jquants-backfill.log 2>&1
+# 営業日ごとの欠けを監視（WBJP_ALERT_WEBHOOK_URL があれば通知）
+0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod                              $WBJP_BIN/jquants check --notify                           >> state/logs/jquants-check.log    2>&1
+# スイング売買の銘柄の日足を J-Quants アーカイブから揃える（wbjp screen / backtest の材料）
+5 19 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-data.lock $WBJP_BIN/wbjp data sync --config-dir config               >> state/logs/wbjp-data-sync.log   2>&1
+10 19 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod                              $WBJP_BIN/wbjp data check --config-dir config --notify     >> state/logs/wbjp-data-check.log  2>&1
+# 積立の銘柄と判定用指数（J-Quants / FRED）
+15 19 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/accum-data.lock $WBJP_BIN/accum sync                                      >> state/logs/accum-sync.log       2>&1
+
+# --- 銘柄選定（デイトレ）----------------------------------------------------------
+# 前夜 20:30: 翌営業日の母集団を state/daytrade/plan-<日付>.parquet に保存（ロング＋ショート）
+30 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock  $WBJP_BIN/daytrade plan --config-dir config/daytrade_margin >> state/logs/daytrade-plan.log    2>&1
+
+# --- 発注経路（立花証券の認証情報を入れたら有効化。まず --live 無しで数日回す）-------------
+# 9:01・9:04・9:07: 気配でギャップ下位 N（ロング）／上位（ショート）を寄付で建てる
+#1,4,7 9 * * 1-5     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes >> state/logs/daytrade-open.log   2>&1
+# 15:20・15:24・15:28: 当日建てた分を返済（1 回目で済めば以降は何もしない）
+#20,24,28 15 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin --live --yes >> state/logs/daytrade-close.log  2>&1
+# 15:40: 返済が全部約定したかを照会し、持ち越しを通知
+#40 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin             >> state/logs/daytrade-verify.log 2>&1
+# スイング売買（日足・大引け後 1 回で足りるが、固定間隔でも無害）
+#*/20 * * * *        cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  $WBJP_BIN/wbjp  run --config-dir config --live --yes >> state/logs/wbjp-run.log  2>&1
+# 積立（発注時間帯 14:00〜15:00 の外では自動でスキップ）
+#7-59/20 * * * *     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/accum-run.lock $WBJP_BIN/accum run --live --yes                     >> state/logs/accum-run.log 2>&1
+#37 * * * *          cd $WBJP_HOME && WBJP_ENV=prod flock    /tmp/accum-run.lock $WBJP_BIN/accum backup                               >> state/logs/accum-backup.log 2>&1

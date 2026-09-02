@@ -18,9 +18,9 @@
 
 ```bash
 # 1. コード配置
-git clone https://github.com/lovemoneyhotspring/we-bull.git /home/abobo/webull/wbjp && cd /home/abobo/webull/wbjp
+git clone https://github.com/lovemoneyhotspring/we-bull.git /home/abobo/jstock && cd /home/abobo/jstock
 # private リポジトリなので認証が必要。HTTPS の場合はパスワード欄に PAT（Personal Access Token）を使う。
-# SSH鍵を使うなら代わりに: git clone git@github.com:lovemoneyhotspring/we-bull.git /home/abobo/webull/wbjp
+# SSH鍵を使うなら代わりに: git clone git@github.com:lovemoneyhotspring/we-bull.git /home/abobo/jstock
 
 # 2. 依存関係
 uv sync
@@ -89,7 +89,7 @@ TACHIBANA_UAT_ORDER_PASSWORD=...
 
 ## 3. `.env` の置き場所
 
-- **既定**: リポジトリ直下（カレントディレクトリ基準）= `/home/abobo/webull/wbjp/.env`。`chmod 600` 必須（緩いと起動時に警告）
+- **既定**: リポジトリ直下（カレントディレクトリ基準）= `/home/abobo/jstock/.env`。`chmod 600` 必須（緩いと起動時に警告）
 - **絶対パスで指定したい場合**: 環境変数 `WBJP_ENV_FILE=/etc/wbjp/wbjp.env` を渡せば、cronの`cd`忘れがあってもそこを読む
 - 中身は秘密でない項目（`WBJP_ENV=prod` 等）のみ。APIキー自体は上記手順3のsystemd `EnvironmentFile=`か`credentials set`（keyring）経由が推奨
 
@@ -109,19 +109,14 @@ TACHIBANA_UAT_ORDER_PASSWORD=...
 同じ銘柄の足を二つのプロセスが同時に書く競合も避けられる。
 `sleep` でずらすより cron の分指定の方が、crontab を見ただけでタイミングが分かる。
 
-```cron
-# wbjp: 0,20,40 分 / accum: 7,27,47 分 / jquants: 13,43 分（互いに重ねない）
-*/20 * * * *    cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  /home/abobo/webull/wbjp/.venv/bin/wbjp  run --live --yes --config-dir config    >> state/logs/wbjp-run.log  2>&1
-7-59/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum run --live --yes                       >> state/logs/accum-run.log 2>&1
-13,43 * * * *   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants sync                                >> state/logs/jquants-sync.log 2>&1
-37 * * * *      cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
-50 3 2-5 * *    cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants backfill                             >> state/logs/jquants-backfill.log 2>&1
-0 20 * * 1-5    cd /home/abobo/webull/wbjp && WBJP_ENV=prod                              /home/abobo/webull/wbjp/.venv/bin/jquants check --notify                       >> state/logs/jquants-check.log 2>&1
-# daytrade（docs/DAYTRADE.md）: 前夜 20:30 に候補、9:01 から寄付買い、15:20 から引け売り。open/close は時間帯の外では何もしない
-30 20 * * 1-5   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade plan                                >> state/logs/daytrade-plan.log 2>&1
-1,4,7 9 * * 1-5 cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade open --live --yes                   >> state/logs/daytrade-open.log 2>&1
-20,24,28 15 * * 1-5 cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock /home/abobo/webull/wbjp/.venv/bin/daytrade close --live --yes               >> state/logs/daytrade-close.log 2>&1
-40 15 * * 1-5   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/daytrade.lock  /home/abobo/webull/wbjp/.venv/bin/daytrade verify                              >> state/logs/daytrade-verify.log 2>&1
+crontab の内容は [`deploy/crontab.txt`](../deploy/crontab.txt) に置いてある（これが正）。
+発注経路の行は立花証券の認証情報を入れるまでコメントアウトしてあり、データ取得・監視・
+前夜の候補作成（`daytrade plan`）だけが回る。
+
+```bash
+# 既存の crontab から旧デプロイ（/home/abobo/webull/wbjp）の行を除き、deploy/crontab.txt を足す
+(crontab -l | grep -v 'webull/wbjp'; cat /home/abobo/jstock/deploy/crontab.txt) | crontab -
+crontab -l | grep jstock
 ```
 
 `daytrade open` は 9:01・9:04・9:07 の 3 回呼ぶ（板寄せ直後は気配の約定時刻が前日のままで「古い」と判定されることがあるため、9:00 ちょうどは避ける。気配を取れなかった回の再試行で、台帳に買いがあれば以降は何もしない）。
@@ -140,13 +135,13 @@ crontab /path/to/crontab.txt && crontab -l
 
 # 2. リダイレクト先を先に作る。>> state/logs/… の評価はプロセス起動より前なので、
 #    ディレクトリが無いと本体が一度も走らずに失敗する（アプリが作るのは起動後）
-mkdir -p /home/abobo/webull/wbjp/state/logs
+mkdir -p /home/abobo/jstock/state/logs
 
 # 3. コマンド部分の検証は 1 回手で流すしかない。cron と同じ最小環境を再現して実行する
 #    （--live は外す。発注以外のデータ取得・判断・記録はすべて動く）
-cd /home/abobo/webull/wbjp && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
+cd /home/abobo/jstock && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
   .venv/bin/wbjp run --config-dir config
-cd /home/abobo/webull/wbjp && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
+cd /home/abobo/jstock && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
   .venv/bin/jquants sync --dry-run
 ```
 
@@ -186,7 +181,7 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
 ## 6. 更新（GitHub から取り込む）
 
 ```bash
-cd /home/abobo/webull/wbjp
+cd /home/abobo/jstock
 flock /tmp/accum-run.lock git pull --ff-only   # 走行中の accum run と重ならないようにロックを取る
 uv sync                                        # 依存関係が変わっていれば反映（変更が無ければ一瞬）
 uv run pytest tests/ -q                        # 任意: 動作確認

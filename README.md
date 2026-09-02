@@ -341,6 +341,25 @@ uv run jquants query "SELECT Code, DiscDate, NP FROM fins_summary WHERE Code='72
 
 置き場は `data/jquants/<端点>/<YYYY-MM>.parquet`（生のまま・全列文字列・鍵で後勝ち）と台帳 `data/jquants/ledger.db`。`data/` は再取得できるキャッシュなのでホスト間でコピーしてよい（発注台帳やログは `state/` にあり、こちらは上書き厳禁）。`accum sync` の日本株の足もここを経由する（揃っていれば API を叩かない）。
 
+## 戦略の改善ループ（本番と同じデータで回す）
+
+cron が溜め続ける J-Quants アーカイブ（`data/jquants`、2016 年〜）と FRED の指数を、そのまま研究にも使う。
+判断ロジックはライブと同じコードなので、ここで出した結果がそのまま運用の見立てになる。
+
+| 段階 | コマンド | 何が出るか |
+|---|---|---|
+| データ | `uv run jquants status` / `jquants check` | 端点ごとの蓄積状況と営業日の欠け |
+| | `uv run jquants sync` | 足りない日付だけ取る（cron が 30 分ごとに回している） |
+| デイトレ | `uv run daytrade plan --config-dir config/daytrade_margin` | 翌営業日の母集団（`state/daytrade/plan-<日付>.parquet`）。cron が 20:30 に回す |
+| | `uv run daytrade backtest --config-dir config/daytrade_margin --since 2025-01-01` | ロング＋ショートの年別損益・Sharpe・最大 DD（数秒） |
+| スイング | `uv run wbjp data sync --config-dir config` | `universe.symbols` の日足をアーカイブから揃える |
+| | `uv run wbjp screen --config-dir config` | 戦略の合致度の順位表（`--show-failed` で落ちた理由） |
+| | `uv run wbjp backtest --config-dir config --from 2025-01-01` | 資産曲線・勝率・シャープ。`--fill-model intrabar` で約定モデルを変えて突き合わせ |
+| 積立 | `uv run accum sync` → `accum backtest` / `accum compare 1306.T` | 戦略ごとの結果と対照群（S&P500 等の判定用指数は FRED） |
+
+パラメータは `config/<dir>/*.toml` を書き換えて再実行する。別案を試すときは `config/` をディレクトリごと複製し
+`--config-dir` で指す（cron が読む設定を壊さない）。研究の記録は `docs/research/` に日付付きで残す。
+
 ## cron で回す
 
 `wbjp run` は**1サイクルだけ**実行して終了する。定期実行はここに書く cron が担当する。
