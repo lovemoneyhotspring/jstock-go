@@ -18,9 +18,9 @@
 
 ```bash
 # 1. コード配置
-git clone https://github.com/lovemoneyhotspring/we-bull.git /home/abobo/jstock && cd /home/abobo/jstock
+git clone https://github.com/lovemoneyhotspring/jstock.git /home/abobo/jstock && cd /home/abobo/jstock
 # private リポジトリなので認証が必要。HTTPS の場合はパスワード欄に PAT（Personal Access Token）を使う。
-# SSH鍵を使うなら代わりに: git clone git@github.com:lovemoneyhotspring/we-bull.git /home/abobo/jstock
+# SSH鍵を使うなら代わりに: git clone git@github.com:lovemoneyhotspring/jstock.git /home/abobo/jstock
 
 # 2. 依存関係
 uv sync
