@@ -19,7 +19,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from wbcore.credentials import ENDPOINTS, Endpoints, Environment
+from wbcore.credentials import Environment
 from wbcore.logging import get_logger
 
 _log = get_logger(__name__)
@@ -57,7 +57,6 @@ class AppSettings(BaseSettings):
     #: 省略時は ``data_dir / "logs"``——データの置き場を変えればログも一緒に動く。
     #: 置き場が分散すると障害時にどこを見ればよいか分からなくなるため、
     #: 機械が読む JSONL も、cron / systemd で stderr を残す場合もここに集める。
-    #: SDK が勝手に作るログ（``webull_*_sdk.log``）は抑止してあり、どこにも書かない。
     log_dir: Path | None = None
 
     @property
@@ -68,10 +67,6 @@ class AppSettings(BaseSettings):
     def log_file(self, app: str) -> Path:
         """アプリ（wbjp / accum）と環境ごとの JSONL。日次でローテーションする。"""
         return self.resolved_log_dir / f"{app}-{self.env.value}.jsonl"
-
-    @property
-    def endpoints(self) -> Endpoints:
-        return ENDPOINTS[self.env]
 
     @property
     def db_path(self) -> Path:

@@ -4,7 +4,7 @@
 市場によって変わる。
 
 エンジン合成（日本株）:
-    Webull JP の日本株 API は逆指値（STOP_LOSS / STOP_LOSS_LIMIT）に対応
+    日本株の API は逆指値（STOP_LOSS / STOP_LOSS_LIMIT）に対応
     していない。ストップ価格をローカルに保持し、足が更新されるたびに
     評価して、抵触していれば決済注文を組み立てる。
 

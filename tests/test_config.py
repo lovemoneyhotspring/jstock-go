@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -14,8 +13,6 @@ import pytest
 from structlog.testing import capture_logs
 
 from wbjp.config import (
-    ENDPOINTS,
-    PUBLIC_UAT_CREDENTIALS,
     AppSettings,
     Config,
     Credentials,
@@ -105,32 +102,15 @@ def test_uat_with_live_flag_is_allowed_and_the_account_is_named_in_the_mode_line
 # --------------------------------------------------------------------------
 
 
-def test_production_never_falls_back_to_public_test_account(
+def test_missing_credentials_are_an_error_in_every_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """本番で公開テスト口座が使われる経路は存在しない。"""
+    """認証情報が無ければ、どの環境でも黙って代わりの口座に落ちたりしない。"""
     monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
 
-    with pytest.raises(MissingCredentialsError) as exc:
-        load_credentials(Environment.PROD)
-
-    assert PUBLIC_UAT_CREDENTIALS["app_key"] not in str(exc.value)
-
-
-def test_uat_falls_back_to_public_test_account(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-
-    creds = load_credentials(Environment.UAT)
-
-    assert creds.is_public_test_account is True
-    assert creds.app_key == PUBLIC_UAT_CREDENTIALS["app_key"]
-
-
-def test_public_fallback_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-
-    with pytest.raises(MissingCredentialsError):
-        load_credentials(Environment.UAT, allow_public_test_account=False)
+    for env in (Environment.PROD, Environment.UAT):
+        with pytest.raises(MissingCredentialsError):
+            load_credentials(env)
 
 
 def test_env_vars_take_priority_over_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,7 +125,6 @@ def test_env_vars_take_priority_over_keyring(monkeypatch: pytest.MonkeyPatch) ->
     creds = load_credentials(Environment.PROD)
 
     assert creds.app_key == "from-env"
-    assert creds.is_public_test_account is False
 
 
 def test_environment_scoped_env_var_beats_generic(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -240,23 +219,6 @@ def test_dotenv_beats_keyring(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     )
 
     assert load_credentials(Environment.PROD, env_file=env_file).app_key == "dotenv-key"
-
-
-def test_dotenv_supplies_key_created_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """失効警告が .env 運用でも効く。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    env_file = _write_env_file(
-        tmp_path / ".env",
-        "WBJP_PROD_APP_KEY=k\n"
-        "WBJP_PROD_APP_SECRET=s\n"
-        "WBJP_PROD_ACCOUNT_ID=a\n"
-        "WBJP_PROD_KEY_CREATED_ON=2026-01-01\n",
-    )
-
-    creds = load_credentials(Environment.PROD, env_file=env_file)
-
-    assert creds.created_on == dt.date(2026, 1, 1)
-    assert creds.expires_on == dt.date(2026, 2, 15)
 
 
 def test_loose_permissions_on_dotenv_are_warned(
@@ -369,27 +331,20 @@ def test_credential_source_reports_where_the_key_came_from(
     assert credential_source(Environment.PROD, env_file=env_file) == str(env_file)
 
 
-def test_credential_source_matches_what_was_actually_used(
+def test_credential_source_reports_what_is_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """1項目でも欠ければ公開テスト口座に落ちる。診断もそう言うこと。
-
-    「.env から読んだ」と表示しながら実際は共有テスト口座、という
-    食い違いが起きると、他人の口座を自分の口座だと思って眺めることになる。
-    """
+    """1項目でも欠ければ解決できない。診断もそう言うこと。"""
     monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
     env_file = _write_env_file(
         tmp_path / ".env",
         "WBJP_UAT_APP_KEY=k\nWBJP_UAT_APP_SECRET=s\n",  # account_id が無い
     )
 
-    creds = load_credentials(Environment.UAT, env_file=env_file)
     source = credential_source(Environment.UAT, env_file=env_file)
 
-    assert creds.is_public_test_account is True
-    assert "公開テスト口座" in source
+    assert "解決できません" in source
     assert "account_id" in source
-    assert str(env_file) not in source
 
 
 def test_credential_source_flags_mixed_origins(
@@ -414,29 +369,6 @@ def test_credentials_repr_hides_the_secret() -> None:
         assert "supersecret" not in rendered
         assert "key12345678" not in rendered
         assert "12345" not in rendered
-
-
-def test_credentials_expiry_calculation() -> None:
-    creds = Credentials(app_key="k", app_secret="s", account_id="a", created_on=dt.date(2026, 8, 1))
-    assert creds.expires_on == dt.date(2026, 9, 15)  # 45日後
-    assert creds.days_until_expiry(dt.date(2026, 9, 10)) == 5
-
-
-def test_credentials_without_created_on_has_no_expiry() -> None:
-    creds = Credentials(app_key="k", app_secret="s", account_id="a")
-    assert creds.expires_on is None
-    assert creds.days_until_expiry() is None
-
-
-# --------------------------------------------------------------------------
-# 接続先
-# --------------------------------------------------------------------------
-
-
-def test_endpoints_are_distinct_per_environment() -> None:
-    """UAT と本番が同じ接続先を向くことは絶対にない。"""
-    assert ENDPOINTS[Environment.UAT].trade != ENDPOINTS[Environment.PROD].trade
-    assert ENDPOINTS[Environment.PROD].trade == "api.webull.co.jp"
 
 
 def test_db_path_is_separated_per_environment() -> None:

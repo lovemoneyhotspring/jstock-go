@@ -15,7 +15,6 @@ import pytest
 from wbcore.broker.base import Broker
 from wbcore.broker.paper import PaperBroker
 from wbcore.broker.registry import BROKERS, available, connect
-from wbcore.broker.webull import WebullBroker
 from wbcore.credentials import (
     Environment,
     MissingCredentialsError,
@@ -41,7 +40,7 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 def test_builtin_brokers_are_registered() -> None:
-    assert {"webull", "paper"} <= set(available())
+    assert {"paper"} <= set(available())
 
 
 def test_unknown_broker_lists_the_alternatives() -> None:
@@ -96,25 +95,13 @@ def test_a_new_exchange_plugs_in_by_subclassing() -> None:
     assert seen == {"env": Environment.PROD, "market": Market.JP, "tax_type": TaxAccountType.NISA}
 
 
-def test_webull_connect_resolves_credentials_from_its_own_namespace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("WBJP_PROD_APP_KEY", "k")
-    monkeypatch.setenv("WBJP_PROD_APP_SECRET", "s")
-    monkeypatch.setenv("WBJP_PROD_ACCOUNT_ID", "a")
-    broker = connect("webull", Environment.PROD, market=Market.US)
-    assert isinstance(broker, WebullBroker)
-    assert broker.name == "webull"
-    # 接続は遅延初期化なので、ここまでネットワークには触っていない
-
-
 # --- 認証情報の名前空間 ---------------------------------------------------
 
 
 def test_credential_namespaces_do_not_leak_into_each_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """別の証券会社のキーが Webull に流れ込まない（逆も）。"""
+    """別の証券会社のキーが既定の名前空間に流れ込まない（逆も）。"""
     monkeypatch.setenv("OTHER_PROD_APP_KEY", "ok")
     monkeypatch.setenv("OTHER_PROD_APP_SECRET", "os")
     monkeypatch.setenv("OTHER_PROD_ACCOUNT_ID", "oa")
@@ -124,10 +111,3 @@ def test_credential_namespaces_do_not_leak_into_each_other(
 
     with pytest.raises(MissingCredentialsError, match="（WBJP）"):
         load_credentials(Environment.PROD)
-
-
-def test_public_test_account_is_webull_only() -> None:
-    """公開テスト口座は Webull のもの。他の名前空間の UAT には使わない。"""
-    assert load_credentials(Environment.UAT).is_public_test_account
-    with pytest.raises(MissingCredentialsError, match="OTHER_UAT_APP_KEY"):
-        load_credentials(Environment.UAT, namespace="OTHER")

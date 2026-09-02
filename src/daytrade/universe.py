@@ -27,7 +27,7 @@ VOL_DAYS = 20
 
 
 def to_broker_symbol(code: str) -> str:
-    """J-Quants の 5 桁コード（``72030`` / ``130A0``）を Webull の表記（``7203`` / ``130A``）に。"""
+    """J-Quants の 5 桁コード（``72030`` / ``130A0``）を発注用の表記（``7203`` / ``130A``）に。"""
     code = code.strip()
     if len(code) == 5 and code.endswith("0"):
         return code[:4]

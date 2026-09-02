@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from wbjp.engine.bt_engine import BacktraderRunner
 
 app = typer.Typer(
-    help="Webull証券 日本株 自動売買システム",
+    help="日本株 自動売買システム",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -101,60 +101,6 @@ def _build_feed(config: Config):  # type: ignore[no-untyped-def]
 
     universe = config.file.universe
     return BarFeed(config.settings.bars_dir, universe.market, base=universe.base_bar_interval)
-
-
-def _collect_symbols(config: Config) -> list[str]:
-    """取り込む銘柄。設定の銘柄に、ウォッチリスト（設定があれば）の銘柄を合流させる。
-
-    ウォッチリストが読めなくても止めない。前回 ``symbols_file`` に書き残した
-    銘柄で続け、読めなかったことだけ知らせる。
-    """
-    universe = config.file.universe
-    symbols = list(universe.symbols)
-    if not universe.watchlists:
-        return symbols
-
-    from wbcore.data.webull_watchlist import (
-        WatchlistItem,
-        WebullWatchlists,
-        index_ticker,
-        is_index,
-        market_of,
-        write_universe,
-    )
-
-    try:
-        lists = WebullWatchlists.connect(config.env).lists()
-    except Exception as exc:
-        console.print(
-            f"[yellow]ウォッチリストを読めませんでした（前回の銘柄で続けます）: {exc}[/yellow]"
-        )
-        return symbols
-    wanted = None if "*" in universe.watchlists else set(universe.watchlists)
-    chosen = [w for w in lists if wanted is None or w.name in wanted]
-    if wanted is not None and (missing := wanted - {w.name for w in chosen}):
-        console.print(f"[yellow]ウォッチリストが見つかりません: {sorted(missing)}[/yellow]")
-
-    picked: list[WatchlistItem] = []
-    skipped: list[str] = []
-    for item in (item for w in chosen for item in w.items):
-        if is_index(item):
-            # 指数は市場に属さない。積立の判定用に使えるので yfinance の表記で蓄積する
-            item = WatchlistItem(index_ticker(item), item.name, item.exchange, item.instrument_id)
-        elif market_of(item) is not universe.market:
-            skipped.append(f"{item.symbol}({item.exchange or '?'})")
-            continue
-        if item.symbol not in symbols and item.symbol not in [i.symbol for i in picked]:
-            picked.append(item)
-    if skipped:
-        console.print(f"[dim]この市場ではないので除外: {', '.join(skipped)}[/dim]")
-    if picked:
-        added = ", ".join(f"{i.symbol}({i.exchange})" if i.exchange else i.symbol for i in picked)
-        console.print(f"[green]ウォッチリストから {len(picked)} 銘柄を追加: {added}[/green]")
-    if universe.symbols_file:
-        target = config.settings.config_dir / universe.symbols_file
-        write_universe(target, picked, source="/".join(w.name for w in chosen), merge_with=target)
-    return symbols + [i.symbol for i in picked]
 
 
 def _load(config_dir: Path | None):  # type: ignore[no-untyped-def]
@@ -839,7 +785,7 @@ def data_sync(
     store = BarStore(config.settings.bars_dir, chosen)
     end = today_utc()
 
-    symbols = _collect_symbols(config)
+    symbols = list(config.file.universe.symbols)
     # レジーム判定の指数と待機資金の利回り系列も一緒に取る
     if config.file.regime.enabled:
         for extra in (config.file.regime.benchmark, config.file.regime.cash_yield_symbol):
@@ -890,7 +836,7 @@ def data_check(
     for candidate in (universe.base_bar_interval, universe.bar_interval, Interval.D1):
         if candidate is not None and candidate not in intervals:
             intervals.append(candidate)
-    symbols = _collect_symbols(config)
+    symbols = list(config.file.universe.symbols)
     if not symbols:
         console.print("[red]universe.symbols が空です[/red]")
         raise typer.Exit(2)
@@ -923,68 +869,6 @@ def data_check(
 
         alert(f"足の蓄積に {len(problems)} 件の問題（{directory_label(config)}）", "\n".join(lines))
     raise typer.Exit(1)
-
-
-@data_app.command("watchlist")
-def data_watchlist(
-    export: Annotated[
-        Path | None, typer.Option(help="銘柄リスト（universe.txt）として書き出す先")
-    ] = None,
-    name: Annotated[
-        str | None, typer.Option(help="書き出すウォッチリストの名前。省略時は全リストをまとめる")
-    ] = None,
-    merge: Annotated[
-        bool, typer.Option("--merge", help="書き出し先に既にある銘柄を残して足す（既定は上書き）")
-    ] = False,
-    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
-) -> None:
-    """Webull のマイウォッチリストを表示する。--export で収集用の銘柄リストに書き出す。
-
-    アプリで気になった銘柄をウォッチリストに入れておけば、そのまま
-    `config/collect/universe.txt` に流し込んで足を蓄積し始められる。
-    """
-    from wbcore.data.webull_watchlist import WebullWatchlists, write_universe
-
-    config = load_config(config_dir)
-    try:
-        lists = WebullWatchlists.connect(config.env).lists()
-    except Exception as exc:
-        console.print(f"[red]ウォッチリストを取得できませんでした: {exc}[/red]")
-        raise typer.Exit(1) from None
-
-    if not lists:
-        console.print(f"[yellow]ウォッチリストがありません（{config.env.value}）[/yellow]")
-        raise typer.Exit(1)
-
-    for w in lists:
-        table = Table(title=f"{w.name}（{len(w.items)} 銘柄）", title_justify="left")
-        for column in ("銘柄", "名称", "取引所"):
-            table.add_column(column)
-        for item in w.items:
-            table.add_row(item.symbol, item.name, item.exchange)
-        console.print(table)
-
-    if export is None:
-        return
-    chosen = [w for w in lists if name is None or w.name == name]
-    if not chosen:
-        console.print(
-            f"[red]ウォッチリスト {name!r} がありません。ある名前: {[w.name for w in lists]}[/red]"
-        )
-        raise typer.Exit(1)
-    seen: set[str] = set()
-    unique = []
-    for item in (item for w in chosen for item in w.items):
-        if item.symbol not in seen:
-            seen.add(item.symbol)
-            unique.append(item)
-    written = write_universe(
-        export,
-        unique,
-        source=name or "全リスト",
-        merge_with=export if merge else None,
-    )
-    console.print(f"\n[green]{export} に {len(written)} 銘柄を書き出しました[/green]")
 
 
 @data_app.command("status")
@@ -1063,13 +947,6 @@ def credentials_check(
     console.print(f"[green]{env.value}: 認証情報を解決できました[/green]")
     console.print(f"  {credentials!r}")
     console.print(f"  取得元: {credential_source(env)}")
-    if credentials.is_public_test_account:
-        console.print("[yellow]  公開されている共有テスト口座です[/yellow]")
-
-    days = credentials.days_until_expiry()
-    if days is not None:
-        colour = "red" if days < 7 else "green"
-        console.print(f"  [{colour}]キーの残り有効日数: {days}日[/{colour}]")
 
 
 if __name__ == "__main__":

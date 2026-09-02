@@ -2,13 +2,14 @@
 
 **なぜこれが必須か**
 
-Webull SDK は API がエラーを返すと、リクエストヘッダを丸ごとログに出力する。
-そこには ``x-app-key`` と ``x-signature`` が含まれる。何もしなければ、
-API エラーが1回起きるだけでログファイルに認証情報が残る。
+証券会社や データ提供元の SDK・クライアントは、API がエラーを返すと
+リクエストヘッダを丸ごとログに出力することがある。そこには ``x-app-key`` や
+``x-signature`` が含まれる。何もしなければ、API エラーが1回起きるだけで
+ログファイルに認証情報が残る。
 
 そのため、マスクは「オプション」ではなくログ経路の必須の一部として組む。
-アプリのログだけでなく、**SDK が出す stdlib logging の出力も含めて**
-最終的な文字列の段階で必ず通す。
+アプリのログだけでなく、**外部ライブラリが出す stdlib logging の出力も
+含めて**最終的な文字列の段階で必ず通す。
 
 対策は二重にしてある:
     1. パターンによるマスク — ``x-app-key: ...`` のような既知の形を潰す
@@ -34,7 +35,7 @@ REDACTED = "***REDACTED***"
 #: 実行時に登録された秘密の実値。パターンの取りこぼしを塞ぐ最後の砦。
 _SECRET_VALUES: set[str] = set()
 
-#: マスク対象のキー名。SDK が出す JSON 形式とヘッダ形式の両方に効かせる。
+#: マスク対象のキー名。外部ライブラリが出す JSON 形式とヘッダ形式の両方に効かせる。
 _SENSITIVE_KEYS = (
     "x-app-key",
     "x-signature",
@@ -274,10 +275,6 @@ def configure_logging(
     for name in quiet_loggers:
         logging.getLogger(name).setLevel(logging.WARNING)
 
-    # SDK が自前のハンドラでマスクを迂回するのを塞ぐ。SDK はインポート時に
-    # 設定するため、接続直前にも改めて呼ぶ必要がある（webull.py を参照）。
-    harden_third_party_logging()
-
 
 class _RedactingProcessorFormatter(structlog.stdlib.ProcessorFormatter):
     """structlog の ProcessorFormatter に最終マスクを足したもの。"""
@@ -289,79 +286,3 @@ class _RedactingProcessorFormatter(structlog.stdlib.ProcessorFormatter):
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     """名前付きの構造化ロガーを返す。"""
     return structlog.stdlib.get_logger(name)
-
-
-def suppress_sdk_own_logging(api_client: Any) -> None:
-    """Webull SDK が独自のログ出力を仕込むのを抑止する。**``ApiClient`` を作った直後、
-    ``TradeClient`` / ``DataClient`` に渡す前に必ず呼ぶ。**
-
-    **なぜ必要か（実測で確認した挙動）**
-
-    ``TradeClient.__init__`` と ``DataClient.__init__`` は ``_init_logger`` を呼び、
-    ログが未設定だと判断すると次の2つを勝手に追加する:
-
-        1. stdout への ``StreamHandler``
-        2. **カレントディレクトリの** ``webull_trade_sdk.log`` /
-           ``webull_data_sdk.log`` への ``TimedRotatingFileHandler``（INFO、72世代）
-
-    どちらも ``propagate`` とは無関係にこちらのマスク経路を通らない。
-    API がエラーを返すと SDK はリクエストヘッダ（``x-app-key`` と
-    ``x-signature``）を丸ごと出力するため、**認証情報が平文でディスクに残る**。
-    実際に、抑止を通さずに ``DataClient`` を作っていた経路で
-    ``webull_data_sdk.log`` に ``x-app-key`` が書き出されていた。
-
-    ``_init_logger`` は ``_stream_logger_set`` と ``_file_logger_set`` の
-    いずれかが真なら何もしない。そこで構築前に立てておく。
-    非公開属性だが、これが SDK 側に用意された唯一の抑止経路であり、
-    代替はディスクへの認証情報の書き出しを許すことになる。
-    """
-    api_client._stream_logger_set = True
-    api_client._file_logger_set = True
-
-
-#: マスク経路を迂回されると困るサードパーティのロガー接頭辞。
-_THIRD_PARTY_PREFIXES = ("webull",)
-
-
-def harden_third_party_logging() -> list[str]:
-    """マスクを迂回する外部ロガーを無力化する。
-
-    **なぜ必要か**
-
-    Webull SDK の ``webull.core.http.response`` は、インポートされた時点で
-    自前の ``StreamHandler`` を DEBUG レベルで追加し、さらに
-    ``propagate = False`` を設定する。この状態だと、そのモジュールのログは
-    ルートロガーに一切届かず、:class:`RedactingFormatter` を通らないまま
-    stderr へ直接書き出される。SDK はリクエストヘッダ（``x-app-key`` と
-    ``x-signature`` を含む）を出力するので、放置すれば認証情報が漏れる。
-
-    そこで対象ロガーのハンドラを取り除き、``propagate`` を戻して、
-    こちらが用意した経路を必ず通るようにする。
-
-    SDK はインポート時に設定するため、**SDK を読み込んだ後**にも
-    呼ぶ必要がある。:meth:`configure_logging` と、実際に SDK へ接続する
-    直前の両方から呼んでいる。
-
-    Returns:
-        無力化したロガー名。
-    """
-    hardened = []
-    manager = logging.Logger.manager
-
-    for name in list(manager.loggerDict):
-        if not name.startswith(_THIRD_PARTY_PREFIXES):
-            continue
-        logger = logging.getLogger(name)
-        if logger.handlers or not logger.propagate:
-            for handler in logger.handlers[:]:
-                logger.removeHandler(handler)
-            logger.propagate = True
-            logger.addFilter(RedactingFilter())
-            hardened.append(name)
-
-    # SDK の初期化はトークン確認の結果を INFO で出す（"_check_token_enable result
-    # is False"）。運用ログには意味が無く、しかも最初の 1 行は SDK が自前の
-    # ハンドラを付けた直後に出るためマスク経路を通らない。レベルで落とす。
-    logging.getLogger("webull.core.http.initializer").setLevel(logging.WARNING)
-
-    return hardened

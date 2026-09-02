@@ -10,7 +10,6 @@ from __future__ import annotations
 from wbcore.credentials import Environment
 from wbcore.data.jquants_provider import JQuantsProvider
 from wbcore.data.provider import MarketDataProvider
-from wbcore.data.webull_provider import WebullMarketDataProvider
 from wbcore.data.yfinance_provider import YFinanceProvider
 from wbcore.domain.models import Market
 from wbcore.registry import Registry
@@ -45,5 +44,5 @@ def default_provider(market: Market) -> str:
     return DEFAULT_PROVIDERS[market]
 
 
-for _cls in (JQuantsProvider, YFinanceProvider, WebullMarketDataProvider):
+for _cls in (JQuantsProvider, YFinanceProvider):
     register(_cls)

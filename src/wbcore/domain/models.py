@@ -25,7 +25,7 @@ def _require_aware(name: str, value: dt.datetime | None) -> None:
 
 
 class Market(StrEnum):
-    """取引市場。値は Webull API の ``market`` にそのまま渡る。
+    """取引市場。値はそのままブローカー API の ``market`` に渡る。
 
     市場ごとの取引ルール（呼値・単元・値幅制限・逆指値の可否・通貨）は
     :mod:`wbcore.domain.market_rules` に集約する。ここは識別子だけ。
@@ -45,7 +45,7 @@ class Market(StrEnum):
 
 
 class Side(StrEnum):
-    """売買方向。値は Webull API がそのまま受け取る文字列。"""
+    """売買方向。値はそのままブローカー API に渡る文字列。"""
 
     BUY = "BUY"
     SELL = "SELL"
@@ -55,7 +55,7 @@ class OrderType(StrEnum):
     """注文種別。
 
     - 日本株で発注できるのは MARKET と LIMIT だけ。STOP_LOSS 系は
-      Webull JP が日本株でサポートしていないため、損切りは
+      日本株の API がサポートしていないことが多いため、損切りは
       :mod:`wbjp.risk.stops` がエンジン側で合成する。
     - 米国株では STOP_LOSS / STOP_LOSS_LIMIT をブローカーに置ける。
       どちらを使うかは :class:`~wbcore.domain.market_rules.MarketRules`
@@ -268,7 +268,7 @@ def make_client_order_id(seed_key: str, symbol: str, side: Side, quantity: Decim
     ブローカー側が「同じ注文」と認識でき、二重発注が防げる。
     スイング売買（差分発注）も積立（当日の投下）も、この規律は同じ。
 
-    Webull の上限は32文字。ハッシュで詰める。
+    ブローカー側の上限に合わせて32文字。ハッシュで詰める。
     """
     seed = f"{seed_key}|{symbol}|{side.value}|{quantity}"
     return hashlib.sha256(seed.encode()).hexdigest()[:32]

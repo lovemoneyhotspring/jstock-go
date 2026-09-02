@@ -8,7 +8,7 @@
 |---|---|---|
 | コード | `src/` `pyproject.toml` `uv.lock` `.python-version` | ✅ |
 | 設定 | 運用する戦略の `config/<戦略名>/` 一式 | ✅ |
-| 秘密情報 | Webull APIキーと J-Quants APIキー（`.env` または systemd `EnvironmentFile=`） | ❌ 別途用意 |
+| 秘密情報 | J-Quants APIキー（と、ブローカーを足すならその APIキー）。`.env` または systemd `EnvironmentFile=` | ❌ 別途用意 |
 | キャッシュ | `data/`（足・財務・J-Quants アーカイブ） | ❌ 別ホストからコピーしてよい（または再取得） |
 | 状態 | `state/`（発注台帳・ログ・バックアップ） | ❌ **このホスト固有。他ホストのファイルで上書き厳禁** |
 
@@ -16,9 +16,8 @@
 
 ## 2. セットアップ手順
 
-> **先に IP を許可する。** Webull OpenAPI の API キーは送信元 IP で制限される。
-> サーバーの外向き IP（`curl -s https://ifconfig.me`）を Webull の API キー設定の
-> 許可リストに追加していないと、接続が `IP_NOT_ALLOWED`（HTTP 401）で失敗する。
+> **証券会社の API キーは送信元 IP で制限されることが多い。** ブローカーを足すときは、
+> サーバーの外向き IP（`curl -s https://ifconfig.me`）を許可リストに登録しておく。
 > UAT と本番でキーが別なら、本番キーの側に登録する。
 
 ```bash
@@ -30,17 +29,17 @@ git clone https://github.com/lovemoneyhotspring/we-bull.git /home/abobo/webull/w
 # 2. 依存関係
 uv sync
 
-# 3. APIキー（本番口座）
+# 3. APIキー（J-Quants と、ブローカーを足すならその口座）
 # ヘッドレスLinuxにはkeyringが無いので `credentials set` は使わず、
 # systemd 経由で環境変数として渡す。
 sudo install -d -m 750 -o root -g wbjp /etc/wbjp
 sudo install -m 640 -o root -g wbjp /dev/null /etc/wbjp/wbjp.env
 sudo vi /etc/wbjp/wbjp.env
 # ↑ このファイルに以下を書く（値は自分のAPIキーに差し替え）
-#   WBJP_PROD_APP_KEY=...
+#   WBJP_JQUANTS_API_KEY=...   # 日本株の足（J-Quants）。環境で分けない
+#   WBJP_PROD_APP_KEY=...      # ブローカーを足したときだけ
 #   WBJP_PROD_APP_SECRET=...
 #   WBJP_PROD_ACCOUNT_ID=...
-#   WBJP_JQUANTS_API_KEY=...   # 日本株の足（J-Quants）。環境で分けない
 #
 # systemdサービス定義（/etc/systemd/system/wbjp.service）に
 # EnvironmentFile=/etc/wbjp/wbjp.env を1行書けば、起動時にこのファイルの

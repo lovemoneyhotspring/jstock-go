@@ -33,7 +33,7 @@ monthly_budget = 25_000
 # 緊急停止。true にすると `accum run --live` でも発注しない。
 kill_switch = false
 
-# 足データの取得元。登録済みの名前（jquants | yfinance | webull）。積立は市場を
+# 足データの取得元。登録済みの名前（jquants | yfinance）。積立は市場を
 # またぐので、省略すると市場ごとの既定を使う: 日本株は J-Quants（公式 API、
 # WBJP_JQUANTS_API_KEY が要る）、米国株と米国指数（^GSPC 等）は yfinance。
 # 指定すると全市場でその取得元を使う（jquants は日本株専用なので通常は書かない）。
@@ -41,15 +41,15 @@ kill_switch = false
 
 # 発注の振る舞い。積立は当日の投下額を成行の買いにする。
 [execution]
-# 発注先。登録済みのブローカー名（webull | paper）。paper はネットワークに繋がないシミュレータ。
-broker = "webull"
+# 発注先。登録済みのブローカー名（今は paper のみ）。paper はネットワークに繋がないシミュレータ。
+broker = "paper"
 # 注文種別。market（成行、既定）| limit（最新価格 × (1 + limit_offset) の指値）。
 # ETF は板が薄いことがあるので、上限を切りたければ limit。
 # 563A のような上場が浅く板の薄い ETF に 14 時台の成行を出すと、想定より高い約定を
 # 掴みうる。指値なら上限が切れ、未約定（失効）なら差額として次のリリース日に埋まる。
 order_type = "limit"
 limit_offset = "0.01"
-# 成行が「気配値が無い」で拒否されたら指値で出し直す（UAT の新規上場 ETF で実測）。
+# 成行が「気配値が無い」で拒否されたら指値で出し直す（新規上場 ETF で実測）。
 fallback_to_limit = true
 # GENERAL（一般） / SPECIFIC（特定） / NISA
 tax_account_type = "SPECIFIC"
@@ -57,8 +57,8 @@ tax_account_type = "SPECIFIC"
 extended_hours = false
 # 売買単位が既定（100株）と異なる銘柄。ETF は 1 株・10 株単位のものが多い。
 # 既定（100株）のままだと月の予算が1単元に届かず、発注が丸ごと見送りになる。
-# 発注前に Webull の銘柄情報（lot_size）で確かめ、分かった銘柄は API の値を優先する。
-# ここに書くのは API で分からない銘柄（新規上場、UAT）のための控え。
+# 発注前にブローカーの銘柄情報（lot_size）で確かめ、分かった銘柄は API の値を優先する。
+# ここに書くのは API で分からない銘柄（新規上場など）のための控え。
 # 452A = 10 口、563A = 1 口（JPX で確認済み）
 lot_size_overrides = { "452A.T" = 10, "563A.T" = 1, "1305.T" = 10, "1591.T" = 1, "1306.T" = 10 }
 

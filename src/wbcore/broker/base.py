@@ -1,9 +1,8 @@
 """ブローカーの抽象。
 
-同じインターフェースの裏に、実際の証券会社（:class:`~wbcore.broker.webull.WebullBroker`）
-とシミュレータ（:class:`~wbcore.broker.paper.PaperBroker`）を並べる。
-エンジンはどちらを渡されたか知らないため、バックテスト・UAT・本番で
-まったく同じコードが動く。
+同じインターフェースの裏に、実際の証券会社とシミュレータ
+（:class:`~wbcore.broker.paper.PaperBroker`）を並べる。エンジンはどちらを
+渡されたか知らないため、バックテスト・UAT・本番でまったく同じコードが動く。
 
 **取引所を足すには**
 

@@ -1,7 +1,8 @@
 """秘匿情報マスクのテスト。
 
 ここが破れると認証情報がログに残る。ゆるいテストでは意味がないので、
-**実際に Webull SDK が出力したエラーログ**をそのまま素材に使う。
+**証券会社の SDK が認証失敗時に吐くエラーログと同じ形**を素材に使う。
+ヘッダを丸ごと出力するのが厄介な点で、何もしなければ app key と署名が漏れる。
 """
 
 from __future__ import annotations
@@ -20,27 +21,26 @@ from wbcore.logging import (
     register_secret,
 )
 
-# 実際に webull.core.client が認証失敗時に出力したログ（値は差し替え済み）。
-# ヘッダを丸ごと吐くため、何もしなければここから app key と署名が漏れる。
-REAL_SDK_ERROR_LOG = """\
-ServerException occurred. Host:api.webull.co.jp SDK-Version:2.0.17 Request:{
+# 認証失敗時に SDK が出力するエラーログ（実際に観測した形。値は架空のもの）。
+SDK_ERROR_LOG = """\
+ServerException occurred. Host:api.broker.example SDK-Version:2.0.17 Request:{
   "_version": "v2",
   "_action_name": "/openapi/config",
   "_header": {
     "x-version": "v2",
-    "x-app-key": "209fffb82d4e62b60d167b7b9c55e163",
+    "x-app-key": "0123456789abcdef0123456789abcdef",
     "x-timestamp": "2026-08-24T13:43:38Z",
     "x-signature-version": "1.0",
     "x-signature-algorithm": "HMAC-SHA256",
     "x-signature-nonce": "a496db6b-2445-5ed8-aae8-837e0160a377",
-    "x-signature": "rarYtIfemMWMwFdSB10VKCHfo93LThHSMTquamw32SY=",
-    "x-webull-client-source": "sdk"
+    "x-signature": "S1gNaTuRe0000ExampleValue0000000000000000000=",
+    "x-client-source": "sdk"
   }
 } Response:{'error_code': 'UNAUTHORIZED'}"""
 
-APP_KEY = "209fffb82d4e62b60d167b7b9c55e163"
-APP_SECRET = "af02275fc2e9cfccd3745c85f48b40cd"
-SIGNATURE = "rarYtIfemMWMwFdSB10VKCHfo93LThHSMTquamw32SY="
+APP_KEY = "0123456789abcdef0123456789abcdef"
+APP_SECRET = "fedcba9876543210fedcba9876543210"
+SIGNATURE = "S1gNaTuRe0000ExampleValue0000000000000000000="
 ACCOUNT_ID = "1241489592734023680"
 
 
@@ -51,7 +51,7 @@ def _clean_secrets() -> None:
 
 def test_redacts_real_sdk_error_log() -> None:
     """SDK の実エラーログから app key と署名が消えること。"""
-    result = redact(REAL_SDK_ERROR_LOG)
+    result = redact(SDK_ERROR_LOG)
     assert APP_KEY not in result
     assert SIGNATURE not in result
     assert REDACTED in result
@@ -59,7 +59,7 @@ def test_redacts_real_sdk_error_log() -> None:
 
 def test_redaction_keeps_diagnostic_context() -> None:
     """マスクしても、デバッグに要る情報は残す。"""
-    result = redact(REAL_SDK_ERROR_LOG)
+    result = redact(SDK_ERROR_LOG)
     assert "UNAUTHORIZED" in result
     assert "/openapi/config" in result
     assert "HMAC-SHA256" in result  # アルゴリズム名は秘密ではない
@@ -124,12 +124,12 @@ def test_formatter_redacts_exception_traceback() -> None:
     """
     formatter = RedactingFormatter("%(message)s")
     try:
-        raise RuntimeError(REAL_SDK_ERROR_LOG)
+        raise RuntimeError(SDK_ERROR_LOG)
     except RuntimeError:
         import sys
 
         record = logging.LogRecord(
-            name="webull.core.client",
+            name="broker_sdk.client",
             level=logging.ERROR,
             pathname=__file__,
             lineno=1,
@@ -149,8 +149,8 @@ def test_sdk_logger_output_is_redacted(capsys: pytest.CaptureFixture[str]) -> No
     configure_logging("INFO")
 
     # SDK と同じロガー名で、SDK と同じ形の内容を出す
-    logging.getLogger("webull.core.client").error(REAL_SDK_ERROR_LOG)
-    logging.getLogger("webull.core.client").error("secret=%s", APP_SECRET)
+    logging.getLogger("broker_sdk.client").error(SDK_ERROR_LOG)
+    logging.getLogger("broker_sdk.client").error("secret=%s", APP_SECRET)
 
     captured = capsys.readouterr().err
     assert APP_KEY not in captured

@@ -1,6 +1,11 @@
-# wbjp — Webull証券 日本株・米国株 自動売買システム
+# wbjp — 日本株・米国株 自動売買システム
 
-Webull証券の OpenAPI を使って日本株・米国株を売買するシステム。3つのパッケージからなる。
+日本株・米国株を売買するシステム。3つのパッケージからなる。
+
+> **⚠️ 実発注できるブローカーは現在ありません。** 証券会社の実装は削除済みで、残っているのは
+> ネットワークに繋がないシミュレータ（`paper`）だけです。実際に発注するには
+> 「[取引所（ブローカー）の差し替え](#取引所ブローカーの差し替え)」の手順で証券会社の実装を足してください。
+> 判断・バックテスト・足データの蓄積・台帳の記録は、ブローカー無しでもそのまま動きます。
 
 | パッケージ | 役割 | CLI |
 |---|---|---|
@@ -19,12 +24,12 @@ Webull証券の OpenAPI を使って日本株・米国株を売買するシス�
 
 ## 設計の前提（実機調査で確定）
 
-Webull JP OpenAPI には、設計を左右する2つの制約がある。
+証券会社の API には、設計を左右する2つの制約がある。
 
-### 1. 日本株の株価データは Webull API から取得できない
+### 1. 日本株の株価データはブローカーの API から取得できない
 
-Webull の市場データAPI（`bars` / `snapshot`）は `US_STOCK` / `US_ETF` にしか対応していない。
-日本株は **発注はできるが、足データは取れない**。
+証券会社の市場データ API は米国株にしか対応していないことが多く、日本株は
+**発注はできるが、足データは取れない**という状況になりやすい。
 
 → **価格データ層とブローカー層を完全に分離**し、価格は日本株が J-Quants API（公式）、米国株が yfinance から取得する。
 
@@ -63,8 +68,8 @@ uv run wbjp run --config-dir config/us            # 判断まで（注文は出�
 | 逆指値 | API 非対応 → エンジン合成 | **STOP_LOSS を GTC でブローカーに置く** |
 | 差金決済の回避 | 当日買った銘柄は当日売らない | 不要 |
 | 通貨 | JPY | USD（`risk` の金額もドル建て） |
-| 足データ | J-Quants API | yfinance か Webull 市場データ API |
-| 売買手数料 | 約 0.11%（UAT 実測） | 無料（2026-07-27〜）＋ SEC/FINRA 手数料 |
+| 足データ | J-Quants API | yfinance |
+| 売買手数料 | 証券会社による（`daytrade.fees` の表を使う口座に合わせる） | 証券会社による＋ SEC/FINRA 手数料 |
 
 米国株で逆指値をブローカーに置く場合の要点:
 
@@ -74,7 +79,7 @@ uv run wbjp run --config-dir config/us            # 判断まで（注文は出�
 - 日足のストップ判定も保険として残す。逆指値が何かの理由で消えていた日でも翌寄付で手仕舞える。
 - `execution.stop_mode = "engine"` にすれば米国株でも日足判定だけに戻せる（比較検証用）。
 
-同じ口座に日本株と米国株が混在するため、`WebullBroker` は **設定された市場の通貨の行だけ**を残高・建玉として読む。日本株と米国株を両方回すなら、設定ディレクトリを分けて別プロセスで動かす。
+同じ口座に日本株と米国株が混在しうるため、ブローカー実装は **設定された市場の通貨の行だけ**を残高・建玉として読むこと。日本株と米国株を両方回すなら、設定ディレクトリを分けて別プロセスで動かす。
 
 ### スクリーニングと順位付け（`trend_pullback`）
 
@@ -171,7 +176,7 @@ uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV
 
 部品は `wbcore` と共有: 足は `wbcore.data`、発注は `wbcore.broker`、登録簿の仕組みは `wbcore.registry`。積立固有なのは倍率（`accum.tactics`）・計画（`accum.plan`）・検証（`accum.simulate` / `accum.basket`）・注文化（`accum.execute`）で、どの段も単独で差し替えられる。
 
-> **UAT で未確認の点**: 米国株の発注ペイロード（`trade_currency` / `extended_hours_trading` / `support_trading_session` の値）と、Webull 市場データ API の応答形式は SDK と公開ドキュメントから組んであり、実機での疎通確認がまだ。最初は必ず `WBJP_ENV=uat` の dry-run で `wbjp account` と `wbjp run` を通し、ログの発注ペイロードを確認すること。
+> **ブローカーを足したときの確認**: 米国株の発注ペイロード（`trade_currency` / 時間外取引の指定など）は証券会社ごとに違う。最初は必ず `WBJP_ENV=uat` の dry-run で `wbjp account` と `wbjp run` を通し、ログの発注ペイロードを確認すること。
 
 ---
 
@@ -180,7 +185,7 @@ uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV
 | 軸 | 何を決めるか | 値 |
 |---|---|---|
 | **`--live`**（コマンド引数） | **注文を出すか** | 無し＝出さない（データ取得・判断・台帳への記録は行う）／有り＝出す |
-| `WBJP_ENV`（`.env`） | **どの口座に繋ぐか** | `uat`＝Webull のテスト口座（実弾ではない）／`prod`＝本番口座 |
+| `WBJP_ENV`（`.env`） | **どの口座に繋ぐか** | `uat`＝テスト口座（実弾ではない）／`prod`＝本番口座 |
 | `kill_switch`（設定ファイル） | 緊急停止 | `true` なら `--live` があっても出さない |
 
 `WBJP_ENV` は売買の可否ではなく口座の選択。`wbjp run` / `accum run` は冒頭にこの 2 軸を 1 行で出す:
@@ -202,7 +207,7 @@ uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV
 
 ## ログ（後から AI に読ませる用）
 
-**ファイルに残すログは 1 箇所だけ**——`WBJP_LOG_DIR`（既定 `WBJP_STATE_DIR/logs`＝`state/logs`）。機械が読む JSONL も、cron で stderr を残す場合もここに集める。SDK が勝手に作る `webull_*_sdk.log` は抑止してあり、どこにも書かれない。
+**ファイルに残すログは 1 箇所だけ**——`WBJP_LOG_DIR`（既定 `WBJP_STATE_DIR/logs`＝`state/logs`）。機械が読む JSONL も、cron で stderr を残す場合もここに集める。
 
 端末に出る整形表示とは別に、**機械が読む JSON Lines** を常に `<WBJP_LOG_DIR>/<app>-<env>.jsonl` に書く（1 行 1 レコード、日次ローテーション、90 日保持、秘匿情報は伏せる）。全レコードに `schema` / `ts_utc` / `run_id`（1 回の実行の識別子）/ `app` / `env` / `command` が付き、主要な出来事には安定した `code`（`accum.decision` / `accum.order` / `accum.fill` …）が付く。項目の定義は [docs/LOGGING.md](docs/LOGGING.md)。
 
@@ -220,7 +225,7 @@ jq -r 'select(.code == "accum.decision") | [.ts_utc, .symbol, .target, .placed, 
 
 ```toml
 [execution]
-broker = "webull"   # webull | paper（ネットワークに繋がないシミュレータ）
+broker = "paper"   # 今は paper（ネットワークに繋がないシミュレータ）のみ
 ```
 
 取引所を足す手順:
@@ -228,15 +233,15 @@ broker = "webull"   # webull | paper（ネットワークに繋がないシミ�
 1. `Broker` を継承し、`name`（設定で使う名前）と `connect()`（認証情報の解決・接続先の選択など、その証券会社固有の準備）を書く
 2. `wbcore.broker.registry.BROKERS.register(YourBroker)` する
 
-認証情報は証券会社ごとに名前空間を分ける（`load_credentials(env, namespace="XXX")` → `XXX_PROD_APP_KEY` / キーチェーン `xxx/prod`）。Webull は `WBJP`。CLI には手を入れない。
+認証情報は証券会社ごとに名前空間を分ける（`load_credentials(env, namespace="XXX")` → `XXX_PROD_APP_KEY` / キーチェーン `xxx/prod`）。既定の名前空間は `WBJP`。CLI には手を入れない。
 
 ## 足データの取得元と足の間隔
 
-取得元も同じ形で差し替える。`wbcore.data.provider.MarketDataProvider` 抽象クラスの裏に J-Quants / yfinance / Webull 市場データ API が並び、設定の名前で選ぶ。省略すると市場の既定（日本株 `jquants` / 米国株 `yfinance`）。
+取得元も同じ形で差し替える。`wbcore.data.provider.MarketDataProvider` 抽象クラスの裏に J-Quants / yfinance が並び、設定の名前で選ぶ。省略すると市場の既定（日本株 `jquants` / 米国株 `yfinance`）。
 
 ```toml
 [universe]
-data_provider = "jquants"    # jquants（日本株のみ・日足のみ）| yfinance（両市場）| webull（米国株のみ）
+data_provider = "jquants"    # jquants（日本株のみ・日足のみ）| yfinance（両市場）
 ```
 
 足の間隔（`Interval`: `1d` / `1h` / `30m` / `15m` / `5m` / `1m`）は抽象の一部で、取得元ごとに対応範囲を申告する（yfinance の 1 分足は直近 7 日、5〜30 分足は 60 日まで）。J-Quants は日足のみで、API キー `WBJP_JQUANTS_API_KEY`（環境変数か `.env`）が要る。Free プランは直近 12 週が取れないため当日の判断には Light 以上を使う。日中足は UTC の `ts` と暦日 `date` の両方を持ち、`data/bars/<間隔>/` に日足とは別に保存される。
@@ -273,19 +278,9 @@ base_interval = "1m"   # 取り込みの基準。5分足・1時間足・日足�
 
 ### 収集専用の設定（[`config/collect/`](config/collect/)）
 
-将来売買する可能性のある銘柄は、戦略を持たない設定で足だけ蓄積しておく。`universe.txt` に銘柄を書き足すだけで、その日から蓄積が始まる。Webull アプリのマイウォッチリストから流し込むこともできる：
+将来売買する可能性のある銘柄は、戦略を持たない設定で足だけ蓄積しておく。`universe.txt` に銘柄を書き足すだけで、その日から蓄積が始まる。
 
-```toml
-[universe]
-watchlists = ["*"]      # 全リスト。名前を並べれば特定のリストだけ
-```
-
-`data sync` / `data check` のたびにウォッチリストを読み、この市場の銘柄を取り込み対象に加える（アプリでリストに足せば、次の取り込みから蓄積が始まる）。読めた銘柄は `universe.txt` にも書き足して残すので、API が落ちた日も前回のリストで蓄積が続く。売買の allowlist（`run` / `backtest` の対象）には入れない——発注対象は設定に明示的に書かれたものだけ。
-
-```bash
-uv run wbjp data watchlist                                                  # リストと中身を表示
-uv run wbjp data watchlist --name 日本株 --export config/collect/universe.txt --merge   # 手で書き出す場合
-```取得元は `data_provider` で切り替えられ、基準足（1 分足）に対応しない取得元でも日足は必ず揃う。
+取得元は `data_provider` で切り替えられ、基準足（1 分足）に対応しない取得元でも日足は必ず揃う。
 
 ```bash
 uv run wbjp data sync   --config-dir config/collect --days 7
@@ -357,7 +352,7 @@ Reconciler            目標 vs 実建玉＋未約定 の「差分だけ」を�
         ↓
 RiskManager           上限チェック・拒否
         ↓
-Broker                WebullBroker / PaperBroker
+Broker                PaperBroker（証券会社の実装を足せる）
 ```
 
 この構造が効くところ:
@@ -372,13 +367,12 @@ Broker                WebullBroker / PaperBroker
 
 | 領域 | 選定 | 理由 |
 |---|---|---|
-| 言語 | Python 3.14 | SDK が `<3.15` のため上限。全依存のcp314ホイールを確認済み |
+| 言語 | Python 3.14 | 全依存のcp314ホイールを確認済み |
 | パッケージ管理 | uv | ランタイムごと管理。ロックファイルで再現性 |
 | データフレーム | polars | インジケーターは polars 式で自前実装 |
 | 価格データ | J-Quants API（日本株）/ yfinance（米国株） | 日本株は JPX 公式・調整済み四本値。米国株と米国指数は J-Quants に無いので yfinance。取得済みは必ずローカルキャッシュ |
 | 状態の保存 | SQLite | 注文・シグナル・実行履歴。ACID と冪等性の担保 |
 | 時系列の保存 | Parquet + DuckDB | 足データの高速な集計・分析 |
-| 発注 | webull-openapi-python-sdk | 公式SDK |
 
 ---
 
@@ -415,7 +409,6 @@ APIキーはリポジトリに置かない。
 | 1 | 環境変数 | systemd の `EnvironmentFile=` / CI（サーバー運用の推奨） |
 | 2 | `.env` | キーチェーンの無いホスト。**`chmod 600` 必須** |
 | 3 | OS キーチェーン | ローカル開発の推奨 |
-| 4 | 公開テスト口座 | UAT のみ。認証情報が無いときの自動フォールバック |
 
 変数名は `WBJP_<ENV>_APP_KEY` / `_APP_SECRET` / `_ACCOUNT_ID`（例: `WBJP_PROD_APP_KEY`）。
 どこから読まれているかは `wbjp credentials check --env prod` の「取得元」で確認できる。
@@ -457,7 +450,7 @@ ExecStart=/opt/wbjp/.venv/bin/wbjp run --live
 ## 使い方
 
 ```bash
-# UAT（実弾なし・公開テスト口座）
+# UAT（テスト口座。実弾なし）
 WBJP_ENV=uat uv run wbjp account
 WBJP_ENV=uat uv run wbjp run --live
 
@@ -544,9 +537,9 @@ src/wbcore/              共通基盤（wbjp / accum のどちらからも使う
 │   ├── models.py        Bar / Signal / Order / Position（すべて Decimal）、決定論的な注文ID
 │   ├── market_rules.py  JP / US の取引ルールの抽象化
 │   └── jp_rules.py      呼値・値幅制限・単元株・取引時間・差金決済
-├── data/                MarketDataProvider → J-Quants / yfinance / Webull / CSV / Parquet+DuckDB / EDGAR 13F
+├── data/                MarketDataProvider → J-Quants / yfinance / CSV / Parquet+DuckDB / EDGAR 13F
 ├── indicators/ohlcv.py  polars 式で SMA/EMA/RSI/ATR/MACD/BB/ADX/Donchian
-└── broker/              Broker ABC → Webull / Paper / レート制限 / 接続の組み立て（factory）
+└── broker/              Broker ABC → Paper / レート制限 / 接続の組み立て（factory）
 
 src/wbjp/                スイング売買
 ├── config.py            settings.toml / strategies.toml（ユニバース・リスク・出口・レジーム）
@@ -571,9 +564,7 @@ src/accum/               積立
 
 | 箇所 | 内容 |
 |---|---|
-| `logging.py` | SDK は起動時に**自前のログハンドラとログファイル**を作り、マスクを迂回する。`harden_third_party_logging()` と `suppress_sdk_own_logging()` で塞いでいる（`ApiClient` を `TradeClient` / `DataClient` に渡す前に必ず呼ぶ） |
-| `broker/webull.py` | 注文照会は**コンボ構造**（実データは入れ子の `orders` 配列）。外側だけ読むと空の注文に見える |
-| `broker/webull.py` | `TradeClient()` はコンストラクタでネットワークを叩くため遅延初期化 |
+| `logging.py` | 証券会社の SDK は起動時に**自前のログハンドラとログファイル**を作り、マスクを迂回することがある。SDK を足すときは、その抑止も一緒に書く |
 | `jp_rules.py` | 呼値は「以下」区分、値幅制限は「未満」区分。引き方が違う |
 | `indicators/ohlcv.py` | `diff()` の先頭 null は `pl.when` で明示的に通す。0 に化けると Wilder 平滑化の種が汚れて TA-Lib と値がずれる |
 | `engine/backtest.py` | 指標は全期間で一度だけ計算する（指標が因果的なので等価）。毎日再計算すると約50倍遅い |
@@ -593,9 +584,10 @@ uv run mypy                # strict
 
 1. `config/settings.toml` の `universe.symbols` を実際に売買したい銘柄に変える
    （TOPIX500 構成銘柄は `topix500_symbols` にも入れる。呼値が変わる）
-2. `risk.max_order_value_jpy` を自分の資金規模に合わせる
-   （既定の50万円は保守的。UAT の9,800万円口座では全注文が上限に当たる）
-3. UAT で `wbjp run --live` を数日回し、`wbjp explain <run_id>` で判断を目視検証
-4. 本番のAPIキーを申請 → `wbjp credentials set --env prod`
-5. `WBJP_ENV=prod wbjp run`（dry-run）を数日回してから `--live` に進む
+2. `risk.max_order_value_jpy` を自分の資金規模に合わせる（既定の50万円は保守的）
+3. 実際に発注するなら、使う証券会社の `Broker` 実装を足す
+   （「[取引所（ブローカー）の差し替え](#取引所ブローカーの差し替え)」）
+4. UAT で `wbjp run --live` を数日回し、`wbjp explain <run_id>` で判断を目視検証
+5. 本番のAPIキーを申請 → `wbjp credentials set --env prod`
+6. `WBJP_ENV=prod wbjp run`（dry-run）を数日回してから `--live` に進む
 

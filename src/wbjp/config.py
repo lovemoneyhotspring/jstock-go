@@ -22,10 +22,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 # 共通基盤からの再輸出。以前はここに実体があったので、旧来の
 # ``from wbjp.config import Environment`` を壊さないために残している。
-from wbcore.credentials import ENDPOINTS as ENDPOINTS
-from wbcore.credentials import PUBLIC_UAT_CREDENTIALS as PUBLIC_UAT_CREDENTIALS
 from wbcore.credentials import Credentials as Credentials
-from wbcore.credentials import Endpoints as Endpoints
 from wbcore.credentials import Environment as Environment
 from wbcore.credentials import MissingCredentialsError as MissingCredentialsError
 from wbcore.credentials import credential_source as credential_source
@@ -146,7 +143,7 @@ class UniverseConfig(BaseModel):
     #: 日本株と米国株を両方回すなら、設定ディレクトリを分けて別プロセスで動かす。
     market: Market = Market.JP
     #: 足データの取得元。:data:`wbcore.data.registry.PROVIDERS` の名前
-    #: （"jquants" は日本株のみ、"yfinance" は両市場、"webull" は米国株のみ）。
+    #: （"jquants" は日本株のみ、"yfinance" は両市場）。
     #: 省略すると市場の既定（日本株 jquants / 米国株 yfinance）。
     data_provider: str = ""
     #: 判断に使う足の間隔。"1d"（日足、既定）/ "1h" / "30m" / "15m" / "5m" / "1m"。
@@ -161,12 +158,6 @@ class UniverseConfig(BaseModel):
     #: 銘柄リストのファイル（1行1銘柄、# はコメント）。設定ディレクトリからの相対パス。
     #: 読み込んだ銘柄は ``symbols`` に合流し、allowlist にもなる。
     symbols_file: str | None = None
-    #: Webull のマイウォッチリストから銘柄を取り込む（``data sync`` / ``data check`` のとき）。
-    #: リストの名前を並べる。``["*"]`` で全リスト。この市場の銘柄だけを使い、
-    #: ``symbols_file`` があればそこにも書き足して残す（API が落ちても前回の
-    #: リストで動けるように）。売買（``run`` / ``backtest``）の allowlist には
-    #: 入れない——発注対象は設定ファイルに明示的に書かれたものだけ。
-    watchlists: list[str] = Field(default_factory=list)
     #: TOPIX500 構成銘柄（呼値が細かくなる）。日本株のみ意味を持つ。
     topix500_symbols: list[str] = Field(default_factory=list)
     #: 売買単位が既定と異なる銘柄の例外 {銘柄コード: 単元株数}
@@ -193,8 +184,6 @@ class UniverseConfig(BaseModel):
             raise ValueError(
                 f"data_provider は {available_providers()} のいずれか: {self.data_provider}"
             )
-        if self.data_provider == "webull" and self.market is not Market.US:
-            raise ValueError('data_provider = "webull" は米国株（market = "US"）専用です')
         if self.data_provider == "jquants" and self.market is not Market.JP:
             raise ValueError('data_provider = "jquants" は日本株（market = "JP"）専用です')
         return self
@@ -419,9 +408,9 @@ class ExecutionConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（webull / paper / …）。
+    #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（paper / …）。
     #: 未知の名前は接続時に候補付きで弾かれる。
-    broker: str = "webull"
+    broker: str = "paper"
     tax_account_type: TaxAccountType = TaxAccountType.SPECIFIC
     #: "market" | "limit"
     order_type: str = "limit"

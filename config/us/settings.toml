@@ -19,7 +19,6 @@ market = "US"
 
 # 足データの取得元。
 #   yfinance … 無料・非公式。日本株と同じ経路
-#   webull   … Webull の市場データ API。ブローカーと同じ値。UAT で疎通確認が要る
 data_provider = "yfinance"
 
 # スクリーニング対象の銘柄リスト（1行1ティッカー）。config ディレクトリからの相対パス。
@@ -76,8 +75,8 @@ max_hold_days = 10
 # 発注の振る舞い
 # --------------------------------------------------------------------------
 [execution]
-# 米国株の課税区分は Webull JP では GENERAL / SPECIFIC。NISA は成長投資枠で
-# 米国株も対象だが、損切り前提のスイングには向かない。
+# 米国株の課税区分は GENERAL / SPECIFIC。NISA は成長投資枠で米国株も対象だが、
+# 損切り前提のスイングには向かない。
 tax_account_type = "SPECIFIC"
 order_type = "limit"
 limit_offset = "0.005"

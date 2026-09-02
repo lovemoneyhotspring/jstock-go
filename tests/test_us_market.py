@@ -16,7 +16,6 @@ import polars as pl
 import pytest
 
 from wbcore.broker.paper import PaperBroker
-from wbcore.broker.webull import WebullBroker
 from wbcore.data.yfinance_provider import to_yahoo_ticker
 from wbcore.domain.jp_rules import PriceRounding
 from wbcore.domain.market_rules import JpMarketRules, UsMarketRules, rules_for
@@ -32,8 +31,6 @@ from wbcore.domain.models import (
     TimeInForce,
 )
 from wbjp.config import (
-    Credentials,
-    Environment,
     ExecutionConfig,
     FileConfig,
     RiskConfig,
@@ -524,12 +521,6 @@ def test_topix500_is_rejected_for_us() -> None:
         UniverseConfig(market=Market.US, symbols=["AAPL"], topix500_symbols=["AAPL"])
 
 
-def test_webull_data_provider_is_us_only() -> None:
-    with pytest.raises(ValueError, match="data_provider"):
-        UniverseConfig(symbols=["7203"], data_provider="webull")
-    assert UniverseConfig(market=Market.US, symbols=["AAPL"], data_provider="webull")
-
-
 def test_legacy_jpy_field_names_still_load() -> None:
     config = FileConfig.model_validate(
         {
@@ -540,79 +531,6 @@ def test_legacy_jpy_field_names_still_load() -> None:
     assert config.risk.max_order_value == D(1)
     assert config.risk.max_daily_loss == D(2)
     assert config.sizing.fixed_notional == D(3)
-
-
-# ==========================================================================
-# WebullBroker の変換（ネットワーク無し）
-# ==========================================================================
-
-
-def webull(market: Market, **kwargs) -> WebullBroker:  # type: ignore[no-untyped-def]
-    creds = Credentials(app_key="k" * 16, app_secret="s" * 16, account_id="acct")
-    return WebullBroker(creds, Environment.UAT, "example.invalid", market=market, **kwargs)
-
-
-def test_us_payload_carries_market_currency_and_stop_price() -> None:
-    payload = webull(Market.US)._to_payload(stop_request(stop="190.5"))
-    assert payload["market"] == "US"
-    assert payload["trade_currency"] == "USD"
-    assert payload["order_type"] == "STOP_LOSS"
-    assert payload["stop_price"] == "190.5"
-    assert payload["time_in_force"] == "GTC"
-    assert payload["extended_hours_trading"] == "false"
-    assert payload["support_trading_session"] == "CORE"
-    assert "limit_price" not in payload
-
-
-def test_us_payload_extended_hours_flag() -> None:
-    request = OrderRequest("o", "AAPL", Side.BUY, OrderType.LIMIT, D(1), D("200.00"))
-    payload = webull(Market.US, extended_hours=True)._to_payload(request)
-    assert payload["extended_hours_trading"] == "true"
-    assert payload["limit_price"] == "200"
-
-
-def test_jp_payload_is_unchanged_and_refuses_stops() -> None:
-    broker = webull(Market.JP)
-    request = OrderRequest("o", "7203", Side.BUY, OrderType.LIMIT, D(100), D(2500))
-    payload = broker._to_payload(request)
-    assert payload["market"] == "JP"
-    assert "trade_currency" not in payload
-    assert "extended_hours_trading" not in payload
-
-    with pytest.raises(ValueError, match="逆指値"):
-        broker._to_payload(stop_request())
-
-
-def test_position_rows_are_filtered_by_market() -> None:
-    us = webull(Market.US)
-    assert us._belongs_to_market({"market": "US", "currency": "USD"})
-    assert not us._belongs_to_market({"market": "JP", "currency": "JPY"})
-    assert us._belongs_to_market({"currency": "USD"})
-    assert not us._belongs_to_market({})  # 情報が無い行は日本株扱い
-
-    jp = webull(Market.JP)
-    assert jp._belongs_to_market({})
-    assert not jp._belongs_to_market({"currency": "USD"})
-
-
-def test_order_rows_parse_stop_price_and_tif() -> None:
-    order = webull(Market.US)._to_order(
-        {
-            "client_order_id": "c",
-            "symbol": "AAPL",
-            "side": "SELL",
-            "order_type": "STOP_LOSS",
-            "total_quantity": "10",
-            "filled_quantity": "0",
-            "status": "WORKING",
-            "stop_price": "190.5",
-            "time_in_force": "GTC",
-        }
-    )
-    assert order.order_type is OrderType.STOP_LOSS
-    assert order.stop_price == D("190.5")
-    assert order.time_in_force is TimeInForce.GTC
-    assert order.status.is_open
 
 
 # ==========================================================================

@@ -89,7 +89,7 @@ class JpMarketRules(MarketRules):
 
     @property
     def broker_stop_order_type(self) -> OrderType | None:
-        # Webull JP の日本株 API は逆指値に対応していない（README 参照）
+        # 日本株の API は逆指値に対応していない（README 参照）
         return None
 
     @property

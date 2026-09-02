@@ -210,10 +210,10 @@ class ExecutionConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    broker: str = "webull"
+    broker: str = "paper"
     tax_account_type: TaxAccountType = TaxAccountType.SPECIFIC
-    #: 9:00 の気配の取得元。webull / yfinance / csv（:mod:`daytrade.quotes`）。
-    quote_source: str = "webull"
+    #: 9:00 の気配の取得元。yfinance / csv（:mod:`daytrade.quotes`）。
+    quote_source: str = "yfinance"
     #: csv のときの置き場（``symbol,price`` の CSV）。
     quote_file: Path | None = None
     #: 寄付買いを出してよい時間帯（JST）。外なら何もしない。

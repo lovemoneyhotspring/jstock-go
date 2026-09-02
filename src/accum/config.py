@@ -213,15 +213,15 @@ class ExecutionConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（webull / paper / …）。
-    broker: str = "webull"
+    #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（paper / …）。
+    broker: str = "paper"
     #: 注文種別。"market"（成行、既定）か "limit"（最新価格 × (1 + limit_offset) の指値）。
     #: ETF は板が薄いことがあり、成行だと不利な価格で約定しうる。指値なら上限を切れる
     order_type: str = "market"
     #: 指値のとき、最新価格からどれだけ上に置くか（約定しやすくするため）。
     limit_offset: Decimal = Decimal("0.01")
-    #: 成行が「気配値が無い」（Webull の OPENAPI_QUOTE_NOT_FOUND）で拒否されたら、
-    #: 同じ内容を指値で出し直す。UAT で新規上場 ETF がこの理由で弾かれた
+    #: 成行が「気配値が無い」（``QUOTE_NOT_FOUND``）で拒否されたら、
+    #: 同じ内容を指値で出し直す。新規上場 ETF がこの理由で弾かれることがある
     fallback_to_limit: bool = True
     #: GENERAL（一般） / SPECIFIC（特定） / NISA
     tax_account_type: TaxAccountType = TaxAccountType.SPECIFIC

@@ -1,4 +1,4 @@
-"""Webull API の認証情報。
+"""証券会社 API の認証情報。
 
 方針:
     - **秘密はリポジトリに置かない。** ローカル開発では OS のキーチェーンに
@@ -8,16 +8,15 @@
       発注する事故を、名前空間の分離で防ぐ。
 
 名前空間:
-    証券会社ごとに ``namespace`` で分ける。Webull は ``WBJP``——環境変数は
-    ``WBJP_PROD_APP_KEY``、キーチェーンは ``wbjp/prod``。別の証券会社を
-    足すときは、その :class:`~wbcore.broker.base.Broker` が自分の名前空間を
-    渡す。プロジェクト（売買 / 積立）を分けても口座は同じなので、
-    名前空間はプロジェクトではなく証券会社に紐づける。
+    証券会社ごとに ``namespace`` で分ける。既定の ``WBJP`` なら環境変数は
+    ``WBJP_PROD_APP_KEY``、キーチェーンは ``wbjp/prod``。証券会社を足すときは、
+    その :class:`~wbcore.broker.base.Broker` が自分の名前空間を渡す。
+    プロジェクト（売買 / 積立）を分けても口座は同じなので、名前空間は
+    プロジェクトではなく証券会社に紐づける。
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import os
 import stat
 from collections.abc import Mapping
@@ -30,7 +29,7 @@ from dotenv import dotenv_values
 
 log = structlog.get_logger(__name__)
 
-#: 既定の名前空間（Webull）。環境変数の接頭辞とキーチェーンのサービス名になる。
+#: 既定の名前空間。環境変数の接頭辞とキーチェーンのサービス名になる。
 DEFAULT_NAMESPACE = "WBJP"
 
 #: 既定の ``.env`` の場所（プロセスのカレントディレクトリ）。
@@ -42,12 +41,6 @@ ENV_FILE_OVERRIDE_VAR = "WBJP_ENV_FILE"
 #: 認証情報を構成する項目。
 _CREDENTIAL_FIELDS = ("app_key", "app_secret", "account_id")
 
-#: Webull の API キーは既定でこの日数で失効する。
-API_KEY_VALIDITY_DAYS = 45
-
-#: 失効まで何日を切ったら警告するか。
-API_KEY_EXPIRY_WARN_DAYS = 7
-
 
 class Environment(StrEnum):
     UAT = "uat"
@@ -58,46 +51,13 @@ class Environment(StrEnum):
         return self is Environment.PROD
 
 
-@dataclass(frozen=True, slots=True)
-class Endpoints:
-    """環境ごとの接続先。"""
-
-    trade: str
-    events: str
-    market_data: str
-
-
-#: 出典: https://developer.webull.co.jp/apis/docs/sdk.md
-ENDPOINTS: dict[Environment, Endpoints] = {
-    Environment.UAT: Endpoints(
-        trade="jp-openapi-alb.uat.webullbroker.com",
-        events="jp-openapi-events.uat.webullbroker.com",
-        market_data="data-api.uat.webullbroker.com",
-    ),
-    Environment.PROD: Endpoints(
-        trade="api.webull.co.jp",
-        events="events-api.webull.co.jp",
-        market_data="data-api.webull.co.jp",
-    ),
-}
-
-#: Webull が公式ドキュメントで公開している UAT 用の共有テスト口座。
-#: 誰でも使えるため残高・建玉は常に他人によって変動する。疎通確認専用。
-#: 本番環境では絶対に使われない（:func:`load_credentials` で分岐）。
-PUBLIC_UAT_CREDENTIALS = {
-    "app_key": "209fffb82d4e62b60d167b7b9c55e163",
-    "app_secret": "af02275fc2e9cfccd3745c85f48b40cd",
-    "account_id": "1241489592734023680",
-}
-
-
 class MissingCredentialsError(RuntimeError):
     """認証情報が見つからない。"""
 
 
 @dataclass(frozen=True, slots=True)
 class Credentials:
-    """Webull API の認証情報。
+    """証券会社 API の認証情報。
 
     ``__repr__`` を潰してあるので、うっかりログや例外に出しても
     秘密が漏れない。
@@ -106,28 +66,11 @@ class Credentials:
     app_key: str
     app_secret: str
     account_id: str
-    created_on: dt.date | None = None
-    is_public_test_account: bool = False
 
     def __repr__(self) -> str:
         return f"Credentials(app_key='***{self.app_key[-4:]}', account_id='***')"
 
     __str__ = __repr__
-
-    @property
-    def expires_on(self) -> dt.date | None:
-        """キーの失効予定日。生成日が未設定なら None。"""
-        if self.created_on is None:
-            return None
-        return self.created_on + dt.timedelta(days=API_KEY_VALIDITY_DAYS)
-
-    def days_until_expiry(self, today: dt.date | None = None) -> int | None:
-        expires = self.expires_on
-        if expires is None:
-            return None
-        from wbcore.clock import today_utc
-
-        return (expires - (today or today_utc())).days
 
 
 # --------------------------------------------------------------------------
@@ -243,7 +186,6 @@ def _resolve_fields(
 def load_credentials(
     env: Environment,
     *,
-    allow_public_test_account: bool = True,
     env_file: Path | None = None,
     namespace: str = DEFAULT_NAMESPACE,
 ) -> Credentials:
@@ -253,10 +195,9 @@ def load_credentials(
         1. 環境変数（CI・systemd の ``EnvironmentFile=`` 向け）
         2. ``.env``（キーチェーンの無いサーバー向け。0600 にすること）
         3. OS キーチェーン（ローカル開発の既定）
-        4. Webull の UAT のみ: 公開のテスト口座
 
     Args:
-        namespace: 証券会社ごとの名前空間（環境変数の接頭辞）。既定は Webull。
+        namespace: 証券会社ごとの名前空間（環境変数の接頭辞）。
 
     Raises:
         MissingCredentialsError: どこにも見つからないとき。
@@ -265,25 +206,11 @@ def load_credentials(
     dotenv = _read_dotenv(path)
     resolved, _ = _resolve_fields(env, dotenv, path, namespace)
 
-    created_key = f"{namespace}_{env.value.upper()}_KEY_CREATED_ON"
-    created_on = _parse_date(os.environ.get(created_key) or dotenv.get(created_key))
-
     if all(resolved.values()):
         return Credentials(
             app_key=str(resolved["app_key"]),
             app_secret=str(resolved["app_secret"]),
             account_id=str(resolved["account_id"]),
-            created_on=created_on,
-        )
-
-    # 本番で公開テスト口座にフォールバックすることは絶対にない。
-    # 公開テスト口座は Webull のものなので、他の名前空間にも使わない。
-    if env is Environment.UAT and allow_public_test_account and namespace == DEFAULT_NAMESPACE:
-        return Credentials(
-            app_key=PUBLIC_UAT_CREDENTIALS["app_key"],
-            app_secret=PUBLIC_UAT_CREDENTIALS["app_secret"],
-            account_id=PUBLIC_UAT_CREDENTIALS["account_id"],
-            is_public_test_account=True,
         )
 
     missing = [k for k, v in resolved.items() if not v]
@@ -317,19 +244,16 @@ def credential_source(
     どこから読まれているか分からないまま本番に発注する事故を防ぐための、
     ``credentials check`` 用の診断。秘密そのものは返さない。
 
-    **``load_credentials`` が実際に採用したものを説明すること。** 1項目でも
-    欠けていれば全体が公開テスト口座にフォールバックするので、``app_key``
-    だけを見て「.env から読んだ」と表示すると嘘になる。
+    **``load_credentials`` が実際に採用したものを説明すること。** 項目ごとに
+    取得元が違いうるので、``app_key`` だけを見て「.env から読んだ」と
+    表示すると嘘になる。
     """
     path = _resolve_env_file(env_file)
     resolved, origins = _resolve_fields(env, _read_dotenv(path), path, namespace)
 
     missing = [k for k, v in resolved.items() if not v]
     if missing:
-        detail = f"{', '.join(missing)} が未設定"
-        if env is Environment.UAT and namespace == DEFAULT_NAMESPACE:
-            return f"公開テスト口座（UAT 共有）— {detail}のため"
-        return f"解決できません（{detail}）"
+        return f"解決できません（{', '.join(missing)} が未設定）"
 
     labels = set(origins.values())
     if len(labels) == 1:
@@ -348,12 +272,3 @@ def store_credentials(
     keyring.set_password(service, "app_key", creds.app_key)
     keyring.set_password(service, "app_secret", creds.app_secret)
     keyring.set_password(service, "account_id", creds.account_id)
-
-
-def _parse_date(value: str | None) -> dt.date | None:
-    if not value:
-        return None
-    try:
-        return dt.date.fromisoformat(value)
-    except ValueError:
-        return None

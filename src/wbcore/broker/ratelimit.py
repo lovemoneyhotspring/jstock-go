@@ -1,19 +1,9 @@
 """レート制限。
 
-Webull の制限（実測・公式ドキュメント）:
-
-    ==================== =============
-    エンドポイント        上限
-    ==================== =============
-    残高・建玉・未約定    2 回 / 2 秒
-    注文の発注・訂正・取消 600 回 / 60 秒
-    発注プレビュー        150 回 / 10 秒
-    銘柄情報              10 回 / 30 秒
-    ==================== =============
-
-残高照会が 2 回/2 秒と厳しいのが要注意点。銘柄ごとに残高を確認するような
-実装にすると即座に上限に当たる。呼び出し側でまとめて取得し、
-:class:`Cached` で短時間だけ使い回す。
+証券会社の API には「残高照会は 2 回 / 2 秒」のような上限がある。銘柄ごとに
+残高を確認するような実装にすると即座に上限に当たるので、呼び出し側でまとめて
+取得し、:class:`Cached` で短時間だけ使い回す。上限そのものは、それを知っている
+:class:`~wbcore.broker.base.Broker` の実装が :class:`Limit` で宣言する。
 """
 
 from __future__ import annotations
@@ -34,16 +24,6 @@ class Limit:
     def __post_init__(self) -> None:
         if self.calls < 1 or self.per_seconds <= 0:
             raise ValueError(f"不正なレート制限: {self.calls}回/{self.per_seconds}秒")
-
-
-#: Webull JP の公表値。
-LIMITS = {
-    "account": Limit(2, 2.0),
-    "order_write": Limit(600, 60.0),
-    "order_read": Limit(2, 2.0),
-    "preview": Limit(150, 10.0),
-    "instrument": Limit(10, 30.0),
-}
 
 
 class RateLimiter:

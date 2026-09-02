@@ -209,25 +209,13 @@ def test_yfinance_clamps_intraday_lookback_and_warns() -> None:
 
 
 def test_builtin_providers_are_registered() -> None:
-    assert {"yfinance", "webull"} <= set(available())
+    assert {"yfinance", "jquants"} <= set(available())
 
 
 def test_connect_yfinance_needs_no_credentials() -> None:
     provider = connect("yfinance", Environment.UAT, market=Market.JP)
     assert isinstance(provider, YFinanceProvider)
     assert provider.market is Market.JP
-
-
-def test_connect_webull_resolves_credentials_and_refuses_jp(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("WBJP_UAT_APP_KEY", "k")
-    monkeypatch.setenv("WBJP_UAT_APP_SECRET", "s")
-    monkeypatch.setenv("WBJP_UAT_ACCOUNT_ID", "a")
-    provider = connect("webull", Environment.UAT, market=Market.US)
-    assert provider.name == "webull" and Interval.M5 in provider.intervals
-    with pytest.raises(MarketDataError, match="JP 市場の足を返しません"):
-        connect("webull", Environment.UAT, market=Market.JP)
 
 
 def test_unknown_provider_lists_the_alternatives() -> None:

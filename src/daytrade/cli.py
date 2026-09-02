@@ -437,9 +437,7 @@ def _quotes_for(
     from daytrade.quotes import quote_source
 
     name = source or config.execution.quote_source
-    provider = quote_source(
-        name, settings.env, quote_file=quote_file or config.execution.quote_file
-    )
+    provider = quote_source(name, quote_file=quote_file or config.execution.quote_file)
     quotes = provider.fetch(symbols)
     missing = [s for s in symbols if s not in quotes]
     log.info(
@@ -1206,11 +1204,11 @@ def status_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
 def quotes_command(
     ctx: typer.Context,
     symbols: Annotated[list[str], typer.Argument(help="銘柄（7203 9984 …）")],
-    source: Annotated[str | None, typer.Option("--source", help="webull / yfinance / csv")] = None,
+    source: Annotated[str | None, typer.Option("--source", help="yfinance / csv")] = None,
     quote_file: Annotated[Path | None, typer.Option("--quote-file")] = None,
     config_dir: _ConfigDir = None,
 ) -> None:
-    """気配の取得元の疎通を確かめる。Webull が日本株を返すかはこれで見る。"""
+    """気配の取得元の疎通を確かめる。寄付の判断に使える鮮度かはここで見る。"""
     from daytrade.quotes import QuoteError
 
     settings = _settings(ctx)

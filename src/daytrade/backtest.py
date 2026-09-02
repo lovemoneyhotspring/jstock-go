@@ -2,7 +2,7 @@
 
 前夜の :func:`daytrade.universe.eligible_expr` と 9:00 の :func:`daytrade.select.gap_rank_expr`
 をそのまま 10 年ぶんのパネルに当てる。資金は固定（複利なし）、100 株単位、手数料は
-Webull の段階制（:mod:`daytrade.fees`）。研究ノートの表と同じ計算。
+段階制の手数料（:mod:`daytrade.fees`）。研究ノートの表と同じ計算。
 """
 
 from __future__ import annotations

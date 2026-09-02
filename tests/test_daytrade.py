@@ -12,7 +12,7 @@ import pytest
 from daytrade.config import DaytradeConfig, SignalConfig, UniverseConfig
 from daytrade.fees import commission, positions_for, round_trip_bp
 from daytrade.ledger import DRY_RUN_STATUS, Ledger
-from daytrade.quotes import CsvQuotes, parse_snapshot
+from daytrade.quotes import CsvQuotes
 from daytrade.select import Quote, pick, shares_for
 from daytrade.universe import Inputs, candidates, segment_expr, to_broker_symbol
 from wbcore.domain.models import OrderRequest, OrderStatus, OrderType, Side
@@ -301,21 +301,6 @@ def test_pick_respects_gap_bounds_and_missing_quotes() -> None:
 # --------------------------------------------------------------------------
 # 気配
 # --------------------------------------------------------------------------
-
-
-def test_parse_snapshot_prefers_price_then_open_then_mid() -> None:
-    payload = [
-        {"symbol": "7203", "price": "3000", "open": "2990", "last_trade_time": 1756684800000},
-        {"symbol": "9984", "open": "5000"},
-        {"symbol": "6758", "bid": "4000", "ask": "4010"},
-        {"symbol": "0000"},
-    ]
-    quotes = {q.symbol: q for q in parse_snapshot(payload)}
-    assert quotes["7203"].price == Decimal(3000)
-    assert quotes["7203"].at == dt.datetime(2025, 9, 1, 0, 0, tzinfo=UTC)
-    assert quotes["9984"].price == Decimal(5000)
-    assert quotes["6758"].price == Decimal(4005)
-    assert "0000" not in quotes
 
 
 def test_csv_quotes(tmp_path: Path) -> None:

@@ -44,9 +44,9 @@ us_skip_high = 0.01
 us_vix_override = 24
 
 [execution]
-broker = "webull"
+broker = "paper"
 tax_account_type = "SPECIFIC"
-quote_source = "webull"    # webull / yfinance / csv
+quote_source = "yfinance"    # yfinance / csv（yfinance は 20 分遅れ。寄付の判断には使えない）
 entry_window = ["09:00", "09:15"]
 exit_window = ["15:20", "15:30"]  # 15:20 の成行はその場で約定（引け値ではない）。15:25 以降ならクロージング・オークションで引け値
 kill_switch = false

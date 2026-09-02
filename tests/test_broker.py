@@ -2,23 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
-from wbcore.broker.base import BrokerError, InsufficientFundsError, OrderRejectedError
+from wbcore.broker.base import InsufficientFundsError, OrderRejectedError
 from wbcore.broker.paper import PaperBroker
 from wbcore.broker.ratelimit import Cached, Limit, RateLimiter
-from wbcore.broker.webull import (
-    _plain,
-    _suppress_sdk_own_logging,
-    flatten_order_legs,
-    parse_order_type,
-    parse_side,
-    parse_status,
-)
 from wbcore.domain.models import (
     OrderRequest,
     OrderStatus,
@@ -74,7 +64,7 @@ def test_quantity_must_be_positive() -> None:
 
 
 def test_client_order_id_length_is_capped() -> None:
-    """Webull の上限は32文字。超えると発注時に弾かれる。"""
+    """注文IDの上限は32文字。超えると発注時に弾かれる。"""
     with pytest.raises(ValueError, match="32文字"):
         OrderRequest("x" * 33, "7203", Side.BUY, OrderType.MARKET, D(100))
 
@@ -91,40 +81,11 @@ def test_unknown_status_is_treated_as_still_open() -> None:
     assert OrderStatus.UNKNOWN.is_open is True
 
 
-def test_unknown_order_type_does_not_crash() -> None:
-    """口座には自分が出した注文以外も並ぶ。
-
-    実際に UAT の共有テスト口座は他人の注文を返してきて、日次サイクルが
-    毎回落ちていた。読めない種別は OTHER に倒す。逆指値は米国株対応で
-    自前の種別になったので、正しく解釈される。
-    """
-    assert parse_order_type("STOP_LOSS") is OrderType.STOP_LOSS
-    assert parse_order_type("STOP_LOSS_LIMIT") is OrderType.STOP_LOSS_LIMIT
-    assert parse_order_type("TRAILING_STOP_LOSS") is OrderType.OTHER
-    assert parse_order_type(None) is OrderType.OTHER
-    assert parse_order_type("limit") is OrderType.LIMIT
-    assert parse_order_type(" MARKET ") is OrderType.MARKET
-
-
 def test_other_order_type_can_never_be_placed() -> None:
     """OTHER は読み取り専用。発注経路に流れてはいけない。"""
     assert OrderType.OTHER.is_placeable is False
     assert OrderType.MARKET.is_placeable is True
     assert OrderType.LIMIT.is_placeable is True
-
-
-def test_unreadable_side_is_an_error_not_a_guess() -> None:
-    """売買区分だけは推測してはいけない。
-
-    符号が反転すると、未約定注文を打ち消すはずの計算が積み増す方向に
-    働く。読めないなら止まる方が安全。
-    """
-    assert parse_side("BUY") is Side.BUY
-    assert parse_side(" sell ") is Side.SELL
-
-    for bad in (None, "", "SHORT"):
-        with pytest.raises(BrokerError, match="売買区分"):
-            parse_side(bad)
 
 
 # --------------------------------------------------------------------------
@@ -378,130 +339,3 @@ def test_cached_invalidate_forces_refetch() -> None:
     cache.get()
 
     assert len(calls) == 2
-
-
-# --------------------------------------------------------------------------
-# Webull レスポンスの解釈
-# --------------------------------------------------------------------------
-
-
-def test_flatten_order_legs_handles_the_real_combo_shape() -> None:
-    """実測したレスポンスの形。
-
-    外側は client_order_id と combo_type だけで、銘柄や数量は入れ子の
-    orders 配列にある。外側だけ読むと空の注文に見えてしまう。
-    """
-    payload = [
-        {
-            "client_order_id": "e8789f624adf4f91b4e24dc243af479a",
-            "combo_type": "NORMAL",
-            "orders": [
-                {
-                    "symbol": "7203",
-                    "side": "BUY",
-                    "status": "SUBMITTED",
-                    "order_type": "LIMIT",
-                    "order_id": "0381AD2S5I6DT0KF4RH0000000",
-                    "total_quantity": "100",
-                    "filled_quantity": "0",
-                    "limit_price": "2500",
-                    "place_time": "1787417901145",
-                }
-            ],
-        }
-    ]
-
-    legs = flatten_order_legs(payload)
-
-    assert len(legs) == 1
-    assert legs[0]["symbol"] == "7203"
-    assert legs[0]["client_order_id"] == "e8789f624adf4f91b4e24dc243af479a"
-
-
-def test_flatten_order_legs_handles_flat_entries() -> None:
-    assert flatten_order_legs([{"symbol": "7203"}]) == [{"symbol": "7203"}]
-
-
-def test_flatten_order_legs_handles_empty() -> None:
-    assert flatten_order_legs(None) == []
-    assert flatten_order_legs([]) == []
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("SUBMITTED", OrderStatus.SUBMITTED),
-        ("filled", OrderStatus.FILLED),
-        ("CANCELED", OrderStatus.CANCELLED),
-        ("CANCELLED", OrderStatus.CANCELLED),
-        ("PARTIAL_FILLED", OrderStatus.PARTIALLY_FILLED),
-        ("something_new", OrderStatus.UNKNOWN),
-        (None, OrderStatus.UNKNOWN),
-    ],
-)
-def test_parse_status(raw: str | None, expected: OrderStatus) -> None:
-    assert parse_status(raw) == expected
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [("2500", "2500"), ("2500.50", "2500.5"), ("1000", "1000"), ("100000", "100000")],
-)
-def test_plain_never_uses_scientific_notation(value: str, expected: str) -> None:
-    """指数表記の価格を API に渡すと注文が弾かれる。"""
-    result = _plain(D(value))
-    assert result == expected
-    assert "E" not in result
-
-
-# --------------------------------------------------------------------------
-# SDK のログ抑止 — 認証情報がディスクに残らないこと
-# --------------------------------------------------------------------------
-
-
-def test_suppress_sdk_logging_sets_the_optout_flags() -> None:
-    """SDK の ``_init_logger`` が独自ハンドラを作らないようにする。
-
-    これを外すと SDK がカレントディレクトリに ``webull_trade_sdk.log`` を
-    作り、マスクを通さずに認証情報を書き込む（実測で確認済み）。
-    """
-
-    class FakeApiClient:
-        pass
-
-    client = FakeApiClient()
-    _suppress_sdk_own_logging(client)
-
-    assert client._stream_logger_set is True  # type: ignore[attr-defined]
-    assert client._file_logger_set is True  # type: ignore[attr-defined]
-
-
-def test_sdk_init_logger_skips_when_flags_are_set(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """実際の SDK の ``_init_logger`` に対して抑止が効くことを確認する。
-
-    SDK の実装が変わってこの経路が使えなくなったら、ここで気付ける。
-    """
-    from webull.trade.trade_client import TradeClient
-
-    monkeypatch.chdir(tmp_path)
-
-    class FakeApiClient:
-        pass
-
-    api_client = FakeApiClient()
-    _suppress_sdk_own_logging(api_client)
-
-    # _init_logger だけを取り出して呼ぶ（接続はしない）
-    TradeClient._init_logger(None, api_client)  # type: ignore[arg-type]
-
-    assert not (tmp_path / "webull_trade_sdk.log").exists(), (
-        "SDK がログファイルを作成した。抑止が効いていない"
-    )
-    # SDK は独自の NullHandler クラスを定義しているため、型名では判定できない。
-    # 危険なのは「実際に書き出すハンドラ」なので、そちらで判定する。
-    # FileHandler と TimedRotatingFileHandler は StreamHandler の派生なので
-    # これ一つで両方を捉えられる。
-    emitting = [
-        h for h in logging.getLogger("webull.core").handlers if isinstance(h, logging.StreamHandler)
-    ]
-    assert emitting == [], f"マスクを通らない出力ハンドラが残っている: {emitting}"

@@ -1,14 +1,11 @@
 [project]
 name = "wbjp"
 version = "0.1.0"
-description = "Webull証券 OpenAPI を用いた自動売買（スイング売買 wbjp / 積立 accum / 共通基盤 wbcore）"
+description = "日本株・米国株の自動売買（スイング売買 wbjp / 積立 accum / 共通基盤 wbcore）"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 
 dependencies = [
-    # --- ブローカー ---
-    # requires-python が >=3.8,<3.15 のため 3.15 へは上げられない
-    "webull-openapi-python-sdk>=2.0.18",
     # --- データ ---
     "polars>=1.44.0",
     "pyarrow>=25.0.0",          # pl.from_pandas() / DuckDB 連携に必要
@@ -79,7 +76,7 @@ mypy_path = "src"
 strict = true
 # SDK は型情報を持たないため
 [[tool.mypy.overrides]]
-module = ["webull.*", "yfinance.*", "duckdb.*", "keyring.*", "backtrader.*", "requests.*"]
+module = ["yfinance.*", "duckdb.*", "keyring.*", "backtrader.*", "requests.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -92,5 +89,5 @@ filterwarnings = [
 ]
 markers = [
     "network: 外部ネットワークに接続するテスト（既定でスキップ）",
-    "uat: Webull UAT 環境に接続するテスト",
+    "uat: UAT（テスト）環境に接続するテスト",
 ]

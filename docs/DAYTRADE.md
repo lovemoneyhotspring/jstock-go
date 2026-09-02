@@ -12,8 +12,9 @@
 手仕舞う（15:25 以降ならクロージング・オークションで引け値）。持ち越さない。
 
 N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万円 ÷ 67 万円 → 3）。
-1 注文は `max_capital ÷ N`。Webull の手数料は 20〜100 万円が一律 275 円なので、1 注文を小さくすると
-bp が跳ね上がる（この規則の理由）。
+1 注文は `max_capital ÷ N`。手数料は 20〜100 万円が一律 275 円という段階制を前提にしており
+（`daytrade.fees`。**使う証券会社の料金表に差し替えること**）、1 注文を小さくすると bp が
+跳ね上がる（この規則の理由）。
 
 ## 1 日の流れ（JST）
 
@@ -57,18 +58,16 @@ bp が跳ね上がる（この規則の理由）。
 
 ## 気配の取得元（未解決の前提）
 
-**Webull OpenAPI の市場データは公式ドキュメント上 US 株のみ**（README「設計の前提」、
-https://developer.webull.co.jp/apis/docs/market-data-api/overview.md）。日本株のスナップショットが
-返るかは実機でしか分からない。取得元は差し替え可能:
+**日本株のリアルタイム気配を返す取得元が無い。** 今ある取得元は次のとおりで、
+どちらも寄付の判断には使えない:
 
 | `quote_source` | 中身 | 用途 |
 |---|---|---|
-| `webull` | 市場データ API のスナップショット（`category=JP_STOCK` を試す） | 本命。`daytrade quotes 7203 9984` で疎通確認 |
 | `yfinance` | Yahoo Finance。**東証は 20 分遅れ** | 検証・dry-run のみ。`open` は `--allow-delayed` が無いと使わない |
 | `csv` | `symbol,price[,at]` のファイル | 別経路で取った気配を流す |
 
-`webull` が日本株を返さなければ、この戦略は**寄付の判断ができない**。代替は他社のリアルタイム
-気配 API（立花証券 e 支店、kabu STATION など）を `QuoteSource` として足すこと。
+この戦略を実運用するには、リアルタイム気配 API（立花証券 e 支店、kabu STATION など）を
+`QuoteSource` として `daytrade.quotes` に足すこと。`daytrade quotes 7203 9984` で疎通を確かめる。
 
 ## 設定（`daytrade.toml`）
 

@@ -60,7 +60,7 @@ class Contribution:
     def broker_symbol(self) -> str:
         """ブローカーに渡す銘柄コード。
 
-        設定には足の取得に合わせて ``1305.T`` と書くが、Webull は ``1305``。
+        設定には足の取得に合わせて ``1305.T`` と書くが、発注では ``1305``。
         指数（``^N225`` など）は買えないので、ここで弾く。
         """
         return broker_symbol(self.symbol, self.market)
@@ -535,7 +535,7 @@ def resolve_lot_sizes(
     return LotSizes(sizes, mismatches, failures)
 
 
-#: 成行が「気配値が無い」で拒否されたときのエラーコード（Webull）。
+#: 成行が「気配値が無い」で拒否されたときのエラーコード。
 QUOTE_NOT_FOUND = "QUOTE_NOT_FOUND"
 
 

@@ -394,7 +394,7 @@ def test_client_order_id_differs_by_input() -> None:
 
 
 def test_client_order_id_fits_the_api_limit() -> None:
-    """Webull の上限は32文字。"""
+    """注文IDの上限は32文字。"""
     assert len(make_client_order_id("very-long-run-id" * 5, "7203", Side.BUY, D(100))) == 32
 
 
