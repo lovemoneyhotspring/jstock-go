@@ -41,7 +41,7 @@ class Market(StrEnum):
 
     @property
     def timezone(self) -> ZoneInfo:
-        """取引所の時間帯。日中足の「何時の足か」を判断するときに使う。"""
+        """取引所の時間帯。引けの前後や市場をまたぐ判定に使う。"""
         return ZoneInfo({Market.JP: "Asia/Tokyo", Market.US: "America/New_York"}[self])
 
 

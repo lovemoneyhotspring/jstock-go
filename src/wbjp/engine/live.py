@@ -127,22 +127,6 @@ class LiveRunner:
         self.provider = provider
 
         file_config = config.file
-        if file_config.universe.bar_interval.is_intraday:
-            # 日中足のライブ運用には「新しい足が確定したときだけ判断する」
-            # エポック管理と、実行の重なりを防ぐロックが要る。それが無い状態で
-            # 動かすと、5分ごとに同じ足で判断し直す。黙って日足で動くよりは
-            # ここで止める。
-            raise NotImplementedError(
-                f"ライブ運用は日足のみ対応です（設定は {file_config.universe.interval} 足）。"
-                "日中足の運用には判断エポックとロックの実装が要ります。"
-                "バックテストは `wbjp backtest` で日中足に対応しています"
-            )
-        for strategy in strategies:
-            if not strategy.supports(file_config.universe.bar_interval):
-                raise ValueError(
-                    f"戦略 {strategy.name} は {file_config.universe.interval} 足に対応していません"
-                )
-            strategy.bind(file_config.universe.bar_interval)
         self.combiner = build_combiner(
             file_config.strategies.combiner,
             {s.name: s.weight for s in file_config.strategies.enabled},
@@ -269,8 +253,6 @@ class LiveRunner:
             _bars=bars,
             _positions=positions,
             equity=equity,
-            interval=file_config.universe.bar_interval,
-            market=file_config.universe.market,
         )
         signals: list[Signal] = []
         for strategy in self.strategies:

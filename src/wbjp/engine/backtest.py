@@ -6,7 +6,7 @@
 
 これを守らないと「バックテストでは動いたのに本番で挙動が違う」が起きる。
 
-1本の足の流れ（日足なら1日、5分足なら5分）:
+1日の流れ:
     1. 前の足で出した注文を、この足の**寄付**で約定させる
     2. この足の終値までの足で判断する（未来は見えない）
     3. 合成 → サイジング → 差分 → リスク判定 → 発注
@@ -15,20 +15,12 @@
 判断は終値、約定は次の足の寄付。この1本のずれが実運用の姿であり、
 同じ足の終値で約定させると取れない価格で売買できることになる。
 
-**日足と日中足で同じ経路を通る。** エンジンは足を「鍵」（日足なら日付、
-日中足なら UTC の時刻）で並べて回すだけで、日付の意味を持つ処理
-（差金決済の当日判定・待機資金の利息・時間切れの営業日数）だけを
-暦日の変わり目で行う。
-
 構成:
     :class:`DecisionPipeline`
         「終値までの足 + 口座の状態 → 出す注文・取り消す注文」の純粋な判断。
         ブローカーを知らない。
     :class:`BacktestRunner`
         :class:`~wbcore.broker.paper.PaperBroker` で約定させる自前エンジン。
-    :class:`~wbjp.engine.bt_engine.BacktraderRunner`
-        同じ :class:`DecisionPipeline` を Backtrader の Cerebro/Broker に
-        つないだ第2エンジン（日足のみ）。約定モデルを第三者実装に差し替えて突き合わせる。
 """
 
 from __future__ import annotations
@@ -40,7 +32,6 @@ from decimal import Decimal
 import polars as pl
 
 from wbcore.broker.paper import PaperBroker
-from wbcore.data.provider import Interval
 from wbcore.domain.market_rules import MarketRules, rules_for
 from wbcore.domain.models import (
     Balance,
@@ -68,24 +59,16 @@ log = get_logger(__name__)
 #: サイジングとストップに使う ATR の期間（足の本数）。
 ATR_PERIOD = 14
 
-#: 足を一意にする鍵。日足は日付、日中足は UTC の時刻。
-BarKey = dt.date | dt.datetime
+#: 足を一意にする鍵（日付）。
+BarKey = dt.date
 
-#: 銘柄 → 鍵 → 列名 → 値。鍵で引ける形に変換した足。
+#: 銘柄 → 日付 → 列名 → 値。日付で引ける形に変換した足。
 BarIndex = dict[str, dict[BarKey, dict[str, Decimal]]]
-
-
-def day_of(key: BarKey) -> dt.date:
-    """鍵の暦日。日中足の時刻は UTC で見た日（東証も NYSE も通常取引は UTC の同じ日）。"""
-    return key.date() if isinstance(key, dt.datetime) else key
 
 
 @dataclass(frozen=True, slots=True)
 class DayRecord:
-    """1本の足ぶんの記録。デバッグと検証のすべてがここに残る。
-
-    ``date`` は暦日、``at`` は日中足のときの時刻（UTC）。日足では None。
-    """
+    """1本の足ぶんの記録。デバッグと検証のすべてがここに残る。"""
 
     date: dt.date
     equity: Decimal
@@ -96,7 +79,6 @@ class DayRecord:
     orders: list[str]
     fills: list[Fill]
     rejected: dict[str, str]
-    at: dt.datetime | None = None
 
 
 @dataclass
@@ -121,7 +103,6 @@ class BacktestResult:
         return pl.DataFrame(
             {
                 "date": [r.date for r in self.records],
-                "at": [r.at for r in self.records],
                 "equity": [float(r.equity) for r in self.records],
             }
         )
@@ -198,21 +179,11 @@ class DecisionPipeline:
     「どの注文を出すか・消すか」を返すだけなので、約定モデルを差し替えても
     判断そのものは 1 bit も変わらない。
 
-    足の間隔は設定（``universe.interval``）で決まる。対応しない戦略は
-    ここで弾き、対応する戦略には :meth:`Strategy.bind` で間隔を伝える。
     """
 
     def __init__(self, strategies: list[Strategy], config: FileConfig) -> None:
         self.strategies = strategies
         self.config = config
-        self.interval: Interval = config.universe.bar_interval
-        for strategy in strategies:
-            if not strategy.supports(self.interval):
-                raise ValueError(
-                    f"戦略 {strategy.name} は {self.interval.value} 足に対応していません"
-                    f"（対応: {sorted(i.value for i in strategy.intervals)}）"
-                )
-            strategy.bind(self.interval)
         self.combiner = build_combiner(
             config.strategies.combiner,
             {s.name: s.weight for s in config.strategies.enabled},
@@ -227,8 +198,8 @@ class DecisionPipeline:
 
     @property
     def key(self) -> str:
-        """足を一意にする列。日足は ``date``、日中足は ``ts``。"""
-        return self.interval.time_column
+        """足を一意にする列。"""
+        return "date"
 
     # -- 足の前処理 ---------------------------------------------------------
 
@@ -378,13 +349,9 @@ class DecisionPipeline:
         *,
         order_id_seed: str,
     ) -> DecisionPlan:
-        """この足の終値までで判断し、発注・取消の計画を返す。
-
-        ``today`` は足の鍵（日足なら日付、日中足なら UTC の時刻）。
-        """
+        """この足の終値までで判断し、発注の計画を返す。"""
         point = today
-        day = day_of(point)
-        at = point if isinstance(point, dt.datetime) else None
+        day = point
 
         closes = self.lookup(indexed, point, "close")
         atr_values = self.lookup(indexed, point, f"atr_{ATR_PERIOD}")
@@ -405,9 +372,6 @@ class DecisionPipeline:
             _bars=visible,
             _positions=positions,
             equity=equity,
-            interval=self.interval,
-            at=at,
-            market=self.config.universe.market,
         )
 
         signals: list[Signal] = []
@@ -523,8 +487,8 @@ class DecisionPipeline:
 class BacktestRunner:
     """足ごとのバックテスト（:class:`~wbcore.broker.paper.PaperBroker` で約定）。
 
-    日足でも日中足でも同じ。成行は常に「次の足の寄付」で約定し、未約定は
-    その1本で失効する（実運用より保守的＝約定しにくい側に倒す方針）。
+    成行は常に「翌日の寄付」で約定し、未約定はその日で失効する
+    （実運用より保守的＝約定しにくい側に倒す方針）。
 
     指値の約定判定は ``fill_model`` で切り替える。``"open"``（既定）は寄付だけで
     判定し、``"intrabar"`` は高安も見る。判断ロジックは同じなので、2 つを
@@ -578,18 +542,14 @@ class BacktestRunner:
         """バックテストを実行する。
 
         Args:
-            bars: 銘柄 → 足（設定の間隔。日足は ``date``、日中足は ``ts`` 昇順）。
+            bars: 銘柄 → 日足（``date`` 昇順）。
             start: この日以降を売買対象にする。前の足はウォームアップに使う。
         """
         if not bars:
             raise ValueError("足データが空です")
-        key = self.pipeline.key
         for symbol, frame in bars.items():
-            if key not in frame.columns:
-                raise ValueError(
-                    f"{symbol} の足に {key!r} 列がありません。設定の universe.interval"
-                    f"（{self.pipeline.interval.value}）と足の間隔が合っていません"
-                )
+            if "date" not in frame.columns:
+                raise ValueError(f"{symbol} の足に 'date' 列がありません")
         # 待機資金の年利（%）の日足。^IRX など。与えると現金に日割りで利息を付ける
         yields: dict[dt.date, Decimal] = {}
         if cash_yield is not None and cash_yield.height:
@@ -612,7 +572,7 @@ class BacktestRunner:
 
         previous_day: dt.date | None = None
         for index, point in enumerate(points):
-            today = day_of(point)
+            today = point
 
             # 0) 暦日が変わったときだけ行う処理: 利息・当日買付の記録の更新
             if today != previous_day:
@@ -674,7 +634,7 @@ class BacktestRunner:
                 rejected[request.symbol] = str(exc)
 
         return DayRecord(
-            date=day_of(point),
+            date=point,
             equity=account.equity,
             cash=account.balance.cash_balance,
             signals=plan.signals,
@@ -683,5 +643,4 @@ class BacktestRunner:
             orders=placed,
             fills=fills,
             rejected=rejected,
-            at=point if isinstance(point, dt.datetime) else None,
         )

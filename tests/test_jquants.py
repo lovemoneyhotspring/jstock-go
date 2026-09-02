@@ -15,7 +15,7 @@ from wbcore.data.jquants_provider import (
     RateLimited,
     to_jquants_code,
 )
-from wbcore.data.provider import Interval, MarketDataError
+from wbcore.data.provider import MarketDataError
 from wbcore.data.registry import available, connect, default_provider
 from wbcore.domain.models import Market
 
@@ -186,12 +186,6 @@ def test_client_error_is_not_retried() -> None:
 
 def test_rate_limited_is_a_market_data_error() -> None:
     assert issubclass(RateLimited, MarketDataError)
-
-
-def test_only_daily_interval() -> None:
-    p, _ = provider()
-    with pytest.raises(MarketDataError, match="1m"):
-        p.fetch_bars(["7203"], dt.date(2026, 8, 1), dt.date(2026, 8, 5), interval=Interval.M1)
 
 
 # --------------------------------------------------------------------------

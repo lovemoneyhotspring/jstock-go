@@ -13,7 +13,7 @@ import polars as pl
 import pytest
 
 from wbcore.data.csv_replay import CsvReplayProvider, InMemoryProvider
-from wbcore.data.provider import Interval, MarketDataError, empty_bars, normalize_bars
+from wbcore.data.provider import MarketDataError, empty_bars, normalize_bars
 from wbcore.data.store import OVERLAP_DAYS, BarStore
 
 
@@ -173,9 +173,9 @@ class RecordingProvider(InMemoryProvider):
         super().__init__(data)
         self.calls: list[tuple[list[str], dt.date, dt.date]] = []
 
-    def fetch_bars(self, symbols, start, end, *, interval=Interval.D1):  # type: ignore[no-untyped-def]
+    def fetch_bars(self, symbols, start, end):  # type: ignore[no-untyped-def]
         self.calls.append((list(symbols), start, end))
-        return super().fetch_bars(symbols, start, end, interval=interval)
+        return super().fetch_bars(symbols, start, end)
 
 
 def test_sync_fetches_everything_when_store_is_empty(tmp_path: Path) -> None:

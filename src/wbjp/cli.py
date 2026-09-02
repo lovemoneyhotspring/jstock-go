@@ -90,14 +90,6 @@ def _build_provider(config: Config) -> MarketDataProvider:
     )
 
 
-def _build_feed(config: Config):  # type: ignore[no-untyped-def]
-    """設定の間隔と基準足で足を供給する窓口。"""
-    from wbcore.data.feed import BarFeed
-
-    universe = config.file.universe
-    return BarFeed(config.settings.bars_dir, universe.market, base=universe.base_bar_interval)
-
-
 def _load(config_dir: Path | None):  # type: ignore[no-untyped-def]
     config = load_config(config_dir)
     if not config.file.universe.symbols:
@@ -304,7 +296,7 @@ def run(
         config=config,
         strategies=build_all(config.file.strategies.enabled),
         broker=broker,
-        store=BarStore(config.settings.bars_dir, config.file.universe.bar_interval),
+        store=BarStore(config.settings.bars_dir),
         journal=journal,
         provider=None if no_sync else _build_provider(config),
     )
@@ -371,6 +363,7 @@ def backtest(
     その足の高安で約定させる第 2 の見立てで、既定（open）との突き合わせに使う。
     """
     from wbcore.broker.paper import FILL_MODELS
+    from wbcore.data.store import BarStore
     from wbjp.engine.backtest import BacktestRunner
     from wbjp.strategy.registry import build_all
 
@@ -379,11 +372,10 @@ def backtest(
         raise typer.Exit(2)
 
     config = _load(config_dir)
-    feed = _build_feed(config)
-    store = feed.store(config.file.universe.bar_interval)
+    store = BarStore(config.settings.bars_dir)
     symbols = config.file.universe.symbols
 
-    bars = feed.read(symbols, config.file.universe.bar_interval)
+    bars = store.read_many(symbols)
     if not bars:
         console.print("[red]足データがありません。先に `wbjp data sync` を実行してください[/red]")
         raise typer.Exit(1)
@@ -659,27 +651,13 @@ def strategies_list(
 def data_sync(
     days: Annotated[int, typer.Option(help="何日ぶん遡って取得するか")] = 900,
     force: Annotated[bool, typer.Option("--force", help="保存済みを無視して取り直す")] = False,
-    interval: Annotated[
-        str | None,
-        typer.Option(
-            help="足の間隔: 1d / 1h / 30m / 15m / 5m / 1m。省略時は設定の universe.interval"
-        ),
-    ] = None,
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
 ) -> None:
-    """足データを更新する（保存済みの続きだけ取得）。"""
-    from wbcore.data.provider import Interval
+    """日足を更新する（保存済みの続きだけ取得）。"""
     from wbcore.data.store import BarStore
 
     config = _load(config_dir)
-    try:
-        chosen = Interval.parse(interval) if interval else config.file.universe.bar_interval
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(2) from None
-    # --interval を明示したときはその足だけ、省略時は設定の基準足も一緒に揃える
-    feed = _build_feed(config) if interval is None else None
-    store = BarStore(config.settings.bars_dir, chosen)
+    store = BarStore(config.settings.bars_dir)
     end = today_utc()
 
     symbols = list(config.file.universe.symbols)
@@ -691,15 +669,12 @@ def data_sync(
     provider = _build_provider(config)
     start = end - dt.timedelta(days=days)
     try:
-        if feed is not None:
-            counts = feed.sync(provider, symbols, start, end, chosen, force=force)
-        else:
-            counts = store.sync(provider, symbols, start, end, force=force)
+        counts = store.sync(provider, symbols, start, end, force=force)
     except Exception as exc:
-        # cron の中で黙って落ちると、分足の穴に気づくのが遅れる
+        # cron の中で黙って落ちると、足が止まっていることに気づくのが遅れる
         from wbcore.notify import alert
 
-        alert("足の取り込みに失敗", f"{directory_label(config)} / {chosen.value}: {exc}")
+        alert("足の取り込みに失敗", f"{directory_label(config)}: {exc}")
         console.print(f"[red]足の取り込みに失敗しました: {exc}[/red]")
         raise typer.Exit(1) from None
     for symbol, count in sorted(counts.items()):
@@ -713,42 +688,32 @@ def directory_label(config: Config) -> str:
 @data_app.command("check")
 def data_check(
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
-    days: Annotated[int, typer.Option(help="穴を探す範囲（暦日）")] = 30,
     notify: Annotated[
         bool, typer.Option("--notify", help="問題があれば WBJP_ALERT_WEBHOOK_URL に通知する")
     ] = False,
 ) -> None:
-    """足の蓄積が止まっていないか、穴が無いかを調べる。問題があれば exit 1。
+    """日足の蓄積が止まっていないかを調べる。問題があれば exit 1。
 
-    cron から `data sync` の直後に回す。取引日は「日足があった日」で決める
-    ので祝日の一覧は要らない。分足は 7 日で取れなくなるので、止まっている
-    ことに早く気づくのが目的。
+    cron で `data sync` の後に回し、`--notify` で Slack 等に知らせる。
     """
     from wbcore.data.health import check
-    from wbcore.data.provider import Interval
 
     config = load_config(config_dir)
-    universe = config.file.universe
-    intervals: list[Interval] = []
-    for candidate in (universe.base_bar_interval, universe.bar_interval, Interval.D1):
-        if candidate is not None and candidate not in intervals:
-            intervals.append(candidate)
     symbols = list(config.file.universe.symbols)
     if not symbols:
         console.print("[red]universe.symbols が空です[/red]")
         raise typer.Exit(2)
 
-    results = check(config.settings.bars_dir, symbols, intervals, lookback_days=days)
+    results = check(config.settings.bars_dir, symbols)
     problems = [c for c in results if not c.healthy]
 
     table = Table(title=f"足の蓄積状況 ({directory_label(config)})", title_justify="left")
-    for column in ("銘柄", "間隔", "本数", "最初", "最終", "状態"):
-        table.add_column(column, justify="right" if column == "本数" else "left")
+    for column in ("銘柄", "本数", "最初", "最終", "状態"):
+        table.add_column(column)
     for c in results:
         state = c.describe()
         table.add_row(
             c.symbol,
-            c.interval.value,
             f"{c.bars:,}",
             str(c.first or "—"),
             str(c.last or "—"),
@@ -759,7 +724,7 @@ def data_check(
     if not problems:
         console.print("[green]すべて正常[/green]")
         return
-    lines = [f"{c.symbol} {c.interval.value}: {c.describe()}" for c in problems]
+    lines = [f"{c.symbol}: {c.describe()}" for c in problems]
     console.print(f"\n[red]{len(problems)} 件の問題[/red]")
     if notify:
         from wbcore.notify import alert
@@ -771,27 +736,18 @@ def data_check(
 @data_app.command("status")
 def data_status(
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
-    interval: Annotated[
-        str | None, typer.Option(help="見る足の間隔。省略時は設定の universe.interval")
-    ] = None,
 ) -> None:
-    """保存済みの足データを一覧する（見立ては含まない。保存されている本物の足だけ）。"""
-    from wbcore.data.provider import Interval
+    """保存済みの日足を一覧する。"""
     from wbcore.data.store import BarStore
 
     config = load_config(config_dir)
-    try:
-        chosen = Interval.parse(interval) if interval else config.file.universe.bar_interval
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(2) from None
-    summary = BarStore(config.settings.bars_dir, chosen).summary()
+    summary = BarStore(config.settings.bars_dir).summary()
 
     if summary.height == 0:
-        console.print(f"保存済みの {chosen.value} 足はありません")
+        console.print("保存済みの足はありません")
         return
 
-    table = Table(title=f"保存済みの足（{chosen.value}）", title_justify="left")
+    table = Table(title="保存済みの足", title_justify="left")
     for column in summary.columns:
         table.add_column(column)
     for row in summary.iter_rows():

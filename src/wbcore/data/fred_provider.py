@@ -31,13 +31,7 @@ import polars as pl
 import requests
 
 from wbcore.credentials import Environment
-from wbcore.data.provider import (
-    BAR_SCHEMA,
-    Interval,
-    MarketDataError,
-    MarketDataProvider,
-    normalize_bars,
-)
+from wbcore.data.provider import BAR_SCHEMA, MarketDataError, MarketDataProvider, normalize_bars
 from wbcore.domain.models import Market
 from wbcore.logging import get_logger
 
@@ -132,7 +126,6 @@ class FredProvider(MarketDataProvider):
     """FRED 実装。米国の指数の日足（終値のみ）。"""
 
     name: ClassVar[str] = "fred"
-    intervals: ClassVar[frozenset[Interval]] = frozenset({Interval.D1})
 
     def __init__(
         self, *, market: Market = Market.US, session: Any | None = None, timeout: int = 30
@@ -153,10 +146,7 @@ class FredProvider(MarketDataProvider):
         symbols: list[str],
         start: dt.date,
         end: dt.date,
-        *,
-        interval: Interval = Interval.D1,
     ) -> dict[str, pl.DataFrame]:
-        self._require(interval)
         out: dict[str, pl.DataFrame] = {}
         for symbol in dict.fromkeys(s.strip() for s in symbols if s.strip()):
             closes = fetch_closes(

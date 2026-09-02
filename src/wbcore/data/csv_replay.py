@@ -8,8 +8,7 @@
       意図的に作り込む。
 
 CSV の形式:
-    日足は ``date,open,high,low,close,volume``、日中足は先頭が ``ts``
-    （ISO 日時。tz 無しは UTC とみなす）のヘッダ付き。
+    ``date,open,high,low,close,volume`` のヘッダ付き。
     ファイル名が銘柄コードになる（``7203.csv`` → ``7203``）。
 
 どちらも設定からは選べない（:meth:`MarketDataProvider.connect` を持たない）。
@@ -23,14 +22,13 @@ from typing import ClassVar
 
 import polars as pl
 
-from wbcore.data.provider import Interval, MarketDataProvider, normalize_bars
+from wbcore.data.provider import MarketDataProvider, normalize_bars
 
 
 class CsvReplayProvider(MarketDataProvider):
     """ディレクトリ内の CSV を読む。"""
 
     name: ClassVar[str] = "csv_replay"
-    intervals: ClassVar[frozenset[Interval]] = frozenset(Interval)
 
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
@@ -45,8 +43,6 @@ class CsvReplayProvider(MarketDataProvider):
         symbols: list[str],
         start: dt.date,
         end: dt.date,
-        *,
-        interval: Interval = Interval.D1,
     ) -> dict[str, pl.DataFrame]:
         result: dict[str, pl.DataFrame] = {}
 
@@ -56,9 +52,9 @@ class CsvReplayProvider(MarketDataProvider):
                 continue
 
             raw = pl.read_csv(path, try_parse_dates=True)
-            if "date" in raw.columns and not interval.is_intraday:
+            if "date" in raw.columns:
                 raw = raw.with_columns(pl.col("date").cast(pl.Date, strict=False))
-            frame = normalize_bars(raw, interval).filter(
+            frame = normalize_bars(raw).filter(
                 (pl.col("date") >= start) & (pl.col("date") <= end)
             )
 
@@ -69,28 +65,19 @@ class CsvReplayProvider(MarketDataProvider):
 
 
 class InMemoryProvider(MarketDataProvider):
-    """あらかじめ用意した DataFrame を返す。テスト専用。
-
-    渡したフレームの間隔を ``interval`` で申告する。それ以外の間隔を
-    要求されると :class:`MarketDataError` になる（本物の取得元と同じ振る舞い）。
-    """
+    """あらかじめ用意した DataFrame を返す。テスト専用。"""
 
     name: ClassVar[str] = "in_memory"
 
-    def __init__(self, bars: dict[str, pl.DataFrame], *, interval: Interval = Interval.D1) -> None:
-        self.interval = interval
-        self.intervals = frozenset({interval})  # type: ignore[misc]
-        self._bars = {symbol: normalize_bars(frame, interval) for symbol, frame in bars.items()}
+    def __init__(self, bars: dict[str, pl.DataFrame]) -> None:
+        self._bars = {symbol: normalize_bars(frame) for symbol, frame in bars.items()}
 
     def fetch_bars(
         self,
         symbols: list[str],
         start: dt.date,
         end: dt.date,
-        *,
-        interval: Interval = Interval.D1,
     ) -> dict[str, pl.DataFrame]:
-        self._require(interval)
         result = {}
         for symbol in symbols:
             frame = self._bars.get(symbol)

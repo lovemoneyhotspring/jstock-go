@@ -5,7 +5,7 @@ JPX が提供する公式の株価 API。非公式のスクレイピングと違
 制約:
     - **日本株と日本の指数のみ。** 米国の指数（``market=US``）は
       :class:`~wbcore.data.provider.MarketDataError` で弾く。
-    - **日足のみ。** 分足は Premium プランの別端点で、ここでは扱わない。
+    - **日足のみ。**
     - **プランで遡れる期間と遅延が違う。** Free は直近 12 週が取れず、
       Light 以上で当日足が取れる。当日の判断に使うなら Light 以上が要る。
     - **レート制限がある**（Standard は 120 回/分）。1 銘柄 1 リクエスト
@@ -41,7 +41,7 @@ from wbcore.data.jquants_client import (
     JQuantsClient,
     RateLimited,
 )
-from wbcore.data.provider import Interval, MarketDataError, MarketDataProvider, normalize_bars
+from wbcore.data.provider import MarketDataError, MarketDataProvider, normalize_bars
 from wbcore.domain.models import Market
 from wbcore.logging import get_logger
 
@@ -107,7 +107,6 @@ class JQuantsProvider(MarketDataProvider):
     """J-Quants API（V2）実装。日本株の日足のみ。"""
 
     name: ClassVar[str] = "jquants"
-    intervals: ClassVar[frozenset[Interval]] = frozenset({Interval.D1})
 
     def __init__(
         self,
@@ -156,10 +155,7 @@ class JQuantsProvider(MarketDataProvider):
         symbols: list[str],
         start: dt.date,
         end: dt.date,
-        *,
-        interval: Interval = Interval.D1,
     ) -> dict[str, pl.DataFrame]:
-        self._require(interval)
         if not symbols:
             return {}
         if start > end:
@@ -168,7 +164,6 @@ class JQuantsProvider(MarketDataProvider):
         log.info(
             "足を取得します",
             provider=self.name,
-            interval=interval.value,
             symbols=len(symbols),
             start=str(start),
             end=str(end),
@@ -297,7 +292,7 @@ def _to_frame(rows: list[dict[str, Any]], *, is_index: bool) -> pl.DataFrame:
     )
     if is_index:
         frame = frame.with_columns(pl.lit(0.0).alias("volume"))
-    return normalize_bars(frame, Interval.D1)
+    return normalize_bars(frame)
 
 
 def _date(value: Any) -> dt.date | None:

@@ -80,30 +80,6 @@ def test_stored_iso_strings_are_shown_in_the_configured_zone() -> None:
     assert fmt_iso(None) == "None"
 
 
-def test_stored_intraday_bars_keep_their_zone(tmp_path: Path) -> None:
-    import polars as pl
-
-    from wbcore.data.provider import Interval
-    from wbcore.data.store import BarStore
-
-    store = BarStore(tmp_path, Interval.M5)
-    store.write(
-        "X",
-        pl.DataFrame(
-            {
-                "ts": [MOMENT],
-                "open": [1.0],
-                "high": [1.0],
-                "low": [1.0],
-                "close": [1.0],
-                "volume": [1.0],
-            }
-        ),
-    )
-    assert store.read("X")["ts"].dtype == pl.Datetime("us", "UTC")
-    assert store.read("X")["ts"][0] == MOMENT
-
-
 def test_trading_window_treats_naive_as_utc() -> None:
     from accum.window import TradingWindow
 

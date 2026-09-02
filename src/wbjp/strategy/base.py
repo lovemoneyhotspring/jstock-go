@@ -31,8 +31,7 @@ from typing import Any, ClassVar
 
 import polars as pl
 
-from wbcore.data.provider import Interval
-from wbcore.domain.models import Market, Position, Signal
+from wbcore.domain.models import Position, Signal
 
 
 class InsufficientBarsError(RuntimeError):
@@ -50,40 +49,12 @@ class StrategyContext:
         as_of: 判断の基準日。この日の足まで（当日を含む）が見える。
         equity: 判断時点の総資産（円）。サイジングには使わないが、
             戦略が資産規模に応じた判断をしたい場合に参照できる。
-        interval: 渡している足の間隔。日足なら ``Interval.D1``。
-        at: 日中足のときの判断時刻（UTC、最後の足の時刻）。日足では None。
-            取引所の現地時刻は ``at.astimezone(market.timezone)``。
-        market: 取引所。:meth:`resample` の区切りを寄付に揃えるのに使う。
     """
 
     as_of: dt.date
     _bars: dict[str, pl.DataFrame]
     _positions: dict[str, Position] = field(default_factory=dict)
     equity: Decimal = Decimal(0)
-    interval: Interval = Interval.D1
-    at: dt.datetime | None = None
-    market: Market = Market.JP
-
-    def resample(
-        self, symbol: str, interval: Interval, *, completed_only: bool = True
-    ) -> pl.DataFrame:
-        """見えている足から、より粗い間隔の足を合成して返す。
-
-        5 分足で判断しながら 1 時間足や日足の指標を見たい（マルチタイム
-        フレーム）ときに使う。合成は見えている足だけから行うので未来は
-        混ざらないが、最後の足は形成中（区間の途中まで）になりうる。
-        ``completed_only`` なら閉じた足だけを返す。
-
-        Raises:
-            ValueError: 今の足より細かい間隔を求めたとき。
-        """
-        from wbcore.data.resample import drop_forming, resample
-
-        frame = resample(self.bars(symbol), self.interval, interval, market=self.market)
-        if completed_only and interval is not self.interval:
-            at = self.at or dt.datetime.combine(self.as_of, dt.time(23, 59), tzinfo=dt.UTC)
-            frame = drop_forming(frame, interval, at, market=self.market)
-        return frame
 
     @property
     def symbols(self) -> list[str]:
@@ -158,28 +129,11 @@ class Strategy(ABC):
     #: 設定ファイルで指定する識別子。サブクラスで必ず上書きする。
     name: ClassVar[str] = ""
 
-    #: 対応する足の間隔。既定はすべて（指標が「本数」で書かれていれば
-    #: 間隔に依存しない）。日付の意味に依存する戦略（月次入れ替えなど）は
-    #: ``frozenset({Interval.D1})`` に絞る。エンジンは設定の間隔に対応しない
-    #: 戦略を起動時に弾く。
-    intervals: ClassVar[frozenset[Interval]] = frozenset(Interval)
-
     #: 判断に必要な過去の足の本数。エンジンがこの本数を用意してから呼ぶ。
     #: 足りない銘柄はスキップされる（例外にはしない）。
     #: パラメータ次第で変わるため、__init__ で上書きしてよい
     #: （ClassVar にすると期間を引数で受ける戦略が書けなくなる）。
     warmup_bars: int = 1
-
-    def supports(self, interval: Interval) -> bool:
-        return interval in self.intervals
-
-    def bind(self, interval: Interval) -> None:
-        """足の間隔が決まったときにエンジンが呼ぶ。既定では何もしない。
-
-        窓を時間で持つ戦略（「15分の移動平均」）はここで本数に直す
-        （:meth:`Interval.bars_in`）。``indicators()`` より前に呼ばれる。
-        """
-        return None  # 抽象にはしない: 本数で書かれた戦略は上書き不要
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: Any) -> None:
         """``name`` の付け忘れを定義時点で弾く。

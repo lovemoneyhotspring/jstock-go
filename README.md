@@ -139,8 +139,8 @@ uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV
 
 | 場面 | 規則 |
 |---|---|
-| 保存 | 時刻は必ず時間帯付き。日中足の `ts` は UTC（Parquet に時間帯が残る）、SQLite の `placed_at` は UTC の ISO 8601（`+00:00` 付き）。暦日（`date`）は取引所の日付で時刻ではないので時間帯を持たない |
-| 演算・判定 | UTC。取引所の現地時刻が要る判断（発注時間帯・引けの前後・分足の区切り）は、その場で `Market.timezone` に変換して比べる |
+| 保存 | 時刻は必ず時間帯付き。SQLite の `placed_at` は UTC の ISO 8601（`+00:00` 付き）。暦日（`date`）は取引所の日付で時刻ではないので時間帯を持たない |
+| 演算・判定 | UTC。取引所の現地時刻が要る判断（発注時間帯・引けの前後）は、その場で `Market.timezone` に変換して比べる |
 | 表示 | 設定の時間帯（`WBJP_TIMEZONE`、既定 UTC）。日本で運用するなら `.env` に `WBJP_TIMEZONE=Asia/Tokyo`。どの時間帯でも**略号を必ず添える**（`2026-08-29 06:20 UTC` / `15:20 JST`）。DB に UTC で保存された時刻（`placed_at` 等）も `explain` / `runs` では設定の時間帯に直して出す |
 | ログ | 端末の表示は設定の時間帯（オフセット付き ISO）。ファイルのログには加えて `ts_utc`（常に UTC）が入る |
 
@@ -183,67 +183,9 @@ broker = "tachibana"   # tachibana | paper（ネットワークに繋がない�
 data_provider = "jquants"    # jquants（日本株・日足のみ）| fred（米国の指数・終値のみ）
 ```
 
-足の間隔（`Interval`: `1d` / `1h` / `30m` / `15m` / `5m` / `1m`）は抽象の一部で、取得元ごとに対応範囲を申告する。**現在の取得元はどちらも日足のみ**で、日中足を供給するものは無い（`csv_replay` はテスト用）。J-Quants は日足のみで、API キー `WBJP_JQUANTS_API_KEY`（環境変数か `.env`）が要る。Free プランは直近 12 週が取れないため当日の判断には Light 以上を使う。日中足は UTC の `ts` と暦日 `date` の両方を持ち、`data/bars/<間隔>/` に日足とは別に保存される。
+扱うのは**日足だけ**。J-Quants も FRED も日足しか返さず、立花証券の API に足の履歴は無い。
 
-```bash
-uv run wbjp data sync --interval 5m --days 5    # 5分足を取る（data/bars/5m/）
-```
-
-取得元を足す手順はブローカーと同じ: `MarketDataProvider` を継承して `name` / `intervals` / `fetch_bars()` / `connect()` を書き、`wbcore.data.registry.PROVIDERS.register()` する。
-
-### 細かい足を基準に取り込み、粗い足は合成する
-
-```toml
-[universe]
-interval = "5m"        # 判断に使う足
-base_interval = "1m"   # 取り込みの基準。5分足・1時間足・日足はここから合成する
-```
-
-`base_interval` を設定すると、`data sync` は基準足と `interval` の足を両方取り、`backtest` は **二層構造** で足を読む（`wbcore.data.feed.BarFeed`）:
-
-| 区間 | 足の出どころ |
-|---|---|
-| 基準足が保存されている範囲 | 基準足から合成（`wbcore.data.resample`。始値＝最初・高値＝最大・安値＝最小・終値＝最後・出来高＝合計。区切りは取引所の寄付に揃える: NYSE の 1 時間足は 09:30, 10:30, …） |
-| それより前 | その間隔で直接取った足（日足なら数十年） |
-| 両方ある区間 | 直接取った足を優先（日足は分割調整済み、分足は無調整のため） |
-
-分足だけを唯一の取り込み元にしないのは、分足の取得元は遡れる期間が短いのが普通だから。日足戦略の 30 年ぶんは分足からは作れない。
-
-戦略は判断中に粗い足を見られる（マルチタイムフレーム）: `ctx.resample("7203", Interval.H1)` は見えている 5 分足から 1 時間足を合成し、まだ閉じていない最後の足は落とす（`completed_only=False` で形成中の足も含められる）。未来の足は構造的に混ざらない。
-
-### 日中足の無い期間は日足から見立てる
-
-分足が取れる前の期間や、取得元が日足しか返さない期間は、読み出すときに日足 1 本を「その日の引けに閉じる 1 本の日中足」に見立てて補う（`synthetic = True` の列が付く）。**保存はしない。** 保存されるのは取得元から来た本物の足だけで、`data status` に出るのも本物だけ。見立ては連続した系列が要る指標のウォームアップと履歴の切れ目を無くすためのもので、その日の値動きの形は持たない。本物の足だけで判断したい戦略は `synthetic` 列で除ける。
-
-### 日中足で判断する
-
-戦略とバックテストは足の間隔に依存しない。設定の `universe.interval` を変えるだけで、同じ経路が 5 分足でも回る。
-
-```toml
-[universe]
-interval = "5m"
-
-[[strategies]]
-name = "intraday_sma_cross"
-fast = "15m"                                # 窓は時間で書く。5分足なら 3 本、1分足なら 15 本に自動で直す
-slow = "1h"
-session = { start = "09:30", end = "14:30" } # 取引所の現地時刻。外では新規に建てない
-flat_before = "15:00"                        # 以降は持ち越さない
-```
-
-```bash
-uv run wbjp data sync --config-dir config/intraday --days 30   # universe.interval に従って 5 分足を取る
-uv run wbjp backtest --config-dir config/intraday --from 2026-08-01
-```
-
-仕組み:
-
-- 戦略は `intervals` で対応する足を宣言する。既定はすべて（指標は「本数」なので間隔に依存しない）。日付の意味に依存する戦略（`momentum_rank` の月次入れ替え、`ross_cameron` の前日比ギャップ）は日足のみで、5 分足の設定で使おうとすると起動時に弾かれる
-- 窓を時間で持つ戦略は `bind(interval)` で本数に直す（`Interval.bars_in("1h")`）。`StrategyContext.at` に足の時刻（UTC）、`Market.timezone` で現地時刻
-- エンジンは足を「鍵」（日足なら日付、日中足なら時刻）で並べて回す。約定は常に次の足の寄付。差金決済の当日判定・待機資金の利息・時間切れの営業日数だけを暦日の変わり目で扱う
-- `--fill-model intrabar`（指値を高安で約定）は日足・日中足のどちらでも使える
-
-> **ライブ運用は日足のみ。** 日中足の設定で `wbjp run` を起動すると明示的に止まる。5 分ごとに回すには「新しい足が確定したときだけ判断する」エポック管理と実行の重なりを防ぐロックが要り、これは次の段階（[cron の節](#cron-で回す)を参照）。
+取得元を足す手順はブローカーと同じ: `MarketDataProvider` を継承して `name` / `fetch_bars()` / `connect()` を書き、`wbcore.data.registry.PROVIDERS.register()` する。
 
 ---
 

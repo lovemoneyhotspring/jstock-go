@@ -14,7 +14,7 @@ from wbcore.data.fred_provider import (
     parse_csv,
     series_id,
 )
-from wbcore.data.provider import Interval, MarketDataError
+from wbcore.data.provider import MarketDataError
 from wbcore.domain.models import Market
 
 SAMPLE = """observation_date,VIXCLS
@@ -75,12 +75,10 @@ def test_fetch_closes_passes_the_period_and_reports_404() -> None:
         fetch_closes("NOPE", dt.date(2026, 8, 1), dt.date(2026, 8, 2), session=_Session(404))
 
 
-def test_provider_is_us_only_and_daily_only() -> None:
+def test_provider_is_us_only() -> None:
     with pytest.raises(MarketDataError, match="US"):
         FredProvider(market=Market.JP)
-    provider = FredProvider.connect(Environment.UAT, market=Market.US)
-    with pytest.raises(MarketDataError, match="対応していません"):
-        provider.fetch_bars(["^VIX"], dt.date(2026, 8, 1), dt.date(2026, 8, 2), interval=Interval.M5)
+    assert FredProvider.connect(Environment.UAT, market=Market.US).market is Market.US
 
 
 def test_provider_returns_bars_keyed_by_the_configured_symbol() -> None:
