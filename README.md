@@ -241,7 +241,7 @@ uv run wbjp backtest --config-dir config/intraday --from 2026-08-01
 - 戦略は `intervals` で対応する足を宣言する。既定はすべて（指標は「本数」なので間隔に依存しない）。日付の意味に依存する戦略（`momentum_rank` の月次入れ替え、`ross_cameron` の前日比ギャップ）は日足のみで、5 分足の設定で使おうとすると起動時に弾かれる
 - 窓を時間で持つ戦略は `bind(interval)` で本数に直す（`Interval.bars_in("1h")`）。`StrategyContext.at` に足の時刻（UTC）、`Market.timezone` で現地時刻
 - エンジンは足を「鍵」（日足なら日付、日中足なら時刻）で並べて回す。約定は常に次の足の寄付。差金決済の当日判定・待機資金の利息・時間切れの営業日数だけを暦日の変わり目で扱う
-- `--engine backtrader` は日足のみ
+- `--fill-model intrabar`（指値を高安で約定）は日足・日中足のどちらでも使える
 
 > **ライブ運用は日足のみ。** 日中足の設定で `wbjp run` を起動すると明示的に止まる。5 分ごとに回すには「新しい足が確定したときだけ判断する」エポック管理と実行の重なりを防ぐロックが要り、これは次の段階（[cron の節](#cron-で回す)を参照）。
 
@@ -366,10 +366,10 @@ WBJP_ENV=uat uv run wbjp run --live
 
 # バックテスト
 uv run wbjp backtest --from 2023-01-01 --to 2026-06-30
-# 約定を Backtrader（Cerebro/Broker）に任せた第2エンジンで突き合わせる。
-# 判断ロジックは同一なので、成行なら自前エンジンと約定が一致するはず。
-# 差が出たらどちらかの約定モデルにバグがある（指値だけは判定基準が違うので差が出る）
-uv run wbjp backtest --from 2023-01-01 --to 2026-06-30 --engine backtrader
+# 指値の約定モデルを変えて突き合わせる。既定の open は寄付だけで判定（保守的）、
+# intrabar はその足の高安に届けば約定（楽観的）。判断ロジックは同一なので、
+# 成行だけの設定なら両者は完全に一致する。差は指値の約定しやすさの違いだけ
+uv run wbjp backtest --from 2023-01-01 --to 2026-06-30 --fill-model intrabar
 
 # 本番（--live なしは常に dry-run）
 WBJP_ENV=prod uv run wbjp run
@@ -479,7 +479,7 @@ src/accum/               積立
 | `indicators/ohlcv.py` | `diff()` の先頭 null は `pl.when` で明示的に通す。0 に化けると Wilder 平滑化の種が汚れて TA-Lib と値がずれる |
 | `engine/backtest.py` | 指標は全期間で一度だけ計算する（指標が因果的なので等価）。毎日再計算すると約50倍遅い |
 | `broker/paper.py` | 注文の失効は**約定処理のあと**。先に失効させると注文が一度も約定しない |
-| `engine/bt_engine.py` | Backtrader の DAY 注文は日足だと翌バーの前に失効して一度も約定しないため、GTC で出して橋渡し側が翌日に取り消す。指値はバー内の高安で約定判定される（PaperBroker は寄付だけ）ので、突き合わせは成行で行う |
+| `engine/analysis.py` | 決済トレードは約定列を銘柄ごと FIFO で突き合わせて作る。シャープは 1 本ごとのリターンの標本標準偏差で年率換算（245 営業日）。値が出せないときは "-" |
 
 ## 開発
 

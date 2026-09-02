@@ -55,6 +55,7 @@ from wbcore.domain.models import (
 from wbcore.indicators.ohlcv import atr, donchian_low, ema, sma
 from wbcore.logging import get_logger
 from wbjp.config import FileConfig
+from wbjp.engine.analysis import analyze
 from wbjp.engine.reconcile import ReconcileSettings, reconcile
 from wbjp.portfolio.sizer import SizingContext, build_sizer
 from wbjp.risk.limits import RiskContext, RiskManager
@@ -106,8 +107,7 @@ class BacktestResult:
     initial_equity: Decimal = Decimal(0)
     final_equity: Decimal = Decimal(0)
     fills: list[Fill] = field(default_factory=list)
-    #: エンジン固有の追加統計（Backtrader のアナライザ出力など）。
-    #: 自前エンジンでは空。
+    #: 追加の分析値（:func:`wbjp.engine.analysis.analyze`）。
     analysis: dict[str, object] = field(default_factory=dict)
 
     @property
@@ -523,8 +523,12 @@ class DecisionPipeline:
 class BacktestRunner:
     """足ごとのバックテスト（:class:`~wbcore.broker.paper.PaperBroker` で約定）。
 
-    日足でも日中足でも同じ。約定は常に「次の足の寄付」で、未約定は
+    日足でも日中足でも同じ。成行は常に「次の足の寄付」で約定し、未約定は
     その1本で失効する（実運用より保守的＝約定しにくい側に倒す方針）。
+
+    指値の約定判定は ``fill_model`` で切り替える。``"open"``（既定）は寄付だけで
+    判定し、``"intrabar"`` は高安も見る。判断ロジックは同じなので、2 つを
+    突き合わせれば約定モデルの違いだけが結果に出る（検証装置）。
     """
 
     def __init__(
@@ -534,14 +538,17 @@ class BacktestRunner:
         *,
         initial_cash: Decimal = Decimal(1_000_000),
         commission_rate: Decimal | None = None,
+        fill_model: str = "open",
     ) -> None:
         self.strategies = strategies
         self.config = config
         self.pipeline = DecisionPipeline(strategies, config)
+        self.fill_model = fill_model
 
         broker_kwargs: dict[str, object] = {
             "initial_cash": initial_cash,
             "currency": self.rules.currency,
+            "fill_model": fill_model,
         }
         if commission_rate is not None:
             broker_kwargs["commission_rate"] = commission_rate
@@ -618,7 +625,14 @@ class BacktestRunner:
 
             # 1) 前の足の注文をこの足の寄付で約定させ、残ったものを失効させる。
             #    失効を約定より先に行うと、注文が約定する機会を永遠に失う。
-            fills = self.broker.settle(lookup(indexed, point, "open"))
+            if self.fill_model == "intrabar":
+                fills = self.broker.settle(
+                    lookup(indexed, point, "open"),
+                    highs=lookup(indexed, point, "high"),
+                    lows=lookup(indexed, point, "low"),
+                )
+            else:
+                fills = self.broker.settle(lookup(indexed, point, "open"))
             self.broker.expire_open_orders()
             self.broker.mark(lookup(indexed, point, "close"))
 
@@ -628,6 +642,7 @@ class BacktestRunner:
             result.fills.extend(fills)
 
         result.final_equity = self.broker.equity
+        result.analysis = analyze([r.equity for r in result.records], result.fills)
         log.info("バックテスト完了", **{k: str(v) for k, v in result.summary().items()})
         return result
 

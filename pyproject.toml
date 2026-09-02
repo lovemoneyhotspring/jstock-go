@@ -11,6 +11,7 @@ dependencies = [
     "pyarrow>=25.0.0",          # DuckDB 連携（polars との受け渡し）に必要
     "requests>=2.32",       # J-Quants API・FRED・立花証券 e支店 API（端点を直接叩く）
     "duckdb>=1.5.0",
+    "numpy>=2.0",           # accum の XIRR・最大DD（polars の to_numpy() も要る）
     # --- 永続化 ---
     # SQLite は標準ライブラリの sqlite3 を直接使う。単一プロセス・単一
     # ライターで ORM が解決する問題が無く、障害時に素の SQL で
@@ -25,9 +26,6 @@ dependencies = [
     "structlog>=24.4",
     "typer>=0.15",
     "tenacity>=9.0",
-    # Backtrader の第 2 エンジン（wbjp/engine/bt_engine.py）だけが使う。pandas もそのため
-    "backtrader>=1.9.78.123",
-    "pandas>=2.2",
 ]
 
 [project.scripts]
@@ -43,7 +41,6 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "freezegun>=1.5",
-    "pandas-stubs>=2.2",
 ]
 
 [build-system]
@@ -76,17 +73,13 @@ mypy_path = "src"
 strict = true
 # SDK は型情報を持たないため
 [[tool.mypy.overrides]]
-module = ["duckdb.*", "keyring.*", "backtrader.*", "requests.*"]
+module = ["duckdb.*", "keyring.*", "requests.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q -m 'not network'"  # 既定ではネットワークを使わない
-filterwarnings = [
-    # backtrader の docstring にある未エスケープの \* （こちらでは直せない）
-    "ignore:.*invalid escape sequence.*:SyntaxWarning:backtrader.*",
-]
 markers = [
     "network: 外部ネットワークに接続するテスト（既定でスキップ）",
     "uat: UAT（テスト）環境に接続するテスト",

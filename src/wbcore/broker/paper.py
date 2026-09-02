@@ -8,10 +8,14 @@
     判断した当日の終値で約定させると、実際には取れない価格で
     売買できることになり、バックテストの成績が過大になる。
 
-指値の扱い:
-    翌日の寄付が指値より不利なら約定しない。当日中に指値に届いた
-    かどうかは日足では分からないため、寄付だけで判定する。
-    実運用より保守的（＝約定しにくい）側に倒している。
+指値の扱い（``fill_model``）:
+    - ``"open"``（既定）: 翌日の寄付が指値より不利なら約定しない。当日中に指値に
+      届いたかどうかは日足では分からないため、寄付だけで判定する。
+      実運用より保守的（＝約定しにくい）側に倒している。
+    - ``"intrabar"``: 寄付が指値より有利なら寄付で、そうでなくその足の高安が指値に
+      届けば指値で約定する。楽観的だが、自前エンジンの約定モデルとは独立した
+      第 2 の見立てとして突き合わせに使う（:mod:`wbjp.engine.backtest`）。
+      :meth:`settle` に ``highs`` / ``lows`` を渡さなければ ``"open"`` と同じ。
 """
 
 from __future__ import annotations
@@ -51,6 +55,9 @@ DEFAULT_COMMISSION_RATE = Decimal("0.0011")
 #: 成行注文で見込む滑り。寄付の板の薄さを粗く織り込む。
 DEFAULT_SLIPPAGE_RATE = Decimal("0.001")
 
+#: 指値の約定モデル。
+FILL_MODELS = ("open", "intrabar")
+
 
 @dataclass(slots=True)
 class _Holding:
@@ -73,6 +80,8 @@ class PaperBroker(Broker):
     slippage_rate: Decimal = DEFAULT_SLIPPAGE_RATE
     tax_type: TaxAccountType = TaxAccountType.SPECIFIC
     currency: str = "JPY"
+    #: 指値の約定判定。"open"（寄付だけ）か "intrabar"（高安も見る）。
+    fill_model: str = "open"
 
     name: ClassVar[str] = "paper"
 
@@ -85,6 +94,8 @@ class PaperBroker(Broker):
     _bought_today: set[str] = field(init=False, default_factory=set)
 
     def __post_init__(self) -> None:
+        if self.fill_model not in FILL_MODELS:
+            raise ValueError(f"fill_model は {FILL_MODELS} のいずれか: {self.fill_model!r}")
         self._cash = self.initial_cash
 
     @classmethod
@@ -284,17 +295,24 @@ class PaperBroker(Broker):
         self,
         open_prices: dict[str, Decimal],
         when: dt.datetime | None = None,
+        *,
+        highs: dict[str, Decimal] | None = None,
+        lows: dict[str, Decimal] | None = None,
     ) -> list[Fill]:
-        """未約定の注文を寄付価格で約定させる。
+        """未約定の注文をその足で約定させる。
 
         Args:
-            open_prices: 銘柄 → その日の寄付。
+            open_prices: 銘柄 → その足の寄付。
             when: 約定時刻（記録用）。
+            highs: 銘柄 → その足の高値。``fill_model = "intrabar"`` のときだけ見る。
+            lows: 銘柄 → その足の安値。同上。
 
         Returns:
             この呼び出しで発生した約定。
         """
         filled: list[Fill] = []
+        highs = highs or {}
+        lows = lows or {}
 
         for client_order_id, order in list(self._orders.items()):
             if not order.status.is_open:
@@ -304,7 +322,9 @@ class PaperBroker(Broker):
             if open_price is None:
                 continue  # その日に値がつかなかった
 
-            price = self._execution_price(order, open_price)
+            price = self._execution_price(
+                order, open_price, highs.get(order.symbol), lows.get(order.symbol)
+            )
             if price is None:
                 continue  # 指値に届かず約定せず
 
@@ -336,7 +356,13 @@ class PaperBroker(Broker):
 
     # -- 内部 ---------------------------------------------------------------
 
-    def _execution_price(self, order: Order, open_price: Decimal) -> Decimal | None:
+    def _execution_price(
+        self,
+        order: Order,
+        open_price: Decimal,
+        high: Decimal | None = None,
+        low: Decimal | None = None,
+    ) -> Decimal | None:
         """約定価格。約定しない場合は None。"""
         if order.order_type is OrderType.MARKET:
             # 成行は不利な方向に滑る
@@ -345,11 +371,7 @@ class PaperBroker(Broker):
 
         limit = order.limit_price
         assert limit is not None  # OrderRequest が保証している
-
-        if order.side is Side.BUY:
-            # 寄付が指値以下なら、より有利な寄付で約定する
-            return open_price if open_price <= limit else None
-        return open_price if open_price >= limit else None
+        return limit_fill_price(order.side, limit, open_price, high, low, self.fill_model)
 
     def _execute(self, order: Order, price: Decimal, when: dt.datetime | None) -> Fill:
         gross = (price * order.quantity).quantize(self._cent, rounding=ROUND_HALF_UP)
@@ -424,6 +446,32 @@ class PaperBroker(Broker):
 
     def _commission(self, gross: Decimal) -> Decimal:
         return (gross * self.commission_rate).quantize(self._cent, rounding=ROUND_HALF_UP)
+
+
+def limit_fill_price(
+    side: Side,
+    limit: Decimal,
+    open_price: Decimal,
+    high: Decimal | None,
+    low: Decimal | None,
+    fill_model: str = "open",
+) -> Decimal | None:
+    """指値の約定価格。約定しなければ None。
+
+    寄付が指値より有利ならより有利な寄付で約定する。``"intrabar"`` では、寄付で
+    約定しなくてもその足の高安が指値に届いていれば指値で約定する。
+    """
+    if side is Side.BUY:
+        if open_price <= limit:
+            return open_price
+        if fill_model == "intrabar" and low is not None and low <= limit:
+            return limit
+        return None
+    if open_price >= limit:
+        return open_price
+    if fill_model == "intrabar" and high is not None and high >= limit:
+        return limit
+    return None
 
 
 def _replace_status(order: Order, status: OrderStatus) -> Order:

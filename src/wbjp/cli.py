@@ -31,8 +31,7 @@ from wbcore.settings import describe_mode
 from wbjp.config import AppSettings, Config, load_config
 
 if TYPE_CHECKING:
-    from wbjp.engine.backtest import BacktestRunner
-    from wbjp.engine.bt_engine import BacktraderRunner
+    pass
 
 app = typer.Typer(
     help="日本株 自動売買システム",
@@ -358,23 +357,25 @@ def backtest(
         int | None, typer.Option(help="初期資金（口座通貨。既定は円300万/ドル3万）")
     ] = None,
     config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
-    engine: Annotated[
+    fill_model: Annotated[
         str,
         typer.Option(
-            help="約定エンジン: native（自前の PaperBroker）/ backtrader（Cerebro で約定）"
+            "--fill-model",
+            help="指値の約定判定: open（寄付だけ。保守的）/ intrabar（高安も見る。楽観的）",
         ),
-    ] = "native",
+    ] = "open",
 ) -> None:
     """保存済みの足でバックテストする。
 
-    判断ロジックはどちらのエンジンでも同一。--engine backtrader は約定と
-    口座管理を Backtrader に任せ、自前エンジンとの突き合わせに使う。
+    判断ロジックは約定モデルによらず同一。--fill-model intrabar は指値を
+    その足の高安で約定させる第 2 の見立てで、既定（open）との突き合わせに使う。
     """
+    from wbcore.broker.paper import FILL_MODELS
     from wbjp.engine.backtest import BacktestRunner
     from wbjp.strategy.registry import build_all
 
-    if engine not in {"native", "backtrader"}:
-        console.print(f"[red]--engine は native か backtrader: {engine}[/red]")
+    if fill_model not in FILL_MODELS:
+        console.print(f"[red]--fill-model は {' / '.join(FILL_MODELS)}: {fill_model}[/red]")
         raise typer.Exit(2)
 
     config = _load(config_dir)
@@ -390,16 +391,12 @@ def backtest(
     if cash is None:
         cash = 3_000_000 if config.file.universe.market.value == "JP" else 30_000
     strategies = build_all(config.file.strategies.enabled)
-    runner: BacktestRunner | BacktraderRunner
-    if engine == "backtrader":
-        from wbjp.engine.bt_engine import BacktraderRunner
-
-        runner = BacktraderRunner(strategies, config.file, initial_cash=Decimal(cash))
-    else:
-        runner = BacktestRunner(strategies, config.file, initial_cash=Decimal(cash))
+    runner = BacktestRunner(
+        strategies, config.file, initial_cash=Decimal(cash), fill_model=fill_model
+    )
     cash_yield = None
     yield_symbol = config.file.regime.cash_yield_symbol
-    if yield_symbol and engine == "native":
+    if yield_symbol:
         cash_yield = store.read(yield_symbol)
         if cash_yield.height == 0:
             console.print(
@@ -410,10 +407,10 @@ def backtest(
         bars,
         start=dt.date.fromisoformat(from_),
         end=dt.date.fromisoformat(to) if to else None,
-        **({"cash_yield": cash_yield} if engine == "native" else {}),
+        cash_yield=cash_yield,
     )
 
-    table = Table(title=f"バックテスト結果 ({engine})", title_justify="left")
+    table = Table(title=f"バックテスト結果（約定モデル: {fill_model}）", title_justify="left")
     table.add_column("項目")
     table.add_column("値", justify="right")
     for key, value in result.summary().items():
@@ -422,11 +419,10 @@ def backtest(
         table.add_row(str(key), str(value))
     console.print(table)
 
-    if engine == "backtrader" and config.file.execution.order_type == "limit":
+    if fill_model == "intrabar" and config.file.execution.order_type == "limit":
         console.print(
-            "\n[yellow]※ 指値は Backtrader がバー内の高安で約定判定するため、"
-            "自前エンジン（寄付だけで判定）より約定しやすく、結果は一致しません。"
-            '突き合わせには execution.order_type = "market" を使ってください[/yellow]'
+            "\n[yellow]※ intrabar は指値をその足の高安で約定させるため、"
+            "既定の open（寄付だけで判定）より約定しやすく、成績は楽観的に出ます[/yellow]"
         )
     console.print(
         "\n[dim]※ 過去の成績は将来を保証しません。"
