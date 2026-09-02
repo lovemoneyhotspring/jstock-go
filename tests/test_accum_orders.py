@@ -29,7 +29,7 @@ class FakeBroker(PaperBroker):
         self.answers = answers
         self.asked: list[str] = []
 
-    def get_order(self, client_order_id: str) -> Order | None:
+    def get_order(self, client_order_id: str, *, broker_order_id: str | None = None) -> Order | None:
         self.asked.append(client_order_id)
         return self.answers.get(client_order_id)
 

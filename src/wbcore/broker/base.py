@@ -107,8 +107,14 @@ class Broker(ABC):
         """
 
     @abstractmethod
-    def get_order(self, client_order_id: str) -> Order | None:
-        """注文1件の状態。見つからなければ None。"""
+    def get_order(self, client_order_id: str, *, broker_order_id: str | None = None) -> Order | None:
+        """注文1件の状態。見つからなければ None。
+
+        ``broker_order_id`` は :class:`~wbcore.domain.models.OrderAck` で返した
+        ブローカー側の注文IDを台帳から渡すためのヒント。client_order_id で照会できる
+        ブローカー（Webull）は無視してよい。できないブローカー（立花証券）は
+        これが無いと別プロセスからの照会ができない。
+        """
 
     def get_order_history(self, start: dt.date, end: dt.date) -> list[Order]:
         """期間内に出した注文（約定・失効を含む）。

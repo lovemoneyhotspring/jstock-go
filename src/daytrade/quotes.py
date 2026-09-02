@@ -21,6 +21,7 @@ from typing import Any, ClassVar, Protocol
 
 from daytrade.select import Quote
 from wbcore.clock import ensure_utc, now_utc
+from wbcore.credentials import Environment
 from wbcore.logging import get_logger
 
 log = get_logger(__name__)
@@ -112,12 +113,50 @@ class CsvQuotes:
         return found
 
 
-def quote_source(name: str, *, quote_file: Path | None = None) -> QuoteSource:
+class TachibanaQuotes:
+    """立花証券 e支店 API の時価問合（``CLMMfdsGetMarketPrice``、1 リクエスト最大 120 銘柄）。
+
+    寄付後は始値（``pDOP``）、無ければ現在値（``pDPP``）。ブローカーの接続（ログイン・
+    仮想URL）をそのまま使う。
+    """
+
+    name: ClassVar[str] = "tachibana"
+
+    def __init__(self, broker: Any) -> None:
+        self._broker = broker
+
+    @classmethod
+    def connect(cls, env: Environment) -> TachibanaQuotes:
+        from wbcore.broker.tachibana import TachibanaBroker
+        from wbcore.domain.models import Market
+
+        return cls(TachibanaBroker.connect(env, market=Market.JP))
+
+    def fetch(self, symbols: Iterable[str]) -> dict[str, Quote]:
+        from wbcore.broker.base import BrokerError
+
+        wanted = list(dict.fromkeys(s for s in symbols if s))
+        try:
+            rows = self._broker.market_prices(wanted)
+        except BrokerError as exc:
+            raise QuoteError(f"立花証券の時価取得に失敗: {exc}") from exc
+        found: dict[str, Quote] = {}
+        for symbol, row in rows.items():
+            price = _decimal(row.get("open")) or _decimal(row.get("last"))
+            if price is None:
+                continue
+            found[symbol] = Quote(symbol=symbol, price=price, at=row["at"], source=self.name)
+        return found
+
+
+def quote_source(name: str, env: Environment, *, quote_file: Path | None = None) -> QuoteSource:
     """設定の名前から取得元を組み立てる。"""
+    if name == "tachibana":
+        return TachibanaQuotes.connect(env)
     if name == "yfinance":
         return YFinanceQuotes()
     if name == "csv":
         if quote_file is None:
             raise ValueError('quote_source = "csv" には quote_file が必要です')
         return CsvQuotes(quote_file)
-    raise ValueError(f"未知の quote_source: {name!r}（yfinance / csv）")
+    raise ValueError(f"未知の quote_source: {name!r}（tachibana / yfinance / csv）")

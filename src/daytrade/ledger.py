@@ -14,7 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from wbcore.clock import now_utc
-from wbcore.domain.models import OrderRequest, OrderStatus, Side
+from wbcore.domain.models import OrderRequest, OrderStatus, Side, TradeType
 
 #: dry-run の記録に付ける状態。「発注済み」には数えない。
 DRY_RUN_STATUS = "dry_run"
@@ -38,6 +38,8 @@ class LedgerOrder:
     placed_at: str
     updated_at: str | None
     reason: str
+    #: 現物 / 信用新規 / 信用返済。古い台帳（列が無い）は現物。
+    trade: TradeType = TradeType.CASH
 
     @property
     def is_dry_run(self) -> bool:
@@ -51,6 +53,27 @@ class LedgerOrder:
     @property
     def is_dead(self) -> bool:
         return not self.is_dry_run and self.status in _DEAD
+
+    @property
+    def is_entry(self) -> bool:
+        """建てる側の注文か（現物の買い、信用の新規建て）。手仕舞う側なら偽。"""
+        if self.trade is TradeType.MARGIN_OPEN:
+            return True
+        if self.trade is TradeType.MARGIN_CLOSE:
+            return False
+        return self.side is Side.BUY
+
+    @property
+    def is_exit(self) -> bool:
+        return not self.is_entry
+
+    @property
+    def leg(self) -> str:
+        """``"long"``（買って売る）か ``"short"``（売建てて買い戻す）か。"""
+        opens_with_buy = (self.is_entry and self.side is Side.BUY) or (
+            self.is_exit and self.side is Side.SELL
+        )
+        return "long" if opens_with_buy else "short"
 
 
 class Ledger:
@@ -74,8 +97,15 @@ class Ledger:
             " avg_fill_price TEXT,"
             " reason TEXT,"
             " placed_at TEXT NOT NULL,"
-            " updated_at TEXT)"
+            " updated_at TEXT,"
+            " trade TEXT NOT NULL DEFAULT 'CASH')"
         )
+        # 既存の台帳（trade 列が無い）を壊さずに列を足す。既定 CASH = 従来の現物
+        columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(orders)")}
+        if "trade" not in columns:
+            self._connection.execute(
+                "ALTER TABLE orders ADD COLUMN trade TEXT NOT NULL DEFAULT 'CASH'"
+            )
         self._connection.execute("CREATE INDEX IF NOT EXISTS orders_day ON orders(day, side)")
         self._connection.commit()
 
@@ -113,6 +143,7 @@ class Ledger:
             placed_at=row["placed_at"],
             updated_at=row["updated_at"],
             reason=row["reason"] or "",
+            trade=TradeType(row["trade"] or "CASH"),
         )
 
     def record(
@@ -127,8 +158,9 @@ class Ledger:
         """発注の結果を残す。同じ ID なら上書き（dry-run → 本発注の順で来る）。"""
         self._connection.execute(
             "INSERT OR REPLACE INTO orders (client_order_id, broker_order_id, day, symbol, side,"
-            " quantity, filled_quantity, status, price, avg_fill_price, reason, placed_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, '0', ?, ?, NULL, ?, ?, NULL)",
+            " quantity, filled_quantity, status, price, avg_fill_price, reason, placed_at,"
+            " updated_at, trade)"
+            " VALUES (?, ?, ?, ?, ?, ?, '0', ?, ?, NULL, ?, ?, NULL, ?)",
             (
                 request.client_order_id,
                 broker_order_id,
@@ -140,6 +172,7 @@ class Ledger:
                 str(price) if price is not None else None,
                 request.reason,
                 now_utc().isoformat(timespec="seconds"),
+                request.trade.value,
             ),
         )
         self._connection.commit()
@@ -193,6 +226,14 @@ class Ledger:
         """その日・その銘柄・その売買で、拒否・取消・失効に終わった注文の数（再送の ID の種に使う）。"""
         return sum(1 for o in self.orders_on(day, side) if o.symbol == symbol and o.is_dead)
 
+    def entries_on(self, day: dt.date) -> list[LedgerOrder]:
+        """その日の建てる側の注文（dry-run を含む）。現物の買い・信用の新規建て。"""
+        return [o for o in self.orders_on(day) if o.is_entry]
+
+    def exits_on(self, day: dt.date) -> list[LedgerOrder]:
+        """その日の手仕舞う側の注文（dry-run を含む）。現物の売り・信用の返済。"""
+        return [o for o in self.orders_on(day) if o.is_exit]
+
     def orders_on(self, day: dt.date, side: Side | None = None) -> list[LedgerOrder]:
         """その日の注文（dry-run を含む）。"""
         if side is None:
@@ -217,31 +258,42 @@ class Ledger:
         return [self._row(r) for r in rows]
 
 
-def realized_pnl(ledger: Ledger, days: list[dt.date]) -> dict[dt.date, float | None]:
-    """日ごとの実現損益（円）。約定した買いと売りの単価差 × 数量（手数料は含まない）。
+def realized_pnl(
+    ledger: Ledger, days: list[dt.date], *, leg: str | None = None
+) -> dict[dt.date, float | None]:
+    """日ごとの実現損益（円）。建てた注文と手仕舞った注文の単価差 × 数量（手数料は含まない）。
 
-    dry-run は数えない。本発注の買いが無い日は 0。買いはあるのに売りの約定単価が
-    無い（照会前・未約定）日は **None**——0 と混ぜると「負けた」と誤読する。
+    ロング（買って売る）もショート（売建てて買い戻す）も「売り単価 − 買い単価」で同じ式になる。
+    ``leg`` を ``"long"`` / ``"short"`` にするとその脚だけ（資産曲線の合図は**ロング側**で見る）。
+
+    dry-run は数えない。本発注で建てた注文が無い日は 0。建てて約定したのに手仕舞いの
+    約定単価が無い（照会前・未約定・記録なし）日は **None**——0 と混ぜると「負けた」と誤読する。
     """
     result: dict[dt.date, float | None] = {}
     for day in days:
-        buys = {o.symbol: o for o in ledger.orders_on(day, Side.BUY) if not o.is_dry_run}
-        if not buys:
+        orders = [
+            o
+            for o in ledger.orders_on(day)
+            if not o.is_dry_run and (leg is None or o.leg == leg)
+        ]
+        entries = {(o.symbol, o.leg): o for o in orders if o.is_entry and not o.is_dead}
+        if not entries:
             result[day] = 0.0
             continue
-        sells = [o for o in ledger.orders_on(day, Side.SELL) if not o.is_dry_run and not o.is_dead]
+        exits = {(o.symbol, o.leg): o for o in orders if o.is_exit and not o.is_dead}
         total = 0.0
         complete = True
-        for sell in sells:
-            buy = buys.get(sell.symbol)
-            if buy is None:
-                continue
-            if sell.avg_fill_price is None or buy.avg_fill_price is None:
+        for key, entry in entries.items():
+            if entry.filled_quantity <= 0:
+                continue  # 約定していないなら手仕舞う物が無い
+            exit_ = exits.get(key)
+            if exit_ is None or exit_.avg_fill_price is None or entry.avg_fill_price is None:
                 complete = False
                 continue
-            total += float((sell.avg_fill_price - buy.avg_fill_price) * sell.filled_quantity)
-        bought = {s for s, b in buys.items() if b.filled_quantity > 0}
-        if bought - {o.symbol for o in sells}:
-            complete = False  # 買ったのに売りの記録が無い
+            if entry.side is Side.BUY:
+                buy_price, sell_price = entry.avg_fill_price, exit_.avg_fill_price
+            else:
+                buy_price, sell_price = exit_.avg_fill_price, entry.avg_fill_price
+            total += float((sell_price - buy_price) * exit_.filled_quantity)
         result[day] = total if complete else None
     return result

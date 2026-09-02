@@ -82,7 +82,11 @@ def _keyring_service(env: Environment, namespace: str) -> str:
     return f"{namespace.lower()}/{env.value}"
 
 
-def _from_keyring(env: Environment, namespace: str = DEFAULT_NAMESPACE) -> dict[str, str | None]:
+def _from_keyring(
+    env: Environment,
+    namespace: str = DEFAULT_NAMESPACE,
+    fields: tuple[str, ...] = _CREDENTIAL_FIELDS,
+) -> dict[str, str | None]:
     try:
         import keyring
     except ImportError:  # pragma: no cover - keyring は必須依存
@@ -90,7 +94,7 @@ def _from_keyring(env: Environment, namespace: str = DEFAULT_NAMESPACE) -> dict[
 
     service = _keyring_service(env, namespace)
     try:
-        return {name: keyring.get_password(service, name) for name in _CREDENTIAL_FIELDS}
+        return {name: keyring.get_password(service, name) for name in fields}
     except Exception as exc:
         # ヘッドレスな Linux サーバーには SecretService も D-Bus も無く、
         # keyring は NoKeyringError を投げる（バックエンド由来の例外が
@@ -102,19 +106,25 @@ def _from_keyring(env: Environment, namespace: str = DEFAULT_NAMESPACE) -> dict[
 
 
 def _scoped_lookup(
-    source: Mapping[str, str | None], env: Environment, namespace: str
+    source: Mapping[str, str | None],
+    env: Environment,
+    namespace: str,
+    *,
+    fields: tuple[str, ...] = _CREDENTIAL_FIELDS,
 ) -> dict[str, str | None]:
     """``WBJP_UAT_APP_KEY`` 形式を優先し、``WBJP_APP_KEY`` を後方互換とする。"""
     prefix = f"{namespace}_{env.value.upper()}_"
     return {
         name: source.get(f"{prefix}{name.upper()}") or source.get(f"{namespace}_{name.upper()}")
-        for name in _CREDENTIAL_FIELDS
+        for name in fields
     }
 
 
-def _from_env_vars(env: Environment, namespace: str) -> dict[str, str | None]:
+def _from_env_vars(
+    env: Environment, namespace: str, *, fields: tuple[str, ...] = _CREDENTIAL_FIELDS
+) -> dict[str, str | None]:
     """環境変数から読む。systemd の ``EnvironmentFile=`` もここに来る。"""
-    return _scoped_lookup(os.environ, env, namespace)
+    return _scoped_lookup(os.environ, env, namespace, fields=fields)
 
 
 def _resolve_env_file(env_file: Path | None) -> Path:
@@ -162,18 +172,23 @@ def _resolve_fields(
     dotenv: dict[str, str | None],
     env_file: Path,
     namespace: str,
+    *,
+    fields: tuple[str, ...] = _CREDENTIAL_FIELDS,
 ) -> tuple[dict[str, str | None], dict[str, str]]:
     """項目ごとに値と、その取得元のラベルを返す。
 
     ``load_credentials`` と ``credential_source`` が**同じ**解決を見るための
     土台。別々に判定すると、実際に使われた認証情報と診断表示がずれる。
+
+    ``fields`` を差し替えれば Webull 以外（項目構成が違う証券会社）にも
+    同じ優先順位（環境変数 → ``.env`` → OS キーチェーン）を使い回せる。
     """
     candidates = (
-        ("環境変数", _from_env_vars(env, namespace)),
-        (str(env_file), _scoped_lookup(dotenv, env, namespace)),
-        ("OS キーチェーン", _from_keyring(env, namespace)),
+        ("環境変数", _from_env_vars(env, namespace, fields=fields)),
+        (str(env_file), _scoped_lookup(dotenv, env, namespace, fields=fields)),
+        ("OS キーチェーン", _from_keyring(env, namespace, fields)),
     )
-    resolved: dict[str, str | None] = dict.fromkeys(_CREDENTIAL_FIELDS)
+    resolved: dict[str, str | None] = dict.fromkeys(fields)
     origins: dict[str, str] = {}
     for label, source in candidates:
         for key, value in source.items():
@@ -272,3 +287,84 @@ def store_credentials(
     keyring.set_password(service, "app_key", creds.app_key)
     keyring.set_password(service, "app_secret", creds.app_secret)
     keyring.set_password(service, "account_id", creds.account_id)
+
+
+# --------------------------------------------------------------------------
+# 立花証券（e支店 API）
+# --------------------------------------------------------------------------
+
+#: 立花証券 e支店 API（e_api_v4r10）の認証情報を構成する項目。
+#: 出典: API リファレンスと公式サンプル（e_api_sample_v4r10.py / .txt）。
+#:
+#:     - ``auth_id`` — ログイン電文 ``CLMAuthLoginRequest`` の ``sAuthId``。
+#:       e支店 Web の「ｅ支店・ＡＰＩ利用設定」で自動生成される認証ID
+#:     - ``private_key_file`` — 同画面で登録した公開鍵と対の**秘密鍵（PEM）のファイルパス**。
+#:       ログイン応答の仮想URL（``sUrlRequest`` 等）は公開鍵で暗号化されて返るので、
+#:       これで復号する（RSA 2048/4096、OAEP、SHA-256）。立花証券側は秘密鍵を保存しない
+#:     - ``order_password`` — 新規注文・取消注文の必須パラメータ ``sSecondPassword``
+#:       （第二暗証番号）。API 利用時は Web 側で「暗証番号省略」を無効にしておくこと
+#:
+#: 認証ID・公開鍵は本番とデモで別管理（環境ごとの名前空間 ``TACHIBANA_<ENV>_...``）。
+_TACHIBANA_CREDENTIAL_FIELDS = ("auth_id", "private_key_file", "order_password")
+
+
+@dataclass(frozen=True, slots=True)
+class TachibanaCredentials:
+    """立花証券 e支店 API（e_api_v4r10）の認証情報。
+
+    ``__repr__`` を潰してあるので、うっかりログや例外に出しても秘密が漏れない。
+    """
+
+    auth_id: str
+    #: 秘密鍵（PEM、``-----BEGIN PRIVATE KEY-----`` から）。
+    private_key_pem: bytes
+    order_password: str
+
+    def __repr__(self) -> str:
+        return f"TachibanaCredentials(auth_id='***{self.auth_id[-2:]}')"
+
+    __str__ = __repr__
+
+
+def load_tachibana_credentials(
+    env: Environment,
+    *,
+    env_file: Path | None = None,
+    namespace: str = "TACHIBANA",
+) -> TachibanaCredentials:
+    """立花証券の認証情報を解決する。
+
+    優先順位は :func:`load_credentials` と同じ（環境変数 → ``.env`` →
+    OS キーチェーン）。公開テスト口座のフォールバックは無い。秘密鍵は
+    ``private_key_file`` のパスから読む（``chmod 600`` のこと）。
+
+    Raises:
+        MissingCredentialsError: どこにも見つからない、または秘密鍵のファイルが無いとき。
+    """
+    path = _resolve_env_file(env_file)
+    dotenv = _read_dotenv(path)
+    resolved, _ = _resolve_fields(
+        env, dotenv, path, namespace, fields=_TACHIBANA_CREDENTIAL_FIELDS
+    )
+
+    if all(resolved.values()):
+        key_path = Path(str(resolved["private_key_file"])).expanduser()
+        if not key_path.is_file():
+            raise MissingCredentialsError(
+                f"立花証券の秘密鍵ファイルがありません: {key_path}"
+                f"（{namespace}_{env.value.upper()}_PRIVATE_KEY_FILE）"
+            )
+        _warn_if_readable_by_others(key_path)
+        return TachibanaCredentials(
+            auth_id=str(resolved["auth_id"]),
+            private_key_pem=key_path.read_bytes(),
+            order_password=str(resolved["order_password"]),
+        )
+
+    missing = [k for k, v in resolved.items() if not v]
+    upper = env.value.upper()
+    raise MissingCredentialsError(
+        f"{env.value} 環境の認証情報（{namespace}）が不足しています: {', '.join(missing)}\n"
+        f"  環境変数:     {namespace}_{upper}_AUTH_ID / _PRIVATE_KEY_FILE / _ORDER_PASSWORD\n"
+        f"  または .env に記載: {namespace}_{upper}_AUTH_ID=... （chmod 600 のこと）"
+    )

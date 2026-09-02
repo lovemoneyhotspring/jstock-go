@@ -56,6 +56,41 @@ uv run wbjp data sync --config-dir config/us --days 1500
 WBJP_ENV=prod uv run wbjp run --config-dir config/us
 ```
 
+## 2b. 立花証券 e支店（`execution.broker = "tachibana"`、`config/daytrade_margin`）
+
+信用取引（`jp_gap_fade_margin`）は立花証券で出す。Webull の API キーとは別に、次の 3 つが要る。
+
+1. e支店 Web（標準 Web）の［お客様情報］→［ｅ支店・ＡＰＩ利用設定］で **「利用する」** にし、
+   自動生成される **認証ID** を控える（「ＤＬ」で `e_api_authid.txt`）
+2. 同じ画面で **公開鍵を登録**（自動作成なら表示される秘密鍵を 1 度だけ「ＤＬ」できる。
+   手動なら自分で RSA 2048/4096 の鍵対を作り、公開鍵だけ登録）。秘密鍵は PEM で保存する。
+   ログイン応答の仮想URLはこの公開鍵で暗号化されて返るので、秘密鍵が無いと何もできない
+3. ［設定情報］→［第二暗証番号］で **「暗証番号省略」を無効**にする（API の注文は毎回
+   `sSecondPassword` が必須。省略設定のままだとエラー 11029）。交付書面が未読だと仮想URLが発行されない
+
+本番とデモ（`https://demo-kabuka.e-shiten.jp/`）は認証ID・鍵が別管理。`.env`（0600）に:
+
+```bash
+TACHIBANA_PROD_AUTH_ID=...                 # 認証ID
+TACHIBANA_PROD_PRIVATE_KEY_FILE=/etc/wbjp/tachibana-prod.pem   # 秘密鍵（0600）
+TACHIBANA_PROD_ORDER_PASSWORD=...          # 第二暗証番号
+TACHIBANA_UAT_AUTH_ID=...                  # デモ環境（WBJP_ENV=uat）
+TACHIBANA_UAT_PRIVATE_KEY_FILE=/etc/wbjp/tachibana-uat.pem
+TACHIBANA_UAT_ORDER_PASSWORD=...
+```
+
+- 手数料コースは Web で**定額手数料コース**を選ぶ（現物は 1 日の約定代金合計 12 万円まで 0 円、
+  20 万円まで 176 円…。信用は 0 円で現物とは別計算）。積立（月 2〜2.5 万、4 倍でも 10 万）は
+  ほぼ無料の範囲。`preview` の手数料見積りはこのコース前提で、当日の既約定分
+  （`sGenbutuBaibaiDaikin`）を足した段階の差分を出す
+- 積立（`accum`）と信用デイトレは同じ現金を使う。デイトレの建玉が 9:00〜15:20 に保証金を拘束するので、
+  14 時台の積立が見る現物買付可能額はその残り。月の積立額が収まるかを一度確かめる
+- その日の通番（`p_no`）と復号した仮想URLは `state/tachibana/session-<env>-<YYYYMMDD>.json`（0600）に
+  残し、同じ日は再ログインしない（公式サンプルと同じ）。仮想URLが無効化されたらこのファイルを消す
+- 初回は**デモで** `WBJP_ENV=uat uv run daytrade quotes 7203 9984 --config-dir config/daytrade_margin` と
+  `daytrade open --config-dir config/daytrade_margin`（dry-run）で疎通と電文を確かめる。
+  サーバの外向き IP の許可設定は不要（Webull と違う）
+
 ## 3. `.env` の置き場所
 
 - **既定**: リポジトリ直下（カレントディレクトリ基準）= `/home/abobo/webull/wbjp/.env`。`chmod 600` 必須（緩いと起動時に警告）

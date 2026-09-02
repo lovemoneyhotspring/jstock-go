@@ -12,14 +12,20 @@ from decimal import ROUND_DOWN, Decimal
 
 import polars as pl
 
-from daytrade.config import SignalConfig
+from daytrade.config import MarginConfig, SignalConfig
 from daytrade.fees import commission
 from wbcore.domain.jp_rules import DEFAULT_LOT_SIZE, price_limit_range
+from wbcore.domain.models import Side
 
 
 def limit_down_price(prev_close: Decimal) -> Decimal:
     """前日終値を基準値段とするストップ安の値段。"""
     return price_limit_range(prev_close)[0]
+
+
+def limit_up_price(prev_close: Decimal) -> Decimal:
+    """前日終値を基準値段とするストップ高の値段。"""
+    return price_limit_range(prev_close)[1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +42,7 @@ class Quote:
 
 @dataclass(frozen=True, slots=True)
 class Pick:
-    """買う銘柄 1 つ。"""
+    """建てる銘柄 1 つ。``side`` が BUY なら寄付で買う（ロング）、SELL なら売建てる（ショート）。"""
 
     symbol: str
     code: str
@@ -46,6 +52,7 @@ class Pick:
     gap: Decimal
     quantity: Decimal
     rank: int
+    side: Side = Side.BUY
 
     @property
     def amount(self) -> Decimal:
@@ -61,6 +68,17 @@ def gap_rank_expr(config: SignalConfig, over: str | None = "Date") -> pl.Expr:
     """``gap`` 列を条件で絞り、小さい順に順位を付ける（条件外は null）。パネルと 1 日で共用。"""
     ok = (pl.col("gap") < float(config.max_gap)) & (pl.col("gap") >= float(config.min_gap))
     rank = pl.when(ok).then(pl.col("gap")).rank("ordinal")
+    return rank.over(over) if over else rank
+
+
+def short_rank_expr(config: MarginConfig, over: str | None = "Date") -> pl.Expr:
+    """信用売り側の順位付け。``gap_rank_expr`` と対称（ギャップの大きい順、条件外は null）。
+
+    ``shortable`` 列（貸借銘柄=true）を持つフレームに適用すること。ここでは
+    貸借の絞り込みはしない（呼び出し側で ``pl.col("shortable")`` と組み合わせる）。
+    """
+    ok = (pl.col("gap") >= float(config.min_gap)) & (pl.col("gap") < float(config.max_gap))
+    rank = pl.when(ok).then(-pl.col("gap")).rank("ordinal")
     return rank.over(over) if over else rank
 
 
@@ -131,6 +149,56 @@ def rank(candidates: pl.DataFrame, quotes: dict[str, Quote], config: SignalConfi
     ]
 
 
+def rank_short(
+    candidates: pl.DataFrame, quotes: dict[str, Quote], config: MarginConfig
+) -> list[Ranked]:
+    """信用売りの候補を、ギャップの**大きい**順に並べる（:func:`rank` の鏡像）。
+
+    ``candidates`` は ``short_eligible`` 列（前夜の plan がショート専用の母集団で判定したもの）
+    が真の行だけを使う。列が無い古い plan は ``eligible & shortable`` で代用する。気配が無い・
+    ギャップが ``[min_gap, max_gap)`` の外・ストップ高（``skip_limit_up``）の銘柄は入らない。
+    """
+    columns = ["Code", "symbol", "name", "prev_close"]
+    has_vol = "vol20" in candidates.columns
+    if has_vol:
+        columns.append("vol20")
+    if "short_eligible" in candidates.columns:
+        universe = candidates.filter(pl.col("short_eligible"))
+    elif "shortable" in candidates.columns:
+        universe = candidates.filter(pl.col("eligible") & pl.col("shortable"))
+    else:
+        universe = candidates.filter(pl.col("eligible"))
+    rows = universe.select(columns)
+    scored: list[tuple[Decimal, str, str, str, Decimal, Decimal, float | None]] = []
+    for row in rows.iter_rows():
+        code, symbol, name, prev_close = row[:4]
+        vol = row[4] if has_vol else None
+        quote = quotes.get(symbol)
+        if quote is None or quote.price <= 0 or prev_close is None or prev_close <= 0:
+            continue
+        prev = Decimal(str(prev_close))
+        gap = quote.price / prev - Decimal(1)
+        if not (gap >= config.min_gap and gap < config.max_gap):
+            continue
+        if config.skip_limit_up and quote.price >= limit_up_price(prev):
+            continue
+        scored.append((gap, symbol, code, name or "", prev, quote.price, vol))
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    return [
+        Ranked(
+            rank=i,
+            symbol=symbol,
+            code=code,
+            name=name,
+            prev_close=prev,
+            price=price,
+            gap=gap.quantize(Decimal("0.0001")),
+            vol=float(vol) if vol is not None else None,
+        )
+        for i, (gap, symbol, code, name, prev, price, vol) in enumerate(scored, start=1)
+    ]
+
+
 def weights(rows: list[Ranked], weighting: str) -> list[Decimal]:
     """N 銘柄への配分比（合計 1）。``inverse_vol`` は 20 日ボラの逆数、``equal`` は等分。"""
     if not rows:
@@ -153,12 +221,15 @@ def pick(
     lot_sizes: dict[str, Decimal] | None = None,
     weighting: str = "equal",
     ranked: list[Ranked] | None = None,
+    side: Side = Side.BUY,
 ) -> list[Pick]:
-    """ギャップ下位 N 銘柄を選び、株数を決める。
+    """順位表の上位 N 銘柄を選び、株数を決める。
 
     まず「1 単元が ``budget`` に収まる」銘柄を順位順に N 個取る（届かない銘柄は次点を繰り上げ）。
     次に ``weighting`` で総予算 ``budget × N`` を按分し、単元に切り捨てる。
     ``inverse_vol`` で按分が小さすぎて 1 単元に届かない銘柄は落ちる（N が減る）。
+    ``ranked`` を省くとロングの順位（:func:`rank`）。ショートは :func:`rank_short` の結果を
+    ``ranked`` に渡し ``side=Side.SELL`` にする。
     """
     if n < 1:
         return []
@@ -183,6 +254,7 @@ def pick(
                 gap=r.gap,
                 quantity=quantity,
                 rank=r.rank,
+                side=side,
             )
         )
     return picks

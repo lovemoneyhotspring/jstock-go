@@ -87,6 +87,148 @@ class CapitalConfig(BaseModel):
         return (self.max_capital / n).quantize(Decimal(1), rounding=ROUND_DOWN)
 
 
+class MarginConfig(BaseModel):
+    """信用売り（ショート）の資金と条件（``[margin]``）。``jp_gap_fade_margin`` 専用。
+
+    ``[capital]`` のロング側と対になる、ショート側の資金枠。銘柄選定はロングと
+    対称（ギャップの符号を反転し、貸借銘柄に限定）。資金配分はロング側の
+    資産曲線ゲート（``regime.equity_curve_days`` / ``equity_curve_scale``）に
+    連動させる：ロング側が縮小した日（地合いが弱い日）ほどショート側を
+    ``long_weak_multiplier`` 倍に増強する「シーソー」。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    #: ショートのオン／オフ。false なら ``jp_gap_fade`` と同じ動き（ロングのみ）。
+    enabled: bool = False
+    #: 保証金として差し入れる現金（円）。信用取引では建玉（``capital.max_capital`` +
+    #: ``margin.max_capital``）が現金より大きくなるため、年率や DD はこれに対して見る。
+    #: 0 なら ``capital.max_capital`` を現金とみなす。
+    cash: Decimal = Decimal(0)
+    #: 1 日に使う資金の上限（円）。``[capital]`` と同じ意味だがショート専用の枠。
+    max_capital: Decimal = Decimal(0)
+    order_budget: Decimal = Decimal(670_000)
+    max_positions: int = 10
+    weighting: str = "inverse_vol"
+    # --- ショート専用の母集団（``[universe]`` はロング用。研究ノート 2026-09-jp-gap-up-short） ---
+    #: 市場区分。プライムは張り付き（引けストップ高で返済できない）率 2.1%、グロース 5.3%・
+    #: スタンダード 5.8%。全区分の方が利益は大きいが持ち越しの損失で OOS が崩れる。
+    segments: list[str] = Field(default_factory=lambda: ["prime"])
+    #: 売買代金の ``universe.turnover_days`` 日中央値がこれ以上。上げるほど悪くなる（ロングと同じ）。
+    min_turnover: Decimal = Decimal(100_000_000)
+    #: 時価総額の下位からいくつ外すか。ショートは小型に効きが厚いので既定は外さない。
+    exclude_cap_terciles: int = 0
+    #: 決算翌日のギャップアップは順張り（−30 bp/取引）なので必ず外す。
+    exclude_earnings_prev: bool = True
+    exclude_earnings_today: bool = True
+    #: 日々公表・注意喚起・増担保の銘柄を外すか。建てられる規制銘柄に効きの差は無いので既定は外さない。
+    exclude_margin_alert: bool = False
+    #: 日証金の申込停止（売り禁）銘柄を外す。新規売りが出せないので発注しても拒否される。
+    exclude_jsf_stop: bool = True
+    #: ギャップ（寄付 ÷ 前日終値 − 1）がこれ**以上**の銘柄だけ（ロングの逆）。
+    #: 5〜7% は +29 bp/取引で薄く、7〜10% +79、10〜15% +112、15% 以上 +304。大きい順に取る。
+    min_gap: Decimal = Decimal("0.05")
+    #: ギャップの上限（これ**未満**）。1 なら実質上限なし。
+    max_gap: Decimal = Decimal(1)
+    #: 9:00 の気配がストップ高の銘柄は売らない（踏み上げの初動を売る危険を避ける。
+    #: ``signal.skip_limit_down`` の逆）。
+    skip_limit_up: bool = True
+    #: ショート側の資金の倍率（シーソー）。``multiplier_normal`` はロング側が通常運転の日、
+    #: ``multiplier_long_weak`` はロング側が資産曲線で縮小された日（地合いが弱い日）。
+    #: 既定は常時 1.0（弱い日限定は Sharpe が高いが稼働が 1/3 に減る）。
+    multiplier_normal: Decimal = Decimal(1)
+    multiplier_long_weak: Decimal = Decimal(1)
+    #: 検証のみ: 引けがストップ高（返済買いが約定しない）の取引を「翌営業日の寄付で返済」として
+    #: 計上する係数。1 で全額（張り付きは全て約定しない）、0 で無視。実態は 0〜1 の間で、
+    #: 運用で約定率を測って決める。研究では張り付き 5.4%・翌朝までさらに −425 bp。
+    carry_penalty: Decimal = Decimal(1)
+    #: ロング側の資産曲線による縮小（``regime.equity_curve_scale``）を効かせるか。
+    #: false にすると、合図（直近 N 日の損益 ≤ 0）はショートのシーソーにだけ使い、
+    #: ロングは縮めない——ドローダウンをショートで受け止め、買いは利益を追う設計。
+    long_shrink: bool = True
+    #: ショートの往復コスト（bp、約定代金に対して）。立花証券は信用手数料 0 円で、
+    #: 貸株料 年 1.15% の日計り 1 日分 ≈ 0.3 bp。残りは滑り（板の厚さ）の見込み。
+    extra_cost_bp: Decimal = Decimal(5)
+    #: ロング側も信用買い（日計り）で建てる。手数料 0 円になり、代わりに金利
+    #: （年 2.50% の 1 日分 ≈ 0.7 bp）を ``long_extra_cost_bp`` で見る。
+    long_via_margin: bool = False
+    long_extra_cost_bp: Decimal = Decimal(5)
+
+    @field_validator("weighting")
+    @classmethod
+    def _weighting(cls, v: str) -> str:
+        if v not in {"equal", "inverse_vol"}:
+            raise ValueError(f"weighting は equal か inverse_vol: {v}")
+        return v
+
+    @field_validator(
+        "cash",
+        "max_capital",
+        "extra_cost_bp",
+        "long_extra_cost_bp",
+        "multiplier_normal",
+        "multiplier_long_weak",
+        "min_turnover",
+    )
+    @classmethod
+    def _non_negative(cls, v: Decimal) -> Decimal:
+        if v < 0:
+            raise ValueError("0 以上")
+        return v
+
+    @field_validator("carry_penalty")
+    @classmethod
+    def _penalty(cls, v: Decimal) -> Decimal:
+        if not Decimal(0) <= v <= Decimal(1):
+            raise ValueError("carry_penalty は 0〜1")
+        return v
+
+    @field_validator("segments")
+    @classmethod
+    def _known_segments(cls, v: list[str]) -> list[str]:
+        unknown = sorted(set(v) - set(SEGMENTS))
+        if unknown:
+            raise ValueError(f"segments に未知の値: {unknown}（使えるのは {list(SEGMENTS)}）")
+        if not v:
+            raise ValueError("segments が空です")
+        return v
+
+    @field_validator("exclude_cap_terciles")
+    @classmethod
+    def _tercile_range(cls, v: int) -> int:
+        if not 0 <= v <= 2:
+            raise ValueError("exclude_cap_terciles は 0〜2")
+        return v
+
+    @field_validator("order_budget")
+    @classmethod
+    def _positive(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("正の値")
+        return v
+
+    @field_validator("min_gap", "max_gap")
+    @classmethod
+    def _range(cls, v: Decimal) -> Decimal:
+        if not Decimal(-1) <= v <= Decimal(1):
+            raise ValueError("ギャップは −1〜1 の比率で書く")
+        return v
+
+    @property
+    def positions(self) -> int:
+        """この資金で持つ銘柄数 N。無効か資金 0 なら 0。"""
+        if not self.enabled or self.max_capital == 0:
+            return 0
+        return positions_for(self.max_capital, self.order_budget, self.max_positions)
+
+    @property
+    def budget_per_order(self) -> Decimal:
+        n = self.positions
+        if n == 0:
+            return Decimal(0)
+        return (self.max_capital / n).quantize(Decimal(1), rounding=ROUND_DOWN)
+
+
 class UniverseConfig(BaseModel):
     """母集団（``[universe]``）。前夜に確定する条件だけを置く。"""
 
@@ -247,6 +389,7 @@ class DaytradeConfig(BaseModel):
     signal: SignalConfig = Field(default_factory=SignalConfig)
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    margin: MarginConfig = Field(default_factory=MarginConfig)
 
 
 def load(config_dir: Path) -> DaytradeConfig:
@@ -264,6 +407,7 @@ def load(config_dir: Path) -> DaytradeConfig:
     try:
         config = DaytradeConfig.model_validate(raw)
         _ = config.capital.positions  # 資金と目安の整合をここで確かめる
+        _ = config.margin.positions  # 同上（ショート側。無効なら 0 のまま素通り）
     except ValueError as exc:
         raise ValueError(f"{path}: {exc}") from None
     return config
