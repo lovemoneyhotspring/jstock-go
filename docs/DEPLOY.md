@@ -8,17 +8,13 @@
 |---|---|---|
 | コード | `src/` `pyproject.toml` `uv.lock` `.python-version` | ✅ |
 | 設定 | 運用する戦略の `config/<戦略名>/` 一式 | ✅ |
-| 秘密情報 | J-Quants APIキー（と、ブローカーを足すならその APIキー）。`.env` または systemd `EnvironmentFile=` | ❌ 別途用意 |
+| 秘密情報 | J-Quants APIキーと立花証券の認証情報（認証ID・秘密鍵 PEM・第二暗証番号）。`.env` または systemd `EnvironmentFile=` | ❌ 別途用意 |
 | キャッシュ | `data/`（足・財務・J-Quants アーカイブ） | ❌ 別ホストからコピーしてよい（または再取得） |
 | 状態 | `state/`（発注台帳・ログ・バックアップ） | ❌ **このホスト固有。他ホストのファイルで上書き厳禁** |
 
 `config/` と `data/` は `src/` の外にあるので、**`src/` だけ配ると動かない**。
 
 ## 2. セットアップ手順
-
-> **証券会社の API キーは送信元 IP で制限されることが多い。** ブローカーを足すときは、
-> サーバーの外向き IP（`curl -s https://ifconfig.me`）を許可リストに登録しておく。
-> UAT と本番でキーが別なら、本番キーの側に登録する。
 
 ```bash
 # 1. コード配置
@@ -29,7 +25,7 @@ git clone https://github.com/lovemoneyhotspring/we-bull.git /home/abobo/webull/w
 # 2. 依存関係
 uv sync
 
-# 3. APIキー（J-Quants と、ブローカーを足すならその口座）
+# 3. APIキー（J-Quants）と立花証券の認証情報（2b 節）
 # ヘッドレスLinuxにはkeyringが無いので `credentials set` は使わず、
 # systemd 経由で環境変数として渡す。
 sudo install -d -m 750 -o root -g wbjp /etc/wbjp
@@ -37,9 +33,9 @@ sudo install -m 640 -o root -g wbjp /dev/null /etc/wbjp/wbjp.env
 sudo vi /etc/wbjp/wbjp.env
 # ↑ このファイルに以下を書く（値は自分のAPIキーに差し替え）
 #   WBJP_JQUANTS_API_KEY=...   # 日本株の足（J-Quants）。環境で分けない
-#   WBJP_PROD_APP_KEY=...      # ブローカーを足したときだけ
-#   WBJP_PROD_APP_SECRET=...
-#   WBJP_PROD_ACCOUNT_ID=...
+#   TACHIBANA_PROD_AUTH_ID=... # 立花証券（2b 節の 3 つ）
+#   TACHIBANA_PROD_PRIVATE_KEY_FILE=/etc/wbjp/tachibana-prod.pem
+#   TACHIBANA_PROD_ORDER_PASSWORD=...
 #
 # systemdサービス定義（/etc/systemd/system/wbjp.service）に
 # EnvironmentFile=/etc/wbjp/wbjp.env を1行書けば、起動時にこのファイルの
@@ -50,15 +46,15 @@ sudo vi /etc/wbjp/wbjp.env
 mkdir -p state/logs
 
 # 5. 価格データの初期取り込み（運用する戦略のconfigごとに）
-uv run wbjp data sync --config-dir config/us --days 1500
+uv run wbjp data sync --config-dir config --days 1500
 
 # 6. dry-runで確認（--live無しは常に発注しない）
-WBJP_ENV=prod uv run wbjp run --config-dir config/us
+WBJP_ENV=prod uv run wbjp run --config-dir config
 ```
 
-## 2b. 立花証券 e支店（`execution.broker = "tachibana"`、`config/daytrade_margin`）
+## 2b. 立花証券 e支店（`execution.broker = "tachibana"`。全プロジェクト共通）
 
-信用取引（`jp_gap_fade_margin`）は立花証券で出す。Webull の API キーとは別に、次の 3 つが要る。
+発注（スイング・積立・デイトレ）は全て立花証券で出す。次の 3 つが要る。
 
 1. e支店 Web（標準 Web）の［お客様情報］→［ｅ支店・ＡＰＩ利用設定］で **「利用する」** にし、
    自動生成される **認証ID** を控える（「ＤＬ」で `e_api_authid.txt`）
@@ -89,7 +85,7 @@ TACHIBANA_UAT_ORDER_PASSWORD=...
   残し、同じ日は再ログインしない（公式サンプルと同じ）。仮想URLが無効化されたらこのファイルを消す
 - 初回は**デモで** `WBJP_ENV=uat uv run daytrade quotes 7203 9984 --config-dir config/daytrade_margin` と
   `daytrade open --config-dir config/daytrade_margin`（dry-run）で疎通と電文を確かめる。
-  サーバの外向き IP の許可設定は不要（Webull と違う）
+  サーバの外向き IP の許可設定は不要
 
 ## 3. `.env` の置き場所
 
@@ -109,13 +105,13 @@ TACHIBANA_UAT_ORDER_PASSWORD=...
 なので**市場が開いているか・引けたかを cron 側で計算する必要はない**。固定間隔で叩き続ければ、
 時間帯の判定は各コマンドの中で完結する。
 
-開始の分は**互いにずらす**。同時に走ると yfinance が同一 IP からのバーストとして
-遮断しやすく、同じ銘柄の足を二つのプロセスが同時に書く競合も避けられる。
+開始の分は**互いにずらす**。同時に走ると J-Quants のレート制限に当たりやすく、
+同じ銘柄の足を二つのプロセスが同時に書く競合も避けられる。
 `sleep` でずらすより cron の分指定の方が、crontab を見ただけでタイミングが分かる。
 
 ```cron
 # wbjp: 0,20,40 分 / accum: 7,27,47 分 / jquants: 13,43 分（互いに重ねない）
-*/20 * * * *    cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  /home/abobo/webull/wbjp/.venv/bin/wbjp  run --live --yes --config-dir config/us >> state/logs/wbjp-run.log  2>&1
+*/20 * * * *    cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  /home/abobo/webull/wbjp/.venv/bin/wbjp  run --live --yes --config-dir config    >> state/logs/wbjp-run.log  2>&1
 7-59/20 * * * * cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum run --live --yes                       >> state/logs/accum-run.log 2>&1
 13,43 * * * *   cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock -n /tmp/jquants.lock   /home/abobo/webull/wbjp/.venv/bin/jquants sync                                >> state/logs/jquants-sync.log 2>&1
 37 * * * *      cd /home/abobo/webull/wbjp && WBJP_ENV=prod flock    /tmp/accum-run.lock /home/abobo/webull/wbjp/.venv/bin/accum backup                                >> state/logs/accum-backup.log 2>&1
@@ -149,7 +145,7 @@ mkdir -p /home/abobo/webull/wbjp/state/logs
 # 3. コマンド部分の検証は 1 回手で流すしかない。cron と同じ最小環境を再現して実行する
 #    （--live は外す。発注以外のデータ取得・判断・記録はすべて動く）
 cd /home/abobo/webull/wbjp && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
-  .venv/bin/wbjp run --config-dir config/us
+  .venv/bin/wbjp run --config-dir config
 cd /home/abobo/webull/wbjp && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
   .venv/bin/jquants sync --dry-run
 ```

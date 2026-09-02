@@ -7,8 +7,7 @@
 # symbols は allowlist としても働く。ここに無い銘柄には、戦略が何を
 # 言おうと絶対に発注されない。戦略のバグに対する最後の防波堤。
 [universe]
-# 取引市場。"JP"（東証）か "US"（NYSE/NASDAQ）。米国株の設定例は config/us/ を参照。
-# 1つの設定ディレクトリは1つの市場だけを扱う。
+# 取引市場。売買できるのは "JP"（東証）だけ。
 market = "JP"
 
 # 判断に使う足の間隔。1d（日足、既定）/ 1h / 30m / 15m / 5m / 1m。
@@ -69,9 +68,9 @@ max_positions = 5
 # 発注の振る舞い
 # --------------------------------------------------------------------------
 [execution]
-# 発注先。登録済みのブローカー名（今は paper のみ）。paper はネットワークに繋がないシミュレータ。
-# 取引所を足すには wbcore.broker.base.Broker を継承して registry に登録する。
-broker = "paper"
+# 発注先。登録済みのブローカー名（tachibana | paper）。paper はネットワークに繋がないシミュレータ。
+# 立花証券 e支店 API の認証情報は docs/DEPLOY.md「立花証券 e支店」を参照。
+broker = "tachibana"
 
 # GENERAL（一般） / SPECIFIC（特定） / NISA
 tax_account_type = "SPECIFIC"
@@ -82,7 +81,3 @@ order_type = "limit"
 
 # 指値を直近終値からどれだけずらすか。約定しやすい方向にずらす。
 limit_offset = "0.005"
-
-# 損切りの置き場所。auto = 市場が逆指値に対応していればブローカーに置く。
-# 日本株は API 非対応なので auto でもエンジン合成になる。
-stop_mode = "auto"

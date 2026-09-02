@@ -22,12 +22,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 # 共通基盤からの再輸出。以前はここに実体があったので、旧来の
 # ``from wbjp.config import Environment`` を壊さないために残している。
-from wbcore.credentials import Credentials as Credentials
 from wbcore.credentials import Environment as Environment
 from wbcore.credentials import MissingCredentialsError as MissingCredentialsError
-from wbcore.credentials import credential_source as credential_source
-from wbcore.credentials import load_credentials as load_credentials
-from wbcore.credentials import store_credentials as store_credentials
 from wbcore.domain.models import Market, TaxAccountType
 from wbcore.settings import AppSettings as AppSettings
 from wbcore.settings import allows_live_orders
@@ -43,7 +39,7 @@ if TYPE_CHECKING:
 def _rename_legacy_keys(data: Any, mapping: dict[str, str]) -> Any:
     """旧フィールド名（``*_jpy``）を新名に読み替える。
 
-    金額の項目は米国株対応で通貨を含まない名前になった。既存の設定
+    金額の項目は通貨を含まない名前にした。既存の設定
     ファイルを壊さないため、旧名も受け付ける。両方書かれていれば
     設定ミスなので落とす。
     """
@@ -61,7 +57,7 @@ def _rename_legacy_keys(data: Any, mapping: dict[str, str]) -> Any:
 class RiskConfig(BaseModel):
     """リスク上限。発注前に全項目をチェックする。
 
-    金額の項目は**口座通貨建て**（日本株なら円、米国株ならドル）。
+    金額の項目は**円建て**。
     ``max_order_value_jpy`` など旧名も読めるが、新しい設定では
     通貨を含まない名前を使う。
     """
@@ -139,12 +135,10 @@ class UniverseConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    #: 取引市場。1つの設定ディレクトリは1つの市場だけを扱う。
-    #: 日本株と米国株を両方回すなら、設定ディレクトリを分けて別プロセスで動かす。
+    #: 取引市場。売買できるのは東証（JP）だけ。
     market: Market = Market.JP
     #: 足データの取得元。:data:`wbcore.data.registry.PROVIDERS` の名前
-    #: （"jquants" は日本株のみ、"yfinance" は両市場）。
-    #: 省略すると市場の既定（日本株 jquants / 米国株 yfinance）。
+    #: （"jquants" は日本株、"fred" は米国の指数）。省略すると市場の既定。
     data_provider: str = ""
     #: 判断に使う足の間隔。"1d"（日足、既定）/ "1h" / "30m" / "15m" / "5m" / "1m"。
     #: 戦略の指標は「本数」で書かれているので、間隔を変えると同じ本数が
@@ -408,22 +402,14 @@ class ExecutionConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（paper / …）。
+    #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（tachibana / paper）。
     #: 未知の名前は接続時に候補付きで弾かれる。
-    broker: str = "paper"
+    broker: str = "tachibana"
     tax_account_type: TaxAccountType = TaxAccountType.SPECIFIC
     #: "market" | "limit"
     order_type: str = "limit"
     #: 指値を直近終値から何%ずらすか（買いは上、売りは下＝約定しやすい方向）
     limit_offset: Decimal = Decimal("0.005")
-    #: 損切りの置き場所。
-    #:   "auto"   … 市場が逆指値に対応していればブローカーに置き、無ければエンジン合成
-    #:   "engine" … 常にエンジン側で日足判定する（米国株でも）
-    #:   "broker" … 常にブローカーに置く。対応しない市場では設定エラー
-    stop_mode: str = "auto"
-    #: 米国株の時間外（プレ・アフター）取引を許すか。日本株では無視される。
-    #: 時間外は板が薄く、指値でも想定外の価格で約定しやすいので既定は無効。
-    extended_hours: bool = False
 
     @field_validator("order_type")
     @classmethod
@@ -432,12 +418,6 @@ class ExecutionConfig(BaseModel):
             raise ValueError(f"order_type は market か limit: {v}")
         return v
 
-    @field_validator("stop_mode")
-    @classmethod
-    def _known_stop_mode(cls, v: str) -> str:
-        if v not in {"auto", "engine", "broker"}:
-            raise ValueError(f"stop_mode は auto / engine / broker のいずれか: {v}")
-        return v
 
 
 class FileConfig(BaseModel):
@@ -454,33 +434,15 @@ class FileConfig(BaseModel):
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
 
     @model_validator(mode="after")
-    def _stop_mode_is_possible(self) -> Self:
+    def _market_is_tradable(self) -> Self:
         from wbcore.domain.market_rules import rules_for
 
-        rules = rules_for(self.universe.market)
-        if self.execution.stop_mode == "broker" and not rules.supports_broker_stops:
-            raise ValueError(
-                f'execution.stop_mode = "broker" は {self.universe.market.value} 市場では'
-                "使えません（逆指値 API 非対応）。auto か engine にしてください"
-            )
+        rules_for(self.universe.market)  # 売買できない市場（US など）はここで弾く
         return self
 
     @property
     def market(self) -> Market:
         return self.universe.market
-
-    @property
-    def uses_broker_stops(self) -> bool:
-        """損切りをブローカーの逆指値として置くか。"""
-        from wbcore.domain.market_rules import rules_for
-
-        match self.execution.stop_mode:
-            case "engine":
-                return False
-            case "broker":
-                return True
-            case _:
-                return rules_for(self.universe.market).supports_broker_stops
 
 
 @dataclass(frozen=True, slots=True)

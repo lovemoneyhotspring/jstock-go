@@ -53,7 +53,8 @@ def test_jp_symbol_drops_yahoo_suffix_for_the_broker() -> None:
 
 
 def test_us_symbol_is_passed_through() -> None:
-    assert broker_symbol("VOO", Market.US) == "VOO"
+    with pytest.raises(ValueError, match="日本株のみ"):
+        broker_symbol("VOO", Market.US)
 
 
 def test_index_cannot_be_ordered() -> None:

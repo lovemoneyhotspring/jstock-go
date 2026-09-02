@@ -18,15 +18,12 @@ from rich.console import Console
 from rich.table import Table
 
 from wbcore.broker.base import BrokerError
-from wbcore.clock import fmt as fmt_when
-from wbcore.clock import fmt_iso, now_utc, today_utc
-from wbcore.credentials import Credentials as Creds
+from wbcore.clock import fmt_iso, today_utc
 from wbcore.credentials import (
     Environment,
     MissingCredentialsError,
     credential_source,
-    load_credentials,
-    store_credentials,
+    load_tachibana_credentials,
 )
 from wbcore.data.provider import MarketDataProvider
 from wbcore.logging import bind_run_context, configure_logging, get_logger
@@ -81,7 +78,6 @@ def _build_broker(config, live: bool):  # type: ignore[no-untyped-def]
         config.env,
         market=config.file.universe.market,
         tax_type=config.file.execution.tax_account_type,
-        extended_hours=config.file.execution.extended_hours,
         notify=lambda message: console.print(f"[yellow]{message}[/yellow]"),
     )
 
@@ -332,7 +328,7 @@ def run(
             table.add_column(column)
         placed_ids = {r.client_order_id for r in result.placed}
         for request in result.planned:
-            price = request.limit_price or request.stop_price
+            price = request.limit_price
             table.add_row(
                 request.symbol,
                 request.side.value,
@@ -436,101 +432,6 @@ def backtest(
         "\n[dim]※ 過去の成績は将来を保証しません。"
         "少数銘柄・短期間の結果は特に当てになりません[/dim]"
     )
-
-
-@app.command()
-def quality(
-    candidates: Annotated[
-        Path | None, typer.Option(help="候補ティッカーのファイル（1行1銘柄）。省略時はユニバース")
-    ] = None,
-    out: Annotated[Path | None, typer.Option(help="合格銘柄を書き出す universe ファイル")] = None,
-    refresh: Annotated[bool, typer.Option("--refresh", help="財務データを取り直す")] = False,
-    relaxed: Annotated[
-        bool, typer.Option("--relaxed", help="緩めの閾値（30〜50 銘柄に収める）")
-    ] = False,
-    show_failed: Annotated[
-        bool, typer.Option("--show-failed", help="不合格も理由付きで表示")
-    ] = False,
-    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
-) -> None:
-    """財務の質（ROE・粗利率・負債・FCF）で母集団を絞る（バフェット流スクリーニング）。
-
-    yfinance の年次財務（直近 4 期）で判定する。過去時点の財務は取れないため、
-    書き出した母集団でバックテストすると **今日の情報で過去を選ぶ** 生存者バイアスが乗る。
-    """
-    from wbcore.data.fundamentals import FundamentalsStore, QualityThresholds, evaluate
-    from wbjp.config import read_symbols_file
-
-    config = load_config(config_dir)
-    symbols = read_symbols_file(candidates) if candidates else list(config.file.universe.symbols)
-    symbols = [
-        s for s in dict.fromkeys(symbols) if not s.startswith("^") and s not in ("SPY", "QQQ")
-    ]
-    store = FundamentalsStore(config.settings.data_dir / "fundamentals")
-    thresholds = QualityThresholds.relaxed() if relaxed else QualityThresholds()
-
-    reports = []
-    with console.status(f"財務データを取得中（{len(symbols)} 銘柄）"):
-        for symbol in symbols:
-            data = store.get(symbol, refresh=refresh)
-            if data is None:
-                continue
-            reports.append(evaluate(data, thresholds))
-
-    passed = [r for r in reports if r.passed]
-    table = Table(
-        title=f"質のスクリーニング: 合格 {len(passed)} / {len(reports)}", title_justify="left"
-    )
-    for column in (
-        "銘柄",
-        "ROE最小",
-        "粗利最小",
-        "営業利益率",
-        "D/E",
-        "利払余力",
-        "FCF/NI",
-        "FCF成長",
-    ):
-        table.add_column(column, justify="right" if column != "銘柄" else "left")
-    if show_failed:
-        table.add_column("不合格の理由")
-
-    def fmt(m: dict[str, float], key: str, pct: bool = True) -> str:
-        v = m.get(key)
-        if v is None:
-            return "—"
-        if v == float("inf"):
-            return "∞"
-        return f"{v:.0%}" if pct else f"{v:.1f}"
-
-    for r in sorted(reports, key=lambda r: (not r.passed, r.symbol)):
-        if not r.passed and not show_failed:
-            continue
-        row = [
-            r.symbol if r.passed else f"[dim]{r.symbol}[/dim]",
-            fmt(r.metrics, "roe_min"),
-            fmt(r.metrics, "gross_margin_min"),
-            fmt(r.metrics, "operating_margin"),
-            fmt(r.metrics, "debt_to_equity", pct=False),
-            fmt(r.metrics, "interest_coverage", pct=False),
-            fmt(r.metrics, "fcf_to_net_income", pct=False),
-            fmt(r.metrics, "fcf_growth"),
-        ]
-        if show_failed:
-            row.append("; ".join(r.failed))
-        table.add_row(*row)
-    console.print(table)
-
-    if out:
-        lines = [
-            "# 財務の質で絞った母集団（`wbjp quality` が生成）。",
-            f"# 生成 {fmt_when(now_utc(), config.settings.timezone)}。閾値: {thresholds}",
-            "# 注意: 今日の財務で選んでいるため、過去のバックテストには生存者バイアスが乗る。",
-            "SPY",
-            *[r.symbol for r in passed],
-        ]
-        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        console.print(f"\n{len(passed)} 銘柄 ＋ SPY を {out} に書き出しました")
 
 
 @app.command()
@@ -907,39 +808,16 @@ def data_status(
 # --------------------------------------------------------------------------
 
 
-@creds_app.command("set")
-def credentials_set(
-    env: Annotated[Environment, typer.Option(help="対象環境")] = Environment.UAT,
-) -> None:
-    """APIキーを OS のキーチェーンに保存する。
-
-    リポジトリには秘密を書かない。キーチェーンの無いサーバーでは
-    環境変数か、0600 にした .env を使う（README 参照）。
-    """
-    app_key = typer.prompt("App Key")
-    app_secret = typer.prompt("App Secret", hide_input=True)
-    account_id = typer.prompt("Account ID")
-
-    try:
-        store_credentials(env, Creds(app_key, app_secret, account_id))
-    except Exception as exc:
-        # ヘッドレスな Linux には使えるバックエンドが無いことが多い。
-        console.print(f"[red]キーチェーンに保存できませんでした: {exc}[/red]")
-        console.print(
-            "このホストにはキーチェーンが無いようです。代わりに環境変数か、"
-            f"0600 にした .env に [bold]WBJP_{env.value.upper()}_APP_KEY[/bold] 等を設定してください。"
-        )
-        raise typer.Exit(1) from exc
-    console.print(f"[green]{env.value} 環境の認証情報をキーチェーンに保存しました[/green]")
-
-
 @creds_app.command("check")
 def credentials_check(
     env: Annotated[Environment, typer.Option(help="対象環境")] = Environment.UAT,
 ) -> None:
-    """認証情報が解決できるか確認する（秘密は表示しない）。"""
+    """立花証券の認証情報（認証ID・秘密鍵・第二暗証番号）が解決できるか確認する。秘密は表示しない。
+
+    置き場所は環境変数 → .env（0600）→ OS キーチェーンの順（docs/DEPLOY.md「立花証券 e支店」）。
+    """
     try:
-        credentials = load_credentials(env)
+        credentials = load_tachibana_credentials(env)
     except MissingCredentialsError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc

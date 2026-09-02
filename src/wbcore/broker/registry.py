@@ -30,7 +30,6 @@ def connect(
     *,
     market: Market,
     tax_type: TaxAccountType = TaxAccountType.SPECIFIC,
-    extended_hours: bool = False,
     notify: Callable[[str], None] | None = None,
 ) -> Broker:
     """名前で選んだブローカーに接続する。
@@ -38,9 +37,7 @@ def connect(
     Raises:
         ValueError: 未知の名前のとき。登録済みの名前を添える。
     """
-    return get(name).connect(
-        env, market=market, tax_type=tax_type, extended_hours=extended_hours, notify=notify
-    )
+    return get(name).connect(env, market=market, tax_type=tax_type, notify=notify)
 
 
 for _cls in (TachibanaBroker, PaperBroker):

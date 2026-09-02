@@ -79,9 +79,9 @@ def broker_symbol(symbol: str, market: Market) -> str:
     """設定上の銘柄コードをブローカーの表記に直す。"""
     if symbol.startswith("^"):
         raise ValueError(f"{symbol}: 指数は発注できません。連動する ETF に置き換えてください")
-    if market is Market.JP:
-        return symbol.removesuffix(".T")
-    return symbol
+    if market is not Market.JP:
+        raise ValueError(f"{symbol}: {market.value} 市場は発注できません（日本株のみ）")
+    return symbol.removesuffix(".T")
 
 
 def ledger_symbol(config: AccumConfig, symbol: str) -> str:
@@ -598,8 +598,8 @@ def to_order(
 def should_fallback_to_limit(request: OrderRequest, error: Exception) -> bool:
     """成行が「気配値が無い／成行禁止」で拒否された注文か。指値で出し直す対象。
 
-    Webull は ``QUOTE_NOT_FOUND``、立花証券は「当該銘柄の成行注文はできません」（11142 等）や
-    「前日終値なし(成行禁止)」（11109）と返す。どちらも指値なら通る種類の拒否。
+    立花証券は「当該銘柄の成行注文はできません」（11142 等）や「前日終値なし(成行禁止)」
+    （11109）と返す。``QUOTE_NOT_FOUND`` は同じ意味の一般的なコード。どちらも指値なら通る。
     """
     if request.order_type is not OrderType.MARKET:
         return False

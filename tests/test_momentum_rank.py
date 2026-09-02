@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal
-from pathlib import Path
 
 import polars as pl
 import pytest
 
 from wbcore.domain.models import Position
-from wbjp.config import load_file_config
 from wbjp.strategy.base import StrategyContext
 from wbjp.strategy.registry import create
 from wbjp.strategy.samples.momentum_rank import MomentumRankStrategy
@@ -196,20 +194,6 @@ def test_parameter_validation() -> None:
         MomentumRankStrategy(rebalance="yearly")
 
 
-def test_shipped_momentum_config_loads() -> None:
-    config = load_file_config(Path("config/us-momentum"))
-    assert config.strategies.enabled[0].name == "momentum_rank"
-    assert config.stops.trailing is True
-    assert config.stops.max_hold_days is None
-    assert config.sizing.atr_stop_multiple == D("3.0")
-    assert "SPY" in config.universe.symbols
-
-
-# --------------------------------------------------------------------------
-# 受け皿（core_symbol）
-# --------------------------------------------------------------------------
-
-
 def test_core_fills_empty_slots_at_the_lowest_rank() -> None:
     signals = {s.symbol: s for s in strategy(top_n=3, core_symbol="SPY").on_bars(context(bars()))}
     # 候補は STRONG / MILD の2つ → 3枠目を SPY が埋める
@@ -242,9 +226,3 @@ def test_core_exits_when_market_turns_off() -> None:
         x.symbol: x for x in strategy(core_symbol="SPY").on_bars(context(frames, held("SPY")))
     }
     assert signals["SPY"].direction == -1.0
-
-
-def test_shipped_etf_rotation_config_loads() -> None:
-    config = load_file_config(Path("config/us-etf-rotation"))
-    assert config.strategies.enabled[0].params["core_symbol"] == "SPY"
-    assert config.sizing.method == "equal_weight"

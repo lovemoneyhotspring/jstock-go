@@ -36,7 +36,6 @@ from wbcore.domain.models import (
     Side,
     TargetPosition,
     TaxAccountType,
-    TimeInForce,
     make_client_order_id,
 )
 from wbcore.logging import get_logger
@@ -53,7 +52,6 @@ class ReconcileSettings:
     #: 指値を直近終値からどれだけずらすか（約定しやすい方向へ）
     limit_offset: Decimal = Decimal("0.005")
     tax_type: TaxAccountType = TaxAccountType.SPECIFIC
-    time_in_force: TimeInForce = TimeInForce.DAY
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,20 +86,9 @@ def effective_quantity(
     for order in open_orders:
         if order.symbol != symbol or not order.status.is_open:
             continue
-        # 逆指値は「トリガーに達したら売る」保険であって、これから約定する
-        # 注文ではない。数えると「建玉が消える予定」と誤認して買い直す。
-        if order.order_type.is_stop:
-            continue
         quantity += order.signed_remaining
 
     return quantity
-
-
-def open_stop_orders(symbol: str, open_orders: Iterable[Order]) -> list[Order]:
-    """銘柄に置かれている生きた逆指値。"""
-    return [
-        o for o in open_orders if o.symbol == symbol and o.status.is_open and o.order_type.is_stop
-    ]
 
 
 def reconcile(
@@ -226,7 +213,6 @@ def _build_order(
             side=side,
             order_type=OrderType.MARKET,
             quantity=quantity,
-            time_in_force=settings.time_in_force,
             tax_type=settings.tax_type,
             reason=reason,
         )
@@ -254,7 +240,6 @@ def _build_order(
         order_type=OrderType.LIMIT,
         quantity=quantity,
         limit_price=limit_price,
-        time_in_force=settings.time_in_force,
         tax_type=settings.tax_type,
         reason=reason,
     )

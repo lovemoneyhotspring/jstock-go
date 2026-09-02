@@ -12,11 +12,6 @@
     翌日の寄付が指値より不利なら約定しない。当日中に指値に届いた
     かどうかは日足では分からないため、寄付だけで判定する。
     実運用より保守的（＝約定しにくい）側に倒している。
-
-逆指値の扱い（米国株）:
-    寄付がトリガー以下なら寄付で（ギャップダウンをそのまま食らう）、
-    そうでなくその日の安値がトリガーに届けばトリガー価格で約定する。
-    安値を渡さなければ寄付だけで判定する（＝エンジン合成と同じ遅れ）。
 """
 
 from __future__ import annotations
@@ -42,7 +37,6 @@ from wbcore.domain.models import (
     Position,
     Side,
     TaxAccountType,
-    TimeInForce,
     TradeType,
 )
 from wbcore.logging import get_logger
@@ -100,7 +94,6 @@ class PaperBroker(Broker):
         *,
         market: Market,
         tax_type: TaxAccountType = TaxAccountType.SPECIFIC,
-        extended_hours: bool = False,
         notify: Callable[[str], None] | None = None,
     ) -> Self:
         """ネットワークに繋がない口座を作る。``execution.broker = "paper"`` で使う。
@@ -218,8 +211,6 @@ class PaperBroker(Broker):
                 )
         elif request.side is Side.SELL:
             pass  # 売建（空売り）。保証金は再現しない
-        elif request.order_type.is_stop:
-            raise OrderRejectedError("買いの逆指値はこのシステムでは扱わない")
         else:
             estimate = self.preview(request)
             if estimate.estimated_cost + estimate.estimated_fee > self._cash:
@@ -238,8 +229,6 @@ class PaperBroker(Broker):
             filled_quantity=Decimal(0),
             status=OrderStatus.SUBMITTED,
             limit_price=request.limit_price,
-            stop_price=request.stop_price,
-            time_in_force=request.time_in_force,
             trade=request.trade,
         )
         self._orders[order.client_order_id] = order
@@ -282,34 +271,30 @@ class PaperBroker(Broker):
         self._bought_today.clear()
 
     def expire_open_orders(self) -> None:
-        """約定しなかった DAY 注文を失効させる。GTC（逆指値）は残す。
+        """約定しなかった注文を失効させる（すべて当日限り）。
 
         呼ぶのは **:meth:`settle` のあと**。1日の正しい順序は
         「寄付で約定 → 未約定を失効 → 当日の終値で判断して新規発注」。
         """
         for client_order_id, order in list(self._orders.items()):
-            if order.status.is_open and order.time_in_force is not TimeInForce.GTC:
+            if order.status.is_open:
                 self._orders[client_order_id] = _replace_status(order, OrderStatus.EXPIRED)
 
     def settle(
         self,
         open_prices: dict[str, Decimal],
         when: dt.datetime | None = None,
-        *,
-        low_prices: dict[str, Decimal] | None = None,
     ) -> list[Fill]:
         """未約定の注文を寄付価格で約定させる。
 
         Args:
             open_prices: 銘柄 → その日の寄付。
             when: 約定時刻（記録用）。
-            low_prices: 銘柄 → その日の安値。逆指値の場中トリガー判定に使う。
 
         Returns:
             この呼び出しで発生した約定。
         """
         filled: list[Fill] = []
-        low_prices = low_prices or {}
 
         for client_order_id, order in list(self._orders.items()):
             if not order.status.is_open:
@@ -319,7 +304,7 @@ class PaperBroker(Broker):
             if open_price is None:
                 continue  # その日に値がつかなかった
 
-            price = self._execution_price(order, open_price, low_prices.get(order.symbol))
+            price = self._execution_price(order, open_price)
             if price is None:
                 continue  # 指値に届かず約定せず
 
@@ -341,10 +326,8 @@ class PaperBroker(Broker):
                 filled_quantity=order.quantity,
                 status=OrderStatus.FILLED,
                 limit_price=order.limit_price,
-                stop_price=order.stop_price,
                 avg_fill_price=price,
                 created_at=order.created_at,
-                time_in_force=order.time_in_force,
                 trade=order.trade,
             )
 
@@ -353,17 +336,12 @@ class PaperBroker(Broker):
 
     # -- 内部 ---------------------------------------------------------------
 
-    def _execution_price(
-        self, order: Order, open_price: Decimal, low_price: Decimal | None = None
-    ) -> Decimal | None:
+    def _execution_price(self, order: Order, open_price: Decimal) -> Decimal | None:
         """約定価格。約定しない場合は None。"""
         if order.order_type is OrderType.MARKET:
             # 成行は不利な方向に滑る
             direction = Decimal(1) if order.side is Side.BUY else Decimal(-1)
             return open_price * (Decimal(1) + direction * self.slippage_rate)
-
-        if order.order_type.is_stop:
-            return self._stop_execution_price(order, open_price, low_price)
 
         limit = order.limit_price
         assert limit is not None  # OrderRequest が保証している
@@ -372,31 +350,6 @@ class PaperBroker(Broker):
             # 寄付が指値以下なら、より有利な寄付で約定する
             return open_price if open_price <= limit else None
         return open_price if open_price >= limit else None
-
-    def _stop_execution_price(
-        self, order: Order, open_price: Decimal, low_price: Decimal | None
-    ) -> Decimal | None:
-        """売りの逆指値の約定価格。
-
-        寄付がトリガー以下ならギャップダウンで寄付約定（成行なので滑る）。
-        そうでなくても安値がトリガーに届いていれば、トリガー価格で
-        成行に変わったとみなす。STOP_LOSS_LIMIT は指値が寄付より
-        不利なら約定しない。
-        """
-        stop = order.stop_price
-        assert stop is not None
-        if open_price <= stop:
-            trigger_price = open_price
-        elif low_price is not None and low_price <= stop:
-            trigger_price = stop
-        else:
-            return None
-
-        if order.order_type is OrderType.STOP_LOSS_LIMIT:
-            limit = order.limit_price
-            assert limit is not None
-            return trigger_price if trigger_price >= limit else None
-        return trigger_price * (Decimal(1) - self.slippage_rate)
 
     def _execute(self, order: Order, price: Decimal, when: dt.datetime | None) -> Fill:
         gross = (price * order.quantity).quantize(self._cent, rounding=ROUND_HALF_UP)

@@ -111,24 +111,9 @@ def _bars(settings: AppSettings, symbols: list[str]):  # type: ignore[no-untyped
     return bars
 
 
-def _edgar_user_agent() -> str:
-    """SEC が要求する連絡先入りの User-Agent。環境変数で上書きできる。"""
-    import os
-
-    return os.environ.get("WBJP_EDGAR_USER_AGENT", "wbjp research m.feat.ta@gmail.com")
-
-
 def _basket_schedule(entry, settings: AppSettings, config_dir: Path | None):  # type: ignore[no-untyped-def]
-    """バスケットの配分表を組み立てる。13F は保存済みの保有一覧から作る。"""
-    from wbcore.data.edgar_13f import Edgar13F, load_cusip_map, weight_schedule
-
-    if entry.source != "13f":
-        return entry.build_schedule()
-    holdings = Edgar13F(entry.cik, settings.data_dir / "13f", _edgar_user_agent()).load()
-    if holdings.height == 0:
-        return entry.build_schedule(None)
-    pairs = weight_schedule(holdings, load_cusip_map(_dir(config_dir)), top=entry.top)
-    return entry.build_schedule(pairs)
+    """バスケットの配分表を組み立てる。"""
+    return entry.build_schedule()
 
 
 # --------------------------------------------------------------------------
@@ -270,27 +255,6 @@ def sync(
     counts = _sync(settings, config, config_dir, days=days, force=force)
     for symbol, count in sorted(counts.items()):
         console.print(f"  {symbol}: {count} 本")
-
-
-@app.command("sync-13f")
-def sync_13f(config_dir: _ConfigDir = None) -> None:
-    """バスケットが参照する 13F（機関投資家の保有報告）を EDGAR から取る。"""
-    from wbcore.data.edgar_13f import Edgar13F
-
-    settings = AppSettings()
-    config = _load(config_dir)
-    ciks = sorted({b.cik for b in config.active_baskets if b.source == "13f"})
-    if not ciks:
-        console.print("[yellow]13F を使うバスケットがありません[/yellow]")
-        return
-    for cik in ciks:
-        client = Edgar13F(cik, settings.data_dir / "13f", _edgar_user_agent())
-        frame = client.sync()
-        periods = frame["period"].n_unique()
-        console.print(
-            f"  CIK {cik}: {periods} 四半期、{frame.height} 行 "
-            f"({frame['period'].min()!s} 〜 {frame['period'].max()!s}) → {client.holdings_path}"
-        )
 
 
 # --------------------------------------------------------------------------
@@ -533,7 +497,6 @@ def _run(
                 settings.env,
                 market=market,
                 tax_type=config.execution.tax_account_type,
-                extended_hours=config.execution.extended_hours,
                 notify=lambda message: console.print(f"[yellow]{message}[/yellow]"),
             )
         return brokers[market]
@@ -1070,7 +1033,7 @@ def basket(
 ) -> None:
     """バスケット（複数銘柄への配分）で積み立てた結果を基準銘柄と比べる。
 
-    足は ``accum sync``、13F は ``accum sync-13f`` で先に取る。
+    足は ``accum sync`` で先に取る。
     """
     import polars as pl
 
@@ -1156,8 +1119,7 @@ def basket(
         f"\n[dim]※ 終了 {result.end}。基準＝同じ日に同じ額を benchmark に投じた場合。"
         "XIRR は年率の内部収益率。\n"
         "※ 最大DD は時間加重の評価額指数から。投下額の増減による見かけの変動は含まない。\n"
-        "※ 13F の配分は提出日の翌営業日から反映。買収・上場廃止で足の無い銘柄は除いて\n"
-        "　 正規化しており、成績はやや控えめに出る（買収は通常プレミアム付き）。[/dim]"
+        "※ 足の無い銘柄は除いて正規化する。[/dim]"
     )
 
 

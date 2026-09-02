@@ -56,7 +56,6 @@ from wbcore.domain.models import (
     OrderType,
     Position,
     Side,
-    TimeInForce,
 )
 from wbcore.logging import get_logger
 from wbjp.config import FileConfig
@@ -75,8 +74,6 @@ log = get_logger(__name__)
 _EXECTYPE: dict[OrderType, int] = {
     OrderType.MARKET: bt.Order.Market,
     OrderType.LIMIT: bt.Order.Limit,
-    OrderType.STOP_LOSS: bt.Order.Stop,
-    OrderType.STOP_LOSS_LIMIT: bt.Order.StopLimit,
 }
 
 
@@ -251,11 +248,10 @@ class _Bridge(bt.Strategy):  # type: ignore[misc]
         # 足が更新された銘柄の日付が「今日」。更新の無い銘柄は前の日付のまま。
         today: dt.date = max(d.datetime.date(0) for d in self.datas)
 
-        # 1) 当日の寄付で約定しなかった DAY 注文を失効させる（GTC の逆指値は残す）
-        for cid, (order, request) in list(self.pending.items()):
-            if request.time_in_force is not TimeInForce.GTC:
-                self.cancel(order)
-                self.pending.pop(cid, None)
+        # 1) 当日の寄付で約定しなかった注文を失効させる
+        for cid, (order, _request) in list(self.pending.items()):
+            self.cancel(order)
+            self.pending.pop(cid, None)
 
         in_range = (self.p.start is None or today >= self.p.start) and (
             self.p.end is None or today <= self.p.end
@@ -269,11 +265,6 @@ class _Bridge(bt.Strategy):  # type: ignore[misc]
         plan = self.pipeline.decide(
             self.bars, self.indexed, today, account, order_id_seed=f"bt-{self.counter}"
         )
-
-        for stale in plan.cancel:
-            entry = self.pending.pop(stale.client_order_id, None)
-            if entry is not None:
-                self.cancel(entry[0])
 
         rejected = {**self.rejected_today, **plan.rejected}
         placed: list[str] = []
@@ -356,8 +347,6 @@ class _Bridge(bt.Strategy):  # type: ignore[misc]
                 raise OrderRejectedError(
                     f"{request.symbol}: 保有 {held} 株に対し {size} 株の売り注文"
                 )
-        elif request.order_type.is_stop:
-            raise OrderRejectedError("買いの逆指値はこのシステムでは扱わない")
 
         kwargs: dict[str, Any] = {
             "data": data,
@@ -368,11 +357,6 @@ class _Bridge(bt.Strategy):  # type: ignore[misc]
         }
         if request.order_type is OrderType.LIMIT:
             kwargs["price"] = float(request.limit_price)  # type: ignore[arg-type]
-        elif request.order_type is OrderType.STOP_LOSS:
-            kwargs["price"] = float(request.stop_price)  # type: ignore[arg-type]
-        elif request.order_type is OrderType.STOP_LOSS_LIMIT:
-            kwargs["price"] = float(request.stop_price)  # type: ignore[arg-type]
-            kwargs["plimit"] = float(request.limit_price)  # type: ignore[arg-type]
 
         order = self.buy(**kwargs) if request.side is Side.BUY else self.sell(**kwargs)
         order.addinfo(request=request)
@@ -407,8 +391,6 @@ def _to_order(order: Any, request: OrderRequest) -> Order:
         filled_quantity=Decimal(0),
         status=OrderStatus.SUBMITTED,
         limit_price=request.limit_price,
-        stop_price=request.stop_price,
-        time_in_force=request.time_in_force,
     )
 
 

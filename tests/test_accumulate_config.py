@@ -25,7 +25,6 @@ from accum import (
 )
 from accum.config import FILENAME
 from accum.registry import available, create
-from wbcore.data.yfinance_provider import to_yahoo_ticker
 from wbcore.domain.models import Market
 
 CONFIG = """
@@ -516,15 +515,6 @@ monthly_budget = 25_000
 """
     grouped = load(_write(tmp_path, body)).symbols_by_market()
     assert grouped == {Market.JP: ["1305.T", "1591.T"], Market.US: ["VOO", "^GSPC"]}
-
-
-def test_us_ticker_is_not_given_the_tokyo_suffix() -> None:
-    """market を分けないと VOO が VOO.T になって取得に失敗する。"""
-    assert to_yahoo_ticker("VOO", Market.US) == "VOO"
-    assert to_yahoo_ticker("VOO", Market.JP) == "VOO.T"
-    # 指数は市場に関係なくそのまま
-    for market in (Market.JP, Market.US):
-        assert to_yahoo_ticker("^GSPC", market) == "^GSPC"
 
 
 def test_market_is_not_passed_to_the_tactic(tmp_path: Path) -> None:

@@ -13,7 +13,7 @@ from decimal import ROUND_DOWN, Decimal
 import polars as pl
 
 from daytrade.config import MarginConfig, SignalConfig
-from daytrade.fees import commission
+from daytrade.fees import order_fee_estimate
 from wbcore.domain.jp_rules import DEFAULT_LOT_SIZE, price_limit_range
 from wbcore.domain.models import Side
 
@@ -60,8 +60,8 @@ class Pick:
 
     @property
     def fee(self) -> Decimal:
-        """片道の手数料（見込み）。"""
-        return commission(self.amount)
+        """片道の手数料（見込み。定額コースは 1 日の合計で決まるので、この注文だけの日として）。"""
+        return order_fee_estimate(self.amount)
 
 
 def gap_rank_expr(config: SignalConfig, over: str | None = "Date") -> pl.Expr:

@@ -275,7 +275,7 @@ def test_symbols_file_merges_into_allowlist(tmp_path: Path) -> None:
         "SPY  # bench\nAAPL\n\n# comment\nMSFT\nAAPL\n", encoding="utf-8"
     )
     (tmp_path / "settings.toml").write_text(
-        '[universe]\nmarket = "US"\nsymbols = ["NVDA"]\nsymbols_file = "universe.txt"\n',
+        '[universe]\nmarket = "JP"\nsymbols = ["NVDA"]\nsymbols_file = "universe.txt"\n',
         encoding="utf-8",
     )
     config = load_file_config(tmp_path)
@@ -288,13 +288,6 @@ def test_missing_symbols_file_is_an_error(tmp_path: Path) -> None:
     )
     with pytest.raises(FileNotFoundError):
         load_file_config(tmp_path)
-
-
-def test_shipped_us_config_loads() -> None:
-    config = load_file_config(Path("config/us"))
-    assert "SPY" in config.universe.symbols
-    assert config.strategies.enabled[0].name == "trend_pullback"
-    assert config.stops.max_hold_days == 10
 
 
 # --------------------------------------------------------------------------

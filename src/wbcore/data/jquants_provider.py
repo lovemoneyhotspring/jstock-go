@@ -1,10 +1,9 @@
 """J-Quants API（V2）から日本株の日足を取得する。
 
-JPX が提供する公式の株価 API。yfinance（非公式・スクレイピング）と違って
-規約上の心配が無く、株式分割・併合を反映した調整済み四本値を返す。
+JPX が提供する公式の株価 API。非公式のスクレイピングと違って規約上の心配が無く、株式分割・併合を反映した調整済み四本値を返す。
 
 制約:
-    - **日本株と日本の指数のみ。** 米国株（``market=US``）は
+    - **日本株と日本の指数のみ。** 米国の指数（``market=US``）は
       :class:`~wbcore.data.provider.MarketDataError` で弾く。
     - **日足のみ。** 分足は Premium プランの別端点で、ここでは扱わない。
     - **プランで遡れる期間と遅延が違う。** Free は直近 12 週が取れず、
@@ -71,7 +70,7 @@ def to_jquants_code(symbol: str) -> tuple[str, bool]:
     """銘柄コードを J-Quants の ``code`` にする。
 
     Returns:
-        ``(code, is_index)``。yfinance 形式の ``7203.T`` も受け付ける。
+        ``(code, is_index)``。``7203.T`` のような ``.T`` 付きも受け付ける。
 
     >>> to_jquants_code("7203")
     ('7203', False)

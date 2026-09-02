@@ -1,47 +1,22 @@
-"""損切りの管理。
+"""損切りの管理（エンジン合成）。
 
-ストップ価格は常にこのモジュールが持ち、**どこで執行するか**だけが
-市場によって変わる。
+逆指値はブローカーに置かない。ストップ価格をローカル（``stops`` テーブル）に
+保持し、足が更新されるたびに評価して、抵触していれば決済注文を組み立てる。
 
-エンジン合成（日本株）:
-    日本株の API は逆指値（STOP_LOSS / STOP_LOSS_LIMIT）に対応
-    していない。ストップ価格をローカルに保持し、足が更新されるたびに
-    評価して、抵触していれば決済注文を組み立てる。
-
-    日足で運用する以上、判定は1日1回しかできない。場中に急落しても
-    翌営業日の寄付で手仕舞うことになり、想定より大きく下で約定しうる。
-    「日本株の逆指値が API に無い」×「日足で運用する」から必然的に
-    生じる制約で、許容できないなら分足運用とリアルタイムデータが要る。
-
-ブローカー執行（米国株）:
-    STOP_LOSS 注文を GTC でブローカーに置く。場中に抵触すれば取引所側で
-    即座に成行決済されるため、日足判定の遅れが無い。トレーリングで
-    ストップが上がったら、古い逆指値を取り消して置き直す
-    （:func:`sync_broker_stops`）。
-
-    この場合もストップ価格の記録（``stops`` テーブル）は残す。ブローカー
-    側の注文が何らかの理由で消えたときに、翌サイクルで置き直せるように
-    するため。
+日足で運用する以上、判定は1日1回しかできない。場中に急落しても
+翌営業日の寄付で手仕舞うことになり、想定より大きく下で約定しうる。
+「逆指値を使わない」×「日足で運用する」から必然的に生じる制約で、
+許容できないなら分足運用とリアルタイムデータが要る。
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from wbcore.domain.jp_rules import round_to_lot
-from wbcore.domain.models import (
-    Order,
-    OrderRequest,
-    OrderType,
-    Position,
-    Side,
-    TargetPosition,
-    TaxAccountType,
-    TimeInForce,
-)
+from wbcore.domain.models import Position, TargetPosition
 from wbcore.logging import get_logger
 
 log = get_logger(__name__)
@@ -452,108 +427,3 @@ def apply_stop_priority(
     for target in stop_targets:
         merged[target.symbol] = target
     return sorted(merged.values(), key=lambda t: t.symbol)
-
-
-# --------------------------------------------------------------------------
-# ブローカー執行（米国株）
-# --------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class BrokerStopPlan:
-    """ブローカー側の逆指値を、記録したストップに揃えるための差分。
-
-    Attributes:
-        place: 新たに置く逆指値。
-        cancel: 取り消す既存の逆指値（価格が古い・数量が違う・建玉が無い）。
-    """
-
-    place: list[OrderRequest]
-    cancel: list[Order]
-
-    def __bool__(self) -> bool:
-        return bool(self.place or self.cancel)
-
-
-def sync_broker_stops(
-    stops: dict[str, Stop],
-    positions: dict[str, Position],
-    open_orders: Iterable[Order],
-    *,
-    order_type: OrderType,
-    order_id_seed: str,
-    tax_type: TaxAccountType = TaxAccountType.GENERAL,
-    pending_exits: set[str] | None = None,
-) -> BrokerStopPlan:
-    """記録したストップとブローカーの逆指値の差分を求める。
-
-    冪等: 同じ入力からは同じ計画が出る。既に正しい逆指値が置かれて
-    いれば何も出さない。
-
-    Args:
-        order_type: 市場が対応する逆指値の種別（``STOP_LOSS`` など）。
-        order_id_seed: 注文IDの種。ストップ価格を含めるので、価格が
-            変われば別の注文になる。
-        pending_exits: 戦略側が手仕舞いを決めた銘柄。逆指値を残したまま
-            売り注文を出すと、両方約定して空売りになる（または拒否される）。
-            これらの銘柄は逆指値を取り消すだけで置き直さない。
-    """
-    from wbjp.engine.reconcile import open_stop_orders
-
-    pending_exits = pending_exits or set()
-    open_orders = list(open_orders)
-    place: list[OrderRequest] = []
-    cancel: list[Order] = []
-
-    symbols = set(stops) | {o.symbol for o in open_orders if o.order_type.is_stop}
-    for symbol in sorted(symbols):
-        existing = open_stop_orders(symbol, open_orders)
-        stop = stops.get(symbol)
-        position = positions.get(symbol)
-        quantity = position.available_quantity if position else Decimal(0)
-
-        if stop is None or quantity <= 0 or symbol in pending_exits:
-            cancel.extend(existing)
-            continue
-
-        wanted = _stop_request(
-            symbol, quantity, stop.stop_price, order_type, order_id_seed, tax_type
-        )
-        matching = [
-            o
-            for o in existing
-            if o.stop_price == wanted.stop_price and o.remaining_quantity == quantity
-        ]
-        # 正しいものが1件あればそれを残し、それ以外（古い価格・重複）は消す
-        keep = matching[0] if matching else None
-        cancel.extend(o for o in existing if o is not keep)
-        if keep is None:
-            place.append(wanted)
-
-    return BrokerStopPlan(place=place, cancel=cancel)
-
-
-def _stop_request(
-    symbol: str,
-    quantity: Decimal,
-    stop_price: Decimal,
-    order_type: OrderType,
-    order_id_seed: str,
-    tax_type: TaxAccountType,
-) -> OrderRequest:
-    from wbcore.domain.models import make_client_order_id
-
-    return OrderRequest(
-        client_order_id=make_client_order_id(
-            f"stop-{order_id_seed}-{stop_price}", symbol, Side.SELL, quantity
-        ),
-        symbol=symbol,
-        side=Side.SELL,
-        order_type=order_type,
-        quantity=quantity,
-        stop_price=stop_price,
-        limit_price=stop_price if order_type is OrderType.STOP_LOSS_LIMIT else None,
-        time_in_force=TimeInForce.GTC,
-        tax_type=tax_type,
-        reason=f"損切り逆指値 @ {stop_price}",
-    )

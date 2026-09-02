@@ -44,8 +44,6 @@ def closes_after(market: Market, other: Market, on: dt.date | None = None) -> bo
     「日付が同じ足」でも、引けが後の市場の足はその日の判断時点にまだ無い。
     東証の銘柄を NASDAQ の指数で判定するなら、同じ日付の指数の足は使えず
     前日の足を使う（米国の引け 16:00 ET は翌日 05〜06:00 JST）。
-    逆に米国株を日経で判定するなら、東証の引け 15:30 JST は同日 02:30 ET なので
-    同じ日付の足が使える。
     """
     return close_utc(market, on).time() > close_utc(other, on).time()
 

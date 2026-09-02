@@ -1,19 +1,16 @@
 """9:00 の気配・現在値の取得元。
 
-日本株のリアルタイム気配を返す取得元は今のところ無い。取得元は差し替え可能に
-してあるので、証券会社の市場データ API を使うならここに足す。
-``daytrade quotes 7203 9984`` で疎通を確かめる。
+取得元は差し替え可能。``daytrade quotes 7203 9984`` で疎通を確かめる。
 
-- ``yfinance``: Yahoo Finance。東証は **20 分遅れ**なので寄付の判断には使えない。
-  ``delayed=True`` を付けて返し、``open`` は既定で拒否する（検証・dry-run 用）
+- ``tachibana``: 立花証券 e支店 API の時価問合（寄付後は始値、無ければ現在値）。本命
 - ``csv``: ``symbol,price[,at]`` のファイル。手で入れた気配や、別経路で取った値を流す
+  （検証・dry-run 用）
 """
 
 from __future__ import annotations
 
 import csv
 import datetime as dt
-import logging
 from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -47,45 +44,6 @@ def _decimal(value: Any) -> Decimal | None:
     except InvalidOperation:
         return None
     return result if result > 0 else None
-
-
-class YFinanceQuotes:
-    """Yahoo Finance（20 分遅れ）。``delayed=True`` を付けて返す。検証・dry-run 用。"""
-
-    name: ClassVar[str] = "yfinance"
-
-    def fetch(self, symbols: Iterable[str]) -> dict[str, Quote]:
-        import yfinance as yf
-
-        wanted = list(dict.fromkeys(s for s in symbols if s))
-        if not wanted:
-            return {}
-        tickers = [f"{s}.T" for s in wanted]
-        # yfinance は取れない銘柄ごとに error を吐く（上場廃止など）。こちらで missing として
-        # 数えるので、code の無い error でログを埋めないよう黙らせる
-        logging.getLogger("yfinance").setLevel(logging.CRITICAL)
-        try:
-            frame = yf.download(
-                tickers, period="1d", interval="1m", group_by="ticker", progress=False, threads=True
-            )
-        except Exception as exc:
-            raise QuoteError(f"yfinance からの取得に失敗: {exc}") from exc
-        found: dict[str, Quote] = {}
-        for symbol, ticker in zip(wanted, tickers, strict=True):
-            try:
-                series = frame[ticker]["Close"] if len(tickers) > 1 else frame["Close"]
-            except KeyError, TypeError:
-                continue
-            series = series.dropna()
-            if series.empty:
-                continue
-            price = _decimal(series.iloc[-1])
-            if price is None:
-                continue
-            stamp = series.index[-1].to_pydatetime()
-            at = ensure_utc(stamp)
-            found[symbol] = Quote(symbol=symbol, price=price, at=at, source=self.name, delayed=True)
-        return found
 
 
 class CsvQuotes:
@@ -153,10 +111,8 @@ def quote_source(name: str, env: Environment, *, quote_file: Path | None = None)
     """設定の名前から取得元を組み立てる。"""
     if name == "tachibana":
         return TachibanaQuotes.connect(env)
-    if name == "yfinance":
-        return YFinanceQuotes()
     if name == "csv":
         if quote_file is None:
             raise ValueError('quote_source = "csv" には quote_file が必要です')
         return CsvQuotes(quote_file)
-    raise ValueError(f"未知の quote_source: {name!r}（tachibana / yfinance / csv）")
+    raise ValueError(f"未知の quote_source: {name!r}（tachibana / csv）")

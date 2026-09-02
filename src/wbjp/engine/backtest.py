@@ -49,7 +49,6 @@ from wbcore.domain.models import (
     Order,
     OrderRequest,
     Position,
-    Side,
     Signal,
     TargetPosition,
 )
@@ -59,7 +58,7 @@ from wbjp.config import FileConfig
 from wbjp.engine.reconcile import ReconcileSettings, reconcile
 from wbjp.portfolio.sizer import SizingContext, build_sizer
 from wbjp.risk.limits import RiskContext, RiskManager
-from wbjp.risk.stops import StopBook, apply_stop_priority, sync_broker_stops
+from wbjp.risk.stops import StopBook, apply_stop_priority
 from wbjp.strategy.base import Strategy, StrategyContext
 from wbjp.strategy.combiner import build_combiner
 
@@ -187,15 +186,13 @@ class DecisionPlan:
     signals: list[Signal]
     combined: dict[str, CombinedSignal]
     targets: list[TargetPosition]
-    #: リスク判定を通った発注（戦略由来 + 逆指値の置き直し）。
+    #: リスク判定を通った発注。
     place: list[OrderRequest]
-    #: 取り消すべき既存注文（古い逆指値など）。
-    cancel: list[Order]
     rejected: dict[str, str]
 
 
 class DecisionPipeline:
-    """終値までの足と口座の状態から、出す注文と取り消す注文を決める。
+    """終値までの足と口座の状態から、出す注文を決める。
 
     ライブとバックテストが共有する売買判断の全部。ブローカーには触らず、
     「どの注文を出すか・消すか」を返すだけなので、約定モデルを差し替えても
@@ -509,29 +506,11 @@ class DecisionPipeline:
         )
         approved, rejected = self.risk.check_all(plan.orders, risk_ctx)
 
-        cancel: list[Order] = []
-        # ブローカーに逆指値を置く市場では、本番と同じ手順で置き直す
-        if self.config.uses_broker_stops and self.rules.broker_stop_order_type:
-            stop_plan = sync_broker_stops(
-                self.stops.all(),
-                positions,
-                account.open_orders,
-                order_type=self.rules.broker_stop_order_type,
-                order_id_seed=order_id_seed,
-                tax_type=self.config.execution.tax_account_type,
-                pending_exits={o.symbol for o in approved if o.side is Side.SELL},
-            )
-            cancel = list(stop_plan.cancel)
-            stop_approved, stop_rejected = self.risk.check_all(stop_plan.place, risk_ctx)
-            approved = approved + stop_approved
-            rejected.update({f"{k} (逆指値)": v for k, v in stop_rejected.items()})
-
         return DecisionPlan(
             signals=signals,
             combined=combined,
             targets=targets,
             place=approved,
-            cancel=cancel,
             rejected={**plan.skipped, **rejected},
         )
 
@@ -566,10 +545,6 @@ class BacktestRunner:
         }
         if commission_rate is not None:
             broker_kwargs["commission_rate"] = commission_rate
-        elif config.universe.market.value == "US":
-            # 米国株の売買手数料は 2026-07-27 から無料。SEC/FINRA 手数料は
-            # 約定代金の 0.01% 未満なので、丸めて 0 とみなす。
-            broker_kwargs["commission_rate"] = Decimal(0)
         self.broker = PaperBroker(**broker_kwargs)  # type: ignore[arg-type]
 
     # 旧来の属性名を残す（テスト・ツールからの参照用）
@@ -643,10 +618,7 @@ class BacktestRunner:
 
             # 1) 前の足の注文をこの足の寄付で約定させ、残ったものを失効させる。
             #    失効を約定より先に行うと、注文が約定する機会を永遠に失う。
-            fills = self.broker.settle(
-                lookup(indexed, point, "open"),
-                low_prices=lookup(indexed, point, "low"),
-            )
+            fills = self.broker.settle(lookup(indexed, point, "open"))
             self.broker.expire_open_orders()
             self.broker.mark(lookup(indexed, point, "close"))
 
@@ -676,9 +648,6 @@ class BacktestRunner:
             bought_today=self.broker.bought_today,
         )
         plan = self.pipeline.decide(bars, indexed, point, account, order_id_seed=f"bt-{index}")
-
-        for stale in plan.cancel:
-            self.broker.cancel(stale.client_order_id)
 
         rejected = dict(plan.rejected)
         placed = []

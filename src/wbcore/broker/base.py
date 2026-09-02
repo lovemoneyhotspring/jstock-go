@@ -69,7 +69,6 @@ class Broker(ABC):
         *,
         market: Market,
         tax_type: TaxAccountType = TaxAccountType.SPECIFIC,
-        extended_hours: bool = False,
         notify: Callable[[str], None] | None = None,
     ) -> Self:
         """環境と市場から、接続済みのブローカーを組み立てる。
@@ -112,7 +111,7 @@ class Broker(ABC):
 
         ``broker_order_id`` は :class:`~wbcore.domain.models.OrderAck` で返した
         ブローカー側の注文IDを台帳から渡すためのヒント。client_order_id で照会できる
-        ブローカー（Webull）は無視してよい。できないブローカー（立花証券）は
+        ブローカーは無視してよい。できないブローカー（立花証券）は
         これが無いと別プロセスからの照会ができない。
         """
 

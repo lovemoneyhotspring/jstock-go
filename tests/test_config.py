@@ -12,16 +12,18 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
+from wbcore.credentials import (
+    TachibanaCredentials,
+    credential_source,
+    load_tachibana_credentials,
+)
 from wbjp.config import (
     AppSettings,
     Config,
-    Credentials,
     Environment,
     FileConfig,
     MissingCredentialsError,
     RiskConfig,
-    credential_source,
-    load_credentials,
     load_file_config,
 )
 
@@ -37,7 +39,7 @@ def _clear_wbjp_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import os
 
     for key in list(os.environ):
-        if key.startswith("WBJP_"):
+        if key.startswith(("WBJP_", "TACHIBANA_")):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr("wbcore.credentials.DEFAULT_ENV_FILE", tmp_path / "absent.env")
 
@@ -46,6 +48,29 @@ def _write_env_file(path: Path, body: str, *, mode: int = 0o600) -> Path:
     path.write_text(body, encoding="utf-8")
     path.chmod(mode)
     return path
+
+
+@pytest.fixture
+def key_file(tmp_path: Path) -> Path:
+    """秘密鍵のファイル（中身は読めればよい。復号はブローカー側のテストで見る）。"""
+    return _write_env_file(tmp_path / "key.pem", "-----BEGIN PRIVATE KEY-----\nMII\n")
+
+
+def _set_env(monkeypatch: pytest.MonkeyPatch, key_file: Path, env: str = "PROD") -> None:
+    monkeypatch.setenv(f"TACHIBANA_{env}_AUTH_ID", "from-env")
+    monkeypatch.setenv(f"TACHIBANA_{env}_PRIVATE_KEY_FILE", str(key_file))
+    monkeypatch.setenv(f"TACHIBANA_{env}_ORDER_PASSWORD", "pw-env")
+
+
+def _dotenv_body(key_file: Path, env: str = "PROD", auth_id: str = "dotenv-id") -> str:
+    return (
+        f"TACHIBANA_{env}_AUTH_ID={auth_id}\n"
+        f"TACHIBANA_{env}_PRIVATE_KEY_FILE={key_file}\n"
+        f"TACHIBANA_{env}_ORDER_PASSWORD=dotenv-pw\n"
+    )
+
+
+_NO_KEYRING = lambda env, *_: {}  # noqa: E731
 
 
 def _config(*, env: Environment, kill_switch: bool = False) -> Config:
@@ -98,7 +123,7 @@ def test_uat_with_live_flag_is_allowed_and_the_account_is_named_in_the_mode_line
 
 
 # --------------------------------------------------------------------------
-# 認証情報
+# 認証情報（立花証券）
 # --------------------------------------------------------------------------
 
 
@@ -106,46 +131,63 @@ def test_missing_credentials_are_an_error_in_every_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """認証情報が無ければ、どの環境でも黙って代わりの口座に落ちたりしない。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
 
     for env in (Environment.PROD, Environment.UAT):
-        with pytest.raises(MissingCredentialsError):
-            load_credentials(env)
+        with pytest.raises(MissingCredentialsError, match="TACHIBANA"):
+            load_tachibana_credentials(env)
 
 
-def test_env_vars_take_priority_over_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_env_vars_take_priority_over_keyring(
+    monkeypatch: pytest.MonkeyPatch, key_file: Path
+) -> None:
     monkeypatch.setattr(
         "wbcore.credentials._from_keyring",
-        lambda env, *_: {"app_key": "kr", "app_secret": "kr", "account_id": "kr"},
+        lambda env, *_: {
+            "auth_id": "kr",
+            "private_key_file": str(key_file),
+            "order_password": "kr",
+        },
     )
-    monkeypatch.setenv("WBJP_PROD_APP_KEY", "from-env")
-    monkeypatch.setenv("WBJP_PROD_APP_SECRET", "secret-env")
-    monkeypatch.setenv("WBJP_PROD_ACCOUNT_ID", "acct-env")
+    _set_env(monkeypatch, key_file)
 
-    creds = load_credentials(Environment.PROD)
+    creds = load_tachibana_credentials(Environment.PROD)
 
-    assert creds.app_key == "from-env"
+    assert creds.auth_id == "from-env"
+    assert creds.private_key_pem.startswith(b"-----BEGIN PRIVATE KEY-----")
 
 
-def test_environment_scoped_env_var_beats_generic(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_environment_scoped_env_var_beats_generic(
+    monkeypatch: pytest.MonkeyPatch, key_file: Path
+) -> None:
     """環境別の変数が、共通の変数より優先される。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    monkeypatch.setenv("WBJP_APP_KEY", "generic")
-    monkeypatch.setenv("WBJP_PROD_APP_KEY", "prod-specific")
-    monkeypatch.setenv("WBJP_APP_SECRET", "s3cr3t-value")
-    monkeypatch.setenv("WBJP_ACCOUNT_ID", "acct")
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    monkeypatch.setenv("TACHIBANA_AUTH_ID", "generic")
+    monkeypatch.setenv("TACHIBANA_PROD_AUTH_ID", "prod-specific")
+    monkeypatch.setenv("TACHIBANA_PRIVATE_KEY_FILE", str(key_file))
+    monkeypatch.setenv("TACHIBANA_ORDER_PASSWORD", "pw")
 
-    assert load_credentials(Environment.PROD).app_key == "prod-specific"
+    assert load_tachibana_credentials(Environment.PROD).auth_id == "prod-specific"
 
 
 def test_missing_credentials_error_names_what_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    monkeypatch.setenv("WBJP_PROD_APP_KEY", "only-key")
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    monkeypatch.setenv("TACHIBANA_PROD_AUTH_ID", "only-id")
 
-    with pytest.raises(MissingCredentialsError, match="app_secret"):
-        load_credentials(Environment.PROD)
+    with pytest.raises(MissingCredentialsError, match="order_password"):
+        load_tachibana_credentials(Environment.PROD)
+
+
+def test_missing_private_key_file_is_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    _set_env(monkeypatch, tmp_path / "absent.pem")
+
+    with pytest.raises(MissingCredentialsError, match="秘密鍵"):
+        load_tachibana_credentials(Environment.PROD)
 
 
 # --------------------------------------------------------------------------
@@ -153,24 +195,21 @@ def test_missing_credentials_error_names_what_is_missing(
 # --------------------------------------------------------------------------
 
 
-def test_dotenv_supplies_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_dotenv_supplies_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key_file: Path
+) -> None:
     """.env に書いた鍵が実際に使われる（環境変数への export 不要）。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    env_file = _write_env_file(
-        tmp_path / ".env",
-        "WBJP_PROD_APP_KEY=dotenv-key\n"
-        "WBJP_PROD_APP_SECRET=dotenv-secret\n"
-        "WBJP_PROD_ACCOUNT_ID=dotenv-acct\n",
-    )
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    env_file = _write_env_file(tmp_path / ".env", _dotenv_body(key_file))
 
-    creds = load_credentials(Environment.PROD, env_file=env_file)
+    creds = load_tachibana_credentials(Environment.PROD, env_file=env_file)
 
-    assert creds.app_key == "dotenv-key"
-    assert creds.account_id == "dotenv-acct"
+    assert creds.auth_id == "dotenv-id"
+    assert creds.order_password == "dotenv-pw"
 
 
 def test_dotenv_does_not_leak_into_os_environ(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key_file: Path
 ) -> None:
     """.env の秘密がプロセス環境に入らない。
 
@@ -178,108 +217,103 @@ def test_dotenv_does_not_leak_into_os_environ(
     """
     import os
 
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    env_file = _write_env_file(
-        tmp_path / ".env",
-        "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=leaky-secret\nWBJP_PROD_ACCOUNT_ID=a\n",
-    )
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    env_file = _write_env_file(tmp_path / ".env", _dotenv_body(key_file))
 
-    load_credentials(Environment.PROD, env_file=env_file)
+    load_tachibana_credentials(Environment.PROD, env_file=env_file)
 
-    assert "WBJP_PROD_APP_SECRET" not in os.environ
+    assert "TACHIBANA_PROD_ORDER_PASSWORD" not in os.environ
 
 
-def test_real_env_vars_beat_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_real_env_vars_beat_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key_file: Path
+) -> None:
     """デプロイ時の環境変数で .env を上書きできる。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    monkeypatch.setenv("WBJP_PROD_APP_KEY", "from-env")
-    env_file = _write_env_file(
-        tmp_path / ".env",
-        "WBJP_PROD_APP_KEY=from-dotenv\n"
-        "WBJP_PROD_APP_SECRET=dotenv-secret\n"
-        "WBJP_PROD_ACCOUNT_ID=dotenv-acct\n",
-    )
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    monkeypatch.setenv("TACHIBANA_PROD_AUTH_ID", "from-env")
+    env_file = _write_env_file(tmp_path / ".env", _dotenv_body(key_file))
 
-    creds = load_credentials(Environment.PROD, env_file=env_file)
+    creds = load_tachibana_credentials(Environment.PROD, env_file=env_file)
 
-    assert creds.app_key == "from-env"
-    assert creds.app_secret == "dotenv-secret"  # 項目ごとに解決される
+    assert creds.auth_id == "from-env"
+    assert creds.order_password == "dotenv-pw"  # 項目ごとに解決される
 
 
-def test_dotenv_beats_keyring(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_dotenv_beats_keyring(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key_file: Path
+) -> None:
     monkeypatch.setattr(
         "wbcore.credentials._from_keyring",
-        lambda env, *_: {"app_key": "kr", "app_secret": "kr", "account_id": "kr"},
+        lambda env, *_: {
+            "auth_id": "kr",
+            "private_key_file": str(key_file),
+            "order_password": "kr",
+        },
     )
-    env_file = _write_env_file(
-        tmp_path / ".env",
-        "WBJP_PROD_APP_KEY=dotenv-key\n"
-        "WBJP_PROD_APP_SECRET=dotenv-secret\n"
-        "WBJP_PROD_ACCOUNT_ID=dotenv-acct\n",
-    )
+    env_file = _write_env_file(tmp_path / ".env", _dotenv_body(key_file))
 
-    assert load_credentials(Environment.PROD, env_file=env_file).app_key == "dotenv-key"
+    assert load_tachibana_credentials(Environment.PROD, env_file=env_file).auth_id == "dotenv-id"
 
 
 def test_loose_permissions_on_dotenv_are_warned(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key_file: Path
 ) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    env_file = _write_env_file(
-        tmp_path / ".env",
-        "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n",
-        mode=0o644,
-    )
+    import structlog
+
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    # 他のテストで束縛済みのロガーは capture_logs を通らないので、未束縛のものに差し替える
+    monkeypatch.setattr("wbcore.credentials.log", structlog.get_logger("wbcore.credentials"))
+    env_file = _write_env_file(tmp_path / ".env", _dotenv_body(key_file), mode=0o644)
 
     with capture_logs() as entries:
-        load_credentials(Environment.PROD, env_file=env_file)
+        load_tachibana_credentials(Environment.PROD, env_file=env_file)
 
     assert any("chmod 600" in e["event"] for e in entries)
 
 
 def test_tight_permissions_on_dotenv_are_quiet(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key_file: Path
 ) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    env_file = _write_env_file(
-        tmp_path / ".env",
-        "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n",
-    )
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    env_file = _write_env_file(tmp_path / ".env", _dotenv_body(key_file))
 
     with capture_logs() as entries:
-        load_credentials(Environment.PROD, env_file=env_file)
+        load_tachibana_credentials(Environment.PROD, env_file=env_file)
 
     assert not any("chmod 600" in e["event"] for e in entries)
 
 
 def test_env_file_override_locates_dotenv_outside_cwd(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key_file: Path
 ) -> None:
     """cron は $HOME で起動する。相対パスに頼らず絶対パスで指定できる。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    env_file = _write_env_file(
-        tmp_path / "elsewhere.env",
-        "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n",
-    )
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    env_file = _write_env_file(tmp_path / "elsewhere.env", _dotenv_body(key_file))
     monkeypatch.setenv("WBJP_ENV_FILE", str(env_file))
 
-    assert load_credentials(Environment.PROD).app_key == "k"
+    assert load_tachibana_credentials(Environment.PROD).auth_id == "dotenv-id"
 
 
-def test_missing_dotenv_is_not_an_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    monkeypatch.setenv("WBJP_PROD_APP_KEY", "k")
-    monkeypatch.setenv("WBJP_PROD_APP_SECRET", "s")
-    monkeypatch.setenv("WBJP_PROD_ACCOUNT_ID", "a")
+def test_missing_dotenv_is_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key_file: Path
+) -> None:
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    _set_env(monkeypatch, key_file)
 
-    creds = load_credentials(Environment.PROD, env_file=tmp_path / "absent.env")
+    creds = load_tachibana_credentials(Environment.PROD, env_file=tmp_path / "absent.env")
 
-    assert creds.app_key == "k"
+    assert creds.auth_id == "from-env"
 
 
 # --------------------------------------------------------------------------
 # キーチェーンの無いホスト
 # --------------------------------------------------------------------------
+
+
+class _NoBackend:
+    @staticmethod
+    def get_password(service: str, name: str) -> str:
+        raise RuntimeError("No recommended backend was available")
 
 
 def test_unavailable_keyring_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -288,30 +322,19 @@ def test_unavailable_keyring_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> 
     そこで落ちると、設定方法を案内する MissingCredentialsError に
     到達できない。
     """
-
-    class _NoBackend:
-        @staticmethod
-        def get_password(service: str, name: str) -> str:
-            raise RuntimeError("No recommended backend was available")
-
     monkeypatch.setitem(sys.modules, "keyring", _NoBackend)
 
-    with pytest.raises(MissingCredentialsError, match="app_key"):
-        load_credentials(Environment.PROD)
+    with pytest.raises(MissingCredentialsError, match="auth_id"):
+        load_tachibana_credentials(Environment.PROD)
 
 
-def test_unavailable_keyring_still_allows_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _NoBackend:
-        @staticmethod
-        def get_password(service: str, name: str) -> str:
-            raise RuntimeError("No recommended backend was available")
-
+def test_unavailable_keyring_still_allows_env_vars(
+    monkeypatch: pytest.MonkeyPatch, key_file: Path
+) -> None:
     monkeypatch.setitem(sys.modules, "keyring", _NoBackend)
-    monkeypatch.setenv("WBJP_PROD_APP_KEY", "k")
-    monkeypatch.setenv("WBJP_PROD_APP_SECRET", "s")
-    monkeypatch.setenv("WBJP_PROD_ACCOUNT_ID", "a")
+    _set_env(monkeypatch, key_file)
 
-    assert load_credentials(Environment.PROD).app_key == "k"
+    assert load_tachibana_credentials(Environment.PROD).auth_id == "from-env"
 
 
 # --------------------------------------------------------------------------
@@ -319,14 +342,11 @@ def test_unavailable_keyring_still_allows_env_vars(monkeypatch: pytest.MonkeyPat
 # --------------------------------------------------------------------------
 
 
-_FULL_SET = "WBJP_PROD_APP_KEY=k\nWBJP_PROD_APP_SECRET=s\nWBJP_PROD_ACCOUNT_ID=a\n"
-
-
 def test_credential_source_reports_where_the_key_came_from(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key_file: Path
 ) -> None:
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    env_file = _write_env_file(tmp_path / ".env", _FULL_SET)
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    env_file = _write_env_file(tmp_path / ".env", _dotenv_body(key_file))
 
     assert credential_source(Environment.PROD, env_file=env_file) == str(env_file)
 
@@ -335,40 +355,39 @@ def test_credential_source_reports_what_is_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """1項目でも欠ければ解決できない。診断もそう言うこと。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    env_file = _write_env_file(
-        tmp_path / ".env",
-        "WBJP_UAT_APP_KEY=k\nWBJP_UAT_APP_SECRET=s\n",  # account_id が無い
-    )
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    env_file = _write_env_file(tmp_path / ".env", "TACHIBANA_UAT_AUTH_ID=k\n")
 
     source = credential_source(Environment.UAT, env_file=env_file)
 
     assert "解決できません" in source
-    assert "account_id" in source
+    assert "order_password" in source
 
 
 def test_credential_source_flags_mixed_origins(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, key_file: Path
 ) -> None:
     """項目ごとにソースが違うなら、その内訳を出す。"""
-    monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
-    monkeypatch.setenv("WBJP_PROD_APP_KEY", "from-env")
-    env_file = _write_env_file(tmp_path / ".env", _FULL_SET)
+    monkeypatch.setattr("wbcore.credentials._from_keyring", _NO_KEYRING)
+    monkeypatch.setenv("TACHIBANA_PROD_AUTH_ID", "from-env")
+    env_file = _write_env_file(tmp_path / ".env", _dotenv_body(key_file))
 
     source = credential_source(Environment.PROD, env_file=env_file)
 
-    assert "app_key=環境変数" in source
-    assert f"account_id={env_file}" in source
+    assert "auth_id=環境変数" in source
+    assert f"order_password={env_file}" in source
 
 
 def test_credentials_repr_hides_the_secret() -> None:
     """うっかりログや例外に出しても漏れない。"""
-    creds = Credentials(app_key="key12345678", app_secret="supersecret", account_id="12345")
+    creds = TachibanaCredentials(
+        auth_id="AUTHID12345", private_key_pem=b"supersecretkey", order_password="9876"
+    )
 
     for rendered in (repr(creds), str(creds), f"{creds}"):
-        assert "supersecret" not in rendered
-        assert "key12345678" not in rendered
-        assert "12345" not in rendered
+        assert "supersecretkey" not in rendered
+        assert "9876" not in rendered
+        assert "AUTHID12345" not in rendered
 
 
 def test_db_path_is_separated_per_environment() -> None:

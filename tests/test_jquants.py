@@ -221,7 +221,7 @@ def test_connect_without_api_key_explains(monkeypatch: pytest.MonkeyPatch, tmp_p
 def test_registered_and_default_per_market() -> None:
     assert "jquants" in available()
     assert default_provider(Market.JP) == "jquants"
-    assert default_provider(Market.US) == "yfinance"
+    assert default_provider(Market.US) == "fred"
 
 
 def test_rate_limit_honours_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:

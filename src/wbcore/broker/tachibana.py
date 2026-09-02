@@ -72,7 +72,6 @@ from wbcore.domain.models import (
     Position,
     Side,
     TaxAccountType,
-    TimeInForce,
     TradeType,
 )
 from wbcore.logging import get_logger, register_secret
@@ -353,7 +352,6 @@ class TachibanaBroker(Broker):
         *,
         market: Market,
         tax_type: TaxAccountType = TaxAccountType.SPECIFIC,
-        extended_hours: bool = False,
         notify: Callable[[str], None] | None = None,
         session_dir: Path | None = None,
     ) -> Self:
@@ -365,8 +363,6 @@ class TachibanaBroker(Broker):
             from wbcore.settings import AppSettings
 
             session_dir = AppSettings().state_dir / "tachibana"
-        if extended_hours:
-            (notify or log.warning)("立花証券では時間外取引（PTS）を扱いません。立会時間のみ")
         return cls(credentials, env, market=market, tax_type=tax_type, session_dir=session_dir)
 
     def __init__(
@@ -861,10 +857,6 @@ class TachibanaBroker(Broker):
     def _to_payload(self, request: OrderRequest) -> dict[str, Any]:
         if not request.order_type.is_placeable:
             raise ValueError(f"発注できない注文種別です: {request.order_type.value}")
-        if request.order_type.is_stop:
-            raise ValueError("逆指値はこのシステムでは発注しない（エンジン側で合成する）")
-        if request.time_in_force is not TimeInForce.DAY:
-            raise ValueError(f"立花証券で {request.time_in_force.value} は未対応です（当日限りのみ）")
         is_market = request.order_type is OrderType.MARKET
         if (
             request.trade is TradeType.MARGIN_OPEN
@@ -957,7 +949,6 @@ class TachibanaBroker(Broker):
             limit_price=limit if price_kubun in ("2", "4") and limit > 0 else None,
             avg_fill_price=fill_price if fill_price > 0 else None,
             created_at=_parse_jst_datetime(entry.get("sOrderOrderDateTime")),
-            time_in_force=TimeInForce.DAY,
             trade=parse_trade(entry.get("sGenkinSinyouKubun", "0")),
         )
 

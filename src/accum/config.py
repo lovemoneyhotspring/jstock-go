@@ -52,9 +52,9 @@ class TacticEntry(BaseModel):
         id: 比較表の行名になる自由なラベル。日本語でよい。
         tactic: 登録簿の鍵（``bear_stack`` など）。機構の名前。
         symbols: この戦略で積み立てる銘柄コード。
-        market: 銘柄の市場。足を取りに行くときのティッカー変換と、発注先の
-            決定に使う（日本株の ``1305`` は ``1305.T``、米国株の ``VOO`` はそのまま）。
-            ``^`` で始まる指数は市場に関係なくそのまま扱われる（発注はできない）。
+        market: 銘柄の市場。発注できるのは日本株（``1305.T`` → ``1305``）だけで、
+            ``US`` は判定用の指数（``^GSPC`` など）の足を取るためにある。
+            ``^`` で始まる指数は発注できない。
         signal_symbol: 倍率の判定に使う別の銘柄。省略すれば買う銘柄自身の足で
             判定する。東証の S&P500 連動 ETF を ``^GSPC`` で判定する、といった使い方。
             判定にしか使わないので指数でもよい。
@@ -124,13 +124,7 @@ class BasketEntry(BaseModel):
 
     Attributes:
         id: 表の行名。
-        source: ``"static"`` は ``weights`` をそのまま使う。``"13f"`` は
-            EDGAR の 13F（``cik`` の運用会社）から四半期ごとの比率を作る。
-        weights: ``source = "static"`` の配分。``13f`` のときはコア（固定部分）
-            として使い、``satellite_share`` の残りをこれに振る。
-        cik: 13F を取る運用会社。既定はバークシャー。
-        top: 13F の上位何銘柄を採るか。
-        satellite_share: 13F 部分の比率。``weights`` が空なら 1。
+        weights: 配分（銘柄 → 比率。合計で正規化する）。
         benchmark: 同じ資金の流れを投じて比較する銘柄。
         monthly_budget: バスケット全体の毎月の予算。省略時は共通設定。
         tactic: 各銘柄に掛ける倍率戦略と、その固有パラメータ。
@@ -141,30 +135,19 @@ class BasketEntry(BaseModel):
     model_config = {"extra": "allow"}
 
     id: str
-    source: str = "static"
     weights: dict[str, float] = Field(default_factory=dict)
-    cik: str = "0001067983"
-    top: int = Field(default=15, ge=1)
-    satellite_share: float = Field(default=1.0, gt=0, le=1)
-    benchmark: str | None = "VOO"
+    benchmark: str | None = "1306.T"
     monthly_budget: Decimal | None = None
     tactic: str = "constant"
     tilt_strength: float = Field(default=0.0, ge=0)
     tilt_lookback: int = Field(default=252, ge=2)
     enabled: bool = True
-    market: Market = Market.US
+    market: Market = Market.JP
 
     def build_tilt(self) -> DrawdownTilt | None:
         if self.tilt_strength <= 0:
             return None
         return DrawdownTilt(self.tilt_strength, self.tilt_lookback)
-
-    @field_validator("source")
-    @classmethod
-    def _source(cls, value: str) -> str:
-        if value not in ("static", "13f"):
-            raise ValueError(f"source は static か 13f: {value!r}")
-        return value
 
     @field_validator("weights")
     @classmethod
@@ -185,20 +168,11 @@ class BasketEntry(BaseModel):
         except ValueError as exc:
             raise ValueError(f"[{self.id}] {exc}") from None
 
-    def build_schedule(
-        self, schedule_13f: list[tuple[Any, dict[str, float]]] | None = None
-    ) -> WeightSchedule:
-        """配分表を組み立てる。``13f`` のときは取得済みの比率列を渡す。"""
-        if self.source == "static":
-            if not self.weights:
-                raise ValueError(f"[{self.id}] static には weights が必要です")
-            return WeightSchedule.static(self.weights)
-        if not schedule_13f:
-            raise ValueError(f"[{self.id}] 13F の保有一覧がありません（`accum sync-13f` を実行）")
-        schedule = WeightSchedule.from_pairs(schedule_13f)
-        if self.weights:
-            return schedule.blend(self.weights, self.satellite_share)
-        return schedule
+    def build_schedule(self) -> WeightSchedule:
+        """配分表を組み立てる。"""
+        if not self.weights:
+            raise ValueError(f"[{self.id}] weights が必要です")
+        return WeightSchedule.static(self.weights)
 
 
 _BASKET_RESERVED = frozenset(BasketEntry.model_fields)
@@ -213,8 +187,8 @@ class ExecutionConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（paper / …）。
-    broker: str = "paper"
+    #: 発注先。:data:`wbcore.broker.registry.BROKERS` の名前（tachibana / paper）。
+    broker: str = "tachibana"
     #: 注文種別。"market"（成行、既定）か "limit"（最新価格 × (1 + limit_offset) の指値）。
     #: ETF は板が薄いことがあり、成行だと不利な価格で約定しうる。指値なら上限を切れる
     order_type: str = "market"
@@ -225,8 +199,6 @@ class ExecutionConfig(BaseModel):
     fallback_to_limit: bool = True
     #: GENERAL（一般） / SPECIFIC（特定） / NISA
     tax_account_type: TaxAccountType = TaxAccountType.SPECIFIC
-    #: 米国株の時間外取引を許すか。日本株では無視される。
-    extended_hours: bool = False
     #: 売買単位が既定と異なる銘柄の例外 {設定に書いた銘柄コード: 単元株数}。
     #: ETF には 1 株や 10 株単位のものがある。既定の 100 株だと月の予算が
     #: 1単元に届かず、発注が丸ごと見送りになる。
@@ -266,8 +238,8 @@ class AccumConfig(BaseModel):
     kill_switch: bool = False
 
     #: 足データの取得元。:data:`wbcore.data.registry.PROVIDERS` の名前。
-    #: 積立は市場をまたぐので、省略すると市場ごとの既定（日本株 jquants /
-    #: 米国株 yfinance）を使う。指定すると全市場でその取得元を使う。
+    #: 判定用の指数は市場をまたぐので、省略すると市場ごとの既定（日本株 jquants /
+    #: 米国の指数 fred）を使う。指定すると全市場でその取得元を使う。
     data_provider: str = ""
 
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)

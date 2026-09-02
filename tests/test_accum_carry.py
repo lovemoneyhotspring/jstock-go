@@ -97,17 +97,17 @@ def test_ledger_symbol_matches_the_broker_notation() -> None:
                     "monthly_budget": 10_000,
                 },
                 {
-                    "id": "us",
+                    "id": "etf",
                     "tactic": "constant",
-                    "symbols": ["VOO"],
-                    "market": "US",
+                    "symbols": ["1306.T"],
+                    "market": "JP",
                     "monthly_budget": 10_000,
                 },
             ]
         }
     )
     assert ledger_symbol(config, "1305.T") == "1305"
-    assert ledger_symbol(config, "VOO") == "VOO"
+    assert ledger_symbol(config, "1306.T") == "1306"
     assert ledger_symbol(config, "unknown") == "unknown"
 
 

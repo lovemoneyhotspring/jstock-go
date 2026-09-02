@@ -1338,7 +1338,7 @@ def status_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
 def quotes_command(
     ctx: typer.Context,
     symbols: Annotated[list[str], typer.Argument(help="銘柄（7203 9984 …）")],
-    source: Annotated[str | None, typer.Option("--source", help="yfinance / csv")] = None,
+    source: Annotated[str | None, typer.Option("--source", help="tachibana / csv")] = None,
     quote_file: Annotated[Path | None, typer.Option("--quote-file")] = None,
     config_dir: _ConfigDir = None,
 ) -> None:

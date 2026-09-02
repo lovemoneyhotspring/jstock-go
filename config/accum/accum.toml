@@ -33,16 +33,16 @@ monthly_budget = 25_000
 # 緊急停止。true にすると `accum run --live` でも発注しない。
 kill_switch = false
 
-# 足データの取得元。登録済みの名前（jquants | yfinance）。積立は市場を
+# 足データの取得元。登録済みの名前（jquants | fred）。判定用の指数は市場を
 # またぐので、省略すると市場ごとの既定を使う: 日本株は J-Quants（公式 API、
-# WBJP_JQUANTS_API_KEY が要る）、米国株と米国指数（^GSPC 等）は yfinance。
-# 指定すると全市場でその取得元を使う（jquants は日本株専用なので通常は書かない）。
-# data_provider = "yfinance"
+# WBJP_JQUANTS_API_KEY が要る）、米国の指数（^GSPC / ^IXIC 等）は FRED（終値のみ）。
+# 通常は書かない。
+# data_provider = "jquants"
 
 # 発注の振る舞い。積立は当日の投下額を成行の買いにする。
 [execution]
-# 発注先。登録済みのブローカー名（今は paper のみ）。paper はネットワークに繋がないシミュレータ。
-broker = "paper"
+# 発注先。登録済みのブローカー名（tachibana | paper）。paper はネットワークに繋がないシミュレータ。
+broker = "tachibana"
 # 注文種別。market（成行、既定）| limit（最新価格 × (1 + limit_offset) の指値）。
 # ETF は板が薄いことがあるので、上限を切りたければ limit。
 # 563A のような上場が浅く板の薄い ETF に 14 時台の成行を出すと、想定より高い約定を
@@ -53,8 +53,6 @@ limit_offset = "0.01"
 fallback_to_limit = true
 # GENERAL（一般） / SPECIFIC（特定） / NISA
 tax_account_type = "SPECIFIC"
-# 米国株の時間外取引。日本株では無視される。
-extended_hours = false
 # 売買単位が既定（100株）と異なる銘柄。ETF は 1 株・10 株単位のものが多い。
 # 既定（100株）のままだと月の予算が1単元に届かず、発注が丸ごと見送りになる。
 # 発注前にブローカーの銘柄情報（lot_size）で確かめ、分かった銘柄は API の値を優先する。
@@ -177,88 +175,18 @@ enabled = false
 # バスケット（複数銘柄への配分）
 # ---------------------------------------------------------------------------
 # 戦略が「1銘柄を何倍買うか」なのに対し、バスケットは「予算をどの銘柄に
-# どう振るか」。monthly_budget はバスケット全体の予算。比率は毎日その日に
-# 足のある銘柄の間で正規化される。
-#
-#   source = "static" … weights をそのまま使う
-#   source = "13f"    … EDGAR の 13F（cik の運用会社）の上位 top 銘柄を
-#                        評価額比で持つ。提出日の翌営業日から反映。
-#                        weights を書くとそれがコア、13F 部分は satellite_share。
+# どう振るか」。monthly_budget はバスケット全体の予算。比率（weights）は
+# 毎日その日に足のある銘柄の間で正規化される。
 #
 # 同じ資金の流れを benchmark に投じた場合と XIRR・最大DD で比べる。
-# `accum sync-13f` で保有一覧、`accum sync` で足を取る。CUSIP の対応は cusip.toml。
+# 足は `accum sync` で取る。
 
-# 戦略1: バークシャー 13F の上位15銘柄を保有比率で積立（基準線）
+# 例: TOPIX 連動 ETF 70% ＋ 日経225 連動 ETF 30%。下落時増額（bear_stack ×2）を重ねる
 [[baskets]]
-id = "BRK上位15"
-source = "13f"
-top = 15
-monthly_budget = 100_000
-benchmark = "VOO"
-
-# 戦略1': 上位10に絞る（集中度を上げる）
-[[baskets]]
-id = "BRK上位10"
-source = "13f"
-top = 10
-monthly_budget = 100_000
-benchmark = "VOO"
-
-# 戦略4: コア・サテライト。VOO 70% ＋ BRK上位15 を 30%
-[[baskets]]
-id = "VOO70+BRK30"
-source = "13f"
-top = 15
-weights = { VOO = 1.0 }
-satellite_share = 0.3
-monthly_budget = 100_000
-benchmark = "VOO"
-
-# 戦略1 に下落時増額（bear_stack ×3）を重ねる。増額は銘柄ごとに判定。
-[[baskets]]
-id = "BRK上位15+配列3倍"
-source = "13f"
-top = 15
+id = "TOPIX70+日経30"
+weights = { "1306.T" = 0.7, "1321.T" = 0.3 }
 tactic = "bear_stack"
-multiplier = 3
-monthly_budget = 100_000
-benchmark = "VOO"
-
-# 戦略3（価格版）: 構成銘柄のうち52週高値から深く下げているものへ配分を寄せる。
-# 比率 × (1 + tilt_strength × 下落率) で正規化。総額は変えない。
-[[baskets]]
-id = "BRK上位15+割安傾斜2"
-source = "13f"
-top = 15
-tilt_strength = 2
-monthly_budget = 100_000
-benchmark = "VOO"
-
-[[baskets]]
-id = "BRK上位15+割安傾斜5"
-source = "13f"
-top = 15
-tilt_strength = 5
-monthly_budget = 100_000
-benchmark = "VOO"
-
-# 戦略4+3: コア・サテライトにサテライト側の割安傾斜を重ねる
-# （傾斜は VOO も含めて掛かるが、指数の下落率は個別株より小さいので
-# 実質的にサテライト側へ寄る）
-[[baskets]]
-id = "VOO70+BRK30+傾斜3"
-source = "13f"
-top = 15
-weights = { VOO = 1.0 }
-satellite_share = 0.3
-tilt_strength = 3
-monthly_budget = 100_000
-benchmark = "VOO"
-
-# 比較の基準: VOO だけ（バスケットの計算経路で XIRR を出す）
-[[baskets]]
-id = "VOO単独"
-source = "static"
-weights = { VOO = 1.0 }
-monthly_budget = 100_000
-benchmark = "^GSPC"
+multiplier = 2
+monthly_budget = 50_000
+benchmark = "1306.T"
+enabled = false

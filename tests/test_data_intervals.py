@@ -14,7 +14,6 @@ from typing import ClassVar
 import polars as pl
 import pytest
 
-from wbcore.clock import today_utc
 from wbcore.credentials import Environment
 from wbcore.data.csv_replay import CsvReplayProvider, InMemoryProvider
 from wbcore.data.provider import (
@@ -28,7 +27,6 @@ from wbcore.data.provider import (
 )
 from wbcore.data.registry import PROVIDERS, available, connect
 from wbcore.data.store import BarStore
-from wbcore.data.yfinance_provider import MAX_LOOKBACK_DAYS, YFinanceProvider
 from wbcore.domain.models import Market
 
 
@@ -169,53 +167,19 @@ def test_csv_replay_reads_intraday_files(tmp_path: Path) -> None:
     assert result["7203"].height == 2
 
 
-# --- yfinance ------------------------------------------------------------
-
-
-def test_yfinance_extracts_intraday_index_as_utc_timestamp() -> None:
-    import pandas as pd
-
-    index = pd.DatetimeIndex(
-        ["2026-08-03 09:00", "2026-08-03 09:05"], tz="Asia/Tokyo", name="Datetime"
-    )
-    raw = pd.DataFrame(
-        {
-            "Open": [1.0, 2.0],
-            "High": [1.0, 2.0],
-            "Low": [1.0, 2.0],
-            "Close": [1.0, 2.0],
-            "Volume": [1, 1],
-        },
-        index=index,
-    )
-    frame = YFinanceProvider()._extract(raw, "7203.T", Interval.M5)
-    assert frame is not None
-    assert frame["ts"][0] == dt.datetime(2026, 8, 3, 0, 0, tzinfo=dt.UTC)
-    assert frame["date"][0] == dt.date(2026, 8, 3)
-
-
-def test_yfinance_clamps_intraday_lookback_and_warns() -> None:
-    # 実装は today_utc() を基準にする。dt.date.today()（ローカル時間帯）と
-    # 突き合わせると、JST の 0〜9 時に日付がずれて落ちる
-    today = today_utc()
-    limit = MAX_LOOKBACK_DAYS[Interval.M5]
-    clamped = YFinanceProvider._clamp_start(today - dt.timedelta(days=400), today, Interval.M5)
-    assert clamped == today - dt.timedelta(days=limit - 1)
-    untouched = YFinanceProvider._clamp_start(today - dt.timedelta(days=400), today, Interval.D1)
-    assert untouched == today - dt.timedelta(days=400)
-
-
 # --- 登録簿 --------------------------------------------------------------
 
 
 def test_builtin_providers_are_registered() -> None:
-    assert {"yfinance", "jquants"} <= set(available())
+    assert {"fred", "jquants"} <= set(available())
 
 
-def test_connect_yfinance_needs_no_credentials() -> None:
-    provider = connect("yfinance", Environment.UAT, market=Market.JP)
-    assert isinstance(provider, YFinanceProvider)
-    assert provider.market is Market.JP
+def test_connect_fred_needs_no_credentials() -> None:
+    from wbcore.data.fred_provider import FredProvider
+
+    provider = connect("fred", Environment.UAT, market=Market.US)
+    assert isinstance(provider, FredProvider)
+    assert provider.market is Market.US
 
 
 def test_unknown_provider_lists_the_alternatives() -> None:

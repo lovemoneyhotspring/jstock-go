@@ -50,7 +50,7 @@ from wbjp.db.repo import Journal
 from wbjp.engine.reconcile import ReconcileSettings, reconcile
 from wbjp.portfolio.sizer import SizingContext, build_sizer
 from wbjp.risk.limits import RiskContext, RiskManager
-from wbjp.risk.stops import StopBook, apply_stop_priority, sync_broker_stops
+from wbjp.risk.stops import StopBook, apply_stop_priority
 from wbjp.strategy.base import Strategy, StrategyContext
 from wbjp.strategy.combiner import build_combiner
 
@@ -372,27 +372,8 @@ class LiveRunner:
         approved, rejected = self.risk.check_all(plan.orders, risk_ctx)
         rejected.update(plan.skipped)
 
-        # 6) 逆指値をブローカーに置く市場では、戦略の注文より先に古い逆指値を
-        #    片付ける。手仕舞いの売りと逆指値が両方板に乗ると二重売却になる。
-        stop_requests: list[OrderRequest] = []
-        if self.config.file.uses_broker_stops and self.rules.broker_stop_order_type:
-            stop_plan = sync_broker_stops(
-                stops.all(),
-                positions,
-                open_orders,
-                order_type=self.rules.broker_stop_order_type,
-                order_id_seed=f"{as_of:%Y%m%d}",
-                tax_type=file_config.execution.tax_account_type,
-                pending_exits={o.symbol for o in approved if o.side is Side.SELL},
-            )
-            self._cancel_stops(stop_plan.cancel, live=allowed)
-            stop_approved, stop_rejected = self.risk.check_all(stop_plan.place, risk_ctx)
-            rejected.update({f"{k} (逆指値)": v for k, v in stop_rejected.items()})
-            stop_requests = stop_approved
-
-        # 7) 発注
+        # 6) 発注
         placed = self._place(run_id, approved, rejected, risk_ctx, live=allowed)
-        placed += self._place(run_id, stop_requests, rejected, risk_ctx, live=allowed)
 
         self.journal.record_risk_events(run_id, rejected)
         self.journal.record_snapshot(run_id, as_of, positions.values())
@@ -406,7 +387,7 @@ class LiveRunner:
             signals=signals,
             combined=combined,
             targets=targets,
-            planned=plan.orders + stop_requests,
+            planned=plan.orders,
             placed=placed,
             rejected=rejected,
         )
@@ -513,27 +494,6 @@ class LiveRunner:
                 log.error("発注に失敗", symbol=request.symbol, error=str(exc))
 
         return placed
-
-    def _cancel_stops(self, orders: list[Order], *, live: bool) -> None:
-        for order in orders:
-            if not live:
-                log.info(
-                    "[dry-run] 逆指値を取り消しません",
-                    symbol=order.symbol,
-                    client_order_id=order.client_order_id,
-                    stop_price=str(order.stop_price),
-                )
-                continue
-            try:
-                self.broker.cancel(order.client_order_id)
-                log.info(
-                    "古い逆指値を取り消し",
-                    symbol=order.symbol,
-                    client_order_id=order.client_order_id,
-                    stop_price=str(order.stop_price),
-                )
-            except BrokerError as exc:
-                log.error("逆指値の取消に失敗", symbol=order.symbol, error=str(exc))
 
     def _refresh_bars(self, symbols: list[str]) -> None:
         if self.provider is None:

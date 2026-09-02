@@ -9,7 +9,6 @@ import polars as pl
 import pytest
 
 from wbcore.broker.paper import PaperBroker
-from wbcore.data.fundamentals import QualityThresholds, evaluate
 from wbcore.domain.models import Position
 from wbjp.config import FileConfig, RegimeConfig, StopsConfig, UniverseConfig
 from wbjp.engine.backtest import DecisionPipeline
@@ -38,7 +37,7 @@ def _bars(closes: list[float], start: dt.date = dt.date(2020, 1, 1)) -> pl.DataF
 
 def _pipeline(**regime: object) -> DecisionPipeline:
     config = FileConfig(
-        universe=UniverseConfig(market="US", symbols=["SPY", "AAA"]),
+        universe=UniverseConfig(market="JP", symbols=["SPY", "AAA"]),
         regime=RegimeConfig(enabled=True, sma_long=20, sma_mid=5, slope_lookback=3, **regime),
     )
     return DecisionPipeline([], config)
@@ -74,7 +73,7 @@ def test_regime_is_caution_when_below_mid_ma_but_above_long_ma() -> None:
 
 
 def test_regime_disabled_is_always_bull() -> None:
-    config = FileConfig(universe=UniverseConfig(market="US", symbols=["AAA"]))
+    config = FileConfig(universe=UniverseConfig(market="JP", symbols=["AAA"]))
     pipeline = DecisionPipeline([], config)
     assert pipeline.regime_exposure({}, dt.date(2020, 1, 1)) == ("bull", D(1))
 
@@ -122,47 +121,6 @@ def test_stops_config_accepts_trailing_multiple() -> None:
     assert StopsConfig(trailing_atr_multiple=D("2.5")).trailing_atr_multiple == D("2.5")
 
 
-# --- 質スクリーニング -------------------------------------------------------
-
-
-def _statements(**overrides: list[float]) -> dict[str, object]:
-    base = {
-        "symbol": "GOOD",
-        "revenue": [100.0, 90.0, 80.0, 70.0],
-        "gross_profit": [60.0, 54.0, 48.0, 42.0],
-        "operating_income": [30.0, 27.0, 24.0, 21.0],
-        "ebit": [30.0, 27.0, 24.0, 21.0],
-        "interest_expense": [1.0, 1.0, 1.0, 1.0],
-        "net_income": [20.0, 18.0, 16.0, 14.0],
-        "equity": [80.0, 75.0, 70.0, 65.0],
-        "total_debt": [20.0, 20.0, 20.0, 20.0],
-        "fcf": [24.0, 20.0, 17.0, 15.0],
-    }
-    base.update(overrides)
-    return base
-
-
-def test_quality_passes_a_textbook_compounder() -> None:
-    report = evaluate(_statements())
-    assert report.passed, report.failed
-    assert report.metrics["roe_min"] == pytest.approx(14 / 65)
-    assert report.metrics["interest_coverage"] == 30.0
-
-
-def test_quality_fails_on_each_weak_point() -> None:
-    assert any("ROE" in f for f in evaluate(_statements(equity=[200.0] * 4)).failed)
-    assert any("粗利率" in f for f in evaluate(_statements(gross_profit=[60, 54, 48, 20])).failed)
-    assert any("D/E" in f for f in evaluate(_statements(total_debt=[100.0] * 4)).failed)
-    assert any("FCF/純利益" in f for f in evaluate(_statements(fcf=[10, 20, 17, 15])).failed)
-    assert any("FCF 成長" in f for f in evaluate(_statements(fcf=[15, 15, 15, 15])).failed)
-    assert any("履歴" in f for f in evaluate(_statements(revenue=[100.0, 90.0])).failed)
-
-
-def test_quality_thresholds_are_adjustable() -> None:
-    lenient = QualityThresholds(min_roe=0.05)
-    assert evaluate(_statements(equity=[200.0] * 4), lenient).passed
-
-
 # --- %トレーリング・出口の種類 ---------------------------------------------
 
 
@@ -186,7 +144,7 @@ def test_trend_exit_kind_is_validated_and_named() -> None:
     with pytest.raises(ValueError, match="trend_exit_kind"):
         StopsConfig(trend_exit_kind="wma")
     config = FileConfig(
-        universe=UniverseConfig(market="US", symbols=["AAA"]),
+        universe=UniverseConfig(market="JP", symbols=["AAA"]),
         stops=StopsConfig(trend_exit_sma=10, trend_exit_kind="donchian"),
     )
     pipeline = DecisionPipeline([], config)

@@ -352,10 +352,10 @@ class ExecutionConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    broker: str = "paper"
+    broker: str = "tachibana"
     tax_account_type: TaxAccountType = TaxAccountType.SPECIFIC
-    #: 9:00 の気配の取得元。yfinance / csv（:mod:`daytrade.quotes`）。
-    quote_source: str = "yfinance"
+    #: 9:00 の気配の取得元。tachibana / csv（:mod:`daytrade.quotes`）。
+    quote_source: str = "tachibana"
     #: csv のときの置き場（``symbol,price`` の CSV）。
     quote_file: Path | None = None
     #: 寄付買いを出してよい時間帯（JST）。外なら何もしない。
@@ -365,7 +365,7 @@ class ExecutionConfig(BaseModel):
     #: （引け値より少し早い値になるが、確実に手仕舞える方を取る）。
     exit_window: tuple[str, str] = ("15:20", "15:30")
     kill_switch: bool = False
-    #: 気配のタイムスタンプがこれより古ければ使わない（秒）。yfinance は 20 分遅れなので通らない。
+    #: 気配のタイムスタンプがこれより古ければ使わない（秒）。
     max_quote_age: int = 90
 
     @field_validator("entry_window", "exit_window")

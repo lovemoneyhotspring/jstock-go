@@ -18,7 +18,7 @@ from wbcore.broker.registry import BROKERS, available, connect
 from wbcore.credentials import (
     Environment,
     MissingCredentialsError,
-    load_credentials,
+    load_tachibana_credentials,
 )
 from wbcore.domain.models import Market, TaxAccountType
 
@@ -28,7 +28,7 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import os
 
     for key in list(os.environ):
-        if key.startswith(("WBJP_", "OTHER_")):
+        if key.startswith(("WBJP_", "TACHIBANA_", "OTHER_")):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr("wbcore.credentials.DEFAULT_ENV_FILE", tmp_path / "absent.env")
     monkeypatch.setattr("wbcore.credentials._from_keyring", lambda env, *_: {})
@@ -82,7 +82,6 @@ def test_a_new_exchange_plugs_in_by_subclassing() -> None:
             *,
             market: Market,
             tax_type: TaxAccountType = TaxAccountType.SPECIFIC,
-            extended_hours: bool = False,
             notify: Callable[[str], None] | None = None,
         ) -> Self:
             seen.update(env=env, market=market, tax_type=tax_type)
@@ -99,15 +98,17 @@ def test_a_new_exchange_plugs_in_by_subclassing() -> None:
 
 
 def test_credential_namespaces_do_not_leak_into_each_other(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """別の証券会社のキーが既定の名前空間に流れ込まない（逆も）。"""
-    monkeypatch.setenv("OTHER_PROD_APP_KEY", "ok")
-    monkeypatch.setenv("OTHER_PROD_APP_SECRET", "os")
-    monkeypatch.setenv("OTHER_PROD_ACCOUNT_ID", "oa")
+    """別の名前空間のキーが立花証券に流れ込まない（逆も）。"""
+    key = tmp_path / "k.pem"
+    key.write_text("-----BEGIN PRIVATE KEY-----\n", encoding="utf-8")
+    monkeypatch.setenv("OTHER_PROD_AUTH_ID", "oid")
+    monkeypatch.setenv("OTHER_PROD_PRIVATE_KEY_FILE", str(key))
+    monkeypatch.setenv("OTHER_PROD_ORDER_PASSWORD", "opw")
 
-    other = load_credentials(Environment.PROD, namespace="OTHER")
-    assert other.app_key == "ok"
+    other = load_tachibana_credentials(Environment.PROD, namespace="OTHER")
+    assert other.auth_id == "oid"
 
-    with pytest.raises(MissingCredentialsError, match="（WBJP）"):
-        load_credentials(Environment.PROD)
+    with pytest.raises(MissingCredentialsError, match="（TACHIBANA）"):
+        load_tachibana_credentials(Environment.PROD)

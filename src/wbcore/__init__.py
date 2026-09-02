@@ -4,7 +4,7 @@
 
 - :mod:`wbcore.domain`      注文・建玉・市場ルールなどのモデル
 - :mod:`wbcore.broker`      証券会社への発注（今はペーパーのみ）
-- :mod:`wbcore.data`        足データの取得と保存（J-Quants / yfinance / EDGAR）
+- :mod:`wbcore.data`        足データの取得と保存（J-Quants / FRED）
 - :mod:`wbcore.indicators`  polars 式の指標
 - :mod:`wbcore.credentials` APIキーの解決（キーチェーン・環境変数・.env）
 - :mod:`wbcore.settings`    環境変数由来の設定と、実発注の可否判定

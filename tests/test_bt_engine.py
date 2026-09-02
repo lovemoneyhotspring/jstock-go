@@ -16,7 +16,6 @@ from decimal import Decimal
 import pytest
 
 from tests.test_backtest import SpyStrategy, make_bars, make_config, wavy
-from wbcore.domain.models import Market, Side
 from wbjp.config import ExecutionConfig, SizingConfig, StopsConfig, UniverseConfig
 from wbjp.engine.backtest import BacktestRunner
 from wbjp.engine.bt_engine import BacktraderRunner
@@ -144,29 +143,3 @@ def test_strategy_never_sees_future_bars() -> None:
 # --------------------------------------------------------------------------
 # 米国株: ブローカー逆指値
 # --------------------------------------------------------------------------
-
-
-def test_us_broker_stop_executes_intraday() -> None:
-    """建てた後に急落する足で、逆指値が Backtrader 側でトリガーされる。"""
-    # 上昇でクロス → 買い → 急落。ストップは -4%（initial_stop_pct）
-    closes = [100.0 + i * 0.5 for i in range(40)] + [120.0, 105.0, 100.0, 98.0, 97.0]
-    closes = closes + [97.0] * 10
-    bars = make_bars(closes, start=dt.date(2024, 1, 1))
-    config = market_config(
-        universe=UniverseConfig(symbols=["X"], market=Market.US),
-        stops=StopsConfig(initial_stop_pct=D("0.04")),
-    )
-    runner = BacktraderRunner(build_all(config.strategies.enabled), config, initial_cash=D(30_000))
-    result = runner.run({"X": bars}, start=dt.date(2024, 2, 1))
-
-    buys = [f for f in result.fills if f.side is Side.BUY]
-    sells = [f for f in result.fills if f.side is Side.SELL]
-    assert buys, "エントリーしていない"
-    assert sells, "急落しても手仕舞っていない（逆指値が置かれていない）"
-    # 逆指値は「トリガー価格 × (1 − 滑り)」で約定する。戦略の売りなら寄付で
-    # 約定するので価格が違う。これで場中執行されたことを確かめる。
-    stop_fill = sells[0]
-    expected = buys[0].price * (D(1) - D("0.04")) * (D(1) - D("0.001"))
-    assert abs(stop_fill.price - expected) / expected < D("1e-6"), (
-        f"逆指値ではなく戦略の売りで手仕舞っている: 約定 {stop_fill.price} / 期待 {expected}"
-    )

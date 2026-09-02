@@ -15,7 +15,6 @@ import pytest
 from wbcore.data.csv_replay import CsvReplayProvider, InMemoryProvider
 from wbcore.data.provider import Interval, MarketDataError, empty_bars, normalize_bars
 from wbcore.data.store import OVERLAP_DAYS, BarStore
-from wbcore.data.yfinance_provider import from_yahoo_ticker, to_yahoo_ticker
 
 
 def bars(closes: list[float], start: dt.date = dt.date(2025, 1, 6)) -> pl.DataFrame:
@@ -35,28 +34,6 @@ def bars(closes: list[float], start: dt.date = dt.date(2025, 1, 6)) -> pl.DataFr
             "volume": [1_000_000.0] * len(closes),
         }
     )
-
-
-# --------------------------------------------------------------------------
-# 銘柄コードの変換
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("symbol", "expected"),
-    [("7203", "7203.T"), ("7203.T", "7203.T"), (" 6758 ", "6758.T")],
-)
-def test_to_yahoo_ticker(symbol: str, expected: str) -> None:
-    assert to_yahoo_ticker(symbol) == expected
-
-
-def test_to_yahoo_ticker_rejects_empty() -> None:
-    with pytest.raises(ValueError, match="空"):
-        to_yahoo_ticker("  ")
-
-
-def test_from_yahoo_ticker_round_trips() -> None:
-    assert from_yahoo_ticker(to_yahoo_ticker("7203")) == "7203"
 
 
 # --------------------------------------------------------------------------
@@ -344,25 +321,6 @@ def test_csv_replay_ignores_unknown_symbol(tmp_path: Path) -> None:
     assert provider.fetch_daily_bars(["9999"], dt.date(2025, 1, 1), dt.date(2025, 12, 31)) == {}
 
 
-# --------------------------------------------------------------------------
-# 実ネットワーク（既定ではスキップ）
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.network
-def test_yfinance_fetches_real_japanese_stocks() -> None:
-    from wbcore.data.yfinance_provider import YFinanceProvider
-
-    end = dt.date.today() - dt.timedelta(days=3)
-    result = YFinanceProvider().fetch_daily_bars(["7203", "6758"], end - dt.timedelta(days=30), end)
-
-    assert set(result) == {"7203", "6758"}
-    for frame in result.values():
-        assert frame.height > 5
-        assert frame.columns == ["date", "open", "high", "low", "close", "volume"]
-        assert (frame["high"] >= frame["low"]).all()
-
-
 def test_store_accepts_index_tickers(tmp_path: Path) -> None:
     """指数のティッカーは ^ で始まる（^N225 など）。"""
     store = BarStore(tmp_path)
@@ -376,10 +334,3 @@ def test_store_still_rejects_separators(tmp_path: Path) -> None:
     for bad in ("a/b", "a\\b", "^../x"):
         with pytest.raises(ValueError, match="使えない文字"):
             BarStore(tmp_path).path_for(bad)
-
-
-def test_index_tickers_keep_their_caret_prefix() -> None:
-    """指数は東証銘柄ではないので .T を付けない。"""
-    assert to_yahoo_ticker("^N225") == "^N225"
-    assert to_yahoo_ticker("^GSPC") == "^GSPC"
-    assert to_yahoo_ticker(" ^IXIC ") == "^IXIC"

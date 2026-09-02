@@ -18,7 +18,7 @@ from accum import (
     xirr,
 )
 from accum.config import AccumConfig
-from wbcore.data.edgar_13f import parse_information_table, weight_schedule
+from wbcore.domain.models import Market
 
 
 def _bars(closes: list[float], *, start: dt.date = dt.date(2020, 1, 1)) -> pl.DataFrame:
@@ -132,91 +132,24 @@ def test_drawdown_reflects_price_not_contributions() -> None:
     assert result.basket.max_drawdown == pytest.approx(0.5, abs=0.02)
 
 
-# --- 13F --------------------------------------------------------------
-
-_SAMPLE = """
-<infoTable><nameOfIssuer>APPLE INC</nameOfIssuer><titleOfClass>COM</titleOfClass>
-<cusip>037833100</cusip><value>600</value>
-<shrsOrPrnAmt><sshPrnamt>1</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>
-<infoTable><nameOfIssuer>APPLE INC</nameOfIssuer><titleOfClass>COM</titleOfClass>
-<cusip>037833100</cusip><value>400</value>
-<shrsOrPrnAmt><sshPrnamt>1</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>
-<infoTable><nameOfIssuer>COCA COLA CO</nameOfIssuer><titleOfClass>COM</titleOfClass>
-<cusip>191216100</cusip><value>500</value>
-<shrsOrPrnAmt><sshPrnamt>1</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>
-<infoTable><nameOfIssuer>SOME BOND</nameOfIssuer><titleOfClass>NOTE</titleOfClass>
-<cusip>999999999</cusip><value>900</value>
-<shrsOrPrnAmt><sshPrnamt>1</sshPrnamt><sshPrnamtType>PRN</sshPrnamtType></shrsOrPrnAmt></infoTable>
-<infoTable><nameOfIssuer>GONE CO</nameOfIssuer><titleOfClass>COM</titleOfClass>
-<cusip>111111111</cusip><value>500</value>
-<shrsOrPrnAmt><sshPrnamt>1</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt></infoTable>
-"""
-
-
-def test_parse_aggregates_same_cusip_and_skips_non_shares() -> None:
-    rows = {c: v for c, _, v in parse_information_table(_SAMPLE)}
-    assert rows == {"037833100": 1000.0, "191216100": 500.0, "111111111": 500.0}
-
-
-def test_weight_schedule_drops_unmapped_and_delisted_then_normalizes() -> None:
-    filed = dt.date(2024, 5, 15)
-    holdings = pl.DataFrame(
-        {
-            "filed": [filed] * 3,
-            "period": [dt.date(2024, 3, 31)] * 3,
-            "cusip": ["037833100", "191216100", "111111111"],
-            "name": ["APPLE", "KO", "GONE"],
-            "value": [1000.0, 500.0, 500.0],
-        }
-    )
-    pairs = weight_schedule(holdings, {"037833100": "AAPL", "191216100": "KO", "111111111": ""})
-    assert pairs == [(filed, {"AAPL": pytest.approx(2 / 3), "KO": pytest.approx(1 / 3)})]
-
-
-def test_top_n_is_applied_before_mapping() -> None:
-    filed = dt.date(2024, 5, 15)
-    holdings = pl.DataFrame(
-        {
-            "filed": [filed] * 2,
-            "period": [dt.date(2024, 3, 31)] * 2,
-            "cusip": ["037833100", "191216100"],
-            "name": ["APPLE", "KO"],
-            "value": [1000.0, 500.0],
-        }
-    )
-    pairs = weight_schedule(holdings, {"037833100": "AAPL", "191216100": "KO"}, top=1)
-    assert pairs == [(filed, {"AAPL": 1.0})]
-
-
 # --- 設定 ---------------------------------------------------------------
 
 
-def test_basket_entry_builds_static_and_blended_schedules() -> None:
+def test_basket_entry_builds_a_static_schedule() -> None:
     config = AccumConfig.model_validate(
         {
             "baskets": [
-                {"id": "s", "weights": {"VOO": 1.0}},
-                {
-                    "id": "b",
-                    "source": "13f",
-                    "weights": {"VOO": 1.0},
-                    "satellite_share": 0.3,
-                    "tactic": "bear_stack",
-                    "multiplier": 2,
-                },
+                {"id": "s", "weights": {"1306.T": 0.7, "1305.T": 0.3}},
+                {"id": "b", "tactic": "bear_stack", "multiplier": 2, "weights": {"1306.T": 1.0}},
             ]
         }
     )
-    static, blended = config.active_baskets
-    assert static.build_schedule().at(dt.date.today()) == {"VOO": 1.0}
-    schedule = blended.build_schedule([(dt.date(2020, 1, 1), {"AAPL": 1.0})])
-    assert schedule.at(dt.date(2021, 1, 1)) == {
-        "VOO": pytest.approx(0.7),
-        "AAPL": pytest.approx(0.3),
-    }
-    assert isinstance(blended.build_tactic(), BearStack)
-    with pytest.raises(ValueError, match="sync-13f"):
-        blended.build_schedule(None)
+    static, stacked = config.active_baskets
+    assert static.build_schedule().at(dt.date.today()) == {"1306.T": 0.7, "1305.T": 0.3}
+    assert static.market is Market.JP
+    assert isinstance(stacked.build_tactic(), BearStack)
+    with pytest.raises(ValueError, match="weights"):
+        AccumConfig.model_validate({"baskets": [{"id": "e"}]}).active_baskets[0].build_schedule()
 
 
 def test_basket_ids_share_the_namespace_with_tactics() -> None:

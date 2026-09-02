@@ -1,11 +1,7 @@
-# wbjp — 日本株・米国株 自動売買システム
+# wbjp — 日本株 自動売買システム（立花証券 e支店 API）
 
-日本株・米国株を売買するシステム。3つのパッケージからなる。
-
-> **⚠️ 実発注できるブローカーは現在ありません。** 証券会社の実装は削除済みで、残っているのは
-> ネットワークに繋がないシミュレータ（`paper`）だけです。実際に発注するには
-> 「[取引所（ブローカー）の差し替え](#取引所ブローカーの差し替え)」の手順で証券会社の実装を足してください。
-> 判断・バックテスト・足データの蓄積・台帳の記録は、ブローカー無しでもそのまま動きます。
+立花証券 e支店 API（e_api_v4r10）で日本株（現物・信用）を売買するシステム。3つのパッケージからなる。
+足データは J-Quants（日本株）と FRED（判断材料に使う米国の指数）から取り、pandas も yfinance も使わない。
 
 | パッケージ | 役割 | CLI |
 |---|---|---|
@@ -22,25 +18,17 @@
 
 ---
 
-## 設計の前提（実機調査で確定）
+## 設計の前提
 
-証券会社の API には、設計を左右する2つの制約がある。
+### 1. 足データはブローカーの API から取らない
 
-### 1. 日本株の株価データはブローカーの API から取得できない
+立花証券 e支店 API にあるのは発注と時価問合（現在値・始値）で、日足の履歴は無い。
 
-証券会社の市場データ API は米国株にしか対応していないことが多く、日本株は
-**発注はできるが、足データは取れない**という状況になりやすい。
+→ **価格データ層とブローカー層を完全に分離**し、日本株の足は J-Quants API（公式）、
+判断材料に使う米国の指数（S&P500 / VIX / NASDAQ）は FRED から取る。
+9:00 の気配（デイトレ）だけは立花証券の時価問合を使う。
 
-→ **価格データ層とブローカー層を完全に分離**し、価格は日本株が J-Quants API（公式）、米国株が yfinance から取得する。
-
-### 2. 日本株は成行・指値のみ。逆指値は使えない
-
-| 注文種別 | 米国株 | 日本株 |
-|---|:---:|:---:|
-| MARKET（成行） | ✓ | ✓ |
-| LIMIT（指値） | ✓ | ✓ |
-| STOP_LOSS（逆指値） | ✓ | **✗** |
-| STOP_LOSS_LIMIT | ✓ | **✗** |
+### 2. 発注は成行・指値のみ。逆指値は使わない
 
 → **損切りはエンジン側で合成する**（`wbjp.risk.stops`）。
 ストップ価格をローカルに保持し、日足更新時に評価して成行/指値の決済注文を出す。
@@ -50,95 +38,46 @@
 
 ---
 
-## 米国株
+## 売買する市場と、判断に使う米国の指数
 
-市場ごとの制約は `wbcore.domain.market_rules` に集約してあり、設定の `universe.market` を切り替えるだけでエンジン本体は同じコードで動く。米国株の設定例は [`config/us/`](config/us/) にある。
+売買するのは東証だけ（`universe.market = "JP"`）。市場ルール（呼値・単元・値幅制限・差金決済の回避）は
+`wbcore.domain.market_rules` / `jp_rules` に集約してある。
 
-```bash
-uv run wbjp data sync --config-dir config/us
-uv run wbjp backtest --from 2024-01-01 --config-dir config/us
-uv run wbjp run --config-dir config/us            # 判断まで（注文は出さない）
-```
+米国の指数は**判断材料としてだけ**使う（`Market.US` はそのための識別子で、発注には使えない）:
 
-| | 日本株（`market = "JP"`） | 米国株（`market = "US"`） |
+| 用途 | 何を見るか | 取得元 |
 |---|---|---|
-| 売買単位 | 100株（単元） | 1株 |
-| 呼値 | 価格帯で段階（`jp_rules`） | 0.01ドル固定 |
-| 制限値幅 | あり（指値が弾かれる） | なし |
-| 逆指値 | API 非対応 → エンジン合成 | **STOP_LOSS を GTC でブローカーに置く** |
-| 差金決済の回避 | 当日買った銘柄は当日売らない | 不要 |
-| 通貨 | JPY | USD（`risk` の金額もドル建て） |
-| 足データ | J-Quants API | yfinance |
-| 売買手数料 | 証券会社による（`daytrade.fees` の表を使う口座に合わせる） | 証券会社による＋ SEC/FINRA 手数料 |
+| デイトレの「米国市場ゲート」 | 前夜の S&P500 の騰落と VIX（`regime.us_skip_*` / `us_vix_override`） | FRED `SP500` / `VIXCLS` |
+| 積立の倍率判定 | `signal_symbol = "^GSPC"` / `"^IXIC"` | FRED `SP500` / `NASDAQCOM` |
 
-米国株で逆指値をブローカーに置く場合の要点:
+FRED は終値だけを返す（四本値・出来高は無い。`open` / `high` / `low` は終値で埋める）。
+`SP500` は直近 10 年ぶんしか公開されない。銘柄コードは従来どおり `^GSPC` のように書き、
+`wbcore.data.fred_provider.SERIES` で FRED の系列 ID に読み替える。
 
-- ストップ価格の記録（`stops` テーブル）は引き続きエンジンが持つ。毎サイクル、記録と板上の逆指値を突き合わせて差分だけ置き直す（`wbjp.risk.stops.sync_broker_stops`）。冪等なので再実行しても増えない。
-- **逆指値は実効ポジションに数えない。** 数えると「もうすぐ建玉が消える」と誤認して買い直す。`effective_quantity` が除外する。
-- 戦略が手仕舞いを決めた銘柄は、売り注文を出す前に逆指値を取り消す。両方が板に乗ると二重売却になる。
-- 日足のストップ判定も保険として残す。逆指値が何かの理由で消えていた日でも翌寄付で手仕舞える。
-- `execution.stop_mode = "engine"` にすれば米国株でも日足判定だけに戻せる（比較検証用）。
+### 手数料
 
-同じ口座に日本株と米国株が混在しうるため、ブローカー実装は **設定された市場の通貨の行だけ**を残高・建玉として読むこと。日本株と米国株を両方回すなら、設定ディレクトリを分けて別プロセスで動かす。
+立花証券の**定額コース**を前提にする。現物は 1 日の約定代金**合計**で段階が決まり
+（12 万円まで 0 円、20 万円まで 176 円、50 万円まで 253 円、100 万円まで 506 円、以後 100 万円ごとに 253 円）、
+信用は 0 円。表は `wbcore.broker.tachibana.FLAT_RATE_TABLE` に 1 つだけ置き、発注前の見積り
+（`preview`）とデイトレのバックテスト（`daytrade.fees`）が同じ表を見る。
 
-### スクリーニングと順位付け（`trend_pullback`）
+### 戦略のサンプル（`wbjp`）
 
-米国株の設定は `trend_pullback` 戦略が「スクリーニング＋順位付け」を兼ねる。`config/us/universe.txt` の銘柄（＝allowlist）を毎サイクル全件評価し、条件を満たした銘柄にスコア（`direction` 0.3〜1.0）を付ける。サイジングは direction の高い順に `sizing.max_positions` の枠を埋めるので、**スコアがそのまま採用順位**になる。
+`config/strategies.toml` で名前と重みを書いて組み合わせる。`sma_cross` / `rsi_reversion` / `atr_breakout` の
+古典 3 本のほか、次の 4 本がある（いずれも `benchmark` に地合いフィルタ用の銘柄を取る。既定の
+`SPY` は東証の銘柄に置き換えること——例: `1306`）。
 
-```bash
-uv run wbjp screen --config-dir config/us                 # 順位表
-uv run wbjp screen --config-dir config/us --show-failed   # 落ちた銘柄と理由
-```
-
-| 条件 | 意図 |
-|---|---|
-| 終値 > SMA200 かつ SMA50 > SMA200、SMA50 が上向き | 長期上昇トレンドのみ |
-| 60日高値からの下落 ≦ 15% | 押し目であって崩れではない |
-| 前日の RSI(3) < 20 ＋ 当日が陽線 | 売られすぎ ＋ 反転確認（落ちるナイフを受けない） |
-| ATR/終値 1.5〜5%、20日平均売買代金 ≧ 500万ドル | 動く・滑らない銘柄 |
-| SPY > SMA50 | 地合いフィルタ |
-| 決算 3 営業日前〜当日は新規建てせず、保有中なら手仕舞い | 日足ではギャップを避けられない（`config/us/earnings.toml` を手動更新） |
-
-スコア = 0.35×押し目の深さ（RSI） + 0.30×SMA20 からの乖離（ATR 単位） + 0.20×トレンドの強さ + 0.15×流動性。内訳は `signals.meta_json` に残る。
-
-手仕舞いは3層: 戦略（RSI(3) ≧ 80 / 含み益で SMA20 回復 / 60日高値到達）、`[stops]`（+1R で建値移動 → ATR トレーリング、5営業日で含み益なし、最大10営業日）、そして初期ストップ（1.5×ATR、米国株は逆指値として板に置く）。
-
-### モメンタム順位戦略（`momentum_rank`、`config/us-momentum/`）
-
-押し目買いとは別の、**損益比型**の戦略。過去 6 ヶ月（直近 1 ヶ月を除く）のリターンをボラティリティで割った順位で上位 `top_n` 銘柄を持ち、月初にだけ入れ替える。数十年・複数市場で生き残っているモメンタム効果に、地合いフィルタ（SPY > SMA200 でなければ全建玉手仕舞い）を重ねてモメンタムクラッシュを避ける。
+| 戦略 | 狙い | 建て | 降り |
+|---|---|---|---|
+| `trend_pullback` | 勝率（小さく多く）。上昇トレンド銘柄の押し目からのブレイクアウト | 条件成立日に毎日 | RSI(3) 過熱・SMA20 回復・時間切れ |
+| `rsi_pullback` | `trend_pullback` の元版（RSI(3) 押し目買い） | 同上 | 同上 |
+| `momentum_rank` | 損益比（大きく少なく）。6 ヶ月リターン÷ボラの順位で上位を持つ | 月初の営業日だけ | 終値 < SMA100・順位脱落・地合いオフ |
+| `ross_cameron` | Gap & Go / マイクロプルバックの日足版 | 材料日とその直後の押し目 | 終値 < EMA9 |
 
 ```bash
-uv run wbjp data sync --config-dir config/us-momentum --days 1500   # 12ヶ月の履歴＋ウォームアップが要る
-uv run wbjp screen   --config-dir config/us-momentum
-uv run wbjp backtest --config-dir config/us-momentum --from 2023-09-01
+uv run wbjp screen   --config-dir config              # 順位表（--show-failed で落ちた理由）
+uv run wbjp backtest --config-dir config --from 2023-01-01
 ```
-
-| | 押し目買い（`config/us`） | モメンタム（`config/us-momentum`） |
-|---|---|---|
-| 狙い | 勝率（小さく多く） | 損益比（大きく少なく） |
-| 建て | 条件成立日に毎日 | 月初の営業日だけ |
-| 降り | RSI 過熱・SMA20 回復・時間切れ | 終値 < SMA100・順位脱落・地合いオフ |
-| 損切り | 1.5×ATR（＋建値移動・利確） | 3×ATR トレーリングのみ |
-| 想定勝率 / 損益比 | 60% / 1:1 | 45% / 2.5:1 |
-
-> 押し目買いの検証では、戦略の手仕舞い自体は勝率 90% で機能した一方、タイトな損切りと時間切れが利益を刈っていた（出口の非対称性）。モメンタムはその逆で、出口を広く取って勝ちを伸ばす。
-
-### ロス・キャメロン流モメンタム（`ross_cameron`、`config/us-cameron/`）
-
-Warrior Trading のロス・キャメロンの手法（Gap & Go / マイクロプルバック、9EMA トレーリング、損益比 2:1）を**日足のスイングに翻訳**したもの。本家は分足のデイトレードなので、翻訳の対応表と条件の一覧は [ross_cameron.py](src/wbjp/strategy/samples/ross_cameron.py) の冒頭にまとめてある。
-
-```bash
-uv run wbjp data sync --config-dir config/us-cameron --days 400
-uv run wbjp screen   --config-dir config/us-cameron
-uv run wbjp backtest --config-dir config/us-cameron --from 2019-01-01
-```
-
-| 入口 | 条件 |
-|---|---|
-| Gap & Go（材料日に乗る） | 始値が前日終値比 ≧ 3%、RVOL ≧ 2x、終値がレンジ上位 30% の陽線、直近 20 日高値を上抜け、終値 > EMA9 > EMA20 |
-| マイクロプルバック（材料日のあと） | 直近 5 日以内に材料日 → 1〜3 日の押し目（安値が EMA9 の上）→ 前日高値を出来高伴って陽線で抜ける |
-
-スコア = 0.35×RVOL + 0.30×ギャップ + 0.20×引け強度 + 0.15×ブレイク幅（ATR 単位）。出口は戦略側の終値 < EMA9 と、`[stops]` の -5% 初期ストップ／+1R 建値移動／+2R 半分利確／3 営業日で含み益なし。決算は本家にとって「材料」なのでブラックアウトは既定で無効。
 
 > 戦略は名前で呼び分ける。`config/<dir>/strategies.toml` の `name` を変えれば、既存の戦略を上書きせずに別の手法を試せる。使える戦略は `uv run wbjp strategies` で一覧できる。
 
@@ -153,7 +92,7 @@ uv run wbjp backtest --config-dir config/us-cameron --from 2019-01-01
 | 戦略の出力 | 銘柄ごとに −1.0〜+1.0 の意見 | その日の購入倍率（1.0 以上） |
 | 実行 | 合成 → サイジング → 差分発注 | 予算 × 倍率 → 成行買い |
 | 設定 | `settings.toml` + `strategies.toml` の `[[strategies]]` | `accum.toml` の `[[tactics]]` / `[[baskets]]` |
-| 例 | `trend_pullback`, `ross_cameron`, `momentum_rank` | `bear_stack`, `stack_ladder`, `drawdown_ladder` |
+| 例 | `sma_cross`, `trend_pullback`, `momentum_rank` | `bear_stack`, `stack_ladder`, `drawdown_ladder` |
 
 ```bash
 uv run accum strategies          # 使える戦略
@@ -176,7 +115,7 @@ uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV
 
 部品は `wbcore` と共有: 足は `wbcore.data`、発注は `wbcore.broker`、登録簿の仕組みは `wbcore.registry`。積立固有なのは倍率（`accum.tactics`）・計画（`accum.plan`）・検証（`accum.simulate` / `accum.basket`）・注文化（`accum.execute`）で、どの段も単独で差し替えられる。
 
-> **ブローカーを足したときの確認**: 米国株の発注ペイロード（`trade_currency` / 時間外取引の指定など）は証券会社ごとに違う。最初は必ず `WBJP_ENV=uat` の dry-run で `wbjp account` と `wbjp run` を通し、ログの発注ペイロードを確認すること。
+> **初回の確認**: 最初は必ずデモ環境（`WBJP_ENV=uat`）の dry-run で `wbjp account` と `wbjp run` を通し、ログの発注電文を確認すること。
 
 ---
 
@@ -225,7 +164,7 @@ jq -r 'select(.code == "accum.decision") | [.ts_utc, .symbol, .target, .placed, 
 
 ```toml
 [execution]
-broker = "paper"   # 今は paper（ネットワークに繋がないシミュレータ）のみ
+broker = "tachibana"   # tachibana | paper（ネットワークに繋がないシミュレータ）
 ```
 
 取引所を足す手順:
@@ -233,18 +172,18 @@ broker = "paper"   # 今は paper（ネットワークに繋がないシミュ�
 1. `Broker` を継承し、`name`（設定で使う名前）と `connect()`（認証情報の解決・接続先の選択など、その証券会社固有の準備）を書く
 2. `wbcore.broker.registry.BROKERS.register(YourBroker)` する
 
-認証情報は証券会社ごとに名前空間を分ける（`load_credentials(env, namespace="XXX")` → `XXX_PROD_APP_KEY` / キーチェーン `xxx/prod`）。既定の名前空間は `WBJP`。CLI には手を入れない。
+認証情報は証券会社ごとに名前空間と項目を分ける（立花証券は `TACHIBANA_<ENV>_AUTH_ID` / `_PRIVATE_KEY_FILE` / `_ORDER_PASSWORD`、キーチェーン `tachibana/<env>`）。解決の優先順位（環境変数 → `.env` → キーチェーン）は `wbcore.credentials._resolve_fields` が共通に持つ。
 
 ## 足データの取得元と足の間隔
 
-取得元も同じ形で差し替える。`wbcore.data.provider.MarketDataProvider` 抽象クラスの裏に J-Quants / yfinance が並び、設定の名前で選ぶ。省略すると市場の既定（日本株 `jquants` / 米国株 `yfinance`）。
+取得元も同じ形で差し替える。`wbcore.data.provider.MarketDataProvider` 抽象クラスの裏に J-Quants / FRED が並び、設定の名前で選ぶ。省略すると市場の既定（日本株 `jquants` / 米国の指数 `fred`）。
 
 ```toml
 [universe]
-data_provider = "jquants"    # jquants（日本株のみ・日足のみ）| yfinance（両市場）
+data_provider = "jquants"    # jquants（日本株・日足のみ）| fred（米国の指数・終値のみ）
 ```
 
-足の間隔（`Interval`: `1d` / `1h` / `30m` / `15m` / `5m` / `1m`）は抽象の一部で、取得元ごとに対応範囲を申告する（yfinance の 1 分足は直近 7 日、5〜30 分足は 60 日まで）。J-Quants は日足のみで、API キー `WBJP_JQUANTS_API_KEY`（環境変数か `.env`）が要る。Free プランは直近 12 週が取れないため当日の判断には Light 以上を使う。日中足は UTC の `ts` と暦日 `date` の両方を持ち、`data/bars/<間隔>/` に日足とは別に保存される。
+足の間隔（`Interval`: `1d` / `1h` / `30m` / `15m` / `5m` / `1m`）は抽象の一部で、取得元ごとに対応範囲を申告する。**現在の取得元はどちらも日足のみ**で、日中足を供給するものは無い（`csv_replay` はテスト用）。J-Quants は日足のみで、API キー `WBJP_JQUANTS_API_KEY`（環境変数か `.env`）が要る。Free プランは直近 12 週が取れないため当日の判断には Light 以上を使う。日中足は UTC の `ts` と暦日 `date` の両方を持ち、`data/bars/<間隔>/` に日足とは別に保存される。
 
 ```bash
 uv run wbjp data sync --interval 5m --days 5    # 5分足を取る（data/bars/5m/）
@@ -268,42 +207,13 @@ base_interval = "1m"   # 取り込みの基準。5分足・1時間足・日足�
 | それより前 | その間隔で直接取った足（日足なら数十年） |
 | 両方ある区間 | 直接取った足を優先（日足は分割調整済み、分足は無調整のため） |
 
-分足だけを唯一の取り込み元にしないのは、遡れる期間が短いから（yfinance の 1 分足は 7 日、5〜30 分足は 60 日）。日足戦略の 30 年ぶんは分足からは作れない。
+分足だけを唯一の取り込み元にしないのは、分足の取得元は遡れる期間が短いのが普通だから。日足戦略の 30 年ぶんは分足からは作れない。
 
 戦略は判断中に粗い足を見られる（マルチタイムフレーム）: `ctx.resample("7203", Interval.H1)` は見えている 5 分足から 1 時間足を合成し、まだ閉じていない最後の足は落とす（`completed_only=False` で形成中の足も含められる）。未来の足は構造的に混ざらない。
 
 ### 日中足の無い期間は日足から見立てる
 
 分足が取れる前の期間や、取得元が日足しか返さない期間は、読み出すときに日足 1 本を「その日の引けに閉じる 1 本の日中足」に見立てて補う（`synthetic = True` の列が付く）。**保存はしない。** 保存されるのは取得元から来た本物の足だけで、`data status` に出るのも本物だけ。見立ては連続した系列が要る指標のウォームアップと履歴の切れ目を無くすためのもので、その日の値動きの形は持たない。本物の足だけで判断したい戦略は `synthetic` 列で除ける。
-
-### 収集専用の設定（[`config/collect/`](config/collect/)）
-
-将来売買する可能性のある銘柄は、戦略を持たない設定で足だけ蓄積しておく。`universe.txt` に銘柄を書き足すだけで、その日から蓄積が始まる。
-
-取得元は `data_provider` で切り替えられ、基準足（1 分足）に対応しない取得元でも日足は必ず揃う。
-
-```bash
-uv run wbjp data sync   --config-dir config/collect --days 7
-uv run wbjp data status --config-dir config/collect --interval 1m
-```
-
-1 分足は 7 日しか遡れないので cron は毎営業日、取りこぼしに備えて 1 日 2 回。**`wbjp run` は使わない**（戦略が無くても建玉のストップ判定まで進む）。
-
-取り込みが止まっていることに 7 日以上気づかないと、その穴は永久に残る。`data check` が「最後にいつ取れたか」と「取れているべき日に穴が無いか」を調べて、問題があれば exit 1 と通知を出す。取引日は「その銘柄の日足があった日」で決めるので、祝日の一覧は要らない。
-
-```bash
-uv run wbjp data check --config-dir config/collect            # 問題があれば exit 1
-uv run wbjp data check --config-dir config/collect --notify   # WBJP_ALERT_WEBHOOK_URL に通知
-```
-
-```cron
-CRON_TZ=Asia/Tokyo
-# stderr も JSONL と同じ WBJP_LOG_DIR に残す（ログの置き場は 1 箇所）
-0 12,16 * * 1-5 cd /opt/wbjp && .venv/bin/wbjp data sync --config-dir config/collect --days 7 >> state/logs/collect.log 2>&1
-15 16 * * 1-5   cd /opt/wbjp && .venv/bin/wbjp data check --config-dir config/collect --notify >> state/logs/collect.log 2>&1
-```
-
-`data sync` 自体が失敗したとき（取得元の障害など）も同じ Webhook に通知する。Webhook は Slack / Discord の Incoming Webhook URL を `WBJP_ALERT_WEBHOOK_URL` に置く。未設定ならエラーログに残るだけ。
 
 ### 日中足で判断する
 
@@ -370,7 +280,7 @@ Broker                PaperBroker（証券会社の実装を足せる）
 | 言語 | Python 3.14 | 全依存のcp314ホイールを確認済み |
 | パッケージ管理 | uv | ランタイムごと管理。ロックファイルで再現性 |
 | データフレーム | polars | インジケーターは polars 式で自前実装 |
-| 価格データ | J-Quants API（日本株）/ yfinance（米国株） | 日本株は JPX 公式・調整済み四本値。米国株と米国指数は J-Quants に無いので yfinance。取得済みは必ずローカルキャッシュ |
+| 価格データ | J-Quants API（日本株）/ FRED（米国の指数） | 日本株は JPX 公式・調整済み四本値。米国の指数は判断材料にだけ使うので、無料・キー不要・pandas 不要の FRED。取得済みは必ずローカルキャッシュ |
 | 状態の保存 | SQLite | 注文・シグナル・実行履歴。ACID と冪等性の担保 |
 | 時系列の保存 | Parquet + DuckDB | 足データの高速な集計・分析 |
 
@@ -493,8 +403,8 @@ uv run jquants query "SELECT Code, DiscDate, NP FROM fins_summary WHERE Code='72
 
 `wbjp run` は**1サイクルだけ**実行して終了する。定期実行はここに書く cron が担当する。
 
-日足で判断するため、走らせるのは**大引け後に1日1回**。yfinance の当日足が
-確定するまで少し待つので、16:00 JST 以降にしておく。
+日足で判断するため、走らせるのは**大引け後に1日1回**。J-Quants の当日足が
+入るのを待つので、配信後（Light プランは翌朝）に回す。
 
 ```cron
 # 平日 16:30 に日次サイクルを実行
@@ -535,11 +445,11 @@ src/wbcore/              共通基盤（wbjp / accum のどちらからも使う
 ├── logging.py           構造化ログ + 秘匿情報マスク
 ├── domain/
 │   ├── models.py        Bar / Signal / Order / Position（すべて Decimal）、決定論的な注文ID
-│   ├── market_rules.py  JP / US の取引ルールの抽象化
+│   ├── market_rules.py  取引ルールの抽象化（実装は東証のみ）
 │   └── jp_rules.py      呼値・値幅制限・単元株・取引時間・差金決済
-├── data/                MarketDataProvider → J-Quants / yfinance / CSV / Parquet+DuckDB / EDGAR 13F
+├── data/                MarketDataProvider → J-Quants / FRED / CSV / Parquet+DuckDB
 ├── indicators/ohlcv.py  polars 式で SMA/EMA/RSI/ATR/MACD/BB/ADX/Donchian
-└── broker/              Broker ABC → Paper / レート制限 / 接続の組み立て（factory）
+└── broker/              Broker ABC → 立花証券 e支店 API / Paper / レート制限 / 接続の組み立て（factory）
 
 src/wbjp/                スイング売買
 ├── config.py            settings.toml / strategies.toml（ユニバース・リスク・出口・レジーム）
@@ -555,7 +465,7 @@ src/accum/               積立
 ├── tactics.py           Tactic ABC / constant / bear_stack / stack_ladder / drawdown_ladder
 ├── stack.py, window.py  移動平均の配列判定 / 発注時間帯
 ├── plan.py              日足と戦略 → 日ごとの投下額
-├── simulate.py, basket.py  検証（対照群との比較 / 複数銘柄への配分・13F）
+├── simulate.py, basket.py  検証（対照群との比較 / 複数銘柄への配分）
 ├── execute.py           投下額 → 成行の買い注文（wbcore.broker へ渡す）
 └── cli.py               `accum`
 ```
@@ -575,7 +485,7 @@ src/accum/               積立
 
 ```bash
 uv run pytest              # ネットワークを使うものは既定でスキップ
-uv run pytest -m network   # yfinance 実接続
+uv run pytest -m network   # 実ネットワーク接続を伴うもの
 uv run ruff check .
 uv run mypy                # strict
 ```
@@ -585,9 +495,8 @@ uv run mypy                # strict
 1. `config/settings.toml` の `universe.symbols` を実際に売買したい銘柄に変える
    （TOPIX500 構成銘柄は `topix500_symbols` にも入れる。呼値が変わる）
 2. `risk.max_order_value_jpy` を自分の資金規模に合わせる（既定の50万円は保守的）
-3. 実際に発注するなら、使う証券会社の `Broker` 実装を足す
-   （「[取引所（ブローカー）の差し替え](#取引所ブローカーの差し替え)」）
-4. UAT で `wbjp run --live` を数日回し、`wbjp explain <run_id>` で判断を目視検証
-5. 本番のAPIキーを申請 → `wbjp credentials set --env prod`
-6. `WBJP_ENV=prod wbjp run`（dry-run）を数日回してから `--live` に進む
+3. 立花証券のデモ環境の認証情報を設定し（docs/DEPLOY.md「立花証券 e支店」）、
+   `WBJP_ENV=uat wbjp run --live` を数日回して `wbjp explain <run_id>` で判断を目視検証
+4. 本番の認証ID・鍵を設定 → `wbjp credentials check --env prod`
+5. `WBJP_ENV=prod wbjp run`（dry-run）を数日回してから `--live` に進む
 

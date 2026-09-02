@@ -44,9 +44,9 @@ us_skip_high = 0.01
 us_vix_override = 24
 
 [execution]
-broker = "paper"
+broker = "tachibana"
 tax_account_type = "SPECIFIC"
-quote_source = "yfinance"    # yfinance / csv（yfinance は 20 分遅れ。寄付の判断には使えない）
+quote_source = "tachibana"   # tachibana / csv。立花証券の時価問合（寄付後は始値、無ければ現在値）
 entry_window = ["09:00", "09:15"]
 exit_window = ["15:20", "15:30"]  # 15:20 の成行はその場で約定（引け値ではない）。15:25 以降ならクロージング・オークションで引け値
 kill_switch = false

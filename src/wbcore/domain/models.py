@@ -25,9 +25,10 @@ def _require_aware(name: str, value: dt.datetime | None) -> None:
 
 
 class Market(StrEnum):
-    """取引市場。値はそのままブローカー API の ``market`` に渡る。
+    """市場。売買するのは ``JP``（東証）だけ。``US`` は判断材料に使う米国の指数
+    （S&P500 / VIX など）の足を持つための識別子で、発注には使えない。
 
-    市場ごとの取引ルール（呼値・単元・値幅制限・逆指値の可否・通貨）は
+    東証の取引ルール（呼値・単元・値幅制限・通貨）は
     :mod:`wbcore.domain.market_rules` に集約する。ここは識別子だけ。
     """
 
@@ -54,12 +55,8 @@ class Side(StrEnum):
 class OrderType(StrEnum):
     """注文種別。
 
-    - 日本株で発注できるのは MARKET と LIMIT だけ。STOP_LOSS 系は
-      日本株の API がサポートしていないことが多いため、損切りは
-      :mod:`wbjp.risk.stops` がエンジン側で合成する。
-    - 米国株では STOP_LOSS / STOP_LOSS_LIMIT をブローカーに置ける。
-      どちらを使うかは :class:`~wbcore.domain.market_rules.MarketRules`
-      が決め、エンジンはそれに従う。
+    発注できるのは MARKET と LIMIT だけ。逆指値は使わず、損切りは
+    :mod:`wbjp.risk.stops` がエンジン側で合成する。
 
     ``OTHER`` は**読み取り専用**。口座に他の経路で置かれた注文を読んだ
     ときに、未知の種別で落ちないための受け皿。発注に使ってはいけない。
@@ -67,28 +64,12 @@ class OrderType(StrEnum):
 
     MARKET = "MARKET"
     LIMIT = "LIMIT"
-    STOP_LOSS = "STOP_LOSS"
-    STOP_LOSS_LIMIT = "STOP_LOSS_LIMIT"
     OTHER = "OTHER"
 
     @property
     def is_placeable(self) -> bool:
-        """このシステムが発注してよい種別か（市場が許すかは別途見る）。"""
+        """このシステムが発注してよい種別か。"""
         return self is not OrderType.OTHER
-
-    @property
-    def is_stop(self) -> bool:
-        """トリガー価格に達するまで板に乗らない条件付き注文か。
-
-        条件付き注文は「もうすぐ約定する」注文ではないので、
-        :func:`~wbjp.engine.reconcile.effective_quantity` は数えない。
-        """
-        return self in {OrderType.STOP_LOSS, OrderType.STOP_LOSS_LIMIT}
-
-
-class TimeInForce(StrEnum):
-    DAY = "DAY"
-    GTC = "GTC"
 
 
 class TradeType(StrEnum):
@@ -323,8 +304,6 @@ class OrderRequest:
     order_type: OrderType
     quantity: Decimal
     limit_price: Decimal | None = None
-    stop_price: Decimal | None = None
-    time_in_force: TimeInForce = TimeInForce.DAY
     tax_type: TaxAccountType = TaxAccountType.GENERAL
     reason: str = ""
     #: 現物 / 信用新規 / 信用返済。既定は現物（既存の呼び出し側は変更不要）。
@@ -336,19 +315,13 @@ class OrderRequest:
         if len(self.client_order_id) > 32:
             raise ValueError(f"client_order_id は32文字以内: {self.client_order_id!r}")
 
-        needs_limit = self.order_type in {OrderType.LIMIT, OrderType.STOP_LOSS_LIMIT}
-        needs_stop = self.order_type.is_stop
+        needs_limit = self.order_type is OrderType.LIMIT
         if needs_limit and self.limit_price is None:
             raise ValueError(f"{self.order_type.value} には limit_price が必要")
         if not needs_limit and self.limit_price is not None:
             raise ValueError(f"{self.order_type.value} に limit_price は指定できない")
-        if needs_stop and self.stop_price is None:
-            raise ValueError(f"{self.order_type.value} には stop_price が必要")
-        if not needs_stop and self.stop_price is not None:
-            raise ValueError(f"{self.order_type.value} に stop_price は指定できない")
-        for label, price in (("limit_price", self.limit_price), ("stop_price", self.stop_price)):
-            if price is not None and price <= 0:
-                raise ValueError(f"{label} は正の数: {price}")
+        if self.limit_price is not None and self.limit_price <= 0:
+            raise ValueError(f"limit_price は正の数: {self.limit_price}")
 
     @property
     def notional(self) -> Decimal | None:
@@ -388,10 +361,8 @@ class Order:
     filled_quantity: Decimal
     status: OrderStatus
     limit_price: Decimal | None = None
-    stop_price: Decimal | None = None
     avg_fill_price: Decimal | None = None
     created_at: dt.datetime | None = None
-    time_in_force: TimeInForce = TimeInForce.DAY
     #: 現物 / 信用新規 / 信用返済（ブローカーが区別を返さなければ CASH）。
     trade: TradeType = TradeType.CASH
 

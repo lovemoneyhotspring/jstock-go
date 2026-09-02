@@ -27,20 +27,29 @@ PREV = dt.date(2026, 8, 31)
 
 
 @pytest.mark.parametrize(
-    ("amount", "fee"),
+    ("day_total", "fee"),
     [
-        (50_000, 55),
-        (100_000, 99),
-        (200_000, 115),
-        (600_000, 275),
-        (1_000_000, 275),
-        (1_200_000, 535),
-        (5_000_000, 640),
-        (40_000_000, 1070),
+        (0, 0),
+        (120_000, 0),
+        (120_001, 176),
+        (200_000, 176),
+        (500_000, 253),
+        (1_000_000, 506),
+        (2_000_000, 759),
+        (10_000_000, 2_783),
+        (12_000_000, 2_783 + 253 * 2),
     ],
 )
-def test_commission_brackets(amount: int, fee: int) -> None:
-    assert commission(Decimal(amount)) == Decimal(fee)
+def test_commission_is_the_flat_rate_on_the_day_total(day_total: int, fee: int) -> None:
+    """立花証券の定額コース。1 日の現物約定代金合計で段階が決まる。"""
+    import polars as pl
+
+    from daytrade.backtest import _day_fee_expr
+
+    assert commission(Decimal(day_total)) == Decimal(fee)
+    # polars 版（バックテスト）も同じ表を見ていること
+    got = pl.DataFrame({"t": [float(day_total)]}).select(_day_fee_expr(pl.col("t"))).item()
+    assert got == float(fee)
 
 
 def test_round_trip_bp_is_lower_for_bigger_orders() -> None:
@@ -250,7 +259,7 @@ def test_pick_orders_by_gap_and_skips_unaffordable() -> None:
     assert picks[0].rank == 2  # D が 1 位だが買えないので順位は残す
     assert picks[0].quantity == Decimal(700)
     assert picks[0].gap == Decimal("-0.0500")
-    assert picks[0].fee == Decimal(275)
+    assert picks[0].fee == Decimal("379.5")  # 665,000 円を往復した日: 定額 759 円の片道分
 
 
 def test_pick_skips_limit_down_at_open() -> None:
@@ -1083,15 +1092,6 @@ def test_paper_broker_short_open_and_close() -> None:
     broker.settle({"7203": Decimal(2400)})
     assert broker.positions_by_symbol() == {}
     assert broker.realized_pnl == Decimal(10000)  # 2500 で売建て 2400 で買戻し
-
-
-def test_webull_refuses_margin_orders() -> None:
-    from wbcore.broker.webull import WebullBroker
-    from wbcore.credentials import Credentials, Environment
-
-    broker = WebullBroker(Credentials("k" * 8, "s" * 8, "a" * 8), Environment.UAT, "x")
-    with pytest.raises(ValueError):
-        broker._to_payload(_req("7203", Side.SELL, TradeType.MARGIN_OPEN))
 
 
 def _cli_env_margin(tmp_path: Path) -> tuple[Path, dict[str, str]]:

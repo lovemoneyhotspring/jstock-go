@@ -11,10 +11,9 @@
 
 **配分は時間で変わる**
 
-13F 追従では四半期ごとに比率が変わる。:class:`WeightSchedule` は
-「この日から有効な比率表」の列で、判定日に有効な最新の表を引く。
-提出日 **当日** の表は使わない（引けた後に公開されることが多いため、
-翌営業日から）。
+:class:`WeightSchedule` は「この日から有効な比率表」の列で、判定日に
+有効な最新の表を引く。今の設定は固定比率（1 表）だが、指数の入れ替えなど
+比率が日付で変わる配分もこの形で表せる。
 
 **足が無い銘柄の扱い**
 
@@ -386,7 +385,7 @@ def simulate_basket(
 
     value_by_date = pl.concat(values).group_by("date").agg(pl.col("value").sum()).sort("date")
     flow_by_date = pl.concat(flows).group_by("date").agg(pl.col("amount").sum()).sort("date")
-    # 配分が始まる前（13F の最初の提出前など）の日は結果に含めない。
+    # 配分が始まる前（最初の投下より前）の日は結果に含めない。
     # 起点が何年も前にあると XIRR の割引が効きすぎて解が不安定になる。
     first_flow = flow_by_date.filter(pl.col("amount") > 0)["date"].min()
     if first_flow is None:

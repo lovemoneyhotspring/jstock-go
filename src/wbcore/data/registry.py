@@ -8,9 +8,9 @@
 from __future__ import annotations
 
 from wbcore.credentials import Environment
+from wbcore.data.fred_provider import FredProvider
 from wbcore.data.jquants_provider import JQuantsProvider
 from wbcore.data.provider import MarketDataProvider
-from wbcore.data.yfinance_provider import YFinanceProvider
 from wbcore.domain.models import Market
 from wbcore.registry import Registry
 
@@ -31,11 +31,11 @@ def connect(name: str, env: Environment, *, market: Market) -> MarketDataProvide
     return get(name).connect(env, market=market)
 
 
-#: 設定で取得元を省略したときの既定。日本株は公式の J-Quants、米国株は
-#: J-Quants が対応しないので yfinance。
+#: 設定で取得元を省略したときの既定。日本株は公式の J-Quants。米国は売買しない
+#: ので、判断材料に使う指数（S&P500 / VIX など）を FRED から取る。
 DEFAULT_PROVIDERS: dict[Market, str] = {
     Market.JP: JQuantsProvider.name,
-    Market.US: YFinanceProvider.name,
+    Market.US: FredProvider.name,
 }
 
 
@@ -44,5 +44,5 @@ def default_provider(market: Market) -> str:
     return DEFAULT_PROVIDERS[market]
 
 
-for _cls in (JQuantsProvider, YFinanceProvider):
+for _cls in (JQuantsProvider, FredProvider):
     register(_cls)

@@ -80,7 +80,7 @@
 | `daytrade.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception`（トレースバック） |
 
 ブローカーとのやり取り（送ったペイロード・応答）は、各ブローカー実装が `event` で残す（`発注します` など。`code` 無し）。
-yfinance が取れない銘柄ごとに吐く error は抑止してあり、代わりに `daytrade.quotes` の `missing_sample` に残る。
+気配が取れなかった銘柄は `daytrade.quotes` の `missing_sample` に残る。
 
 ### スイング売買（`wbjp`）
 

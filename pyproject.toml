@@ -8,9 +8,8 @@ requires-python = ">=3.14,<3.15"
 dependencies = [
     # --- データ ---
     "polars>=1.44.0",
-    "pyarrow>=25.0.0",          # pl.from_pandas() / DuckDB 連携に必要
-    "yfinance>=1.6.0",      # 米国株・米国指数（J-Quants は日本株のみ）
-    "requests>=2.32",       # J-Quants API（公式 SDK は使わず、端点を直接叩く）
+    "pyarrow>=25.0.0",          # DuckDB 連携（polars との受け渡し）に必要
+    "requests>=2.32",       # J-Quants API・FRED・立花証券 e支店 API（端点を直接叩く）
     "duckdb>=1.5.0",
     # --- 永続化 ---
     # SQLite は標準ライブラリの sqlite3 を直接使う。単一プロセス・単一
@@ -26,6 +25,7 @@ dependencies = [
     "structlog>=24.4",
     "typer>=0.15",
     "tenacity>=9.0",
+    # Backtrader の第 2 エンジン（wbjp/engine/bt_engine.py）だけが使う。pandas もそのため
     "backtrader>=1.9.78.123",
     "pandas>=2.2",
 ]
@@ -76,7 +76,7 @@ mypy_path = "src"
 strict = true
 # SDK は型情報を持たないため
 [[tool.mypy.overrides]]
-module = ["yfinance.*", "duckdb.*", "keyring.*", "backtrader.*", "requests.*"]
+module = ["duckdb.*", "keyring.*", "backtrader.*", "requests.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

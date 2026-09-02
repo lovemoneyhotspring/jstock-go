@@ -17,7 +17,7 @@ from typing import Any
 import polars as pl
 
 from daytrade.config import DaytradeConfig
-from daytrade.fees import commission
+from daytrade.fees import FLAT_RATE_STEP, FLAT_RATE_TABLE, commission
 from daytrade.select import gap_rank_expr, short_rank_expr
 from daytrade.universe import (
     STOCK_PRODUCT,
@@ -37,26 +37,23 @@ from wbcore.data.jquants_archive import Archive, endpoint
 TRADING_DAYS = 245
 
 
-def _fee_expr(amount: pl.Expr) -> pl.Expr:
-    """:func:`daytrade.fees.commission` の polars 版（片道）。"""
-    return (
-        pl.when(amount <= 0)
-        .then(0)
-        .when(amount <= 50_000)
-        .then(55)
-        .when(amount <= 100_000)
-        .then(99)
-        .when(amount <= 200_000)
-        .then(115)
-        .when(amount <= 1_000_000)
-        .then(275)
-        .when(amount <= 1_500_000)
-        .then(535)
-        .when(amount <= 30_000_000)
-        .then(640)
-        .otherwise(1070)
-        .cast(pl.Float64)
-    )
+def _day_fee_expr(day_total: pl.Expr) -> pl.Expr:
+    """:func:`daytrade.fees.commission` の polars 版。1 日の現物約定代金合計 → その日の手数料。"""
+    chain: Any = pl.when(day_total <= 0).then(0.0)
+    for bound, fee in FLAT_RATE_TABLE:
+        chain = chain.when(day_total <= float(bound)).then(float(fee))
+    top_bound, top_fee = FLAT_RATE_TABLE[-1]
+    step_size, step_fee = FLAT_RATE_STEP
+    extra_steps = ((day_total - float(top_bound)) / float(step_size)).ceil()
+    result: pl.Expr = chain.otherwise(float(top_fee) + float(step_fee) * extra_steps)
+    return result.cast(pl.Float64)
+
+
+def _fee_expr(amount: pl.Expr, *, over: str = "Date") -> pl.Expr:
+    """各取引の往復手数料。定額コースは 1 日の合計（買い＋売り = 2 × 代金）で段階が
+    決まるので、その日の手数料を約定代金の比で各取引に配る。"""
+    day_total = (2 * amount).sum().over(over)
+    return pl.when(day_total > 0).then(_day_fee_expr(day_total) * amount / day_total * 2).otherwise(0.0)
 
 
 def limit_width_expr(base: pl.Expr) -> pl.Expr:
@@ -300,7 +297,7 @@ def simulate(
     picks = (
         picks.with_columns(amount=pl.col("shares") * pl.col("O"))
         .with_columns(
-            fees=2 * _fee_expr(pl.col("amount")),
+            fees=_fee_expr(pl.col("amount")),
             gross=pl.col("shares") * (pl.col("C") - pl.col("O")),
         )
         .with_columns(pnl=pl.col("gross") - pl.col("fees"))
@@ -350,7 +347,7 @@ def _pick_and_price(
 
     ``sign`` が損益の向き（買い +1: ``C − O``、売り −1: ``O − C``）。``extra_cost_bp`` は
     約定代金に対する往復の概算コスト（貸株料・金利・滑り、bp）。``commission`` を
-    偽にすると段階制の手数料（:func:`_fee_expr`）を掛けない（立花証券の信用取引は 0 円）。
+    偽にすると現物の定額手数料（:func:`_fee_expr`）を掛けない（立花証券の信用取引は 0 円）。
     """
     picks = (
         eligible.with_columns(shares=(pl.lit(budget) / (pl.col("O") * 100)).floor() * 100)
@@ -378,7 +375,7 @@ def _pick_and_price(
             )
             .filter(pl.col("shares") >= 100)
         )
-    base_fee = 2 * _fee_expr(pl.col("amount")) if commission else pl.lit(0.0)
+    base_fee = _fee_expr(pl.col("amount")) if commission else pl.lit(0.0)
     return (
         picks.with_columns(amount=pl.col("shares") * pl.col("O"))
         .with_columns(
@@ -600,7 +597,7 @@ def _apply_regime_seesaw(
     if r.drift_gate is not None and (drift is None or drift.height == 0):
         raise ValueError("drift_gate を使うには TOPIX のアーカイブが要ります")
     if r.us_skip_high is not None and (us is None or us.height == 0):
-        raise ValueError("us_skip_high を使うには米国市場のデータが要ります（yfinance）")
+        raise ValueError("us_skip_high を使うには米国市場のデータが要ります（FRED）")
 
     frame = (
         long_daily.rename(
@@ -723,7 +720,7 @@ def _apply_regime(
     if r.drift_gate is not None and (drift is None or drift.height == 0):
         raise ValueError("drift_gate を使うには TOPIX のアーカイブが要ります")
     if r.us_skip_high is not None and (us is None or us.height == 0):
-        raise ValueError("us_skip_high を使うには米国市場のデータが要ります（yfinance）")
+        raise ValueError("us_skip_high を使うには米国市場のデータが要ります（FRED）")
     frame = daily.join(market_gap, on="Date", how="left")
     frame = (
         frame.join(iv, on="Date", how="left")
@@ -852,6 +849,6 @@ def run_margin(
     return simulate_margin(panel, config, iv=iv, drift=drift, us=us)
 
 
-def daily_commission(amount: Decimal) -> Decimal:
-    """テスト用: polars 版と :func:`daytrade.fees.commission` が一致することを確かめる入口。"""
-    return commission(amount)
+def daily_commission(day_total: Decimal) -> Decimal:
+    """テスト用: polars 版（:func:`_day_fee_expr`）と :func:`daytrade.fees.commission` を突き合わせる入口。"""
+    return commission(day_total)
