@@ -120,15 +120,33 @@ func runClose(live, yes, ignoreWindow bool, date string) error {
 	}
 
 	// 約定数量はブローカーに聞く（部分約定・拒否をそのまま手仕舞いの数量に反映する）
+	//
+	// 聞けなかったときに台帳の値（発注直後は 0）へ黙って落ちてはいけない。
+	// 0 は「手仕舞う数量なし」として扱われるので、建玉があっても売らずに
+	// 終わり、そのまま持ち越しになる。確かめられなかった銘柄は
+	// unconfirmed に積んで、最後に人へ知らせたうえで異常終了する。
 	var targets []exitTarget
+	var unconfirmed []string
 	for _, order := range entries {
 		filled := order.FilledQuantity
 		fillPrice := order.AvgFillPrice
 		if b != nil {
 			current, err := b.GetOrder(order.ClientOrderID, order.BrokerOrderID)
 			if err != nil {
-				fmt.Printf("  %s: 照会に失敗、台帳の値で続行: %v\n", order.Symbol, err)
+				fmt.Printf("  %s: 照会に失敗: %v\n", order.Symbol, err)
 				current = nil
+			}
+			if current == nil && filled.LessThanOrEqual(decimal.Zero) &&
+				domain.OrderStatus(order.Status).IsOpen() {
+				// 建てたかどうかが分からない。数量を推測して売ると、
+				// 建っていなかった場合に新規の反対建玉を作ってしまう。
+				unconfirmed = append(unconfirmed,
+					fmt.Sprintf("%s（%s / %s 株）", order.Symbol, order.Status, order.Quantity))
+				logWarn("daytrade.unconfirmed", "買い注文の約定を確かめられません", map[string]any{
+					"day": day.Format(DateLayout), "symbol": order.Symbol,
+					"client_order_id": order.ClientOrderID, "status": order.Status,
+				})
+				continue
 			}
 			if current != nil {
 				filled, fillPrice = current.FilledQuantity, current.AvgFillPrice
@@ -154,7 +172,8 @@ func runClose(live, yes, ignoreWindow bool, date string) error {
 					"quantity": order.Quantity.String(), "filled": filled.String(),
 				})
 			} else {
-				logWarn("daytrade.fill", "買い注文を照会できず台帳の値で続行", map[string]any{
+				// 台帳に約定が残っている（照会は空でも過去に確定済み）。その値で手仕舞う
+				logWarn("daytrade.fill", "買い注文を照会できず台帳の確定値で続行", map[string]any{
 					"day": day.Format(DateLayout), "symbol": order.Symbol,
 					"client_order_id": order.ClientOrderID, "filled": filled.String(),
 				})
@@ -173,7 +192,18 @@ func runClose(live, yes, ignoreWindow bool, date string) error {
 		}
 		targets = append(targets, exitTarget{entry: order, quantity: filled, fillPrice: fillPrice})
 	}
+	if len(unconfirmed) > 0 {
+		// 建玉が残っている可能性がある。人が板を見て手で処理する必要がある
+		alert("デイトレ: 建玉の有無を確かめられません（持ち越しの恐れ）",
+			strings.Join(unconfirmed, "\n"))
+		digest.Anomaly("daytrade.unconfirmed_entries",
+			fmt.Sprintf("%d 件の買い注文を照会できませんでした", len(unconfirmed)))
+	}
 	if len(targets) == 0 {
+		if len(unconfirmed) > 0 {
+			return fmt.Errorf("%d 件の買い注文を照会できず、手仕舞いを判断できません（口座を確認してください）",
+				len(unconfirmed))
+		}
 		logInfo("daytrade.skip", "売る対象なし", map[string]any{"reason": "nothing_to_sell"})
 		return nil
 	}
@@ -205,8 +235,13 @@ func runClose(live, yes, ignoreWindow bool, date string) error {
 		"sells": len(targets), "failures": len(failures),
 	})
 	digest.Note(map[string]any{
-		"phase": "close", "live": allowed, "sells": len(targets), "failures": len(failures),
+		"phase": "close", "live": allowed, "sells": len(targets),
+		"failures": len(failures), "unconfirmed": len(unconfirmed),
 	})
+	if len(unconfirmed) > 0 {
+		return fmt.Errorf("%d 件の買い注文を照会できませんでした（建玉が残っていないか口座を確認してください）",
+			len(unconfirmed))
+	}
 	return nil
 }
 
@@ -284,7 +319,9 @@ func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time) {
 	if err != nil {
 		return
 	}
-	positions, err := b.PositionsBySymbol()
+	// 信用建玉も見る。立花の GetPositions は現物しか返さないので、
+	// これを使わないと日計りで建てた玉が「無い」ことになる。
+	positions, err := broker.PositionsBySymbolIncludingMargin(b)
 	if err != nil {
 		logWarn("daytrade.reconcile", "建玉を照会できず保険の確認を省略", map[string]any{"error": err.Error()})
 		return

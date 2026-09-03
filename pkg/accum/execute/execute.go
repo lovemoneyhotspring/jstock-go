@@ -14,10 +14,12 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	wbhistory "github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/history"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/notify"
 	"github.com/shopspring/decimal"
 )
 
@@ -349,13 +351,29 @@ func RunAccumulation(
 	// 失効・拒否なら「発注済み」から外れ、この後の差額の計算で自動的に
 	// 埋め直される。照会できないときは前回の状態のまま先へ進む——
 	// ここで止めると、ブローカー側の一時的な不調で積立が丸ごと飛ぶ。
-	changes, err := SyncOrderStatus(led, b, now)
+	synced, err := SyncOrderStatus(led, b, now)
 	if err != nil {
 		logger.Warn("accum.sync_failed",
 			fmt.Sprintf("注文の照会に失敗（前回の状態のまま続けます）: %v", err))
 	}
-	for _, change := range changes {
+	for _, change := range synced.Changes {
 		logger.Info("accum.fill", "前回の注文: "+change.Describe())
+	}
+	// 照会できなかった注文は「発注済み」に数えたまま保留してある。
+	// 実際には届いていなかった場合、その額はこの月ずっと埋まらないので、
+	// 自動では決めずに人へ知らせる。
+	for _, u := range synced.Unresolved {
+		logger.Warn("accum.unresolved", "照会できず保留: "+u.Describe())
+	}
+	if len(synced.Unresolved) > 0 {
+		var lines []string
+		for _, u := range synced.Unresolved {
+			lines = append(lines, u.Describe())
+		}
+		notify.Alert("積立: 前回の注文を照会できません（口座を確認してください）",
+			strings.Join(lines, "\n"), logger)
+		digest.Anomaly("accum.unresolved",
+			fmt.Sprintf("%d 件の注文を照会できませんでした", len(synced.Unresolved)))
 	}
 
 	// 2. 本日の発注計画

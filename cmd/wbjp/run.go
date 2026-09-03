@@ -297,7 +297,19 @@ func newRunCmd() *cobra.Command {
 			_ = rep.RecordTargets(runID, targetList)
 
 			// 4. リコンサイル
-			openOrders, _ := b.GetOpenOrders()
+			//
+			// 板に残っている注文が見えないと、同じ注文をもう一度出しうる。
+			// 発注する回では照会に失敗した時点で止める（dry-run は記録だけ
+			// なので、見えないまま続けても実害は無い）。
+			openOrders, err := b.GetOpenOrders()
+			if err != nil {
+				if canLive {
+					return fmt.Errorf("板の注文を照会できないため発注を中止しました（二重発注を避けます）: %w", err)
+				}
+				logger.Warn("run.open_orders_failed",
+					fmt.Sprintf("板の注文を照会できません（dry-run のため続行）: %v", err))
+				openOrders = nil
+			}
 
 			orderType := domain.OrderTypeLimit
 			if setCfg.Execution.OrderType == "market" {

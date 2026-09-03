@@ -99,15 +99,23 @@ func checkOpenOrders(cfg *accumcfg.AccumConfig, led *ledger.Ledger) error {
 	if err != nil {
 		return err
 	}
-	changes, err := execute.SyncOrderStatus(led, b, clock.NowUTC())
-	for _, change := range changes {
+	synced, err := execute.SyncOrderStatus(led, b, clock.NowUTC())
+	for _, change := range synced.Changes {
 		fmt.Println("更新: " + change.Describe())
+	}
+	// 照会できなかった注文は台帳をそのままにしてある。人が口座を見て
+	// 判断する必要があるので、黙って「変化なし」にはしない。
+	for _, u := range synced.Unresolved {
+		fmt.Println("保留（照会できず）: " + u.Describe())
 	}
 	if err != nil {
 		return err
 	}
-	if len(changes) == 0 {
+	if len(synced.Changes) == 0 && len(synced.Unresolved) == 0 {
 		fmt.Println("変化のあった注文はありません")
+	}
+	if len(synced.Unresolved) > 0 {
+		return fmt.Errorf("%d 件の注文を照会できませんでした", len(synced.Unresolved))
 	}
 	return nil
 }

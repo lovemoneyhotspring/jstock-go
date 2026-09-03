@@ -52,6 +52,30 @@ func (c StatusChange) Describe() string {
 		c.Symbol, c.After, filled, total, pct)
 }
 
+// UnresolvedOrder は照会できず、判断を保留した注文。
+//
+// 台帳はそのまま（「発注済み」に数えたまま）にする。勝手に失効へ倒すと
+// 板に残っていた注文と二重になり、逆に放置し続けると当月の予算が
+// 埋まらない。どちらも自動では決められないので、人に知らせる。
+type UnresolvedOrder struct {
+	ClientOrderID string
+	Symbol        string
+	Status        string
+	Reason        string
+}
+
+func (u UnresolvedOrder) Describe() string {
+	return fmt.Sprintf("%s（%s / %s）: %s", u.Symbol, u.ClientOrderID, u.Status, u.Reason)
+}
+
+// SyncResult は照会の結果。
+type SyncResult struct {
+	// Changes は台帳を更新できた注文。
+	Changes []StatusChange
+	// Unresolved は照会できず保留した注文。空でなければ人に知らせる。
+	Unresolved []UnresolvedOrder
+}
+
 // SyncOrderStatus は結果が確定していない注文をブローカーに照会し、台帳を更新する。
 //
 // ブローカーに無い注文は原則そのまま残す（勝手に「失効」にすると、実は板に
@@ -65,18 +89,24 @@ func (c StatusChange) Describe() string {
 // 判断時の価格のままだと、実際に払った額との差だけ差額の計算がずれる。
 // 約定ぶんではなく発注株数を掛けるのは、失効・拒否のときに
 // ledger.EffectiveAmount が約定ぶんへ按分するため——ここで按分すると二重に効く。
-func SyncOrderStatus(led *ledger.Ledger, b broker.Broker, now time.Time) ([]StatusChange, error) {
+func SyncOrderStatus(led *ledger.Ledger, b broker.Broker, now time.Time) (SyncResult, error) {
+	var result SyncResult
 	open, err := led.OpenOrders()
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 
-	var changes []StatusChange
 	for _, row := range open {
-		// broker_order_id は client_order_id で引けないブローカー（立花証券）のためのヒント
+		// broker_order_id は client_order_id で引けないブローカー（立花証券）のためのヒント。
+		// 送信結果が分からず PENDING のまま残った注文にはこれが無く、照会しようが無い。
 		order, err := b.GetOrder(row.ClientOrderID, row.BrokerOrderID)
 		if err != nil {
-			return changes, fmt.Errorf("照会に失敗: %w", err)
+			// 1 件引けないだけで残りの照会まで止めない。保留にして先へ進む
+			result.Unresolved = append(result.Unresolved, UnresolvedOrder{
+				ClientOrderID: row.ClientOrderID, Symbol: row.Symbol,
+				Status: row.Status, Reason: err.Error(),
+			})
+			continue
 		}
 
 		if order == nil {
@@ -89,7 +119,7 @@ func SyncOrderStatus(led *ledger.Ledger, b broker.Broker, now time.Time) ([]Stat
 			}
 			if err := led.UpdateStatus(row.ClientOrderID,
 				string(domain.OrderStatusRejected), nil, nil); err != nil {
-				return changes, err
+				return result, err
 			}
 			execution.Collect(execution.Spec{
 				Event:         "fill",
@@ -101,7 +131,7 @@ func SyncOrderStatus(led *ledger.Ledger, b broker.Broker, now time.Time) ([]Stat
 				Quantity:      row.Quantity,
 				Reason:        execution.ReasonUnconfirmed,
 			})
-			changes = append(changes, StatusChange{
+			result.Changes = append(result.Changes, StatusChange{
 				ClientOrderID:  row.ClientOrderID,
 				Symbol:         row.Symbol,
 				Before:         row.Status,
@@ -155,9 +185,9 @@ func SyncOrderStatus(led *ledger.Ledger, b broker.Broker, now time.Time) ([]Stat
 		}
 		if err := led.UpdateStatusDetail(row.ClientOrderID, string(order.Status),
 			&order.FilledQuantity, order.AvgFillPrice, order.BrokerOrderID, amount); err != nil {
-			return changes, err
+			return result, err
 		}
-		changes = append(changes, StatusChange{
+		result.Changes = append(result.Changes, StatusChange{
 			ClientOrderID:  row.ClientOrderID,
 			Symbol:         row.Symbol,
 			Before:         row.Status,
@@ -166,5 +196,5 @@ func SyncOrderStatus(led *ledger.Ledger, b broker.Broker, now time.Time) ([]Stat
 			Quantity:       row.Quantity,
 		})
 	}
-	return changes, nil
+	return result, nil
 }

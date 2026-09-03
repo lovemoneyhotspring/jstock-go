@@ -1,6 +1,7 @@
 package execute
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -59,18 +60,18 @@ func TestSyncOrderStatusRejectsStalePending(t *testing.T) {
 	b := &lookupBroker{orders: map[string]*domain.Order{}} // ブローカーは知らない
 	later := time.Now().UTC().Add(UnconfirmedGrace + time.Hour)
 
-	changes, err := SyncOrderStatus(led, b, later)
+	synced, err := SyncOrderStatus(led, b, later)
 	if err != nil {
 		t.Fatalf("照会に失敗: %v", err)
 	}
-	if len(changes) != 1 {
-		t.Fatalf("変化の件数 = %d, want 1", len(changes))
+	if len(synced.Changes) != 1 {
+		t.Fatalf("変化の件数 = %d, want 1", len(synced.Changes))
 	}
-	if changes[0].After != domain.OrderStatusRejected {
-		t.Errorf("状態 = %s, want REJECTED", changes[0].After)
+	if synced.Changes[0].After != domain.OrderStatusRejected {
+		t.Errorf("状態 = %s, want REJECTED", synced.Changes[0].After)
 	}
-	if !changes[0].LostAmountRatio().Equal(decimal.NewFromInt(1)) {
-		t.Errorf("未約定割合 = %s, want 1", changes[0].LostAmountRatio())
+	if !synced.Changes[0].LostAmountRatio().Equal(decimal.NewFromInt(1)) {
+		t.Errorf("未約定割合 = %s, want 1", synced.Changes[0].LostAmountRatio())
 	}
 
 	// 「発注済み」から外れ、次の run で差額として埋め直される
@@ -93,12 +94,12 @@ func TestSyncOrderStatusKeepsFreshPending(t *testing.T) {
 	b := &lookupBroker{orders: map[string]*domain.Order{}}
 	soon := time.Now().UTC().Add(time.Hour)
 
-	changes, err := SyncOrderStatus(led, b, soon)
+	synced, err := SyncOrderStatus(led, b, soon)
 	if err != nil {
 		t.Fatalf("照会に失敗: %v", err)
 	}
-	if len(changes) != 0 {
-		t.Fatalf("変化の件数 = %d, want 0", len(changes))
+	if len(synced.Changes) != 0 {
+		t.Fatalf("変化の件数 = %d, want 0", len(synced.Changes))
 	}
 	open, _ := led.OpenOrders()
 	if len(open) != 1 || open[0].Status != string(domain.OrderStatusPending) {
@@ -125,12 +126,12 @@ func TestSyncOrderStatusOverwritesAmountWithFillPrice(t *testing.T) {
 		},
 	}}
 
-	changes, err := SyncOrderStatus(led, b, time.Now().UTC())
+	synced, err := SyncOrderStatus(led, b, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("照会に失敗: %v", err)
 	}
-	if len(changes) != 1 || changes[0].After != domain.OrderStatusFilled {
-		t.Fatalf("変化 = %+v", changes)
+	if len(synced.Changes) != 1 || synced.Changes[0].After != domain.OrderStatusFilled {
+		t.Fatalf("変化 = %+v", synced.Changes)
 	}
 
 	month, _ := time.Parse("2006-01-02", "2026-08-01")
@@ -167,5 +168,47 @@ func TestSyncOrderStatusProratesPartialFill(t *testing.T) {
 	placed, _ := led.PlacedAmount("1306.T", month)
 	if !placed.Equal(decimal.NewFromInt(100_000)) { // 40 株 × 2500
 		t.Errorf("発注済み額 = %s, want 100000", placed)
+	}
+}
+
+// errorBroker は照会が必ず失敗するブローカー（broker_order_id が無い注文の再現）。
+type errorBroker struct {
+	broker.Broker
+	err error
+}
+
+func (e *errorBroker) GetOrder(string, *string) (*domain.Order, error) { return nil, e.err }
+
+// 照会できない注文は、勝手に失効させず保留にする。
+//
+// 立花証券は client_order_id を持たないので、送信結果が分からず
+// broker_order_id の無い注文は引きようがない。ここで REJECTED に倒すと、
+// 実は約定していた場合に翌日もう一度買ってしまう。
+func TestSyncOrderStatusHoldsUnqueryableOrders(t *testing.T) {
+	led := openTestLedger(t)
+	recordPending(t, led, "order-1", "1306.T", 100, 250_000)
+
+	b := &errorBroker{err: errors.New("broker_order_id が必要です")}
+	later := time.Now().UTC().Add(UnconfirmedGrace + time.Hour)
+
+	synced, err := SyncOrderStatus(led, b, later)
+	if err != nil {
+		t.Fatalf("1 件の照会失敗で全体を止めるべきではありません: %v", err)
+	}
+	if len(synced.Changes) != 0 {
+		t.Errorf("照会できていないのに台帳を変えました: %+v", synced.Changes)
+	}
+	if len(synced.Unresolved) != 1 {
+		t.Fatalf("保留の件数 = %d, want 1", len(synced.Unresolved))
+	}
+	if synced.Unresolved[0].Symbol != "1306.T" {
+		t.Errorf("保留 = %+v", synced.Unresolved[0])
+	}
+
+	// 台帳は動かさない（「発注済み」に数えたまま）
+	month, _ := time.Parse("2006-01-02", "2026-08-01")
+	placed, _ := led.PlacedAmount("1306.T", month)
+	if !placed.Equal(decimal.NewFromInt(250_000)) {
+		t.Errorf("発注済み額 = %s, want 250000（保留中は動かさない）", placed)
 	}
 }
