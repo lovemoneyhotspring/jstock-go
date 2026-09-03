@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	accumcfg "github.com/lovemoneyhotspring/jstock-go/pkg/accum/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/execute"
+	accumhist "github.com/lovemoneyhotspring/jstock-go/pkg/accum/history"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
@@ -13,11 +15,13 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 func newRunCmd() *cobra.Command {
 	var liveFlag bool
 	var yesFlag bool
+	var ignoreWindowFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -41,6 +45,11 @@ func newRunCmd() *cobra.Command {
 			}(), reason)
 
 			if canLive && !yesFlag {
+				// 非対話（cron・パイプ）では確認を取れない。黙って通すと
+				// 意図しない本番発注になるので、明示的に --yes を求める。
+				if !term.IsTerminal(int(os.Stdin.Fd())) {
+					return fmt.Errorf("非対話で本番発注はできません。確認を省くなら --yes を付けてください")
+				}
 				fmt.Print("本番注文を送信します。続行しますか？ [y/N]: ")
 				var input string
 				_, _ = fmt.Scanln(&input)
@@ -78,11 +87,15 @@ func newRunCmd() *cobra.Command {
 				}
 			}
 
-			return execute.RunAccumulation(cfg, b, barStore, led, logger, canLive)
+			// 判断の履歴（発注に至らなかった日も含む）を残す。accum evaluate の材料。
+			hist := accumhist.StoreFor(appSettings)
+
+			return execute.RunAccumulation(cfg, b, barStore, led, logger, hist, canLive, ignoreWindowFlag)
 		},
 	}
 
 	cmd.Flags().BoolVar(&liveFlag, "live", false, "実際にブローカーへ発注する")
-	cmd.Flags().BoolVar(&yesFlag, "yes", false, "本番発注時の確認プロンプトをスキップする")
+	cmd.Flags().BoolVarP(&yesFlag, "yes", "y", false, "本番発注時の確認プロンプトをスキップする")
+	cmd.Flags().BoolVar(&ignoreWindowFlag, "ignore-window", false, "発注時間帯の外でも注文を作る")
 	return cmd
 }

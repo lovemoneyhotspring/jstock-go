@@ -232,7 +232,7 @@ def _crash(title: str, code: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
 
             try:
                 return func(*args, **kwargs)
-            except typer.Exit, typer.Abort:
+            except (typer.Exit, typer.Abort):
                 raise
             except Exception as exc:
                 log.exception(f"{title}が異常終了", code=code, error=str(exc))

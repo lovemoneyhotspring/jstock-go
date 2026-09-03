@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/backup"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/storage"
@@ -58,8 +59,12 @@ func (o LedgerOrder) EffectiveAmount() decimal.Decimal {
 }
 
 type Ledger struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
+
+// Path は台帳ファイルの置き場所。二重買付を疑う場面で人に示す。
+func (l *Ledger) Path() string { return l.path }
 
 func OpenLedger(dbPath string) (*Ledger, error) {
 	db, err := storage.OpenSQLite(dbPath)
@@ -90,7 +95,7 @@ func OpenLedger(dbPath string) (*Ledger, error) {
 		return nil, fmt.Errorf("failed to create accumulation table: %w", err)
 	}
 
-	l := &Ledger{db: db}
+	l := &Ledger{db: db, path: dbPath}
 	if err := l.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -150,6 +155,28 @@ func (l *Ledger) WasPlaced(clientOrderID string) bool {
 	query := "SELECT 1 FROM orders WHERE client_order_id = ? AND status NOT IN (?, ?);"
 	err := l.db.QueryRow(query, clientOrderID, DryRunStatus, string(domain.OrderStatusRejected)).Scan(&dummy)
 	return err == nil
+}
+
+// RecordedIDs は台帳が知っている注文 ID を全て返す。
+//
+// ブローカーの約定履歴と突き合わせて「台帳に無い約定」を探すために使う。
+// dry-run は実際には発注していないので除く。
+func (l *Ledger) RecordedIDs() (map[string]struct{}, error) {
+	rows, err := l.db.Query("SELECT client_order_id FROM orders WHERE status != ?;", DryRunStatus)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids[id] = struct{}{}
+	}
+	return ids, rows.Err()
 }
 
 func (l *Ledger) PlacedAmount(symbol string, month time.Time) (decimal.Decimal, error) {
@@ -271,7 +298,32 @@ func (l *Ledger) Record(req domain.OrderRequest, status string, brokerOrderID *s
 	return err
 }
 
+// Backup は台帳を別ファイルに複製する。
+//
+// 台帳は「今月いくら発注済みか」の唯一の記録で、ブローカーから再構築できない。
+// 失うと次の実行で当月の予算を買い直す。単純なファイルコピーだと cron が
+// 書いている最中の中途半端な状態を写しうるので、SQLite の一貫した
+// スナップショット（wbcore/backup）を使う。
+func (l *Ledger) Backup(destination string) (string, error) {
+	return backup.BackupSQLite(l.path, destination)
+}
+
 func (l *Ledger) UpdateStatus(clientOrderID, status string, filledQty *decimal.Decimal, avgFillPrice *decimal.Decimal) error {
+	return l.UpdateStatusDetail(clientOrderID, status, filledQty, avgFillPrice, nil, nil)
+}
+
+// UpdateStatusDetail はブローカーに照会した結果で約定状況を更新する。
+//
+// brokerOrderID と amount は nil なら変えない。amount は「発注済み」として数える額
+// （株数 × 約定単価）の上書き。発注時は指値・成行の想定額で記録しているので、
+// 約定額が分かった時点で置き換えないと当月の残りの計算がずれる。
+func (l *Ledger) UpdateStatusDetail(
+	clientOrderID, status string,
+	filledQty *decimal.Decimal,
+	avgFillPrice *decimal.Decimal,
+	brokerOrderID *string,
+	amount *decimal.Decimal,
+) error {
 	nowUTC := clock.NowUTC().Format(time.RFC3339)
 	var filledStr *string
 	if filledQty != nil {
@@ -284,10 +336,19 @@ func (l *Ledger) UpdateStatus(clientOrderID, status string, filledQty *decimal.D
 		avgStr = &s
 	}
 
+	var amtStr *string
+	if amount != nil {
+		s := amount.String()
+		amtStr = &s
+	}
+
 	query := `UPDATE orders SET status = ?, filled_quantity = COALESCE(?, filled_quantity),
-		avg_fill_price = COALESCE(?, avg_fill_price), updated_at = ?
+		avg_fill_price = COALESCE(?, avg_fill_price),
+		broker_order_id = COALESCE(?, broker_order_id),
+		amount = COALESCE(?, amount),
+		updated_at = ?
 		WHERE client_order_id = ?;`
-	_, err := l.db.Exec(query, status, filledStr, avgStr, nowUTC, clientOrderID)
+	_, err := l.db.Exec(query, status, filledStr, avgStr, brokerOrderID, amtStr, nowUTC, clientOrderID)
 	return err
 }
 

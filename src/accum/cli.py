@@ -502,7 +502,7 @@ def run(
             yes=yes,
             config_dir=config_dir,
         )
-    except typer.Exit, typer.Abort:
+    except (typer.Exit, typer.Abort):
         raise
     except Exception as exc:
         # cron / systemd では誰も端末を見ていない。理由を通知してから落とす

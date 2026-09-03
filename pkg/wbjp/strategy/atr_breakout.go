@@ -5,124 +5,79 @@ import (
 	"math"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/indicators"
 )
 
-// ATRBreakout 戦略
+// ATRBreakout は ATR フィルタ付きドンチャン・ブレイクアウト戦略。
+//
+// 過去 N 日の高値を上抜けたら買い、安値を下抜けたら売り。ボラティリティが
+// 極端に小さい（＝だましになりやすい）局面は見送る。大きな相場の初動を
+// 捉えるが、勝率は低く、少数の大きな勝ちで稼ぐ。
 type ATRBreakout struct {
 	Channel     int
 	ATRPeriod   int
 	MinATRRatio float64
+
+	warmup int
 }
 
-func NewATRBreakout(channel, atrPeriod int, minATRRatio float64) *ATRBreakout {
+// NewATRBreakout はブレイクアウト戦略を作る。
+//
+// minATRRatio は ATR/終値 の下限。これ未満なら値動きが小さすぎるとみなして
+// 見送る（だましを減らすためのフィルタ）。
+func NewATRBreakout(channel, atrPeriod int, minATRRatio float64) (*ATRBreakout, error) {
 	if channel <= 0 {
 		channel = 20
 	}
 	if atrPeriod <= 0 {
 		atrPeriod = 14
 	}
-	if minATRRatio <= 0 {
-		minATRRatio = 0.005
+	if minATRRatio < 0 {
+		return nil, fmt.Errorf("min_atr_ratio は 0 以上: %g", minATRRatio)
 	}
 	return &ATRBreakout{
 		Channel:     channel,
 		ATRPeriod:   atrPeriod,
 		MinATRRatio: minATRRatio,
-	}
+		warmup:      maxInt(channel, atrPeriod) + 2,
+	}, nil
 }
 
-func (a *ATRBreakout) Name() string {
-	return "atr_breakout"
+func (a *ATRBreakout) Name() string    { return "atr_breakout" }
+func (a *ATRBreakout) WarmupBars() int { return a.warmup }
+func (a *ATRBreakout) Describe() string {
+	return fmt.Sprintf("%s(channel=%d, atr_period=%d)", a.Name(), a.Channel, a.ATRPeriod)
 }
 
-func (a *ATRBreakout) OnBars(symbol string, bars []domain.Bar) (*domain.Signal, error) {
-	n := len(bars)
-	warmup := a.Channel
-	if a.ATRPeriod > warmup {
-		warmup = a.ATRPeriod
-	}
-	warmup += 2
+func (a *ATRBreakout) OnBars(ctx *Context) ([]domain.Signal, error) {
+	return eachSymbol(ctx, a.warmup, a.evaluate), nil
+}
 
-	if n < warmup {
-		return nil, nil
-	}
+func (a *ATRBreakout) evaluate(symbol string, v View) *domain.Signal {
+	upper := last(v.DonchianHigh(a.Channel))
+	lower := last(v.DonchianLow(a.Channel))
+	atrValue := last(v.ATR(a.ATRPeriod))
+	closePrice := last(v.Closes())
 
-	highs := make([]float64, n)
-	lows := make([]float64, n)
-	closes := make([]float64, n)
-
-	for i, b := range bars {
-		h, _ := b.High.Float64()
-		l, _ := b.Low.Float64()
-		c, _ := b.Close.Float64()
-		highs[i] = h
-		lows[i] = l
-		closes[i] = c
+	if anyNaN(upper, lower, atrValue, closePrice) || closePrice <= 0 {
+		return nil
 	}
 
-	donchianHigh, err := indicators.DonchianHigh(highs, a.Channel)
-	if err != nil {
-		return nil, err
-	}
-	donchianLow, err := indicators.DonchianLow(lows, a.Channel)
-	if err != nil {
-		return nil, err
-	}
-	atrVals, err := indicators.ATR(highs, lows, closes, a.ATRPeriod)
-	if err != nil {
-		return nil, err
-	}
-
-	lastIdx := n - 1
-	upper := donchianHigh[lastIdx]
-	lower := donchianLow[lastIdx]
-	atrVal := atrVals[lastIdx]
-	closePrice := closes[lastIdx]
-
-	if math.IsNaN(upper) || math.IsNaN(lower) || math.IsNaN(atrVal) || closePrice <= 0 {
-		return nil, nil
-	}
-
-	atrRatio := atrVal / closePrice
+	atrRatio := atrValue / closePrice
 	if atrRatio < a.MinATRRatio {
-		return nil, nil // 値動きが小さすぎるため見送り
+		return nil // 値動きが乏しく、だましになりやすい
 	}
 
+	// ボラティリティが大きいほどブレイクの信頼度を上げる（上限あり）
 	confidence := math.Min(1.0, 0.4+atrRatio*20.0)
-	latestHigh := highs[lastIdx]
-	latestLow := lows[lastIdx]
+	meta := map[string]any{"upper": upper, "lower": lower, "atr": atrValue, "atr_ratio": atrRatio}
 
-	meta := map[string]any{
-		"upper":     upper,
-		"lower":     lower,
-		"atr":       atrVal,
-		"atr_ratio": atrRatio,
+	if last(v.Highs()) > upper {
+		return signal(a.Name(), symbol, 1.0, confidence,
+			fmt.Sprintf("%d日高値 %.1f を上抜け", a.Channel, upper), meta)
 	}
-
-	if latestHigh > upper {
-		sig, err := domain.NewSignal(
-			a.Name(),
-			symbol,
-			1.0,
-			confidence,
-			fmt.Sprintf("%d日高値 %.1f を上抜け", a.Channel, upper),
-			meta,
-		)
-		return &sig, err
+	if last(v.Lows()) < lower {
+		return signal(a.Name(), symbol, -1.0, confidence,
+			fmt.Sprintf("%d日安値 %.1f を下抜け", a.Channel, lower), meta)
 	}
-
-	if latestLow < lower {
-		sig, err := domain.NewSignal(
-			a.Name(),
-			symbol,
-			-1.0,
-			confidence,
-			fmt.Sprintf("%d日安値 %.1f を下抜け", a.Channel, lower),
-			meta,
-		)
-		return &sig, err
-	}
-
-	return nil, nil
+	return nil
 }

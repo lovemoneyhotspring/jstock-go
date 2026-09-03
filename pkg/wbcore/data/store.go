@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/history"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/storage"
 	"github.com/parquet-go/parquet-go"
 	"github.com/shopspring/decimal"
 )
@@ -182,4 +184,94 @@ func (s *BarStore) Write(symbol string, bars []domain.Bar) error {
 	}
 
 	return os.Rename(tmpPath, path)
+}
+
+// ReadMany は複数銘柄をまとめて読む。足が 1 本も無い銘柄は含めない
+// （「データが無い」と「値動きが無い」を区別できるようにするため）。
+func (s *BarStore) ReadMany(symbols []string, start, end string) (map[string][]domain.Bar, error) {
+	result := make(map[string][]domain.Bar, len(symbols))
+	for _, symbol := range symbols {
+		bars, err := s.Read(symbol, start, end)
+		if err != nil {
+			return nil, err
+		}
+		if len(bars) > 0 {
+			result[symbol] = bars
+		}
+	}
+	return result, nil
+}
+
+// LastDate は保存済みの最終取引日（YYYY-MM-DD）。未保存なら空文字。
+// 増分取得の起点に使う。
+func (s *BarStore) LastDate(symbol string) (string, error) {
+	bars, err := s.Read(symbol, "", "")
+	if err != nil || len(bars) == 0 {
+		return "", err
+	}
+	return bars[len(bars)-1].Date, nil
+}
+
+// Upsert は既存データに継ぎ足す。同じ日は新しい方（引数側）で上書きする。
+// 戻り値は保存後の総本数。
+//
+// 「後勝ち」なのは、直近の足が取引所側で後から訂正されることがあるため。
+func (s *BarStore) Upsert(symbol string, bars []domain.Bar) (int, error) {
+	incoming, err := NormalizeBars(bars)
+	if err != nil {
+		return 0, err
+	}
+	existing, err := s.Read(symbol, "", "")
+	if err != nil {
+		return 0, err
+	}
+	if len(incoming) == 0 {
+		return len(existing), nil
+	}
+	// NormalizeBars が重複を後勝ちで潰すので、後ろに置いた incoming が残る
+	merged, err := NormalizeBars(append(existing, incoming...))
+	if err != nil {
+		return 0, err
+	}
+	if err := s.Write(symbol, merged); err != nil {
+		return 0, err
+	}
+	return len(merged), nil
+}
+
+// Query は保存済みの全銘柄に SQL を投げる（DuckDB）。
+//
+// テーブル名 bars で全銘柄を横断できる。列は日足の正規スキーマに symbol を
+// 加えたもの。1 銘柄 1 ファイルの Parquet をそのまま読ませられるので、
+// 集計のためにデータを別の形へ複製せずに済む。
+//
+//	store.Query("SELECT symbol, count(*) AS n FROM bars GROUP BY symbol")
+func (s *BarStore) Query(query string) (history.Frame, error) {
+	symbols, err := s.Symbols()
+	if err != nil {
+		return history.Frame{}, err
+	}
+	if len(symbols) == 0 {
+		return history.NewFrame([]history.Column{}, nil), nil
+	}
+
+	db, err := storage.OpenDuckDB()
+	if err != nil {
+		return history.Frame{}, fmt.Errorf("DuckDB を開けません: %w", err)
+	}
+	defer db.Close()
+
+	pattern := strings.ReplaceAll(filepath.Join(s.root, "*.parquet"), "'", "''")
+	if _, err := db.Exec("CREATE VIEW bars AS SELECT * FROM read_parquet('" + pattern + "')"); err != nil {
+		return history.Frame{}, fmt.Errorf("bars ビューを作れません: %w", err)
+	}
+	return history.QueryFrame(db, query)
+}
+
+// Summary は保存状況の一覧（銘柄・本数・最初と最後の日）。データの穴を見つけるのに使う。
+func (s *BarStore) Summary() (history.Frame, error) {
+	return s.Query(
+		"SELECT symbol, count(*) AS bars, min(date) AS first, max(date) AS last " +
+			"FROM bars GROUP BY symbol ORDER BY symbol",
+	)
 }

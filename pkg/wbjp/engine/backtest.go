@@ -2,11 +2,12 @@ package engine
 
 import (
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/indicators"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/portfolio"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/risk"
@@ -78,6 +79,17 @@ func RunBacktest(
 	riskMgr := risk.NewRiskManager(setCfg.Risk, setCfg.Universe.Symbols)
 	stopBook := risk.NewStopBook(nil)
 
+	// サイジングはライブと同じ実装を使う。保有上限・手仕舞い閾値・
+	// 再サイジング抑制が検証側だけ効かない状態を作らない。
+	sizer, err := portfolio.NewSizer(setCfg.Sizing)
+	if err != nil {
+		return nil, err
+	}
+
+	// 指標は全履歴に対して一度だけ計算し、日ごとに切り詰めて見せる。
+	// 日ごとに足を切り出して計算し直すと、日数の二乗に比例して遅くなる。
+	universe := strategy.NewUniverse(allBars)
+
 	var allFills []domain.Fill
 	equityHistory := make([]decimal.Decimal, 0, len(dates))
 
@@ -107,82 +119,96 @@ func RunBacktest(
 		equityHistory = append(equityHistory, equity)
 		posMap, _ := pb.PositionsBySymbol()
 
-		// 4. 当日までの確定足スライスを準備
-		todayBars := make(map[string][]domain.Bar)
+		// 4. 当日までの確定足を戦略に見せる眺めを作る。
+		//
+		// 未来の足は構造として見えない（Context が as_of で切り詰める）ので、
+		// 先読みバイアスは規律ではなく仕組みで防がれる。
+		stratCtx := universe.At(today, posMap, equity)
+
 		atrMap := make(map[string]decimal.Decimal)
-		for sym, bars := range allBars {
-			var slice []domain.Bar
-			for _, b := range bars {
-				if b.Date <= today {
-					slice = append(slice, b)
-				}
-			}
-			if len(slice) == 0 {
+		for _, sym := range stratCtx.Symbols() {
+			v, ok := stratCtx.Bars(sym)
+			if !ok || v.Len() < 14 {
 				continue
 			}
-			todayBars[sym] = slice
-
-			if len(slice) >= 14 {
-				highs := make([]float64, len(slice))
-				lows := make([]float64, len(slice))
-				closes := make([]float64, len(slice))
-				for i, b := range slice {
-					h, _ := b.High.Float64()
-					l, _ := b.Low.Float64()
-					c, _ := b.Close.Float64()
-					highs[i] = h
-					lows[i] = l
-					closes[i] = c
-				}
-				atrVals, _ := indicators.ATR(highs, lows, closes, 14)
-				if len(atrVals) > 0 {
-					atrMap[sym] = decimal.NewFromFloat(atrVals[len(atrVals)-1])
-				}
+			if value := lastFiniteOf(v.ATR(14)); !math.IsNaN(value) {
+				atrMap[sym] = decimal.NewFromFloat(value)
 			}
 		}
 
 		// 5. ストップロスの管理と手仕舞い判定
-		stopBook.Ensure(posMap, atrMap, today, setCfg.Sizing.ATRStopMultiple, true)
+		//
+		// ライブ（cmd/wbjp/run.go）と同じ順序・同じ設定で処理する。
+		// ここが食い違うと、検証結果が実運用を予測しなくなる。
+		stopBook.EnsureWithOptions(posMap, atrMap, today,
+			risk.EnsureOptionsFrom(setCfg.Stops, setCfg.Sizing.ATRStopMultiple))
 		stopBook.UpdateTrailing(closePrices, atrMap)
-
-		targets := make(map[string]domain.TargetPosition)
-		for _, exitTarget := range stopBook.ExitTargets(closePrices) {
-			targets[exitTarget.Symbol] = exitTarget
-		}
+		stopBook.UpdateBreakeven(closePrices, setCfg.Stops.BreakevenAfterR)
 
 		// 6. 戦略のシグナル評価とサイジング
+		//
+		// ライブ（cmd/wbjp/run.go）と同じく、戦略には全銘柄をまとめて渡す。
+		signalMap := make(map[string]domain.CombinedSignal)
 		if dayIdx < len(dates)-1 { // 最終日は新規建て不要
-			for _, sym := range setCfg.Universe.Symbols {
-				if _, hasExit := targets[sym]; hasExit {
+			signalsBySymbol := make(map[string][]domain.Signal)
+			for _, s := range strats {
+				sigs, err := s.OnBars(stratCtx)
+				if err != nil {
 					continue
 				}
-				bars := todayBars[sym]
-				if len(bars) == 0 {
-					continue
-				}
-				lastBar := bars[len(bars)-1]
-
-				var sigs []domain.Signal
-				for _, s := range strats {
-					sig, err := s.OnBars(sym, bars)
-					if err == nil && sig != nil {
-						sigs = append(sigs, *sig)
-					}
-				}
-
-				combined := combineFunc(sym, sigs, weights)
-				if combined.Direction >= stratCfg.EntryThreshold {
-					target, err := portfolio.SizePosition(combined, equity, lastBar.Close, atrMap[sym], lotSizes[sym], setCfg.Sizing)
-					if err == nil {
-						targets[sym] = target
-					}
+				for _, sig := range sigs {
+					signalsBySymbol[sig.Symbol] = append(signalsBySymbol[sig.Symbol], sig)
 				}
 			}
+			for _, sym := range setCfg.Universe.Symbols {
+				if !stratCtx.HasBars(sym, 1) {
+					continue
+				}
+				signalMap[sym] = combineFunc(sym, signalsBySymbol[sym], weights)
+			}
+		}
+
+		sizingEquity := equity
+		if setCfg.Regime.Enabled {
+			regimeName, exposure := risk.RegimeExposure(setCfg.Regime, benchmarkInput(stratCtx, setCfg.Regime))
+			signalMap, sizingEquity = risk.ApplyRegime(regimeName, exposure, signalMap, posMap, equity)
+		}
+
+		strategyTargets := sizer.Size(signalMap, portfolio.SizingContext{
+			Equity:      sizingEquity,
+			BuyingPower: bal.BuyingPower,
+			Prices:      closePrices,
+			ATR:         atrMap,
+			LotSizes:    lotSizes,
+			Positions:   posMap,
+		}, stratCfg.EntryThreshold, stratCfg.ExitThreshold)
+
+		quantities := make(map[string]decimal.Decimal, len(posMap))
+		for sym, pos := range posMap {
+			quantities[sym] = pos.Quantity
+		}
+		stopTargets := stopBook.ExitTargets(closePrices)
+		stopTargets = append(stopTargets,
+			stopBook.TimeExitTargets(closePrices, today, setCfg.Stops.StaleExitDays, setCfg.Stops.MaxHoldDays)...)
+		stopTargets = append(stopTargets,
+			stopBook.TakeProfitTargets(closePrices, quantities, lotSizes,
+				setCfg.Stops.TakeProfitR, setCfg.Stops.TakeProfitFraction, marketrules.DefaultLotSize)...)
+
+		targets := make(map[string]domain.TargetPosition)
+		for _, t := range risk.ApplyStopPriority(strategyTargets, stopTargets) {
+			targets[t.Symbol] = t
 		}
 
 		// 7. リコンサイル
 		openOrders, _ := pb.GetOpenOrders()
-		reconciled, err := Reconcile(targets, posMap, openOrders, closePrices, lotSizes, domain.OrderTypeMarket, decimal.Zero, today)
+		plan, err := Reconcile(targets, posMap, openOrders, closePrices, lotSizes,
+			ReconcileSettings{
+				OrderType:         domain.OrderTypeMarket,
+				LimitOffset:       decimal.Zero,
+				TaxType:           domain.TaxAccountSpecific,
+				BlocksSameDaySale: true,
+			},
+			pb.BoughtToday(), today)
 		if err != nil {
 			continue
 		}
@@ -198,7 +224,7 @@ func RunBacktest(
 			RealizedPnLToday: decimal.Zero,
 		}
 
-		for _, res := range reconciled {
+		for _, res := range plan.Orders {
 			if res.Request == nil {
 				continue
 			}
@@ -230,11 +256,63 @@ func RunBacktest(
 		}
 	}
 
+	// 勝率は約定を FIFO で往復に突き合わせないと出せない（analysis.go）
+	winning, losing, winRate := TradeStats(allFills)
+
 	return &BacktestStats{
 		InitialEquity: initialCash,
 		FinalEquity:   finalEquity,
 		TotalReturn:   totalReturn,
 		MaxDrawdown:   maxDD,
 		TotalFills:    len(allFills),
+		WinningTrades: winning,
+		LosingTrades:  losing,
+		WinRate:       winRate,
 	}, nil
+}
+
+// benchmarkInput はバックテスト時点での地合い判定材料を組み立てる。
+//
+// ライブの regimeInput と同じ規則。指標が揃わなければ nil のままにして、
+// 判断できない日を弱気として扱わせる。
+func benchmarkInput(ctx *strategy.Context, cfg wbjpcfg.RegimeConfig) risk.RegimeInput {
+	var in risk.RegimeInput
+	if cfg.Benchmark == "" {
+		return in
+	}
+	v, ok := ctx.Bars(cfg.Benchmark)
+	if !ok || v.Len() == 0 {
+		return in
+	}
+
+	bars := v.Bars()
+	last := bars[len(bars)-1].Close
+	in.Close = &last
+
+	longMA := v.SMA(cfg.SMALong)
+	midMA := v.SMA(cfg.SMAMid)
+	if value := lastFiniteOf(longMA); !math.IsNaN(value) {
+		d := decimal.NewFromFloat(value)
+		in.LongMA = &d
+	}
+	if value := lastFiniteOf(midMA); !math.IsNaN(value) {
+		d := decimal.NewFromFloat(value)
+		in.MidMA = &d
+	}
+	idx := len(longMA) - 1 - cfg.SlopeLookback
+	if in.LongMA != nil && idx >= 0 && !math.IsNaN(longMA[idx]) {
+		slope := in.LongMA.Sub(decimal.NewFromFloat(longMA[idx]))
+		in.Slope = &slope
+	}
+	return in
+}
+
+// lastFiniteOf は並びの末尾にある有効な値。NaN しか無ければ NaN。
+func lastFiniteOf(series []float64) float64 {
+	for i := len(series) - 1; i >= 0; i-- {
+		if !math.IsNaN(series[i]) {
+			return series[i]
+		}
+	}
+	return math.NaN()
 }
