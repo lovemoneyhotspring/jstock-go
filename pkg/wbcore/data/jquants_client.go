@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -250,9 +251,46 @@ func truncate(s string, n int) string {
 	return s[:n]
 }
 
+// subscriptionCoverageRe は「契約プランが対応する最古の日付」を 400 応答の本文から拾う。
+//
+// 例: `{"message": "Your subscription covers the following dates: 2016-09-03 ~ . ..."}`
+// 新規上場銘柄など、保存済みの足が無い銘柄は増分同期の起点が無く、毎回
+// defaultSyncDays（約30年）ぶん遡って要求してしまう。プランの対応開始日より
+// 前を要求すると 400 になり、足が一切保存されないので次回も同じ日付で
+// 要求し続け、その銘柄だけ永久に同期に失敗する。
+var subscriptionCoverageRe = regexp.MustCompile(`subscription covers the following dates:\s*(\d{4}-\d{2}-\d{2})`)
+
+// earliestSubscriptionDate は 400 エラーの本文から対応開始日を取り出す（無ければ ""）。
+func earliestSubscriptionDate(err error) string {
+	if err == nil {
+		return ""
+	}
+	m := subscriptionCoverageRe.FindStringSubmatch(err.Error())
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
 // FetchDailyBars は 1 銘柄の日足を取る。symbol は "7203.T" でも "72030" でもよい。
 // start / end は "YYYY-MM-DD"（API には区切り無しで渡す）。
+//
+// 要求した start がプランの対応開始日より前で 400 になった場合は、その開始日に
+// 合わせて 1 度だけ取り直す。取り直さないと、保存済みの足が無い銘柄（新規上場・
+// 新規追加）は毎日同じ古い start で要求し続け、いつまでも同期できない。
 func (c *JQuantsClient) FetchDailyBars(symbol, start, end string) ([]domain.Bar, error) {
+	bars, err := c.fetchDailyBarsOnce(symbol, start, end)
+	if err == nil {
+		return bars, nil
+	}
+	earliest := earliestSubscriptionDate(err)
+	if earliest == "" || (start != "" && earliest <= start) {
+		return nil, err
+	}
+	return c.fetchDailyBarsOnce(symbol, earliest, end)
+}
+
+func (c *JQuantsClient) fetchDailyBarsOnce(symbol, start, end string) ([]domain.Bar, error) {
 	code, isIndex, err := ToJQuantsCode(symbol)
 	if err != nil {
 		return nil, err

@@ -142,3 +142,53 @@ func TestBulkDownloadWithoutURL(t *testing.T) {
 		t.Error("URL が無ければエラーにすべき")
 	}
 }
+
+// 保存済みの足が無い銘柄（新規上場・新規追加）は defaultSyncDays ぶん遡った
+// 古い start で要求してしまう。プランの対応開始日より前で 400 になったとき、
+// その日付に合わせて取り直せることを確認する（取り直さないと、次回同期でも
+// 同じ古い start を送り続け、その銘柄だけ永久に同期できない）。
+func TestFetchDailyBarsRetriesFromSubscriptionStart(t *testing.T) {
+	var seenFrom []string
+	client, _ := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		from := r.URL.Query().Get("from")
+		seenFrom = append(seenFrom, from)
+		if from == "19960908" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"message": "Your subscription covers the following dates: 2016-09-03 ~ . If you want more data, please check other plans:https://jpx-jquants.com/#dataset"}`)
+			return
+		}
+		if from != "20160903" {
+			t.Errorf("取り直した from が違う: %s", from)
+		}
+		fmt.Fprint(w, `{"data":[{"Date":"2016-09-05","Code":"1629","AdjC":1000}]}`)
+	})
+
+	bars, err := client.FetchDailyBars("1629.T", "1996-09-08", "2026-09-03")
+	if err != nil {
+		t.Fatalf("取り直しで成功するはず: %v", err)
+	}
+	if len(bars) != 1 || bars[0].Date != "2016-09-05" {
+		t.Fatalf("bars = %v", bars)
+	}
+	if len(seenFrom) != 2 || seenFrom[0] != "19960908" || seenFrom[1] != "20160903" {
+		t.Errorf("要求した from の履歴が違う: %v", seenFrom)
+	}
+}
+
+// 対応開始日が要求済みの start と同じかそれより前なら、取り直しても結果は
+// 変わらない（無限ループの元）ので、そのままエラーを返す。
+func TestFetchDailyBarsDoesNotRetryWhenNoEarlierData(t *testing.T) {
+	calls := 0
+	client, _ := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"message": "Your subscription covers the following dates: 2016-09-03 ~ . ..."}`)
+	})
+
+	if _, err := client.FetchDailyBars("1629.T", "2020-01-01", "2026-09-03"); err == nil {
+		t.Fatal("エラーになるはず")
+	}
+	if calls != 1 {
+		t.Errorf("取り直すべきでないのに %d 回呼ばれた", calls)
+	}
+}
