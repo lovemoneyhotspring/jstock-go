@@ -4,7 +4,7 @@
 #
 #   deploy/night-repair.sh                      # 通常実行（cron 用、6:00）
 #   DRY_RUN=1 deploy/night-repair.sh            # 異常判定・調査はするが push・PR 作成・Discord 送信をしない
-#   NIGHT_REPAIR_MODEL=sonnet deploy/night-repair.sh   # モデルを変えて試す（既定は fable）
+#   NIGHT_REPAIR_MODEL=sonnet deploy/night-repair.sh   # モデルを変えて試す（既定は opus）
 #
 # 設計の要点:
 #   - 異常が無ければ claude を起動しない（前段の jq 判定。API コストを抑える）
@@ -91,7 +91,7 @@ fi
 # 禁止事項として書いてある。1800 秒（30 分）で打ち切る。
 printf '%s' "$PROMPT" | timeout 1800 "$CLAUDE_BIN" -p \
   --agent night-repair \
-  --model "${NIGHT_REPAIR_MODEL:-fable}" \
+  --model "${NIGHT_REPAIR_MODEL:-opus}" \
   --permission-mode bypassPermissions \
   --disallowedTools "$DISALLOWED" \
   > "$REPORT" 2> "$REPORT_DIR/night-repair-$TODAY.err"
