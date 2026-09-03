@@ -17,6 +17,11 @@ log = get_logger(__name__)
 
 WEBHOOK_ENV = "WBJP_ALERT_WEBHOOK_URL"
 
+#: 送るときの User-Agent。**省略できない。** Discord は Cloudflare の後ろにいて、
+#: urllib の既定（``Python-urllib/3.x``）だと本文を見ずに 403 を返す。curl では
+#: 通るのに通知だけ届かない、という形で失敗するので必ず付ける。
+USER_AGENT = "wbjp/1.0 (+https://github.com/lovemoneyhotspring/jstock)"
+
 
 def alert(title: str, body: str = "") -> bool:
     """通知を送る。送れたら True。Webhook 未設定なら False（ログには残す）。"""
@@ -28,7 +33,10 @@ def alert(title: str, body: str = "") -> bool:
     # Slack は text、Discord は content を読む。両方入れておけばどちらでも通る
     payload = json.dumps({"text": text, "content": text}).encode()
     request = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+        method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:

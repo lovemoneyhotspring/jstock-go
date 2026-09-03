@@ -82,12 +82,15 @@ def test_alert_posts_json_to_the_webhook(monkeypatch: pytest.MonkeyPatch) -> Non
     def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
         sent["url"] = request.full_url
         sent["body"] = json.loads(request.data)
+        sent["ua"] = request.get_header("User-agent")
         return _Response()
 
     monkeypatch.setenv(notify.WEBHOOK_ENV, "https://hooks.example/abc")
     monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
     assert notify.alert("止まった", "詳細") is True
     assert sent["url"] == "https://hooks.example/abc"
+    # User-Agent を省くと Discord（Cloudflare）が本文を見ずに 403 を返す
+    assert sent["ua"] == notify.USER_AGENT
     assert sent["body"]["text"] == "[wbjp] 止まった\n詳細"  # type: ignore[index]
 
 
