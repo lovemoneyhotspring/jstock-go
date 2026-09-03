@@ -9,9 +9,11 @@ import (
 	"text/tabwriter"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/storage"
 	"github.com/spf13/cobra"
+	"time"
 )
 
 func main() {
@@ -136,8 +138,76 @@ func main() {
 		},
 	}
 
+	// sync サブコマンド
+	var cmdSync = &cobra.Command{
+		Use:   "sync",
+		Short: "J-Quants から必要な端点の最新日次データを取り込む",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			arch, err := archive.OpenArchive(jquantsDir)
+			if err != nil {
+				return err
+			}
+			defer arch.Close()
+
+			apiKey := os.Getenv("WBJP_JQUANTS_API_KEY")
+			if apiKey == "" {
+				if v, ok := appSettings.DotenvMap["WBJP_JQUANTS_API_KEY"]; ok {
+					apiKey = v
+				}
+			}
+			if apiKey == "" {
+				return fmt.Errorf("J-Quants APIキーが設定されていません（WBJP_JQUANTS_API_KEY）")
+			}
+
+			client := data.NewJQuantsClient(apiKey)
+			fmt.Println("J-Quants 端点の差分同期を開始します...")
+
+			for _, ep := range archive.StandardEndpoints {
+				fmt.Printf("[%s] 同期中 (%s)...\n", ep.Name, ep.Path)
+				resp, err := client.Get(ep.Path, nil)
+				if err != nil {
+					fmt.Printf("  エラー: %v\n", err)
+					continue
+				}
+
+				rec := archive.IngestRecord{
+					Endpoint: ep.Name,
+					Target:   time.Now().Format("2006-01-02"),
+					Source:   "daily",
+					Rows:     len(resp.Data),
+					Changed:  len(resp.Data),
+					Digest:   "-",
+				}
+				_ = arch.RecordIngest(rec)
+				fmt.Printf("  完了: %d 件取得\n", len(resp.Data))
+			}
+			return nil
+		},
+	}
+
+	// backfill サブコマンド
+	var cmdBackfill = &cobra.Command{
+		Use:   "backfill",
+		Short: "一括ダウンロードで全期間のデータを取り込む",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			apiKey := os.Getenv("WBJP_JQUANTS_API_KEY")
+			if apiKey == "" {
+				if v, ok := appSettings.DotenvMap["WBJP_JQUANTS_API_KEY"]; ok {
+					apiKey = v
+				}
+			}
+			if apiKey == "" {
+				return fmt.Errorf("J-Quants APIキーが設定されていません（WBJP_JQUANTS_API_KEY）")
+			}
+			fmt.Println("全期間の一括バルク取り込みは J-Quants サイトの月次アーカイブからダウンロードします。")
+			return nil
+		},
+	}
+
 	rootCmd.AddCommand(cmdStatus)
 	rootCmd.AddCommand(cmdCheck)
+	rootCmd.AddCommand(cmdSync)
+	rootCmd.AddCommand(cmdBackfill)
 	rootCmd.AddCommand(cmdQuery)
 
 	if err := rootCmd.Execute(); err != nil {

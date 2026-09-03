@@ -43,6 +43,10 @@ func buildStrategies(stratCfg *wbjpcfg.StrategiesConfig) ([]strategy.Strategy, m
 			strats = append(strats, strategy.NewATRBreakout(20, 14, 0.005))
 		case "trend_pullback":
 			strats = append(strats, strategy.NewTrendPullback())
+		case "rsi_pullback":
+			strats = append(strats, strategy.NewRSIPullback())
+		case "momentum_rank":
+			strats = append(strats, strategy.NewMomentumRank())
 		}
 	}
 	return strats, weights
@@ -139,6 +143,128 @@ func main() {
 					sym, st.StopPrice, st.EntryPrice, st.ATRMultiple, hc, st.CreatedOn)
 			}
 			w.Flush()
+			return nil
+		},
+	}
+
+	// strategies サブコマンド
+	var cmdStrategies = &cobra.Command{
+		Use:   "strategies",
+		Short: "使える戦略（ストラテジー）の一覧",
+		Run: func(cmd *cobra.Command, args []string) {
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "名前\t説明")
+			fmt.Fprintln(w, "sma_cross\t移動平均クロス（順張りトレンドフォロー）")
+			fmt.Fprintln(w, "rsi_reversion\tRSI 逆張り（レンジ相場・買われすぎ売られすぎ反転）")
+			fmt.Fprintln(w, "atr_breakout\tドンチャンチャネル上抜け/下抜け ＋ ATR ボラティリティフィルタ")
+			fmt.Fprintln(w, "trend_pullback\t長期上昇トレンド ＋ 出来高枯渇押し目 ＋ 反発ブレイクアウト")
+			fmt.Fprintln(w, "rsi_pullback\t長期上昇トレンド ＋ RSI(3) 短期売られすぎ反発（勝率重視）")
+			fmt.Fprintln(w, "momentum_rank\t過去6ヶ月・12ヶ月の中期モメンタム順位（損益比重視）")
+			w.Flush()
+		},
+	}
+
+	// orders サブコマンド
+	var cmdOrders = &cobra.Command{
+		Use:   "orders",
+		Short: "未約定の注文一覧を client_order_id 付きで表示する",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			setCfg, err := wbjpcfg.LoadSettingsFile(configDirFlag)
+			if err != nil {
+				return err
+			}
+
+			var b broker.Broker
+			if setCfg.Execution.Broker == "paper" {
+				b = broker.NewPaperBroker(decimal.Zero, "open")
+			} else {
+				creds, err := credentials.LoadTachibanaCredentials(appSettings.Env, appSettings.DotenvMap)
+				if err != nil {
+					return err
+				}
+				b, err = broker.NewTachibanaBroker(appSettings.Env, creds, appSettings.StateDir)
+				if err != nil {
+					return err
+				}
+			}
+
+			openOrders, err := b.GetOpenOrders()
+			if err != nil {
+				return err
+			}
+
+			if len(openOrders) == 0 {
+				fmt.Printf("未約定注文はありません (%s)\n", appSettings.Env)
+				return nil
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "注文ID\t銘柄\t売買\t種別\t数量\t未約定\t指値\t状態")
+			for _, o := range openOrders {
+				lp := "成行"
+				if o.LimitPrice != nil {
+					lp = o.LimitPrice.String()
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					o.ClientOrderID, o.Symbol, o.Side, o.OrderType, o.Quantity, o.RemainingQuantity(), lp, o.Status)
+			}
+			w.Flush()
+			return nil
+		},
+	}
+
+	// cancel サブコマンド
+	var cmdCancel = &cobra.Command{
+		Use:   "cancel [client_order_id]",
+		Short: "未約定の注文を取り消す",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			clientOrderID := args[0]
+			setCfg, err := wbjpcfg.LoadSettingsFile(configDirFlag)
+			if err != nil {
+				return err
+			}
+
+			var b broker.Broker
+			if setCfg.Execution.Broker == "paper" {
+				b = broker.NewPaperBroker(decimal.Zero, "open")
+			} else {
+				creds, err := credentials.LoadTachibanaCredentials(appSettings.Env, appSettings.DotenvMap)
+				if err != nil {
+					return err
+				}
+				b, err = broker.NewTachibanaBroker(appSettings.Env, creds, appSettings.StateDir)
+				if err != nil {
+					return err
+				}
+			}
+
+			if err := b.Cancel(clientOrderID, nil); err != nil {
+				return fmt.Errorf("取消に失敗しました: %w", err)
+			}
+
+			fmt.Printf("取消を送信しました: %s\n", clientOrderID)
+			return nil
+		},
+	}
+
+	// backup サブコマンド
+	var cmdBackup = &cobra.Command{
+		Use:   "backup [destination]",
+		Short: "売買データベース（SQLite）を別ファイルに複製する",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dest := fmt.Sprintf("%s.backup-%s", appSettings.DBPath(), time.Now().Format("20060102-150405"))
+			if len(args) > 0 {
+				dest = args[0]
+			}
+			srcData, err := os.ReadFile(appSettings.DBPath())
+			if err != nil {
+				return fmt.Errorf("DB読み込み失敗: %w", err)
+			}
+			if err := os.WriteFile(dest, srcData, 0644); err != nil {
+				return fmt.Errorf("バックアップ作成失敗: %w", err)
+			}
+			fmt.Printf("データベースをバックアップしました: %s\n", dest)
 			return nil
 		},
 	}
@@ -569,6 +695,10 @@ func main() {
 	rootCmd.AddCommand(cmdStops)
 	rootCmd.AddCommand(cmdScreen)
 	rootCmd.AddCommand(cmdSync)
+	rootCmd.AddCommand(cmdStrategies)
+	rootCmd.AddCommand(cmdOrders)
+	rootCmd.AddCommand(cmdCancel)
+	rootCmd.AddCommand(cmdBackup)
 	rootCmd.AddCommand(cmdBacktest)
 	rootCmd.AddCommand(cmdRun)
 
