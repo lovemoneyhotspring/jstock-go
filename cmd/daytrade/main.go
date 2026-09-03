@@ -15,6 +15,7 @@ import (
 	"os"
 
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -25,10 +26,7 @@ func main() {
 		// 実行の記録（ログ・ダイジェスト）はどのサブコマンドでも要るので、
 		// 入口で 1 回だけ起こして出口で 1 回だけ畳む。
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			setupRun(cmd.Name())
-		},
-		PersistentPostRun: func(cmd *cobra.Command, args []string) {
-			teardownRun()
+			run = cli.StartRun("daytrade", appSettings, cmd.Name())
 		},
 	}
 
@@ -45,8 +43,10 @@ func main() {
 	rootCmd.AddCommand(newQuotesCmd())
 	rootCmd.AddCommand(newBacktestCmd())
 
-	if err := rootCmd.Execute(); err != nil {
-		teardownRun()
+	// os.Exit は defer を飛ばすので、ダイジェストはここで必ず書き出す
+	err := rootCmd.Execute()
+	run.Finish(err)
+	if err != nil {
 		os.Exit(1)
 	}
 }
