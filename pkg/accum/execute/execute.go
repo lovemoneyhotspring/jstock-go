@@ -20,6 +20,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/notify"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/reconcile"
 	"github.com/shopspring/decimal"
 )
 
@@ -363,9 +364,15 @@ func RunAccumulation(
 	//（AI が最初に読む。届いていた／届いていなかった／決められない、の件数）
 	if r := synced.Resolved; r.Attributed+r.NotSent+r.Ambiguous+r.TooRecent > 0 {
 		digest.Note(r.Fields("pending"))
-		for _, line := range r.Details {
-			logger.Info("accum.pending_resolved", "送信結果不明の注文: "+line)
+	}
+	for _, r := range synced.Resolutions {
+		fields := r.Fields()
+		if r.Outcome == reconcile.Ambiguous {
+			fields["fix"] = strings.Replace(fields["fix"].(string), "<app>", "accum", 1)
+			logger.Error("accum.pending_ambiguous", "送信結果不明の注文を決められない（PENDING のまま）", fields)
+			continue
 		}
+		logger.Info("accum.pending_resolved", "送信結果不明の注文を判定: "+string(r.Outcome), fields)
 	}
 	// 照会できなかった注文は「発注済み」に数えたまま保留してある。次の run が
 	// もう一度判定する。決められないものはダイジェストの異常として残す（AI が読む）。

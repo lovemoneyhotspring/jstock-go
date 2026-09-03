@@ -35,6 +35,7 @@ func main() {
 	rootCmd.AddCommand(newHistoryCmd())
 	rootCmd.AddCommand(newEvaluateCmd())
 	rootCmd.AddCommand(newBasketCmd())
+	rootCmd.AddCommand(cli.NewPendingCmd("accum", appSettings.AccumDBPath))
 
 	// os.Exit は defer を飛ばすので、ダイジェストはここで必ず書き出す。
 	// 「今日ちゃんと動いたか」を AI が 1 ファイルで読めることが目的なので、

@@ -37,6 +37,7 @@ func main() {
 	rootCmd.AddCommand(newRunsCmd())
 	rootCmd.AddCommand(newDataCmd())
 	rootCmd.AddCommand(newCredentialsCmd())
+	rootCmd.AddCommand(cli.NewPendingCmd("wbjp", appSettings.DBPath))
 
 	// os.Exit は defer を飛ばすので、ダイジェストはここで必ず書き出す
 	err := rootCmd.Execute()

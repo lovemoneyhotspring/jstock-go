@@ -102,8 +102,8 @@ func checkOpenOrders(cfg *accumcfg.AccumConfig, led *ledger.Ledger) error {
 	for _, change := range synced.Changes {
 		fmt.Println("更新: " + change.Describe())
 	}
-	// 照会できなかった注文は台帳をそのままにしてある。人が口座を見て
-	// 判断する必要があるので、黙って「変化なし」にはしない。
+	// 照会できなかった注文は台帳をそのままにしてある。次の run が再判定する。
+	// 決められないもの（ambiguous）はログの候補を見て `accum pending resolve` で直す。
 	for _, u := range synced.Unresolved {
 		fmt.Println("保留（照会できず）: " + u.Describe())
 	}
@@ -114,7 +114,7 @@ func checkOpenOrders(cfg *accumcfg.AccumConfig, led *ledger.Ledger) error {
 		fmt.Println("変化のあった注文はありません")
 	}
 	if len(synced.Unresolved) > 0 {
-		return fmt.Errorf("%d 件の注文を照会できませんでした", len(synced.Unresolved))
+		return fmt.Errorf("%d 件の注文を判定できませんでした（次の run で再判定。決められないものは `accum pending resolve`）", len(synced.Unresolved))
 	}
 	return nil
 }

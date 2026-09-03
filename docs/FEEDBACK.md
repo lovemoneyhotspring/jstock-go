@@ -159,6 +159,33 @@ DRY_RUN=1 deploy/daily-report.sh 2026-09-02   # 日付を指定
 一覧を照会できないときは判定せず、実弾を出さない（`*.pending_unresolved`）。cron の次の回で再判定する。
 
 ダイジェストには `pending_attributed` / `pending_unsent` / `pending_ambiguous` / `pending_too_recent` の
-件数が載る。AI が見るべきは **`pending_ambiguous` が 2 回以上の実行にまたがって続く**ときだけ——
-口座の注文一覧（`wbjp orders` / `accum orders --check` / 層 3 の `*.pending_ambiguous` 行）で
-どの注文か特定し、台帳の該当行を `UNSENT` か注文番号付きの状態に直す提案を書く。
+件数が載る。AI が動くのは **`pending_ambiguous` が 2 回以上の実行にまたがって続く**ときだけ。
+
+### 自己修復の手順（AI が実行する）
+
+`ambiguous` のログ行（`code` = `daytrade.pending_ambiguous` / `wbjp.pending_ambiguous` / `accum.pending_ambiguous`）には
+判断に要るものが全部入っている——台帳側の注文（`client_order_id` / `symbol` / `side` / `trade` / `quantity` / `placed_at`）、
+ブローカー側の未帰属の候補（`candidates[]`: `broker_order_id` / `quantity` / `trade` / `status` / `filled` / `created_at`）、
+そして実行する修復コマンドの雛形（`fix`）。
+
+```bash
+# 1. 何が決められなかったか（run_id は digest の anomalies の行から）
+jq -c 'select(.code | test("pending_ambiguous"))' state/logs/daytrade-prod.jsonl | tail -3
+
+# 2. いま PENDING のまま残っているもの（3 アプリ共通の形）
+bin/daytrade pending --json      # bin/wbjp pending --json / bin/accum pending --json
+
+# 3. 候補と突き合わせて決める。届いていたなら注文番号を帰属、届いていないなら UNSENT
+bin/daytrade pending resolve <client_order_id> --attribute <broker_order_id> --status FILLED --filled 100 --price 1234
+bin/daytrade pending resolve <client_order_id> --unsent
+```
+
+判断の規則:
+- 候補の `quantity` が台帳の `quantity` と一致し、`created_at` が `placed_at` の直後 → その候補に **帰属**
+- 候補の数量が違い、`created_at` が `placed_at` より前 → 別の戦略（手動・別 cron）の注文。台帳の注文は **`UNSENT`**
+- 候補のどれも説明がつかない → `UNSENT` にせず、その日のその銘柄は触らない（`PENDING` のまま翌日の verify で建玉を突き合わせる）
+
+`pending resolve` は `PENDING` の行しか触らない（先に自動判定や約定が入っていれば拒否する）ので、
+2 回実行しても壊れない。直したあとは通常の cron がそのまま続く——`UNSENT` なら次の実行で種を変えて送り直し、
+帰属なら close / verify が注文番号で照会する。**daily-report サブエージェントは読むだけ**なので、
+修復は Claude Code のセッション（人が起動する、または cron が `claude -p` で呼ぶ）が行う。

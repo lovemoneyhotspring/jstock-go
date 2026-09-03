@@ -77,6 +77,8 @@ type SyncResult struct {
 	Unresolved []UnresolvedOrder
 	// Resolved は送信結果不明（PENDING）の注文を当日の注文一覧で判定した集計。
 	Resolved reconcile.Summary
+	// Resolutions はその 1 件ごとの判定（ログに項目付きで残す）。
+	Resolutions []reconcile.Resolution
 }
 
 // SyncOrderStatus は結果が確定していない注文をブローカーに照会し、台帳を更新する。
@@ -277,5 +279,6 @@ func resolveUnconfirmed(led *ledger.Ledger, b broker.Broker, rows []ledger.Ledge
 		}
 	}
 	result.Resolved = reconcile.Summarize(resolutions)
+	result.Resolutions = append(result.Resolutions, resolutions...)
 	return nil
 }
