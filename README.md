@@ -97,7 +97,7 @@ wbjp backtest --config-dir config --from 2023-01-01
 ```bash
 accum strategies          # 使える戦略
 accum list                # 戦略と銘柄の対応
-accum sync                # 足を取る（約30年ぶん。増額は暴落局面で効くため長い履歴が要る）
+accum sync                # 足を取る（日本株は J-Quants の配信範囲ぶん＝約10年。米国指数は約30年）
 accum plan                # 直近の投下額
 accum backtest            # 銘柄ごとの結果（対照群＝同額を均等に投じた場合）
 accum compare 1305.T      # 登録済み戦略を1銘柄で横並び
