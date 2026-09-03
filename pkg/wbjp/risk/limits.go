@@ -118,7 +118,37 @@ func (r *RiskManager) Check(req domain.OrderRequest, ctx RiskContext, preview *d
 		}
 	}
 
-	// 10. 見積り乖離チェック
+	// 10. 総エクスポージャ上限（買いのみ）
+	//
+	// 1銘柄ごとの比率（9）を守っても、上限いっぱいの銘柄を並べれば
+	// 全額が株になる。暴落時に現金が無い状態を避けるため、建玉合計にも
+	// 蓋をする。判定は「約定分＋発注中の全銘柄＋今回」で見る。板に残る
+	// 買い注文を数えないと、全部約定した瞬間に上限を突破する。
+	// 上限が 0（＝未設定の構造体リテラル）のときは判定しない。設定ファイル
+	// 経由なら既定 0.90 が入るので、0 は「書き忘れ」であって「全建玉禁止」
+	// ではない。
+	if req.Side == domain.SideBuy && ctx.Equity.GreaterThan(decimal.Zero) &&
+		r.config.MaxGrossExposure.GreaterThan(decimal.Zero) {
+		gross := decimal.Zero
+		for _, pos := range ctx.Positions {
+			gross = gross.Add(pos.MarketValue())
+		}
+		for _, pending := range ctx.PendingValue {
+			gross = gross.Add(pending)
+		}
+		gross = gross.Add(r.notional(req, ctx))
+		ratio := gross.Div(ctx.Equity)
+
+		if ratio.GreaterThan(r.config.MaxGrossExposure) {
+			return RiskDecision{Approved: false, Reason: fmt.Sprintf(
+				"%s: 建玉合計の想定比率 %.1f%% が総エクスポージャ上限 %.1f%% を超える",
+				req.Symbol,
+				ratio.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+				r.config.MaxGrossExposure.Mul(decimal.NewFromInt(100)).InexactFloat64())}
+		}
+	}
+
+	// 11. 見積り乖離チェック
 	if preview != nil && req.LimitPrice != nil {
 		expected := req.LimitPrice.Mul(req.Quantity).Round(0)
 		diff := preview.EstimatedCost.Sub(expected).Abs()
