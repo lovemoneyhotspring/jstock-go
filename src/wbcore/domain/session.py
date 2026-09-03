@@ -43,5 +43,5 @@ def parse_time(value: Any, label: str = "time") -> dt.time:
     try:
         hour, minute = str(value).split(":")
         return dt.time(int(hour), int(minute))
-    except ValueError, AttributeError:
+    except (ValueError, AttributeError):
         raise ValueError(f"{label} は HH:MM 形式で指定します: {value!r}") from None

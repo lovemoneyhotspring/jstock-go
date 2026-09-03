@@ -138,7 +138,7 @@ class RedactingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             message = record.getMessage()
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return True
         redacted = redact(message)
         if redacted != message:
