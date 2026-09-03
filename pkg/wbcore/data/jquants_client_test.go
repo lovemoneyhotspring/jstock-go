@@ -96,8 +96,7 @@ func TestGetRejects4xx(t *testing.T) {
 
 func TestBulkListAndDownload(t *testing.T) {
 	payload := []byte("Date,Code\n2025-01-06,1\n")
-	var files *httptest.Server
-	files = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	files := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("x-api-key") != "" {
 			t.Error("署名付き URL に API キーを送ってはいけない")
 		}

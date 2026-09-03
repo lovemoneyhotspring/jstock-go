@@ -361,7 +361,7 @@ func (a *Archive) upsertMonth(ep Endpoint, month string, new *Frame) (int, error
 		return 0, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return 0, fmt.Errorf("Parquet の差し替えに失敗しました %s: %w", path, err)
+		return 0, fmt.Errorf("保管庫の Parquet の差し替えに失敗しました %s: %w", path, err)
 	}
 	return changed, nil
 }

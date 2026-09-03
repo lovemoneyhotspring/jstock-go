@@ -16,8 +16,6 @@ func month(s string) time.Time {
 	return t
 }
 
-func ptr(t time.Time) *time.Time { return &t }
-
 // row は日付・基本・増額だけを持つ計画行。
 func row(date string, base, extra int64) plan.PlanRow {
 	return plan.PlanRow{
