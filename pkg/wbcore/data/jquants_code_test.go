@@ -3,6 +3,7 @@ package data
 import (
 	"testing"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/shopspring/decimal"
 )
 
@@ -92,18 +93,17 @@ func TestDailyBarRawIndexColumns(t *testing.T) {
 }
 
 func TestCodeMatches(t *testing.T) {
-	stored := "72030"
-	if !codeMatches(&stored, "7203") {
+	stored := archive.RowViewOf(map[string]string{"Code": "72030"})
+	if !codeMatches(stored, "7203") {
 		t.Error("4 桁の入力が 5 桁の保存に一致しません")
 	}
-	if !codeMatches(&stored, "72030") {
+	if !codeMatches(stored, "72030") {
 		t.Error("5 桁どうしが一致しません")
 	}
-	other := "13060"
-	if codeMatches(&other, "7203") {
+	if codeMatches(archive.RowViewOf(map[string]string{"Code": "13060"}), "7203") {
 		t.Error("別の銘柄に一致してしまいました")
 	}
-	if codeMatches(nil, "7203") {
-		t.Error("nil に一致してしまいました")
+	if codeMatches(archive.RowViewOf(nil), "7203") {
+		t.Error("Code が無い行に一致してしまいました")
 	}
 }

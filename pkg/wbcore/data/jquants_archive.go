@@ -20,6 +20,7 @@ const calendarLookback = 14
 // 読めない）で nil を渡して API だけで動かせるようにするため。
 type BarArchive interface {
 	Read(ep archive.Endpoint, start, end time.Time) (*archive.Frame, error)
+	ReadWhere(ep archive.Endpoint, opt archive.ReadOptions) (*archive.Frame, error)
 	Upsert(ep archive.Endpoint, f *archive.Frame) (int, error)
 }
 
@@ -41,7 +42,16 @@ func archiveDailyBars(
 	if err != nil {
 		return nil, false
 	}
-	stored, err := arch.Read(ep, start, end)
+	// 1 銘柄ぶんしか要らないので、銘柄と列を保管庫の読み出しに押し下げる。
+	// 全銘柄を載せてから捨てると、2 年ぶんで数 GB を一度に抱えることになる。
+	stored, err := arch.ReadWhere(ep, archive.ReadOptions{
+		Start:   start,
+		End:     end,
+		Columns: barColumns(isIndex),
+		Keep: func(row archive.RowView) bool {
+			return codeMatches(row, code)
+		},
+	})
 	if err != nil {
 		// 壊れたファイル等。API に倒す
 		fmt.Fprintf(os.Stderr, "[warn] アーカイブを読めません（%s）: %v\n", ep.Path, err)
@@ -59,9 +69,7 @@ func archiveDailyBars(
 	var bars []domain.Bar
 	haveLast := ""
 	for i := 0; i < stored.Height(); i++ {
-		if !codeMatches(stored.Get(i, "Code"), code) {
-			continue
-		}
+		// 銘柄は ReadWhere の Keep で絞ってあるので、ここでは見ない
 		date := stored.Get(i, ep.DateColumn)
 		if date == nil || *date == "" {
 			continue
@@ -78,18 +86,25 @@ func archiveDailyBars(
 	return bars, true
 }
 
+// barColumns は足を組むのに要る列。保管庫の読み出しで射影に使う
+// （bars は 15 列あるが、足に使うのは半分ほど）。
+func barColumns(isIndex bool) []string {
+	if isIndex {
+		return []string{"Code", "O", "H", "L", "C"}
+	}
+	return []string{"Code", "AdjO", "AdjH", "AdjL", "AdjC", "AdjVo"}
+}
+
 // codeMatches は入力の 4 桁コード（7203）と保存の 5 桁（72030）を突き合わせる。
-func codeMatches(stored *string, code string) bool {
-	if stored == nil {
-		return false
-	}
+// 保管庫の読み出し中に呼ばれるので、値を文字列に複製せずに比べる。
+func codeMatches(row archive.RowView, code string) bool {
 	if len(code) == 5 {
-		return *stored == code
+		return row.Equal("Code", code)
 	}
-	if len(*stored) < 4 {
+	if len(code) < 4 {
 		return false
 	}
-	return (*stored)[:4] == code
+	return row.HasPrefix("Code", code)
 }
 
 func archiveRowToBar(f *archive.Frame, i int, date, symbol string, isIndex bool) domain.Bar {
