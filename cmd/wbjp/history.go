@@ -1,26 +1,13 @@
 package main
 
 import (
-	"fmt"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"os"
-	"time"
 
 	corehistory "github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/history"
 	wbjphistory "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/history"
 	"github.com/spf13/cobra"
 )
-
-// parseDay は YYYY-MM-DD を UTC の 0 時にする。空ならゼロ値（＝制限なし）。
-func parseDay(text string) (time.Time, error) {
-	if text == "" {
-		return time.Time{}, nil
-	}
-	day, err := time.ParseInLocation("2006-01-02", text, time.UTC)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("日付は YYYY-MM-DD で指定してください: %s", text)
-	}
-	return day, nil
-}
 
 func newHistoryCmd() *cobra.Command {
 	var (
@@ -42,15 +29,15 @@ func newHistoryCmd() *cobra.Command {
 			}
 
 			// --date は「その日だけ」の省略記法。--from/--to より強い
-			day, err := parseDay(date)
+			day, err := cli.ParseDay(date)
 			if err != nil {
 				return err
 			}
-			from, err := parseDay(start)
+			from, err := cli.ParseDay(start)
 			if err != nil {
 				return err
 			}
-			to, err := parseDay(end)
+			to, err := cli.ParseDay(end)
 			if err != nil {
 				return err
 			}

@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync"
 	"text/tabwriter"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
@@ -23,26 +24,30 @@ type session struct {
 	ingestor *archive.Ingestor
 	ledger   *archive.Ledger
 	logger   *logging.Logger
+	run      *cli.Run
+	once     sync.Once
 }
 
+// close は台帳を閉じ、ダイジェストを書き出す。何度呼んでも 1 回しか畳まない。
 func (s *session) close() {
-	if s.ledger != nil {
-		_ = s.ledger.Close()
-	}
-	if s.logger != nil {
-		_ = s.logger.Close()
-	}
+	s.once.Do(func() {
+		if s.ledger != nil {
+			_ = s.ledger.Close()
+		}
+		s.run.Finish(nil)
+	})
 }
 
 // newSession は保管庫・台帳・（要れば）API クライアントを組み立てる。
 // status / check のように手元だけ見るコマンドは API キーが無くても動く。
 func newSession(command string, needClient bool) (*session, error) {
-	runID := logging.NewRunID()
-	logger, _ := logging.NewLogger("jquants", string(appSettings.Env), runID, command, appSettings.LogDir)
+	run := cli.StartRun("jquants", appSettings, command)
+	runID, logger := run.RunID, run.Logger
 
 	arch := archive.NewArchive(jquantsDir)
 	ledger, err := archive.OpenLedger(arch.LedgerPath())
 	if err != nil {
+		run.Finish(err)
 		return nil, err
 	}
 	var client archive.Client
@@ -50,6 +55,7 @@ func newSession(command string, needClient bool) (*session, error) {
 		jq, err := data.NewJQuantsClientFromEnv(appSettings.DotenvMap)
 		if err != nil {
 			_ = ledger.Close()
+			run.Finish(err)
 			return nil, err
 		}
 		client = jq
@@ -58,6 +64,7 @@ func newSession(command string, needClient bool) (*session, error) {
 		ingestor: archive.NewIngestor(client, arch, ledger, runID, logger),
 		ledger:   ledger,
 		logger:   logger,
+		run:      run,
 	}, nil
 }
 
@@ -102,12 +109,4 @@ func printFailures(failures []archive.Failure, note string) bool {
 	}
 	fmt.Fprintf(os.Stderr, "%d 件の取り込みに失敗しました（%s）\n", len(failures), note)
 	return true
-}
-
-// dash は空文字を「—」に置き換える（表の見た目を揃えるため）。
-func dash(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "—"
-	}
-	return s
 }

@@ -48,7 +48,6 @@ func newSyncCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer logger.Close()
 
 			total, failures := syncAccumBars(cfg, logger, days, force, true)
 

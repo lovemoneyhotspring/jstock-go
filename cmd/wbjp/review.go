@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"os"
 	"text/tabwriter"
 
@@ -24,11 +25,11 @@ func newReviewCmd() *cobra.Command {
 		Long: "選定の妥当性を日ごとに見る。採用・次点・圏外の平均リターンを並べる。\n\n" +
 			"材料は wbjp evaluate が積んだ履歴。",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			from, err := parseDay(start)
+			from, err := cli.ParseDay(start)
 			if err != nil {
 				return err
 			}
-			to, err := parseDay(end)
+			to, err := cli.ParseDay(end)
 			if err != nil {
 				return err
 			}

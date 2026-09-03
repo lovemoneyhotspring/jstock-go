@@ -4,9 +4,8 @@ import (
 	"fmt"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
-	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 )
 
@@ -16,14 +15,7 @@ func connectBroker() (broker.Broker, error) {
 	if err != nil {
 		return nil, err
 	}
-	if setCfg.Execution.Broker == "paper" {
-		return broker.NewPaperBroker(decimal.Zero, "open"), nil
-	}
-	creds, err := credentials.LoadTachibanaCredentials(appSettings.Env, appSettings.DotenvMap)
-	if err != nil {
-		return nil, err
-	}
-	return broker.NewTachibanaBroker(appSettings.Env, creds, appSettings.StateDir)
+	return cli.ConnectBroker(setCfg.Execution.Broker, appSettings)
 }
 
 func newOrderCmd() *cobra.Command {
