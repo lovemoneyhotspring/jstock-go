@@ -44,3 +44,6 @@ htmlcov/
 
 # Webull SDK が勝手に作るログ（マスクを通らないため必ず除外）
 webull_*_sdk.log
+
+# --- Go ---
+/bin/
