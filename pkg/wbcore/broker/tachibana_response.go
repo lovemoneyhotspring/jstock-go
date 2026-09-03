@@ -143,3 +143,15 @@ func fieldDecimalOK(row map[string]any, keys ...string) (decimal.Decimal, bool) 
 	}
 	return value, true
 }
+
+// text は任意の値を文字列にする（応答の項目は文字列とは限らない）。
+func text(v any) string {
+	switch value := v.(type) {
+	case string:
+		return value
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(value)
+	}
+}
