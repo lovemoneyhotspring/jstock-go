@@ -103,6 +103,40 @@ accum evaluate --json | jq '.summary'
 
 ---
 
+## 4. 日次レポート（Discord）
+
+上の 3 層を**毎営業日 21:00 に AI に読ませ**、稼働・異常・判断の妥当性・気づき・改善案を
+Discord に流す。人が毎日 `jq` を叩かなくても、崩れたときに気づけるようにするための仕組み。
+
+| 部品 | 役割 |
+|---|---|
+| `.claude/agents/daily-report.md` | サブエージェントの定義。**何をどの順で読むか**と、やってはいけないこと |
+| `deploy/daily-report.sh` | 起動と配達。`claude -p --agent daily-report` を回し、標準出力を Discord に流す |
+| `deploy/discord_post.py` | Webhook に POST する。2000 文字で分割する（Discord の上限） |
+| cron | `0 21 * * 1-5`（`deploy/crontab.txt`）。evaluate 群と plan が出揃ってから |
+
+```console
+# 手で回す（送らずに中身だけ見る）
+DRY_RUN=1 deploy/daily-report.sh
+DRY_RUN=1 deploy/daily-report.sh 2026-09-02   # 日付を指定
+```
+
+本文は送信の成否によらず `state/reports/daily-<日付>.md` に残る。
+
+**生成と配達を分けてある。** モデルに「送る」ことまで任せると、送り忘れた日が
+黙って消える。レポートを作るのは AI、Discord に届けるのは決め打ちのスクリプト。
+生成に失敗した場合は、失敗した事実のほうが Discord に流れる。
+
+**エージェントには読み取り専用のツールしか渡していない**（`tools: Bash, Read, Glob, Grep`、
+起動時に `--disallowedTools Edit,Write,NotebookEdit`）。発注コマンドと `config/` の
+書き換えは定義の中でも明示的に禁じてある——下の線引きと同じ理由。
+
+**ダイジェストは起動時点の写しを読ませる。** エージェントが叩く `review` / `evaluate` は
+それ自体がダイジェストに 1 行足すので、生のファイルを読ませると自分の足跡を
+その日の運用実績として数えてしまう。
+
+---
+
 ## 自動化するときの線引き
 
 提案の生成（`evaluate` → `review` → `backtest` → `docs/research/` への記録）までは

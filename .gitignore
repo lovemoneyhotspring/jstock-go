@@ -37,7 +37,10 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
-.claude/
+# Claude Code のローカル状態は無視するが、サブエージェントの定義は
+# 運用設定（deploy/crontab.txt と同格）なので追跡する
+.claude/*
+!.claude/agents/
 
 # Webull SDK が勝手に作るログ（マスクを通らないため必ず除外）
 webull_*_sdk.log

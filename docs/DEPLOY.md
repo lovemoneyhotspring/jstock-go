@@ -122,6 +122,27 @@ crontab -l | grep jstock
 `daytrade open` は 9:01・9:04・9:07 の 3 回呼ぶ（板寄せ直後は気配の約定時刻が前日のままで「古い」と判定されることがあるため、9:00 ちょうどは避ける。気配を取れなかった回の再試行で、台帳に買いがあれば以降は何もしない）。
 `close` は 15:20・15:24・15:28 の 3 回（1 回目で売れていれば 2 回目以降は何もしない。拒否されていれば送り直す）。15:20 の成行はその場の気配で約定し、15:25 以降ならクロージング・オークションで引け値になる。15:40 の `verify` は売りの約定を照会し、売れ残り（ストップ安で板に買いが無い等）があれば持ち越しとして通知する。祝日は `open` が「候補なし／気配なし」で終わるだけで無害。
 
+### 日次レポート（Discord）
+
+21:00 の行（`deploy/daily-report.sh`）だけは他と前提が違う。回す前に 2 つ要る。
+
+1. **通知先**。Discord のサーバー設定 → 連携サービス → ウェブフック で URL を作り、
+   `.env` に `WBJP_ALERT_WEBHOOK_URL=…` を入れる（`jquants check --notify` などの
+   異常通知も同じ URL に流れる）。
+2. **Claude Code の認証**。cron は `claude` を非対話で回すので、その cron を持つ
+   ユーザーで一度 `claude` にログインしておく（認証は `~/.claude` に入る）。
+
+```bash
+# 送らずに中身だけ確認する
+DRY_RUN=1 /home/abobo/jstock/deploy/daily-report.sh
+
+# 配達だけ試す（Discord に 1 通届けば経路は通っている）
+echo 'テスト' | .venv/bin/python deploy/discord_post.py
+```
+
+中身は `state/reports/daily-<日付>.md` に残る。仕組みは
+[FEEDBACK.md](FEEDBACK.md)「4. 日次レポート（Discord）」。
+
 ### cron を入れる前の検証
 
 cron 専用の「実行せずに全部検証する」コマンドは無い。次の 3 段で確かめる:
