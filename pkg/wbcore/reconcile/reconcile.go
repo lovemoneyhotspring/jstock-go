@@ -58,8 +58,54 @@ type Resolution struct {
 	Pending Pending
 	Outcome Outcome
 	// Match は Attributed のときブローカー側の注文。
-	Match  *domain.Order
-	Reason string
+	Match *domain.Order
+	// Candidates は Ambiguous のとき、同じ銘柄・売買で未帰属の注文（AI が突き合わせに使う）。
+	Candidates []domain.Order
+	Reason     string
+}
+
+// Fields はログ・ダイジェスト向けの平らな項目。3 つのアプリで同じ形にする
+// （AI が code で拾ったあと、同じ鍵で読めるように）。
+func (r Resolution) Fields() map[string]any {
+	fields := map[string]any{
+		"client_order_id": r.Pending.ClientOrderID,
+		"symbol":          r.Pending.Symbol,
+		"side":            string(r.Pending.Side),
+		"trade":           string(r.Pending.Trade),
+		"quantity":        r.Pending.Quantity.String(),
+		"placed_at":       r.Pending.PlacedAt.UTC().Format(time.RFC3339),
+		"outcome":         string(r.Outcome),
+		"reason":          r.Reason,
+	}
+	if r.Match != nil {
+		fields["broker_order_id"] = derefString(r.Match.BrokerOrderID)
+		fields["status"] = string(r.Match.Status)
+		fields["filled"] = r.Match.FilledQuantity.String()
+	}
+	if len(r.Candidates) > 0 {
+		candidates := make([]map[string]any, 0, len(r.Candidates))
+		for _, c := range r.Candidates {
+			entry := map[string]any{
+				"broker_order_id": derefString(c.BrokerOrderID), "quantity": c.Quantity.String(),
+				"trade": string(c.Trade), "status": string(c.Status), "filled": c.FilledQuantity.String(),
+			}
+			if c.CreatedAt != nil {
+				entry["created_at"] = c.CreatedAt.UTC().Format(time.RFC3339)
+			}
+			candidates = append(candidates, entry)
+		}
+		fields["candidates"] = candidates
+		// AI がそのまま実行できる修復の手順。判断は AI が候補を見て行う
+		fields["fix"] = fmt.Sprintf("<app> pending resolve %s --attribute <broker_order_id> --status <STATUS> | --unsent", r.Pending.ClientOrderID)
+	}
+	return fields
+}
+
+func derefString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 // Options は判定の条件。
@@ -95,8 +141,7 @@ func Resolve(pending []Pending, todays []domain.Order, opts Options) []Resolutio
 				Reason: fmt.Sprintf("送信から %s 未満", opts.Grace)})
 			continue
 		}
-		var exact []domain.Order
-		similar := 0
+		var exact, similar []domain.Order
 		for _, o := range todays {
 			if o.BrokerOrderID == nil {
 				continue
@@ -111,7 +156,7 @@ func Resolve(pending []Pending, todays []domain.Order, opts Options) []Resolutio
 				continue // 発注よりずっと前からある注文は別物
 			}
 			if !o.Quantity.Equal(p.Quantity) || (p.Trade != "" && o.Trade != "" && o.Trade != p.Trade) {
-				similar++
+				similar = append(similar, o)
 				continue
 			}
 			exact = append(exact, o)
@@ -122,9 +167,9 @@ func Resolve(pending []Pending, todays []domain.Order, opts Options) []Resolutio
 			used[*match.BrokerOrderID] = struct{}{}
 			out = append(out, Resolution{Pending: p, Outcome: Attributed, Match: &match,
 				Reason: fmt.Sprintf("注文番号 %s（%s）", *match.BrokerOrderID, match.Status)})
-		case similar > 0:
-			out = append(out, Resolution{Pending: p, Outcome: Ambiguous,
-				Reason: fmt.Sprintf("同じ銘柄・売買で数量か区分の違う未帰属の注文が %d 件", similar)})
+		case len(similar) > 0:
+			out = append(out, Resolution{Pending: p, Outcome: Ambiguous, Candidates: similar,
+				Reason: fmt.Sprintf("同じ銘柄・売買で数量か区分の違う未帰属の注文が %d 件", len(similar))})
 		default:
 			out = append(out, Resolution{Pending: p, Outcome: NotSent, Reason: "当日の注文一覧に該当なし"})
 		}

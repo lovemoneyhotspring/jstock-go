@@ -265,18 +265,14 @@ func ResolvePending(env Env, b broker.Broker, grace time.Duration) (reconcile.Su
 	resolutions := reconcile.Resolve(pendings, todays, reconcile.Options{Now: now, Grace: grace, Known: known})
 	var ambiguous []string
 	for _, r := range resolutions {
-		fields := map[string]any{
-			"day": env.dayText(), "client_order_id": r.Pending.ClientOrderID, "symbol": r.Pending.Symbol,
-			"side": string(r.Pending.Side), "quantity": r.Pending.Quantity.String(),
-			"outcome": string(r.Outcome), "reason": r.Reason,
-		}
+		fields := r.Fields()
+		fields["day"] = env.dayText()
 		switch r.Outcome {
 		case reconcile.Attributed:
 			m := r.Match
 			if err := env.Ledger.UpdateStatus(r.Pending.ClientOrderID, m.Status, m.FilledQuantity, m.AvgFillPrice, m.BrokerOrderID); err != nil {
 				return summary, fmt.Errorf("判定の結果を台帳に書けません: %w", err)
 			}
-			fields["broker_order_id"], fields["status"], fields["filled"] = stringOf(m.BrokerOrderID), string(m.Status), m.FilledQuantity.String()
 			env.Report.Info("daytrade.pending_resolved", "送信結果不明の注文は届いていた", fields)
 		case reconcile.NotSent:
 			if err := env.Ledger.UpdateStatus(r.Pending.ClientOrderID, domain.OrderStatusUnsent, decimal.Zero, nil, nil); err != nil {
@@ -284,6 +280,7 @@ func ResolvePending(env Env, b broker.Broker, grace time.Duration) (reconcile.Su
 			}
 			env.Report.Info("daytrade.pending_resolved", "送信結果不明の注文は届いていなかった（送り直せる）", fields)
 		case reconcile.Ambiguous:
+			fields["fix"] = strings.Replace(fields["fix"].(string), "<app>", "daytrade", 1)
 			env.Report.Error("daytrade.pending_ambiguous", "送信結果不明の注文を決められない（PENDING のまま。この銘柄は今日は触らない）", fields)
 			ambiguous = append(ambiguous, fmt.Sprintf("%s %s %s 株: %s", r.Pending.Symbol, r.Pending.Side, r.Pending.Quantity, r.Reason))
 		case reconcile.TooRecent:

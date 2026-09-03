@@ -245,8 +245,9 @@ func (i *Ingestor) TradingDays(start, end time.Time) ([]time.Time, error) {
 	if frame.Height() > 0 && frame.HasColumn("HolDiv") {
 		seen := map[string]bool{}
 		var days []time.Time
+		divIdx, dateIdx := frame.col("HolDiv"), frame.col("Date")
 		for _, row := range frame.Rows {
-			div, date := row["HolDiv"], row["Date"]
+			div, date := cell(row, divIdx), cell(row, dateIdx)
 			if div == nil || date == nil || !TradingDayDivisions[*div] || seen[*date] {
 				continue
 			}

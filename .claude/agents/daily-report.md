@@ -40,7 +40,9 @@ jq -c 'select(.anomalies)' state/digest/prod-<日付>.jsonl
 `pending_attributed` / `pending_unsent` / `pending_ambiguous` は、送信結果が分からなかった注文を
 プログラムが当日の注文一覧で判定した件数（`docs/FEEDBACK.md`「送信結果不明の注文はプログラムが決める」）。
 `attributed` / `unsent` は**正常に自己修復した**ので、稼働の行に「結果不明 1 件 → 届いていなかったので再送」と
-1 行書けば足りる。深掘りするのは `pending_ambiguous` が 2 回以上の実行にまたがって続くときだけ。
+1 行書けば足りる。深掘りするのは `pending_ambiguous` が 2 回以上の実行にまたがって続くときだけ——そのときは
+層 3 の `*.pending_ambiguous` 行（`candidates` と `fix` が入っている）を引用し、「改善案」に
+`bin/<app> pending resolve ...` の具体的なコマンドを書く（あなたは実行しない。読むだけ）。
 
 **cron の予定表（`deploy/crontab.txt`）と突き合わせて、動くはずなのに 1 行も無いジョブを探す。**
 黙って動かなかったジョブは、エラーより見つけにくく害が大きい。

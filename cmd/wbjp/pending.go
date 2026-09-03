@@ -54,18 +54,13 @@ func resolvePendingOrders(rep *repo.Repo, b broker.Broker, logger *logging.Logge
 	resolutions := reconcile.Resolve(pendings, todays, reconcile.Options{Now: now, Grace: reconcile.DefaultGrace, Known: known})
 	var ambiguous []string
 	for _, r := range resolutions {
-		fields := map[string]any{
-			"client_order_id": r.Pending.ClientOrderID, "symbol": r.Pending.Symbol,
-			"side": string(r.Pending.Side), "quantity": r.Pending.Quantity.String(),
-			"outcome": string(r.Outcome), "reason": r.Reason,
-		}
+		fields := r.Fields()
 		switch r.Outcome {
 		case reconcile.Attributed:
 			m := r.Match
 			if err := rep.UpdateOrder(r.Pending.ClientOrderID, m.Status, m.FilledQuantity, m.AvgFillPrice, m.BrokerOrderID); err != nil {
 				return summary, fmt.Errorf("判定の結果を台帳に書けません: %w", err)
 			}
-			fields["broker_order_id"], fields["status"] = *m.BrokerOrderID, string(m.Status)
 			logger.Info("wbjp.pending_resolved", "送信結果不明の注文は届いていた", fields)
 		case reconcile.NotSent:
 			if err := rep.UpdateOrder(r.Pending.ClientOrderID, domain.OrderStatusUnsent, decimalZero, nil, nil); err != nil {
@@ -73,6 +68,7 @@ func resolvePendingOrders(rep *repo.Repo, b broker.Broker, logger *logging.Logge
 			}
 			logger.Info("wbjp.pending_resolved", "送信結果不明の注文は届いていなかった（送り直せる）", fields)
 		case reconcile.Ambiguous:
+			fields["fix"] = strings.Replace(fields["fix"].(string), "<app>", "wbjp", 1)
 			logger.Error("wbjp.pending_ambiguous", "送信結果不明の注文を決められない（PENDING のまま）", fields)
 			ambiguous = append(ambiguous, fmt.Sprintf("%s %s %s 株: %s", r.Pending.Symbol, r.Pending.Side, r.Pending.Quantity, r.Reason))
 		case reconcile.TooRecent:

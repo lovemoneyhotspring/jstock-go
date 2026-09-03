@@ -234,7 +234,7 @@ func TestUpsertNewColumn(t *testing.T) {
 func TestUpsertRequiresKeyColumns(t *testing.T) {
 	a := NewArchive(t.TempDir())
 	ep := bars()
-	f := &Frame{Columns: []string{"Date"}, Rows: []map[string]*string{{"Date": strptr("2025-01-06")}}}
+	f := &Frame{Columns: []string{"Date"}, Rows: []Row{{strptr("2025-01-06")}}}
 	if _, err := a.Upsert(ep, f); err == nil {
 		t.Error("鍵の列が無ければエラーにすべき")
 	}

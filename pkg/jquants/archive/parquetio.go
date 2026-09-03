@@ -71,10 +71,11 @@ func writeParquet(path string, f *Frame, dateColumns map[string]bool) error {
 		batch = batch[:0]
 		return nil
 	}
+	positions := f.cols(order)
 	for _, row := range f.Rows {
 		values := cells[len(batch)*len(order):][:len(order)]
 		for i, name := range order {
-			values[i] = parquetValue(row[name], dateColumns[name], i)
+			values[i] = parquetValue(cell(row, positions[i]), dateColumns[name], i)
 		}
 		batch = append(batch, values)
 		if len(batch) == writeRowBatch {
@@ -258,7 +259,12 @@ func scanParquet(path string, opt scanOptions) (*Frame, error) {
 	if !opt.filtering() {
 		// 絞り込みが無いなら行数が分かっているので一度で確保する
 		// （append の倍々の伸びで一時的に 2 倍になるのを防ぐ）
-		out.Rows = make([]map[string]*string, 0, file.NumRows())
+		out.Rows = make([]Row, 0, file.NumRows())
+	}
+	// ファイルの列の位置 → Frame の列の位置（落とす列は -1）
+	keptIndex := make([]int, len(columns))
+	for i, name := range columns {
+		keptIndex[i] = out.col(name)
 	}
 	dateLeaf := -1
 	if opt.dateColumn != "" {
@@ -294,7 +300,7 @@ func scanParquet(path string, opt scanOptions) (*Frame, error) {
 				if opt.keep != nil && !opt.keep(view) {
 					continue
 				}
-				out.Rows = append(out.Rows, decodeRow(buffer[i], columns, opt.columns))
+				out.Rows = append(out.Rows, decodeRow(buffer[i], keptIndex, len(kept)))
 			}
 			if readErr != nil {
 				reader.Close()
@@ -465,33 +471,36 @@ func spread(row parquet.Row, into []parquet.Value) {
 	}
 }
 
-// decodeRow は Parquet の 1 行を文字列の map に戻す。
-// want が nil でなければ、その列だけを起こす（除いた列は文字列に複製しない）。
-func decodeRow(row parquet.Row, columns []string, want map[string]bool) map[string]*string {
-	size := len(columns)
-	if want != nil {
-		size = len(want)
-	}
-	out := make(map[string]*string, size)
+// decodeRow は Parquet の 1 行を Frame の行にする。keptIndex はファイルの列の位置 →
+// Frame の列の位置（落とす列は -1）。
+//
+// 値の文字列ヘッダは行ごとに 1 本のスライスにまとめて確保し、行にはその要素への
+// ポインタを入れる。セルごとに *string を確保すると 1 行 15 列で 16 回のアロケートに
+// なり、80 万行（1 か月）で 1,300 万回——GC の時間の大半がこれだった。スライスは
+// 容量を先に決めて伸ばさないので、ポインタが古い配列を指すことはない。
+func decodeRow(row parquet.Row, keptIndex []int, width int) Row {
+	out := make(Row, width)
+	values := make([]string, 0, width)
 	for _, v := range row {
 		i := v.Column()
-		if i < 0 || i >= len(columns) {
+		if i < 0 || i >= len(keptIndex) || keptIndex[i] < 0 || v.IsNull() {
 			continue
 		}
-		name := columns[i]
-		if want != nil && !want[name] {
+		if len(values) == cap(values) {
+			// 想定外（列の重複など）。伸ばすと既存のポインタが無効になるので個別に確保する
+			out[keptIndex[i]] = strptr(cellText(v))
 			continue
 		}
-		if v.IsNull() {
-			out[name] = nil
-			continue
-		}
-		switch v.Kind() {
-		case parquet.Int32:
-			out[name] = strptr(fromEpochDay(v.Int32()))
-		default:
-			out[name] = strptr(string(v.ByteArray()))
-		}
+		values = append(values, cellText(v))
+		out[keptIndex[i]] = &values[len(values)-1]
 	}
 	return out
+}
+
+// cellText は 1 セルの値を文字列にする（日付は YYYY-MM-DD）。
+func cellText(v parquet.Value) string {
+	if v.Kind() == parquet.Int32 {
+		return fromEpochDay(v.Int32())
+	}
+	return string(v.ByteArray())
 }

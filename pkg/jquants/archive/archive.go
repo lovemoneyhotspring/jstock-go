@@ -63,9 +63,10 @@ func (a *Archive) Months(ep Endpoint) []string {
 var readWorkers = min(4, runtime.GOMAXPROCS(0))
 
 // bytesPerCell は Frame の 1 セルが実際に食うメモリの目安。
-// 行は map[string]*string なので、map の枠・文字列のヘッダ・値の実体で
-// 1 セルおよそ 96 バイト（このリポジトリで 15 列と 30 列を実測した値から）。
-const bytesPerCell = 96
+// 行は列に揃えた []*string で、ポインタ 8 + 文字列ヘッダ 16 + 値の実体で
+// 1 セルおよそ 44 バイト（15 列 5.2 万行のベンチマークで 34.6MB / 78 万セル）。
+// 上限の判定は安全側に 48 で見る。行が map だった頃は 96 だった。
+const bytesPerCell = 48
 
 // defaultReadBudget は 1 回の読み出しが Frame に載せていい量の既定。
 // これを超えると、OOM で殺される代わりにエラーで止まる。
@@ -285,8 +286,9 @@ func (a *Archive) Upsert(ep Endpoint, f *Frame) (int, error) {
 	// 月ごとに分ける。日付が取れない行は落とす（どの月に置くか決まらない）
 	byMonth := map[string]*Frame{}
 	var order []string
+	dateIdx := f.col(ep.DateColumn)
 	for _, row := range f.Rows {
-		v := row[ep.DateColumn]
+		v := cell(row, dateIdx)
 		if v == nil || len(*v) < 7 {
 			continue
 		}

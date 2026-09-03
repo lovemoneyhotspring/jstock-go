@@ -23,9 +23,72 @@ const dateLayout = "2006-01-02"
 //
 // polars の DataFrame の代わり。列の型を持たないのは方針どおり
 // 「生のまま残す」ため。数値への解釈は読むとき（Typed）に行う。
+//
+// 行は Columns と同じ並びのスライス（Row）。以前は行ごとの map だったが、
+// map は 1 セルあたり約 100 バイト（枠・ハッシュ・ポインタ）を食い、1 か月 80 万行の
+// 日足で 300MB になっていた。スライスなら 1 セル 24 バイト＋値で済む。
+// 列名で引くときは Get / col を使う（Columns の位置は index に控える）。
 type Frame struct {
 	Columns []string
-	Rows    []map[string]*string
+	Rows    []Row
+	// index は列名 → Columns の位置。Columns が変わったら組み直す（col が面倒を見る）。
+	index map[string]int
+}
+
+// Row は 1 行。Frame.Columns と同じ並びで、NULL は nil。
+// 後から列が増えた表では Columns より短いことがある（足りない分は NULL）。
+type Row []*string
+
+// col は列の位置。無ければ -1。
+func (f *Frame) col(name string) int {
+	if f == nil {
+		return -1
+	}
+	if f.index == nil || len(f.index) != len(f.Columns) {
+		f.index = make(map[string]int, len(f.Columns))
+		for i, c := range f.Columns {
+			f.index[c] = i
+		}
+	}
+	if j, ok := f.index[name]; ok {
+		return j
+	}
+	return -1
+}
+
+// cols は列名の並びを位置の並びにする（無い列は -1）。
+func (f *Frame) cols(names []string) []int {
+	out := make([]int, len(names))
+	for i, name := range names {
+		out[i] = f.col(name)
+	}
+	return out
+}
+
+// cell は行の j 列目。範囲外（短い行・無い列）は nil。
+func cell(row Row, j int) *string {
+	if j < 0 || j >= len(row) {
+		return nil
+	}
+	return row[j]
+}
+
+// AppendRow は列名 → 値の行を足す。知らない列は末尾に足す。
+// 取り込み以外（テストの固定データなど）で表を組むときに使う。
+func (f *Frame) AppendRow(values map[string]*string) {
+	names := make([]string, 0, len(values))
+	for k := range values {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		f.addColumn(k)
+	}
+	row := make(Row, len(f.Columns))
+	for _, k := range names {
+		row[f.col(k)] = values[k]
+	}
+	f.Rows = append(f.Rows, row)
 }
 
 // Height は行数。
@@ -51,17 +114,18 @@ func (f *Frame) HasColumn(name string) bool {
 
 // addColumn は列を末尾に足す（既にあれば何もしない）。
 func (f *Frame) addColumn(name string) {
-	if !f.HasColumn(name) {
+	if f.col(name) < 0 {
 		f.Columns = append(f.Columns, name)
+		f.index[name] = len(f.Columns) - 1
 	}
 }
 
 // Get は行 i の列 name の値。無ければ nil。
 func (f *Frame) Get(i int, name string) *string {
-	if i < 0 || i >= len(f.Rows) {
+	if f == nil || i < 0 || i >= len(f.Rows) {
 		return nil
 	}
-	return f.Rows[i][name]
+	return cell(f.Rows[i], f.col(name))
 }
 
 func strptr(s string) *string { return &s }
@@ -124,11 +188,14 @@ func normalizeDate(raw *string) *string {
 
 // withDates は日付列を正規化し、日付列が無ければエラーにする。
 func withDates(f *Frame, ep Endpoint) error {
-	dates := ep.dateColumnSet()
-	for _, row := range f.Rows {
-		for name := range dates {
-			if v, ok := row[name]; ok {
-				row[name] = normalizeDate(v)
+	for name := range ep.dateColumnSet() {
+		j := f.col(name)
+		if j < 0 {
+			continue
+		}
+		for _, row := range f.Rows {
+			if j < len(row) {
+				row[j] = normalizeDate(row[j])
 			}
 		}
 	}
@@ -140,18 +207,21 @@ func withDates(f *Frame, ep Endpoint) error {
 
 // RowsToFrame は API の行（JSON オブジェクト）を保存形にする。
 func RowsToFrame(rows []map[string]any, ep Endpoint) (*Frame, error) {
-	f := &Frame{}
+	f := &Frame{Rows: make([]Row, 0, len(rows))}
+	names := make([]string, 0, 32)
 	for _, row := range rows {
 		// 列の出現順を安定させるため、行ごとにキーを並べてから足す
-		names := make([]string, 0, len(row))
+		names = names[:0]
 		for k := range row {
 			names = append(names, k)
 		}
 		sort.Strings(names)
-		out := make(map[string]*string, len(row))
 		for _, k := range names {
 			f.addColumn(k)
-			out[k] = stringify(row[k])
+		}
+		out := make(Row, len(f.Columns))
+		for _, k := range names {
+			out[f.col(k)] = stringify(row[k])
 		}
 		f.Rows = append(f.Rows, out)
 	}
@@ -162,21 +232,23 @@ func RowsToFrame(rows []map[string]any, ep Endpoint) (*Frame, error) {
 }
 
 // CSVToFrame は一括ダウンロードの csv.gz を保存形にする。列名は API と同じ前提。
+//
+// gzip は流しながら読む（展開した全文を一度メモリに置かない。bars の 1 か月は
+// 展開すると数十 MB で、Frame 本体と合わせて 2 重に持つことになる）。
 func CSVToFrame(payload []byte, ep Endpoint) (*Frame, error) {
-	raw := payload
+	var source io.Reader = bytes.NewReader(payload)
 	if len(payload) >= 2 && payload[0] == 0x1f && payload[1] == 0x8b {
 		zr, err := gzip.NewReader(bytes.NewReader(payload))
 		if err != nil {
 			return nil, fmt.Errorf("一括 CSV の展開に失敗しました: %w", err)
 		}
 		defer zr.Close()
-		decoded, err := io.ReadAll(zr)
-		if err != nil {
-			return nil, fmt.Errorf("一括 CSV の展開に失敗しました: %w", err)
-		}
-		raw = decoded
+		source = zr
 	}
-	reader := csv.NewReader(bytes.NewReader(raw))
+	reader := csv.NewReader(source)
+	// 行のスライスを使い回す。各フィールドは行ごとの 1 本の文字列の部分文字列なので、
+	// 値を Frame に残しても 1 行 1 アロケートで済む（フィールドごとに複製しない）
+	reader.ReuseRecord = true
 	reader.FieldsPerRecord = -1 // 列数の揺れ（末尾の空列など）で全体を落とさない
 	reader.LazyQuotes = true
 	header, err := reader.Read()
@@ -186,6 +258,8 @@ func CSVToFrame(payload []byte, ep Endpoint) (*Frame, error) {
 	if err != nil {
 		return nil, fmt.Errorf("一括 CSV の見出しを読めません: %w", err)
 	}
+	// ReuseRecord なので見出しのスライスは次の Read で上書きされる。複製しておく
+	header = append([]string(nil), header...)
 	// BOM 付きで配られることがある
 	if len(header) > 0 {
 		header[0] = strings.TrimPrefix(header[0], "\ufeff")
@@ -199,13 +273,15 @@ func CSVToFrame(payload []byte, ep Endpoint) (*Frame, error) {
 		if err != nil {
 			return nil, fmt.Errorf("一括 CSV の読み取りに失敗しました: %w", err)
 		}
-		row := make(map[string]*string, len(header))
-		for i, name := range header {
+		row := make(Row, len(header))
+		// 値の文字列ヘッダは行ごとに 1 本にまとめる（decodeRow と同じ理由）
+		values := make([]string, 0, len(header))
+		for i := range header {
 			if i >= len(record) || record[i] == "" {
-				row[name] = nil // 空欄は NULL（polars の read_csv + when/then と同じ）
-				continue
+				continue // 空欄は NULL（polars の read_csv + when/then と同じ）
 			}
-			row[name] = strptr(record[i])
+			values = append(values, record[i])
+			row[i] = &values[len(values)-1]
 		}
 		f.Rows = append(f.Rows, row)
 	}
@@ -240,8 +316,9 @@ func NumericColumns(f *Frame, exclude ...string) []string {
 			continue
 		}
 		seen, ok := 0, true
+		j := f.col(name)
 		for i := 0; i < limit && ok; i++ {
-			v := f.Rows[i][name]
+			v := cell(f.Rows[i], j)
 			if v == nil {
 				continue
 			}
@@ -289,16 +366,11 @@ func Typed(f *Frame, exclude ...string) *TypedFrame {
 	return &TypedFrame{Frame: f, Numeric: numeric}
 }
 
-// rowSignature は行の内容を比較・ハッシュするための正規化文字列。
-// 列名でそろえるので、列順が違っても同じ内容なら同じ文字列になる。
-func rowSignature(row map[string]*string, columns []string) string {
+// keyOf は鍵列（位置で指定）の値を連結したもの。上書きの単位。
+func keyOf(row Row, key []int) string {
 	var b strings.Builder
-	for _, name := range columns {
-		b.WriteString(name)
-		b.WriteByte('=')
-		if v := row[name]; v == nil {
-			b.WriteByte(0x00) // NULL と空文字を混同しない
-		} else {
+	for _, j := range key {
+		if v := cell(row, j); v != nil {
 			b.WriteString(*v)
 		}
 		b.WriteByte(0x1f)
@@ -306,19 +378,29 @@ func rowSignature(row map[string]*string, columns []string) string {
 	return b.String()
 }
 
-// keyOf は鍵列の値を連結したもの。上書きの単位。
-func keyOf(row map[string]*string, key []string) string {
-	var b strings.Builder
-	for _, name := range key {
-		if v := row[name]; v != nil {
-			b.WriteString(*v)
+// rowDigest は 1 行の内容のハッシュ。列名でそろえるので列順に依らない。
+//
+// 行の正規化文字列（rowSignature）を残さずハッシュだけを持つ。80 万行の表で
+// 正規化文字列を全部並べると表と同じだけのメモリをもう一度使う。
+func rowDigest(row Row, columns []string, positions []int) [sha256.Size]byte {
+	h := sha256.New()
+	for k, name := range columns {
+		h.Write([]byte(name))
+		h.Write([]byte{'='})
+		if v := cell(row, positions[k]); v == nil {
+			h.Write([]byte{0x00}) // NULL と空文字を混同しない
+		} else {
+			h.Write([]byte(*v))
 		}
-		b.WriteByte(0x1f)
+		h.Write([]byte{0x1f})
 	}
-	return b.String()
+	var out [sha256.Size]byte
+	h.Sum(out[:0])
+	return out
 }
 
 // DigestOf は応答の内容のハッシュ。同じ内容の取り直しを台帳で見分ける。
+// 行順にも列順にも依らない（行ごとのハッシュを並べ替えてから束ねる）。
 func DigestOf(f *Frame) string {
 	h := sha256.New()
 	if f.Height() == 0 {
@@ -326,13 +408,14 @@ func DigestOf(f *Frame) string {
 	}
 	columns := append([]string(nil), f.Columns...)
 	sort.Strings(columns)
-	signatures := make([]string, 0, f.Height())
+	positions := f.cols(columns)
+	digests := make([][sha256.Size]byte, 0, f.Height())
 	for _, row := range f.Rows {
-		signatures = append(signatures, rowSignature(row, columns))
+		digests = append(digests, rowDigest(row, columns, positions))
 	}
-	sort.Strings(signatures) // 行順に依らない
-	for _, s := range signatures {
-		h.Write([]byte(s))
+	sort.Slice(digests, func(i, j int) bool { return bytes.Compare(digests[i][:], digests[j][:]) < 0 })
+	for i := range digests {
+		h.Write(digests[i][:])
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -346,14 +429,17 @@ func countChanged(old, new *Frame, key []string) int {
 		}
 	}
 	sort.Strings(common)
-	previous := make(map[string]string, old.Height())
+	oldPos, newPos := old.cols(common), new.cols(common)
+	oldKey, newKey := old.cols(key), new.cols(key)
+	// 旧表は鍵 → 行ハッシュだけを持つ（正規化文字列を全行ぶん持つと旧表と同じ量のメモリになる）
+	previous := make(map[string][sha256.Size]byte, old.Height())
 	for _, row := range old.Rows {
-		previous[keyOf(row, key)] = rowSignature(row, common)
+		previous[keyOf(row, oldKey)] = rowDigest(row, common, oldPos)
 	}
 	changed := 0
 	for _, row := range new.Rows {
-		before, ok := previous[keyOf(row, key)]
-		if !ok || before != rowSignature(row, common) {
+		before, ok := previous[keyOf(row, newKey)]
+		if !ok || before != rowDigest(row, common, newPos) {
 			changed++
 		}
 	}
@@ -362,10 +448,11 @@ func countChanged(old, new *Frame, key []string) int {
 
 // dedupeLast は鍵で重複を潰し、後に現れた行を残す（後勝ち）。出現順は保つ。
 func dedupeLast(f *Frame, key []string) *Frame {
+	keyPos := f.cols(key)
 	position := make(map[string]int, f.Height())
-	kept := make([]map[string]*string, 0, f.Height())
+	kept := make([]Row, 0, f.Height())
 	for _, row := range f.Rows {
-		k := keyOf(row, key)
+		k := keyOf(row, keyPos)
 		if i, ok := position[k]; ok {
 			kept[i] = row
 			continue
@@ -381,14 +468,15 @@ func dedupeLast(f *Frame, key []string) *Frame {
 // 鍵は行ごとに一度だけ組む。比較関数の中で組むと O(n log n) 回の文字列生成に
 // なり、8 万行で 270 万回のアロケートになる。
 func sortByKey(f *Frame, key []string) {
+	keyPos := f.cols(key)
 	keys := make([]string, len(f.Rows))
 	order := make([]int, len(f.Rows))
 	for i, row := range f.Rows {
-		keys[i] = keyOf(row, key)
+		keys[i] = keyOf(row, keyPos)
 		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool { return keys[order[a]] < keys[order[b]] })
-	sorted := make([]map[string]*string, len(f.Rows))
+	sorted := make([]Row, len(f.Rows))
 	for i, from := range order {
 		sorted[i] = f.Rows[from]
 	}
@@ -406,7 +494,28 @@ func concatDiagonal(frames ...*Frame) *Frame {
 		for _, c := range f.Columns {
 			out.addColumn(c)
 		}
-		out.Rows = append(out.Rows, f.Rows...)
+		// 列の並びが同じならそのまま繋ぐ。違えば行を out の並びに並べ直す
+		mapping := out.cols(f.Columns)
+		identity := true
+		for j, to := range mapping {
+			if to != j {
+				identity = false
+				break
+			}
+		}
+		if identity {
+			out.Rows = append(out.Rows, f.Rows...)
+			continue
+		}
+		for _, row := range f.Rows {
+			aligned := make(Row, len(out.Columns))
+			for j, v := range row {
+				if j < len(mapping) && mapping[j] >= 0 {
+					aligned[mapping[j]] = v
+				}
+			}
+			out.Rows = append(out.Rows, aligned)
+		}
 	}
 	return out
 }
@@ -420,9 +529,10 @@ func AsOf(f *Frame, date time.Time, dateColumn, by string) *Frame {
 		by = "Code"
 	}
 	cutoff := date.Format(dateLayout)
-	visible := make([]map[string]*string, 0, f.Height())
+	dateIdx, byIdx := f.col(dateColumn), f.col(by)
+	visible := make([]Row, 0, f.Height())
 	for _, row := range f.Rows {
-		d := row[dateColumn]
+		d := cell(row, dateIdx)
 		if d == nil || *d > cutoff {
 			continue
 		}
@@ -432,14 +542,15 @@ func AsOf(f *Frame, date time.Time, dateColumn, by string) *Frame {
 	if f.HasColumn("DiscTime") {
 		order = append(order, "DiscTime")
 	}
+	orderPos := f.cols(order)
 	sort.SliceStable(visible, func(i, j int) bool {
-		return keyOf(visible[i], order) < keyOf(visible[j], order)
+		return keyOf(visible[i], orderPos) < keyOf(visible[j], orderPos)
 	})
-	latest := map[string]map[string]*string{}
+	latest := map[string]Row{}
 	var groups []string
 	for _, row := range visible {
 		g := ""
-		if v := row[by]; v != nil {
+		if v := cell(row, byIdx); v != nil {
 			g = *v
 		}
 		if _, ok := latest[g]; !ok {

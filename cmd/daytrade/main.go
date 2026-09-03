@@ -42,6 +42,7 @@ func main() {
 	rootCmd.AddCommand(newStatusCmd())
 	rootCmd.AddCommand(newQuotesCmd())
 	rootCmd.AddCommand(newBacktestCmd())
+	rootCmd.AddCommand(cli.NewPendingCmd("daytrade", appSettings.DaytradeDBPath))
 
 	// os.Exit は defer を飛ばすので、ダイジェストはここで必ず書き出す
 	err := rootCmd.Execute()

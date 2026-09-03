@@ -45,7 +45,7 @@ func Build(root string, days []time.Time, symbols []Symbol) (*archive.Archive, e
 	// 取引カレンダー（HolDiv 1 = 営業日）
 	calendar := &archive.Frame{Columns: []string{"Date", "HolDiv"}}
 	for _, day := range days {
-		calendar.Rows = append(calendar.Rows, map[string]*string{
+		calendar.AppendRow(map[string]*string{
 			"Date": ptr(day.Format(dateLayout)), "HolDiv": ptr("1"),
 		})
 	}
@@ -67,13 +67,13 @@ func Build(root string, days []time.Time, symbols []Symbol) (*archive.Archive, e
 			closePrice := open * (1 + s.IntradayOn[key])
 			high := math.Max(open, closePrice)
 			low := math.Min(open, closePrice)
-			bars.Rows = append(bars.Rows, map[string]*string{
+			bars.AppendRow(map[string]*string{
 				"Date": ptr(key), "Code": ptr(s.Code),
 				"O": num(open), "H": num(high), "L": num(low), "C": num(closePrice),
 				"Va": num(s.Turnover), "MktCap": num(s.MktCap),
 				"AdjFactor": ptr("1"), "UL": ptr("0"), "LL": ptr("0"),
 			})
-			master.Rows = append(master.Rows, map[string]*string{
+			master.AppendRow(map[string]*string{
 				"Date": ptr(key), "Code": ptr(s.Code), "CoName": ptr(s.Name),
 				"MktNm": ptr(s.Market), "ProdCat": ptr(s.ProdCat), "Mrgn": ptr(s.Mrgn),
 			})
@@ -91,13 +91,11 @@ func Build(root string, days []time.Time, symbols []Symbol) (*archive.Archive, e
 
 // AddEarnings は前日引け後の決算開示を足す（母集団から外れることの確認用）。
 func AddEarnings(arch *archive.Archive, code string, discDate time.Time, discTime string) error {
-	frame := &archive.Frame{
-		Columns: []string{"DiscDate", "DiscTime", "Code", "DiscNo"},
-		Rows: []map[string]*string{{
-			"DiscDate": ptr(discDate.Format(dateLayout)), "DiscTime": ptr(discTime),
-			"Code": ptr(code), "DiscNo": ptr("1"),
-		}},
-	}
+	frame := &archive.Frame{Columns: []string{"DiscDate", "DiscTime", "Code", "DiscNo"}}
+	frame.AppendRow(map[string]*string{
+		"DiscDate": ptr(discDate.Format(dateLayout)), "DiscTime": ptr(discTime),
+		"Code": ptr(code), "DiscNo": ptr("1"),
+	})
 	_, err := arch.Upsert(archive.MustEndpoint("fins_summary"), frame)
 	return err
 }
@@ -108,26 +106,22 @@ func AddMarginAlert(arch *archive.Archive, code string, pubDate time.Time, jsfSt
 	if jsfStop {
 		reason = `{"RestrictedByJSF": "1"}`
 	}
-	frame := &archive.Frame{
-		Columns: []string{"PubDate", "Code", "AppDate", "PubReason"},
-		Rows: []map[string]*string{{
-			"PubDate": ptr(pubDate.Format(dateLayout)), "Code": ptr(code),
-			"AppDate": ptr(pubDate.Format(dateLayout)), "PubReason": ptr(reason),
-		}},
-	}
+	frame := &archive.Frame{Columns: []string{"PubDate", "Code", "AppDate", "PubReason"}}
+	frame.AppendRow(map[string]*string{
+		"PubDate": ptr(pubDate.Format(dateLayout)), "Code": ptr(code),
+		"AppDate": ptr(pubDate.Format(dateLayout)), "PubReason": ptr(reason),
+	})
 	_, err := arch.Upsert(archive.MustEndpoint("markets_margin_alert"), frame)
 	return err
 }
 
 // AddEarningsDate は当日の決算発表予定を足す。
 func AddEarningsDate(arch *archive.Archive, code string, pubDate, schDate time.Time) error {
-	frame := &archive.Frame{
-		Columns: []string{"PubDate", "Code", "SchDate"},
-		Rows: []map[string]*string{{
-			"PubDate": ptr(pubDate.Format(dateLayout)), "Code": ptr(code),
-			"SchDate": ptr(schDate.Format(dateLayout)),
-		}},
-	}
+	frame := &archive.Frame{Columns: []string{"PubDate", "Code", "SchDate"}}
+	frame.AppendRow(map[string]*string{
+		"PubDate": ptr(pubDate.Format(dateLayout)), "Code": ptr(code),
+		"SchDate": ptr(schDate.Format(dateLayout)),
+	})
 	_, err := arch.Upsert(archive.MustEndpoint("fins_earnings_date"), frame)
 	return err
 }
