@@ -14,7 +14,7 @@
 
 set -uo pipefail
 
-HOME_DIR="${WBJP_HOME:-/home/abobo/jstock}"
+HOME_DIR="${WBJP_HOME:-/home/abobo/jstock-go}"
 cd "$HOME_DIR" || exit 1
 
 DAY="${1:-$(TZ=Asia/Tokyo date +%F)}"

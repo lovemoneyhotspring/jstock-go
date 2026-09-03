@@ -1,5 +1,6 @@
-# wbjp（/home/abobo/jstock）の cron。`crontab -l` の既存行のうち /home/abobo/webull/wbjp を指す
-# 旧デプロイ（Webull）の行をこの内容で置き換える。他のジョブ（暗号資産・rcguard）はそのまま。
+# wbjp（/home/abobo/jstock-go）の cron。`crontab -l` の既存行のうち古いデプロイ
+# （/home/abobo/webull/wbjp、/home/abobo/jstock の Python 版）を指す行をこの内容で置き換える。
+# 他のジョブ（暗号資産・rcguard）はそのまま。
 #
 # 方針（docs/DEPLOY.md）:
 #   - 固定間隔で叩き続ける。時間帯の判定は各コマンドの中で完結する
@@ -16,8 +17,8 @@
 #      下の「発注経路」の行のコメントを外す（まず --live 無しで数日、次に --live）
 
 # 実行ファイルは deploy/build.sh が bin/ に作る（Go のみ。uv も Python も要らない）
-WBJP_HOME=/home/abobo/jstock
-WBJP_BIN=/home/abobo/jstock/bin
+WBJP_HOME=/home/abobo/jstock-go
+WBJP_BIN=/home/abobo/jstock-go/bin
 
 # --- データ ------------------------------------------------------------------
 # J-Quants のメモリ（docs/JQUANTS_ARCHIVE.md「メモリ」）:

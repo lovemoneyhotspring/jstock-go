@@ -18,9 +18,9 @@
 
 ```bash
 # 1. コード配置
-git clone https://github.com/lovemoneyhotspring/jstock.git /home/abobo/jstock && cd /home/abobo/jstock
+git clone https://github.com/lovemoneyhotspring/jstock-go.git /home/abobo/jstock-go && cd /home/abobo/jstock-go
 # private リポジトリなので認証が必要。HTTPS の場合はパスワード欄に PAT（Personal Access Token）を使う。
-# SSH鍵を使うなら代わりに: git clone git@github.com:lovemoneyhotspring/jstock.git /home/abobo/jstock
+# SSH鍵を使うなら代わりに: git clone git@github.com:lovemoneyhotspring/jstock-go.git /home/abobo/jstock-go
 
 # 2. 実行ファイルを作る（Go 1.26 以上。uv も Python も要らない）
 deploy/build.sh          # bin/ に wbjp / accum / daytrade / jquants / discord-post ができる
@@ -89,7 +89,7 @@ TACHIBANA_UAT_ORDER_PASSWORD=...
 
 ## 3. `.env` の置き場所
 
-- **既定**: リポジトリ直下（カレントディレクトリ基準）= `/home/abobo/jstock/.env`。`chmod 600` 必須（緩いと起動時に警告）
+- **既定**: リポジトリ直下（カレントディレクトリ基準）= `/home/abobo/jstock-go/.env`。`chmod 600` 必須（緩いと起動時に警告）
 - **絶対パスで指定したい場合**: 環境変数 `WBJP_ENV_FILE=/etc/wbjp/wbjp.env` を渡せば、cronの`cd`忘れがあってもそこを読む
 - 中身は秘密でない項目（`WBJP_ENV=prod` 等）のみ。APIキー自体は上記手順3のsystemd `EnvironmentFile=` 経由が推奨（ローカル開発ならキーチェーン。README「APIキーの置き場所」）
 
@@ -115,7 +115,7 @@ crontab の内容は [`deploy/crontab.txt`](../deploy/crontab.txt) に置いて�
 
 ```bash
 # 既存の crontab から旧デプロイ（/home/abobo/webull/wbjp）の行を除き、deploy/crontab.txt を足す
-(crontab -l | grep -v 'webull/wbjp'; cat /home/abobo/jstock/deploy/crontab.txt) | crontab -
+(crontab -l | grep -v 'webull/wbjp'; cat /home/abobo/jstock-go/deploy/crontab.txt) | crontab -
 crontab -l | grep jstock
 ```
 
@@ -134,7 +134,7 @@ crontab -l | grep jstock
 
 ```bash
 # 送らずに中身だけ確認する
-DRY_RUN=1 /home/abobo/jstock/deploy/daily-report.sh
+DRY_RUN=1 /home/abobo/jstock-go/deploy/daily-report.sh
 
 # 配達だけ試す（Discord に 1 通届けば経路は通っている）
 echo 'テスト' | bin/discord-post
@@ -156,13 +156,13 @@ crontab /path/to/crontab.txt && crontab -l
 
 # 2. リダイレクト先を先に作る。>> state/logs/… の評価はプロセス起動より前なので、
 #    ディレクトリが無いと本体が一度も走らずに失敗する（アプリが作るのは起動後）
-mkdir -p /home/abobo/jstock/state/logs
+mkdir -p /home/abobo/jstock-go/state/logs
 
 # 3. コマンド部分の検証は 1 回手で流すしかない。cron と同じ最小環境を再現して実行する
 #    （--live は外す。発注以外のデータ取得・判断・記録はすべて動く）
-cd /home/abobo/jstock && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
+cd /home/abobo/jstock-go && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
   bin/wbjp run --config-dir config
-cd /home/abobo/jstock && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
+cd /home/abobo/jstock-go && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
   bin/jquants sync --dry-run
 ```
 
@@ -215,7 +215,7 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
 ## 6. 更新（GitHub から取り込む）
 
 ```bash
-cd /home/abobo/jstock
+cd /home/abobo/jstock-go
 flock /tmp/accum-run.lock git pull --ff-only   # 走行中の accum run と重ならないようにロックを取る
 go test ./... -short                           # 任意: 動作確認
 flock /tmp/accum-run.lock deploy/build.sh      # 実行ファイルを作り直す（走行中と重ならないように）
