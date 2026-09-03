@@ -142,3 +142,23 @@ DRY_RUN=1 deploy/daily-report.sh 2026-09-02   # 日付を指定
 提案の生成（`evaluate` → `review` → `backtest` → `docs/research/` への記録）までは
 自動化してよい。**`config/*.toml` への反映は人が承認する。** パラメータの自動書き換えは
 過学習と暴走がそのまま実弾に繋がるため。
+
+### 送信結果不明の注文はプログラムが決める（人は見ない前提）
+
+発注を送って応答が返らなかった注文（台帳の `PENDING`）は、人に「口座を確かめてください」
+とは言わず、**当日の注文一覧（立花 CLMOrderList）と銘柄・売買・区分・数量・時刻で
+突き合わせて自動で判定する**（`wbcore/reconcile`）。3 つの台帳とも同じ規則:
+
+| 判定 | 台帳 | その後 |
+|---|---|---|
+| `attributed`（届いていた） | 注文番号と状態を帰属 | 通常どおり照会・手仕舞い |
+| `not_sent`（届いていない） | `UNSENT`（終了状態） | 種を変えて送り直す。daytrade は同じ実行の中で 1 度、wbjp / accum は次の実行の差分で |
+| `too_recent`（送った直後） | `PENDING` のまま | 次の実行で判定 |
+| `ambiguous`（同じ銘柄で細部の違う未帰属の注文がある） | `PENDING` のまま | 通知＋ダイジェストの異常。daytrade はその銘柄を触らない、wbjp は発注を止める |
+
+一覧を照会できないときは判定せず、実弾を出さない（`*.pending_unresolved`）。cron の次の回で再判定する。
+
+ダイジェストには `pending_attributed` / `pending_unsent` / `pending_ambiguous` / `pending_too_recent` の
+件数が載る。AI が見るべきは **`pending_ambiguous` が 2 回以上の実行にまたがって続く**ときだけ——
+口座の注文一覧（`wbjp orders` / `accum orders --check` / 層 3 の `*.pending_ambiguous` 行）で
+どの注文か特定し、台帳の該当行を `UNSENT` か注文番号付きの状態に直す提案を書く。

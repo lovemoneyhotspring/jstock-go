@@ -359,9 +359,20 @@ func RunAccumulation(
 	for _, change := range synced.Changes {
 		logger.Info("accum.fill", "前回の注文: "+change.Describe())
 	}
-	// 照会できなかった注文は「発注済み」に数えたまま保留してある。
-	// 実際には届いていなかった場合、その額はこの月ずっと埋まらないので、
-	// 自動では決めずに人へ知らせる。
+	// 送信結果不明（PENDING）の注文を当日の注文一覧で判定した結果はダイジェストに載せる
+	//（AI が最初に読む。届いていた／届いていなかった／決められない、の件数）
+	if r := synced.Resolved; r.Attributed+r.NotSent+r.Ambiguous+r.TooRecent > 0 {
+		digest.Note(r.Fields("pending"))
+		for _, line := range r.Details {
+			logger.Info("accum.pending_resolved", "送信結果不明の注文: "+line)
+		}
+	}
+	// 照会できなかった注文は「発注済み」に数えたまま保留してある。次の run が
+	// もう一度判定する。決められないものはダイジェストの異常として残す（AI が読む）。
+	if len(synced.Unresolved) > 0 {
+		digest.Anomaly("accum.pending_ambiguous",
+			fmt.Sprintf("%d 件の注文を判定できず保留（次の run で再判定）", len(synced.Unresolved)))
+	}
 	for _, u := range synced.Unresolved {
 		logger.Warn("accum.unresolved", "照会できず保留: "+u.Describe())
 	}

@@ -80,7 +80,9 @@ jq 'select(.run_id == "abc123" and .routine != true)' state/logs/daytrade-prod.j
 | `accum.lot_size` | 売買単位が設定と銘柄情報で食い違った（API を採用）、または照会できず設定値で進んだ | `symbol`, `configured`, `api` / `market`, `error` |
 | `accum.decision` | 今日出すべき投下を決めた | `symbol`, `market`, `month`（どの月の積立か）, `judged_on`（判断日）, `target`（今月の目標）, `placed`（発注済み）, `due`（差額＝今日出す額）, `multiplier`, `price`, `tactic`, `signal`（判定用の銘柄。無ければ null） |
 | `accum.order` | 投下を注文にした結果（1 件ごと） | `symbol`, `client_order_id`, `quantity`, `price`, `amount`, `live`（実発注か）, `outcome`（`発注` / `dry-run` / `見送り …` / `失敗 …` / `発注済み（冪等）`）, `note`（見送り・失敗の理由） |
-| `accum.unconfirmed` | 発注を送ったが応答が返らず、届いたか分からない。台帳には `PENDING` のまま残し再送しない（`accum orders --check` で確かめる） | `symbol`, `client_order_id`, `error` |
+| `accum.unconfirmed` | 発注を送ったが応答が返らず、届いたか分からない。台帳には `PENDING` のまま残し、次の `run` の冒頭で当日の注文一覧と突き合わせて自動で判定する | `symbol`, `client_order_id`, `error` |
+| `accum.pending_resolved` | 送信結果不明の注文を当日の注文一覧で判定した（1 件ごと）。`attributed`（届いていた→注文番号を帰属）/ `not_sent`（届いていない→`UNSENT`、次の差額で埋め直す）/ `too_recent`（送った直後。次の run で） | 本文に銘柄・数量・判定 |
+| `accum.pending_ambiguous` | ダイジェストの異常。同じ銘柄で細部の違う未帰属の注文があり自動で決められない。`PENDING` のまま次の run で再判定。続くなら口座の注文一覧を見る | `detail` |
 | `accum.run` | 実行の終了 | `live`, `reason`（dry-run の理由）, `orders`, `failures` |
 | `accum.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception`（トレースバック本文。`log.exception` / `exc_info=True` のログはすべてこの項目を持つ） |
 
@@ -108,6 +110,9 @@ jq 'select(.run_id == "abc123" and .routine != true)' state/logs/daytrade-prod.j
 | `daytrade.carry` | verify が売れ残り（持ち越し）を見つけた（通知も送る） | `day`, `positions`（銘柄と株数） |
 | `daytrade.fill` | close / verify が注文をブローカーに照会した | `symbol`, `client_order_id`, `broker_order_id`, `before` / `after`（状態）, `quantity`, `filled`, `avg_fill_price`。照会できなければ warning で `after` が null |
 | `daytrade.reconcile` | close / verify が台帳と食い違う建玉をブローカーに見つけた（通知も送る）／建玉を照会できなかった | `held`, `symbol` / `error` |
+| `daytrade.pending_resolved` | 送信結果不明（`PENDING`）の注文を当日の注文一覧（銘柄・売買・区分・数量・時刻）で判定した。`outcome` = `attributed`（届いていた→注文番号と状態を帰属）/ `not_sent`（届いていない→`UNSENT`。同じ実行の中で種を変えて 1 度送り直す）/ `too_recent` | `day`, `client_order_id`, `symbol`, `side`, `quantity`, `outcome`, `reason`, `broker_order_id`, `status`, `filled` |
+| `daytrade.pending_ambiguous` | 同じ銘柄・売買で数量か区分の違う未帰属の注文があり、自動で決められない（通知も送る）。`PENDING` のまま残り、その銘柄はその日は触らない。ダイジェストの `pending_ambiguous` に件数 | 同上 |
+| `daytrade.pending_unresolved` | 当日の注文一覧を照会できず判定を持ち越した。open は発注しない（次の cron で再判定） | `error` |
 | `daytrade.skip` | 何もしなかった | `reason`（`disabled` / `holiday` / `window` / `regime` / `already` / `no_quotes` / `no_picks` / `no_capital` / `no_buys` / `nothing_to_sell`）と付随項目 |
 | `daytrade.pnl_incomplete` | 資産曲線の評価で、売りの約定単価が確定していない日を除いた | `days` |
 | `daytrade.iv_missing` / `daytrade.us_missing` | 前日の IV／前夜の米国市場を取れず、そのゲート無しで進んだ | `prev_day` / `error` |
@@ -123,6 +128,7 @@ jq 'select(.run_id == "abc123" and .routine != true)' state/logs/daytrade-prod.j
 | `code` | いつ | 主な項目 |
 |---|---|---|
 | `wbjp.signals` | 戦略が意見を出した | `strategy`, `signals`（件数） |
+| `wbjp.pending_resolved` / `wbjp.pending_ambiguous` | daytrade と同じ。送信結果不明の注文を当日の注文一覧で判定した／決められなかった。決められないものがあれば `run` は発注せずに止まる（ダイジェスト `wbjp.pending_ambiguous`） | `client_order_id`, `symbol`, `side`, `quantity`, `outcome`, `reason` |
 
 `code` の無いログ（サイクル開始・発注・リスク判定の結果など）は `event` と付随項目で読む。
 順次 `code` を付けていく。

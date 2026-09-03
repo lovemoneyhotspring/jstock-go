@@ -19,6 +19,7 @@ var deadStatuses = map[string]struct{}{
 	string(domain.OrderStatusCancelled): {},
 	string(domain.OrderStatusRejected):  {},
 	string(domain.OrderStatusExpired):   {},
+	string(domain.OrderStatusUnsent):    {},
 }
 
 type LedgerOrder struct {
@@ -113,9 +114,28 @@ func (l *Ledger) Close() error {
 
 func (l *Ledger) WasPlaced(clientOrderID string) bool {
 	var dummy int
-	query := "SELECT 1 FROM orders WHERE client_order_id = ? AND status NOT IN (?, ?);"
-	err := l.db.QueryRow(query, clientOrderID, DryRunStatus, string(domain.OrderStatusRejected)).Scan(&dummy)
+	query := "SELECT 1 FROM orders WHERE client_order_id = ? AND status NOT IN (?, ?, ?);"
+	err := l.db.QueryRow(query, clientOrderID, DryRunStatus, string(domain.OrderStatusRejected), string(domain.OrderStatusUnsent)).Scan(&dummy)
 	return err == nil
+}
+
+// BrokerOrderIDs は台帳が知っている注文番号（broker_order_id）の集合。
+// 送信結果不明の注文をブローカーの一覧と突き合わせるとき、既に帰属済みのものを除くのに使う。
+func (l *Ledger) BrokerOrderIDs() (map[string]struct{}, error) {
+	rows, err := l.db.Query("SELECT broker_order_id FROM orders WHERE broker_order_id IS NOT NULL AND broker_order_id != ''")
+	if err != nil {
+		return nil, fmt.Errorf("台帳の注文番号を読めません: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // RecordedIDs は台帳が知っている注文 ID を全て返す。

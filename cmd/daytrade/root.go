@@ -6,6 +6,7 @@ import (
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/execute"
 	dthistory "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/history"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
@@ -13,6 +14,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/history"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/reconcile"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 	"github.com/shopspring/decimal"
 )
@@ -157,3 +159,29 @@ func alert(title, body string) { run.Alert(title, body) }
 func yen(v any) string                 { return cli.Yen(v) }
 func pct(v float64) string             { return cli.Pct(v) }
 func yenPtr(v *decimal.Decimal) string { return cli.Yen(v) }
+
+// resolvePending は送信結果不明（PENDING）の注文をプログラムで判定し、結果をダイジェストに残す。
+//
+// 誰も端末を見ていない前提なので、人に「確かめてください」とは言わない。判定できたものは
+// 台帳を直し、決められないものだけを異常としてダイジェストに載せる（AI が読んで扱う）。
+// 一覧を照会できなければエラー——判定できないまま実弾を出さない。
+func resolvePending(env execute.Env, b broker.Broker) error {
+	summary, err := execute.ResolvePending(env, b, reconcile.DefaultGrace)
+	if err != nil {
+		logError("daytrade.pending_unresolved", "送信結果不明の注文を判定できません", map[string]any{"error": err.Error()})
+		digest.Anomaly("daytrade.pending_unresolved", err.Error())
+		return err
+	}
+	if summary.Attributed+summary.NotSent+summary.Ambiguous+summary.TooRecent == 0 {
+		return nil
+	}
+	digest.Note(summary.Fields("pending"))
+	for _, line := range summary.Details {
+		fmt.Println("  送信結果不明の注文: " + line)
+	}
+	if summary.Ambiguous > 0 {
+		digest.Anomaly("daytrade.pending_ambiguous",
+			fmt.Sprintf("%d 件の送信結果不明の注文を自動で決められません", summary.Ambiguous))
+	}
+	return nil
+}

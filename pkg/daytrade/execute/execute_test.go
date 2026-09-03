@@ -18,12 +18,14 @@ import (
 
 // stubBroker は発注の規則を検証するための模型。応答を差し替えられる。
 type stubBroker struct {
-	place     func(domain.OrderRequest) (*domain.OrderAck, error)
-	getOrder  func(clientOrderID string) (*domain.Order, error)
-	positions []domain.Position
-	posErr    error
-	balance   domain.Balance
-	placed    []domain.OrderRequest
+	place      func(domain.OrderRequest) (*domain.OrderAck, error)
+	getOrder   func(clientOrderID string) (*domain.Order, error)
+	positions  []domain.Position
+	posErr     error
+	balance    domain.Balance
+	placed     []domain.OrderRequest
+	history    []domain.Order // 当日の注文一覧
+	historyErr error
 }
 
 func (s *stubBroker) Name() string      { return "stub" }
@@ -46,7 +48,9 @@ func (s *stubBroker) GetOrder(clientOrderID string, _ *string) (*domain.Order, e
 	}
 	return s.getOrder(clientOrderID)
 }
-func (s *stubBroker) GetOrderHistory(_, _ time.Time) ([]domain.Order, error) { return nil, nil }
+func (s *stubBroker) GetOrderHistory(_, _ time.Time) ([]domain.Order, error) {
+	return s.history, s.historyErr
+}
 func (s *stubBroker) Preview(_ domain.OrderRequest) (*domain.OrderPreview, error) {
 	return &domain.OrderPreview{}, nil
 }
@@ -181,7 +185,8 @@ func TestPlacePicksRejectedIsResentWithNewSeed(t *testing.T) {
 
 func TestPlacePicksUnconfirmedStaysPending(t *testing.T) {
 	env, _ := newEnv(t)
-	b := &stubBroker{balance: richBalance()}
+	// 一覧も照会できない → 届いたかどうか決められない → PENDING のまま、送り直さない
+	b := &stubBroker{balance: richBalance(), historyErr: errors.New("down")}
 	b.place = func(req domain.OrderRequest) (*domain.OrderAck, error) {
 		return nil, errors.New("timeout")
 	}
@@ -377,5 +382,117 @@ func TestVerifyDetectsCarriedAndMismatch(t *testing.T) {
 	result = Verify(env, b, entries, exits)
 	if len(result.Unconfirmed) == 0 {
 		t.Errorf("照会できない注文が数えられていない: %+v", result)
+	}
+}
+
+// --- 送信結果不明（PENDING）の自動判定 ---
+
+func brokerOrderOf(id, symbol string, side domain.Side, qty int64, trade domain.TradeType, status domain.OrderStatus) domain.Order {
+	created := time.Now().UTC()
+	return domain.Order{ClientOrderID: id, BrokerOrderID: &id, Symbol: symbol, Side: side, Trade: trade,
+		Quantity: decimal.NewFromInt(qty), FilledQuantity: decimal.NewFromInt(qty), Status: status, CreatedAt: &created}
+}
+
+func todayEnv(t *testing.T) (Env, *recorder) {
+	t.Helper()
+	env, rep := newEnv(t)
+	// 立花の一覧は当日分しか無いので、判定は「今日（JST）」の台帳にだけ効く
+	now := time.Now().In(time.FixedZone("JST", 9*3600))
+	env.Day = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	return env, rep
+}
+
+func TestUnconfirmedIsResentWhenBrokerHasNoOrder(t *testing.T) {
+	env, _ := todayEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	calls := 0
+	b.place = func(req domain.OrderRequest) (*domain.OrderAck, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("timeout") // 1 回目は結果不明
+		}
+		id := "N/" + req.Symbol
+		return &domain.OrderAck{ClientOrderID: req.ClientOrderID, BrokerOrderID: &id, Status: domain.OrderStatusSubmitted}, nil
+	}
+	// 一覧に無い → 届いていない → 種を変えて同じ実行の中で送り直す
+	orders, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if err != nil || orders != 1 || len(failures) != 0 {
+		t.Fatalf("orders=%d failures=%v err=%v", orders, failures, err)
+	}
+	if len(b.placed) != 2 || b.placed[0].ClientOrderID == b.placed[1].ClientOrderID {
+		t.Fatalf("送り直しの ID: %+v", b.placed)
+	}
+	entries, _ := env.Ledger.EntriesOn(env.Day)
+	statuses := map[string]string{}
+	for _, o := range entries {
+		statuses[o.ClientOrderID] = o.Status
+	}
+	if statuses[b.placed[0].ClientOrderID] != string(domain.OrderStatusUnsent) ||
+		statuses[b.placed[1].ClientOrderID] != string(domain.OrderStatusSubmitted) {
+		t.Errorf("台帳: %v", statuses)
+	}
+}
+
+func TestUnconfirmedIsAttributedWhenBrokerHasOrder(t *testing.T) {
+	env, _ := todayEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	b.place = func(req domain.OrderRequest) (*domain.OrderAck, error) {
+		// 届いたが応答が返らなかった: 一覧には載っている
+		b.history = append(b.history, brokerOrderOf("77/x", req.Symbol, req.Side, 100, req.Trade, domain.OrderStatusSubmitted))
+		return nil, errors.New("timeout")
+	}
+	orders, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if err != nil || orders != 1 || len(failures) != 0 || len(b.placed) != 1 {
+		t.Fatalf("orders=%d failures=%v placed=%d err=%v", orders, failures, len(b.placed), err)
+	}
+	o := statusOf(t, env, "7203")
+	if o.Status != string(domain.OrderStatusSubmitted) || o.BrokerOrderID == nil || *o.BrokerOrderID != "77/x" {
+		t.Errorf("帰属されていない: %+v", o)
+	}
+}
+
+func TestUnconfirmedStaysPendingWhenHistoryUnavailable(t *testing.T) {
+	env, _ := todayEnv(t)
+	b := &stubBroker{balance: richBalance(), historyErr: errors.New("down")}
+	b.place = func(domain.OrderRequest) (*domain.OrderAck, error) { return nil, errors.New("timeout") }
+	_, failures, _ := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if len(failures) != 1 || len(b.placed) != 1 {
+		t.Fatalf("判定できないのに送り直した: failures=%v placed=%d", failures, len(b.placed))
+	}
+	if o := statusOf(t, env, "7203"); o.Status != string(domain.OrderStatusPending) {
+		t.Errorf("PENDING のまま次の実行に渡す: %s", o.Status)
+	}
+	// 次の実行の冒頭: 一覧が取れれば判定できる
+	b.historyErr = nil
+	summary, err := ResolvePending(env, b, 0)
+	if err != nil || summary.NotSent != 1 {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+	if o := statusOf(t, env, "7203"); o.Status != string(domain.OrderStatusUnsent) {
+		t.Errorf("UNSENT になっていない: %s", o.Status)
+	}
+	// 「発注済み」に数えないので、もう一度 open が走れば送り直す
+	b.place = nil
+	orders, _, _ := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if orders != 1 || len(b.placed) != 2 {
+		t.Errorf("UNSENT の後に送り直されていない: orders=%d placed=%d", orders, len(b.placed))
+	}
+}
+
+func TestResolvePendingAmbiguousAlertsAndKeepsPending(t *testing.T) {
+	env, rep := todayEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	b.place = func(domain.OrderRequest) (*domain.OrderAck, error) { return nil, errors.New("timeout") }
+	// 同じ銘柄・売買で数量の違う未帰属の注文がある → 決められない
+	b.history = []domain.Order{brokerOrderOf("9/x", "7203", domain.SideBuy, 300, domain.TradeTypeCash, domain.OrderStatusFilled)}
+	PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if o := statusOf(t, env, "7203"); o.Status != string(domain.OrderStatusPending) {
+		t.Errorf("決められないときは PENDING のまま: %s", o.Status)
+	}
+	if len(rep.alerts) == 0 || len(rep.errors) == 0 {
+		t.Errorf("決められないことを知らせていない: alerts=%v errors=%v", rep.alerts, rep.errors)
+	}
+	if len(b.placed) != 1 {
+		t.Errorf("決められないのに送り直した: %d", len(b.placed))
 	}
 }

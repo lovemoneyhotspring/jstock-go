@@ -293,6 +293,23 @@ func runDaily(liveFlag, yesFlag, noSyncFlag bool) error {
 		logger.Warn("wbjp.ledger", fmt.Sprintf("目標を記録できません: %v", err))
 	}
 
+	// 3-5. 送信結果が分からなかった注文を判定する。決められないものがあれば発注しない
+	//（同じ銘柄に二重に出しうる）。dry-run は台帳に PENDING を作らないので飛ばす
+	if canLive {
+		summary, err := resolvePendingOrders(rep, b, logger, clock.NowUTC())
+		if err != nil {
+			digest.Anomaly("wbjp.pending_unresolved", err.Error())
+			return err
+		}
+		if summary.Attributed+summary.NotSent+summary.Ambiguous+summary.TooRecent > 0 {
+			digest.Note(summary.Fields("pending"))
+		}
+		if summary.Ambiguous > 0 {
+			digest.Anomaly("wbjp.pending_ambiguous", fmt.Sprintf("%d 件の送信結果不明の注文を自動で決められません", summary.Ambiguous))
+			return fmt.Errorf("送信結果不明の注文 %d 件を決められないため発注を中止しました（二重発注を避けます）", summary.Ambiguous)
+		}
+	}
+
 	// 4. リコンサイル
 	//
 	// 板に残っている注文が見えないと、同じ注文をもう一度出しうる。
@@ -439,6 +456,8 @@ func runDaily(liveFlag, yesFlag, noSyncFlag bool) error {
 	digest.Note(map[string]any{"phase": "run", "live": canLive, "orders": placed, "targets": len(targetList)})
 	return nil
 }
+
+var decimalZero = decimal.Zero
 
 func derefString(v *string) string {
 	if v == nil {

@@ -51,7 +51,7 @@ func runVerify(date string) error {
 	}()
 
 	env := execute.Env{Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout}
-	entries, exits, err := execute.LiveOrders(env)
+	entries, _, err := execute.LiveOrders(env)
 	if err != nil {
 		return err
 	}
@@ -63,6 +63,14 @@ func runVerify(date string) error {
 
 	b, err := connectBroker(cfg)
 	if err != nil {
+		return err
+	}
+	if err := resolvePending(env, b); err != nil {
+		return err
+	}
+	// 判定で台帳が変わりうるので読み直す
+	var exits []dtledger.Order
+	if entries, exits, err = execute.LiveOrders(env); err != nil {
 		return err
 	}
 

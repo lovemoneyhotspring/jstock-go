@@ -73,7 +73,17 @@ func runClose(live, yes, ignoreWindow bool, date string) error {
 		}
 	}()
 
-	env := execute.Env{Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout}
+	env := execute.Env{Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout, RetryWait: execute.DefaultRetryWait}
+	var b broker.Broker
+	if allowed {
+		if b, err = connectBroker(cfg); err != nil {
+			return err
+		}
+		// 朝の建玉や前回の手仕舞いで送信結果が分からなかったものを判定してから、数量を決める
+		if err := resolvePending(env, b); err != nil {
+			return err
+		}
+	}
 	entries, dryRun, err := execute.LiveEntries(env)
 	if err != nil {
 		return err
@@ -85,13 +95,6 @@ func runClose(live, yes, ignoreWindow bool, date string) error {
 			warnUnrecordedPositions(cfg, day)
 		}
 		return nil
-	}
-
-	var b broker.Broker
-	if allowed {
-		if b, err = connectBroker(cfg); err != nil {
-			return err
-		}
 	}
 
 	// 約定数量はブローカーに聞く（部分約定・拒否をそのまま手仕舞いの数量に反映する）。

@@ -127,7 +127,18 @@ func runOpen(opts openOptions) error {
 		}
 	}()
 
-	if !allowed {
+	env := execute.Env{Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout, RetryWait: execute.DefaultRetryWait}
+	var b broker.Broker
+	if allowed {
+		if b, err = connectBroker(cfg); err != nil {
+			return err
+		}
+		// 前回の実行で送信結果が分からなかった注文があれば、ここで判定して台帳を直す。
+		// 届いていなければ UNSENT になり、下の「発注済み」には数えない（種を変えて送り直す）
+		if err := resolvePending(env, b); err != nil {
+			return err
+		}
+	} else {
 		// dry-run は確認のたびに増える。その日の古い dry-run は消して最新だけ残す
 		if _, err := led.ClearDryRun(day); err != nil {
 			return err
@@ -310,12 +321,7 @@ func runOpen(opts openOptions) error {
 		return err
 	}
 
-	env := execute.Env{Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout}
-	var b broker.Broker
 	if allowed {
-		if b, err = connectBroker(cfg); err != nil {
-			return fmt.Errorf("建玉を突き合わせられないため発注を中止しました: %w", err)
-		}
 		// 台帳に無い建玉がブローカーにあれば、この実行は二重に建てることになる。
 		// 冪等性は台帳の client_order_id で担保しているので、台帳を失う・別ホストへ
 		// 移す・復元した直後は効かない。発注の直前にブローカーと突き合わせる

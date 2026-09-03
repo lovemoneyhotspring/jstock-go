@@ -19,8 +19,10 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/execution"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/reconcile"
 	"github.com/shopspring/decimal"
 )
 
@@ -40,7 +42,13 @@ type Env struct {
 	Report Reporter
 	// Out は人向けの出力。nil なら捨てる。
 	Out io.Writer
+	// RetryWait は送信結果が分からなかったとき、当日の注文一覧で判定するまでに待つ時間
+	// （受付が一覧に載るまでの猶予）。テストは 0。
+	RetryWait time.Duration
 }
+
+// DefaultRetryWait は RetryWait の既定。
+const DefaultRetryWait = 5 * time.Second
 
 func (e Env) printf(format string, a ...any) {
 	if e.Out != nil {
@@ -167,6 +175,128 @@ func PlaceRecorded(env Env, b broker.Broker, request domain.OrderRequest, price 
 	return nil
 }
 
+// placeResolving は送って結果が分からなければ当日の注文一覧で判定し、届いていなければ
+// 種を変えて 1 度だけ送り直す。返す request は最後に送ったもの。
+//
+// 判定できなかった（一覧を照会できない・まだ載っていない）ときは PENDING のまま
+// ErrUnconfirmedOrder を返す。次の実行（cron は 3 分おきに 3 回）の冒頭で
+// ResolvePending がもう一度判定する。人は介在しない。
+func placeResolving(env Env, b broker.Broker, build func(attempt int) domain.OrderRequest, attempt int,
+	price decimal.Decimal, fee *decimal.Decimal) (domain.OrderRequest, error) {
+	request := build(attempt)
+	err := PlaceRecorded(env, b, request, price, fee)
+	var unconfirmed *ErrUnconfirmedOrder
+	if !errors.As(err, &unconfirmed) {
+		return request, err
+	}
+	if env.RetryWait > 0 {
+		time.Sleep(env.RetryWait)
+	}
+	if _, rerr := ResolvePending(env, b, 0); rerr != nil {
+		env.Report.Warn("daytrade.pending_unresolved", "送信結果不明の注文を判定できません（次の実行で再判定）", map[string]any{
+			"client_order_id": request.ClientOrderID, "error": rerr.Error()})
+		return request, err
+	}
+	current, ok, _ := env.Ledger.Get(request.ClientOrderID)
+	switch {
+	case !ok || current.Status == string(domain.OrderStatusPending):
+		return request, err
+	case current.Status == string(domain.OrderStatusUnsent):
+		env.Report.Info("daytrade.pending_resolved", "届いていなかったので種を変えて送り直す", map[string]any{
+			"client_order_id": request.ClientOrderID, "symbol": request.Symbol, "attempt": attempt + 1})
+		request = build(attempt + 1)
+		return request, PlaceRecorded(env, b, request, price, fee)
+	default:
+		env.Report.Info("daytrade.pending_resolved", "届いていた（注文番号を台帳に帰属）", map[string]any{
+			"client_order_id": request.ClientOrderID, "symbol": request.Symbol,
+			"broker_order_id": stringOf(current.BrokerOrderID), "status": current.Status})
+		return request, nil
+	}
+}
+
+// ResolvePending は台帳の PENDING（送信結果不明）を、ブローカーの当日の注文一覧と
+// 突き合わせて判定し、台帳を更新する（wbcore/reconcile）。
+//
+//   - 届いていた   → 注文番号と状態を書き戻す
+//   - 届いていない → UNSENT（終了状態。次の判断で種を変えて送り直せる）
+//   - 決められない → PENDING のまま残し、Error ログと通知（AI が読む）
+//
+// 一覧を照会できなければエラー。判定できないまま実弾を出さない。
+// 立花の一覧は当日分しか返らないので、判定日が今日（JST）でなければ何もしない。
+func ResolvePending(env Env, b broker.Broker, grace time.Duration) (reconcile.Summary, error) {
+	var summary reconcile.Summary
+	if b == nil {
+		return summary, nil
+	}
+	orders, err := env.Ledger.OrdersOn(env.Day, nil)
+	if err != nil {
+		return summary, err
+	}
+	var pendings []reconcile.Pending
+	for _, o := range orders {
+		if o.Status != string(domain.OrderStatusPending) {
+			continue
+		}
+		placedAt, _ := time.Parse(time.RFC3339, o.PlacedAt)
+		pendings = append(pendings, reconcile.Pending{
+			ClientOrderID: o.ClientOrderID, Symbol: o.Symbol, Side: o.Side, Trade: o.Trade,
+			Quantity: o.Quantity, PlacedAt: placedAt,
+		})
+	}
+	if len(pendings) == 0 {
+		return summary, nil
+	}
+	now := clock.NowUTC()
+	todayJST := clock.ToZone(now, clock.Tokyo)
+	if env.Day.Format(cli.DateLayout) != todayJST.Format(cli.DateLayout) {
+		env.Report.Warn("daytrade.pending_unresolved", "判定日が今日ではないので送信結果不明の注文は判定しない（一覧は当日分のみ）",
+			map[string]any{"day": env.dayText(), "pending": len(pendings)})
+		return summary, nil
+	}
+	start := time.Date(todayJST.Year(), todayJST.Month(), todayJST.Day(), 0, 0, 0, 0, clock.Tokyo)
+	todays, err := b.GetOrderHistory(start, start.Add(24*time.Hour-time.Second))
+	if err != nil {
+		return summary, fmt.Errorf("送信結果不明の注文 %d 件を判定できません（当日の注文一覧を照会できない）: %w", len(pendings), err)
+	}
+	known, err := env.Ledger.BrokerOrderIDs()
+	if err != nil {
+		return summary, err
+	}
+	resolutions := reconcile.Resolve(pendings, todays, reconcile.Options{Now: now, Grace: grace, Known: known})
+	var ambiguous []string
+	for _, r := range resolutions {
+		fields := map[string]any{
+			"day": env.dayText(), "client_order_id": r.Pending.ClientOrderID, "symbol": r.Pending.Symbol,
+			"side": string(r.Pending.Side), "quantity": r.Pending.Quantity.String(),
+			"outcome": string(r.Outcome), "reason": r.Reason,
+		}
+		switch r.Outcome {
+		case reconcile.Attributed:
+			m := r.Match
+			if err := env.Ledger.UpdateStatus(r.Pending.ClientOrderID, m.Status, m.FilledQuantity, m.AvgFillPrice, m.BrokerOrderID); err != nil {
+				return summary, fmt.Errorf("判定の結果を台帳に書けません: %w", err)
+			}
+			fields["broker_order_id"], fields["status"], fields["filled"] = stringOf(m.BrokerOrderID), string(m.Status), m.FilledQuantity.String()
+			env.Report.Info("daytrade.pending_resolved", "送信結果不明の注文は届いていた", fields)
+		case reconcile.NotSent:
+			if err := env.Ledger.UpdateStatus(r.Pending.ClientOrderID, domain.OrderStatusUnsent, decimal.Zero, nil, nil); err != nil {
+				return summary, fmt.Errorf("判定の結果を台帳に書けません: %w", err)
+			}
+			env.Report.Info("daytrade.pending_resolved", "送信結果不明の注文は届いていなかった（送り直せる）", fields)
+		case reconcile.Ambiguous:
+			env.Report.Error("daytrade.pending_ambiguous", "送信結果不明の注文を決められない（PENDING のまま。この銘柄は今日は触らない）", fields)
+			ambiguous = append(ambiguous, fmt.Sprintf("%s %s %s 株: %s", r.Pending.Symbol, r.Pending.Side, r.Pending.Quantity, r.Reason))
+		case reconcile.TooRecent:
+			env.Report.Info("daytrade.pending_resolved", "送った直後なので次の実行で判定する", fields)
+		}
+	}
+	if len(ambiguous) > 0 {
+		env.Report.Alert("デイトレ: 送信結果不明の注文を自動で決められません（口座の注文一覧を確かめてください）",
+			strings.Join(ambiguous, "\n"))
+	}
+	return reconcile.Summarize(resolutions), nil
+}
+
 // PlacePicks は選んだ銘柄を順に発注する。b が nil なら dry-run（台帳に記録だけ）。
 // 台帳への記録が先（PlaceRecorded）。余力は取引区分ごとに減らしていく。
 func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, failures []string, err error) {
@@ -174,8 +304,10 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 	remaining := map[domain.TradeType]decimal.Decimal{}
 
 	for _, pick := range picks {
+		pick := pick
 		attempt := env.Ledger.DeadCount(env.Day, pick.Symbol, pick.Side)
-		request := EntryRequest(pick, env.Day, env.Cfg, attempt)
+		build := func(a int) domain.OrderRequest { return EntryRequest(pick, env.Day, env.Cfg, a) }
+		request := build(attempt)
 		label := "買い"
 		if pick.Side == domain.SideSell {
 			label = "売建"
@@ -211,7 +343,8 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 			}
 			remaining[request.Trade] = remaining[request.Trade].Sub(need)
 			fee := pick.Fee()
-			if err := PlaceRecorded(env, b, request, pick.Price, &fee); err != nil {
+			var err error
+			if request, err = placeResolving(env, b, build, attempt, pick.Price, &fee); err != nil {
 				outcome = fmt.Sprintf("失敗 %v", err)
 				failures = append(failures, fmt.Sprintf("%s %s: %v", pick.Symbol, label, err))
 				env.printf("  %s: %s\n", pick.Symbol, outcome)
@@ -482,6 +615,10 @@ func PlaceExit(env Env, b broker.Broker, target ExitTarget) (string, error) {
 		exitSide = domain.SideBuy
 	}
 	attempt := env.Ledger.DeadCount(env.Day, entry.Symbol, exitSide)
+	build := func(a int) domain.OrderRequest {
+		req, _ := ExitRequest(entry, target.Quantity, env.Day, env.Cfg, a)
+		return req
+	}
 	request, action := ExitRequest(entry, target.Quantity, env.Day, env.Cfg, attempt)
 	if env.Ledger.WasPlaced(request.ClientOrderID) {
 		env.printf("  %s: %s発注済み（冪等）\n", entry.Symbol, action)
@@ -498,7 +635,7 @@ func PlaceExit(env Env, b broker.Broker, target ExitTarget) (string, error) {
 	if target.FillPrice != nil {
 		price = *target.FillPrice
 	}
-	if err := PlaceRecorded(env, b, request, price, nil); err != nil {
+	if _, err := placeResolving(env, b, build, attempt, price, nil); err != nil {
 		return "", err
 	}
 	env.printf("  %s: %s %s 株 発注\n", entry.Symbol, action, cli.Yen(target.Quantity))
