@@ -19,19 +19,15 @@
 *.parquet
 logs/
 
-# --- Python ---
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-*.egg-info/
-dist/
-build/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+# --- Go ---
+# deploy/build.sh が作る実行ファイル。中身はホストの CPU / OS 依存なので配らない
+/bin/
+# `go build ./cmd/wbjp` は -o を付けないとカレントに実行ファイルを落とす
+/wbjp
+/accum
+/daytrade
+/jquants
+/discord-post
 
 # --- OS/エディタ ---
 .DS_Store

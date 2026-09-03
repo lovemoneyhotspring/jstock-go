@@ -57,18 +57,18 @@ jq 'select(.anomalies)' state/digest/prod-2026-09-03.jsonl
 `slippage_bp` は**有利ならプラス、不利ならマイナス**（買いは安く買えたら有利、
 売りは高く売れたら有利——向きを揃えないと平均が意味を持たない）。
 
-理由（`reason`）は `wbcore.execution.ReasonCode` の列挙。文言は変わるので、
+理由（`reason`）は `pkg/wbcore/execution` の `ReasonCode` の列挙。文言は変わるので、
 集計は必ずコードで行う（人が読む説明は `note` に自由文のまま残る）。
 
-```python
-import polars as pl
-rows = pl.read_parquet("state/daytrade/history/execution/*.parquet")
+```bash
+# 行をそのまま見る
+daytrade history execution --from 2026-09-01 --json
 
 # 見送りの理由の分布
-rows.filter(pl.col("event") == "skip")["reason"].value_counts()
+jquants query "SELECT reason, count(*) FROM read_parquet('state/daytrade/history/execution/*.parquet') WHERE event = 'skip' GROUP BY reason ORDER BY 2 DESC"
 
 # 平均で何 bp 負けているか
-rows.filter(pl.col("event") == "fill")["slippage_bp"].mean()
+jquants query "SELECT avg(slippage_bp) FROM read_parquet('state/daytrade/history/execution/*.parquet') WHERE event = 'fill'"
 ```
 
 ## 2-b. 判断の妥当性（`evaluate` / `review`）
@@ -112,7 +112,7 @@ Discord に流す。人が毎日 `jq` を叩かなくても、崩れたときに
 |---|---|
 | `.claude/agents/daily-report.md` | サブエージェントの定義。**何をどの順で読むか**と、やってはいけないこと |
 | `deploy/daily-report.sh` | 起動と配達。`claude -p --agent daily-report` を回し、標準出力を Discord に流す |
-| `deploy/discord_post.py` | Webhook に POST する。2000 文字で分割する（Discord の上限） |
+| `cmd/discord-post` | Webhook に POST する。2000 文字で分割する（Discord の上限）。実体は `pkg/wbcore/notify` |
 | cron | `0 21 * * 1-5`（`deploy/crontab.txt`）。evaluate 群と plan が出揃ってから |
 
 ```console

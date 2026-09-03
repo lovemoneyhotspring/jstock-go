@@ -6,13 +6,13 @@
 
 | 種類 | 場所 | git管理 |
 |---|---|---|
-| コード | `src/` `pyproject.toml` `uv.lock` `.python-version` | ✅ |
+| コード | `cmd/` `pkg/` `go.mod` `go.sum`（サーバーで `deploy/build.sh` を叩いて `bin/` を作る） | ✅ |
 | 設定 | 運用する戦略の `config/<戦略名>/` 一式 | ✅ |
 | 秘密情報 | J-Quants APIキーと立花証券の認証情報（認証ID・秘密鍵 PEM・第二暗証番号）。`.env` または systemd `EnvironmentFile=` | ❌ 別途用意 |
 | キャッシュ | `data/`（足・財務・J-Quants アーカイブ） | ❌ 別ホストからコピーしてよい（または再取得） |
 | 状態 | `state/`（発注台帳・ログ・バックアップ） | ❌ **このホスト固有。他ホストのファイルで上書き厳禁** |
 
-`config/` と `data/` は `src/` の外にあるので、**`src/` だけ配ると動かない**。
+`config/` と `data/` はコードの外にあるので、**`cmd/` `pkg/` だけ配ると動かない**。
 
 ## 2. セットアップ手順
 
@@ -22,11 +22,11 @@ git clone https://github.com/lovemoneyhotspring/jstock.git /home/abobo/jstock &&
 # private リポジトリなので認証が必要。HTTPS の場合はパスワード欄に PAT（Personal Access Token）を使う。
 # SSH鍵を使うなら代わりに: git clone git@github.com:lovemoneyhotspring/jstock.git /home/abobo/jstock
 
-# 2. 依存関係
-uv sync
+# 2. 実行ファイルを作る（Go 1.26 以上。uv も Python も要らない）
+deploy/build.sh          # bin/ に wbjp / accum / daytrade / jquants / discord-post ができる
 
 # 3. APIキー（J-Quants）と立花証券の認証情報（2b 節）
-# ヘッドレスLinuxにはkeyringが無いので `credentials set` は使わず、
+# ヘッドレスLinuxにはkeyringが無いので、キーチェーンは使わず
 # systemd 経由で環境変数として渡す。
 sudo install -d -m 750 -o root -g wbjp /etc/wbjp
 sudo install -m 640 -o root -g wbjp /dev/null /etc/wbjp/wbjp.env
@@ -46,10 +46,10 @@ sudo vi /etc/wbjp/wbjp.env
 mkdir -p state/logs
 
 # 5. 価格データの初期取り込み（運用する戦略のconfigごとに）
-uv run wbjp data sync --config-dir config --days 1500
+wbjp data sync --config-dir config --days 1500
 
 # 6. dry-runで確認（--live無しは常に発注しない）
-WBJP_ENV=prod uv run wbjp run --config-dir config
+WBJP_ENV=prod wbjp run --config-dir config
 ```
 
 ## 2b. 立花証券 e支店（`execution.broker = "tachibana"`。全プロジェクト共通）
@@ -83,7 +83,7 @@ TACHIBANA_UAT_ORDER_PASSWORD=...
   14 時台の積立が見る現物買付可能額はその残り。月の積立額が収まるかを一度確かめる
 - その日の通番（`p_no`）と復号した仮想URLは `state/tachibana/session-<env>-<YYYYMMDD>.json`（0600）に
   残し、同じ日は再ログインしない（公式サンプルと同じ）。仮想URLが無効化されたらこのファイルを消す
-- 初回は**デモで** `WBJP_ENV=uat uv run daytrade quotes 7203 9984 --config-dir config/daytrade_margin` と
+- 初回は**デモで** `WBJP_ENV=uat daytrade quotes 7203 9984 --config-dir config/daytrade_margin` と
   `daytrade open --config-dir config/daytrade_margin`（dry-run）で疎通と電文を確かめる。
   サーバの外向き IP の許可設定は不要
 
@@ -91,7 +91,7 @@ TACHIBANA_UAT_ORDER_PASSWORD=...
 
 - **既定**: リポジトリ直下（カレントディレクトリ基準）= `/home/abobo/jstock/.env`。`chmod 600` 必須（緩いと起動時に警告）
 - **絶対パスで指定したい場合**: 環境変数 `WBJP_ENV_FILE=/etc/wbjp/wbjp.env` を渡せば、cronの`cd`忘れがあってもそこを読む
-- 中身は秘密でない項目（`WBJP_ENV=prod` 等）のみ。APIキー自体は上記手順3のsystemd `EnvironmentFile=`か`credentials set`（keyring）経由が推奨
+- 中身は秘密でない項目（`WBJP_ENV=prod` 等）のみ。APIキー自体は上記手順3のsystemd `EnvironmentFile=` 経由が推奨（ローカル開発ならキーチェーン。README「APIキーの置き場所」）
 
 ## 4. 定期実行（cron）— 20分おき固定、時刻計算はしない
 
@@ -137,7 +137,7 @@ crontab -l | grep jstock
 DRY_RUN=1 /home/abobo/jstock/deploy/daily-report.sh
 
 # 配達だけ試す（Discord に 1 通届けば経路は通っている）
-echo 'テスト' | .venv/bin/python deploy/discord_post.py
+echo 'テスト' | bin/discord-post
 ```
 
 中身は `state/reports/daily-<日付>.md` に残る。仕組みは
@@ -161,9 +161,9 @@ mkdir -p /home/abobo/jstock/state/logs
 # 3. コマンド部分の検証は 1 回手で流すしかない。cron と同じ最小環境を再現して実行する
 #    （--live は外す。発注以外のデータ取得・判断・記録はすべて動く）
 cd /home/abobo/jstock && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
-  .venv/bin/wbjp run --config-dir config
+  bin/wbjp run --config-dir config
 cd /home/abobo/jstock && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
-  .venv/bin/jquants sync --dry-run
+  bin/jquants sync --dry-run
 ```
 
 構文チェックが見てくれるのは「5 つの時刻フィールド＋コマンドの形」だけで、
@@ -211,11 +211,12 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
 ```bash
 cd /home/abobo/jstock
 flock /tmp/accum-run.lock git pull --ff-only   # 走行中の accum run と重ならないようにロックを取る
-uv sync                                        # 依存関係が変わっていれば反映（変更が無ければ一瞬）
-uv run pytest tests/ -q                        # 任意: 動作確認
+go test ./... -short                           # 任意: 動作確認
+flock /tmp/accum-run.lock deploy/build.sh      # 実行ファイルを作り直す（走行中と重ならないように）
 ```
 
-- **cron の再起動は不要**。`wbjp run` / `accum run` は 20 分ごとに新しいプロセスで起動するので、次の実行から新コードになる
+- **cron の再起動は不要**。`wbjp run` / `accum run` は 20 分ごとに新しいプロセスで起動するので、`build.sh` を回した次の実行から新コードになる
+- **`build.sh` を忘れると古い実行ファイルのまま動く**。`git pull` だけでは反映されない（Go は実行ファイルに固める）
 - `data/`（台帳 DB・足・ログ）は git 管理外なので pull で消えない
 - `config/` は git 管理下。サーバー側で `accum.toml` を直接編集すると pull が衝突する。
   設定変更は **ローカルで commit → push → サーバーで pull** の一方向に揃える

@@ -2,9 +2,9 @@
 #
 # 各戦略は「買え/売れ」ではなく -1.0〜+1.0 の意見を返す。
 # それを combiner が1本に合成し、サイジングが株数に変換する。
-# 使える戦略は `uv run wbjp strategies` で一覧できる。
+# 使える戦略は `wbjp strategies` で一覧できる。
 #
-# 積立はここには書かない。別プロジェクト（config/accum/accum.toml、`uv run accum`）。
+# 積立はここには書かない。別プロジェクト（config/accum/accum.toml、`accum`）。
 
 # 合成方式:
 #   weighted_vote … 重み付き平均。少数意見も一定量は反映される（既定）

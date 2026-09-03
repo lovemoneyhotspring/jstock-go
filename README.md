@@ -6,9 +6,9 @@
 | パッケージ | 役割 | CLI |
 |---|---|---|
 | `wbcore` | 共通基盤。ブローカー・足データ・指標・認証情報・登録簿の仕組み | — |
-| `wbjp` | スイング売買。複数の戦略を差し替え・合成し、差分だけを発注する | `uv run wbjp` |
-| `accum` | 積立。ドル平均法＋下落局面での増額。売らない | `uv run accum` |
-| `daytrade` | デイトレ。日本株のギャップ逆張りを寄付で買い大引で売る（[docs/DAYTRADE.md](docs/DAYTRADE.md)） | `uv run daytrade` |
+| `wbjp` | スイング売買。複数の戦略を差し替え・合成し、差分だけを発注する | `wbjp` |
+| `accum` | 積立。ドル平均法＋下落局面での増額。売らない | `accum` |
+| `daytrade` | デイトレ。日本株のギャップ逆張りを寄付で買い大引で売る（[docs/DAYTRADE.md](docs/DAYTRADE.md)） | `daytrade` |
 
 `wbjp` と `accum` は互いに import しない。どちらも `wbcore` の部品を組み合わせて動く。
 
@@ -75,11 +75,11 @@ FRED は終値だけを返す（四本値・出来高は無い。`open` / `high`
 | `ross_cameron` | Gap & Go / マイクロプルバックの日足版 | 材料日とその直後の押し目 | 終値 < EMA9 |
 
 ```bash
-uv run wbjp screen   --config-dir config              # 順位表（--show-failed で落ちた理由）
-uv run wbjp backtest --config-dir config --from 2023-01-01
+wbjp screen   --config-dir config              # 順位表（--show-failed で落ちた理由）
+wbjp backtest --config-dir config --from 2023-01-01
 ```
 
-> 戦略は名前で呼び分ける。`config/<dir>/strategies.toml` の `name` を変えれば、既存の戦略を上書きせずに別の手法を試せる。使える戦略は `uv run wbjp strategies` で一覧できる。
+> 戦略は名前で呼び分ける。`config/<dir>/strategies.toml` の `name` を変えれば、既存の戦略を上書きせずに別の手法を試せる。使える戦略は `wbjp strategies` で一覧できる。
 
 ---
 
@@ -95,14 +95,14 @@ uv run wbjp backtest --config-dir config --from 2023-01-01
 | 例 | `sma_cross`, `trend_pullback`, `momentum_rank` | `bear_stack`, `stack_ladder`, `drawdown_ladder` |
 
 ```bash
-uv run accum strategies          # 使える戦略
-uv run accum list                # 戦略と銘柄の対応
-uv run accum sync                # 足を取る（約30年ぶん。増額は暴落局面で効くため長い履歴が要る）
-uv run accum plan                # 直近の投下額
-uv run accum backtest            # 銘柄ごとの結果（対照群＝同額を均等に投じた場合）
-uv run accum compare 1305.T      # 登録済み戦略を1銘柄で横並び
-uv run accum run                 # 今日出すべき投下を計算する（注文は出さない）
-uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV（uat / prod）。cron では --yes も
+accum strategies          # 使える戦略
+accum list                # 戦略と銘柄の対応
+accum sync                # 足を取る（約30年ぶん。増額は暴落局面で効くため長い履歴が要る）
+accum plan                # 直近の投下額
+accum backtest            # 銘柄ごとの結果（対照群＝同額を均等に投じた場合）
+accum compare 1305.T      # 登録済み戦略を1銘柄で横並び
+accum run                 # 今日出すべき投下を計算する（注文は出さない）
+accum run --live          # 注文を出す。口座は .env の WBJP_ENV（uat / prod）。cron では --yes も
 ```
 
 倍率の判定を別の銘柄で行うこともできる（`signal_symbol`）。東証の S&P500 連動 ETF を買いながら、増額の判定は本家の指数 `^GSPC` の配列で行う、といった使い方。判定用は買わないので指数でもよく、暦が違っても「その日以前で最新」の判定値を当てる。判定用の市場の引けが買う市場の判断時刻より後（東証の銘柄を米国指数で判定）なら、同じ日付の足はまだ存在しないので**前日の足**を使う——バックテストでも同じ規則にして、ライブと食い違わないようにしている。省略すれば買う銘柄自身の足で判定する。
@@ -111,7 +111,7 @@ uv run accum run --live          # 注文を出す。口座は .env の WBJP_ENV
 
 増額分は日ごとに判定して積み上げ、**翌週の最初の営業日（月曜、休場なら火曜以降）に、累積が基本予算以上になっていれば 1 件でまとめて出す**（届かなければ次週へ持ち越して積み続け、入金日には閾値に関係なく基本分と同じ注文に乗せる）。日ごとに出すと 1 件が数千円になり、最低手数料 55 円で 1.5% 取られるうえ 10 口単位の ETF では 1 単元に届かないため。基本予算まで貯めてから出すことで 1 件あたりの手数料率を下げる。投下額の総量は変わらず、出す日が後ろにずれるだけ。単元に届かず買えなかった端数は差額として残り、次に資金が足される月曜か翌月の入金日に自動で繰り越される（台帳に残す「発注済み」は差額ではなく**株数 × 価格**）。月をまたいだ残りは、前月に実際の発注記録がある場合だけ当月の目標に足す——dry-run しかしていない月の分まで本稼働の初月に買わないため。
 
-`run` は冒頭で、前回までに送った注文の**約定状況をブローカーに照会**して台帳を更新する。「発注済み」に数えるのは生きている注文と約定した分だけで、失効・拒否の未約定分は数えない——つまり次の `run` で差額として自動的に埋め直される。未約定のまま終わった注文は通知する。台帳は `uv run accum orders`（`--check` で照会を伴う）で見られる。発注前にブローカーの見積りと買付余力を突き合わせ、足りなければ見送って通知する。株数は `投下額 ÷ 価格` を単元に切り捨て。ETF は単元が 1 株・10 株のものが多いので `[execution] lot_size_overrides` で指定する（既定の 100 株だと月の予算が届かず丸ごと見送りになる）。注文 ID は日付・銘柄・株数から決定論的に作るため、cron が二重に走っても二重買付にならない。
+`run` は冒頭で、前回までに送った注文の**約定状況をブローカーに照会**して台帳を更新する。「発注済み」に数えるのは生きている注文と約定した分だけで、失効・拒否の未約定分は数えない——つまり次の `run` で差額として自動的に埋め直される。未約定のまま終わった注文は通知する。台帳は `accum orders`（`--check` で照会を伴う）で見られる。発注前にブローカーの見積りと買付余力を突き合わせ、足りなければ見送って通知する。株数は `投下額 ÷ 価格` を単元に切り捨て。ETF は単元が 1 株・10 株のものが多いので `[execution] lot_size_overrides` で指定する（既定の 100 株だと月の予算が届かず丸ごと見送りになる）。注文 ID は日付・銘柄・株数から決定論的に作るため、cron が二重に走っても二重買付にならない。
 
 部品は `wbcore` と共有: 足は `wbcore.data`、発注は `wbcore.broker`、登録簿の仕組みは `wbcore.registry`。積立固有なのは倍率（`accum.tactics`）・計画（`accum.plan`）・検証（`accum.simulate` / `accum.basket`）・注文化（`accum.execute`）で、どの段も単独で差し替えられる。
 
@@ -219,9 +219,9 @@ Broker                PaperBroker（証券会社の実装を足せる）
 
 | 領域 | 選定 | 理由 |
 |---|---|---|
-| 言語 | Python 3.14 | 全依存のcp314ホイールを確認済み |
-| パッケージ管理 | uv | ランタイムごと管理。ロックファイルで再現性 |
-| データフレーム | polars | インジケーターは polars 式で自前実装 |
+| 言語 | Go 1.26 | 単一の実行ファイルで配れる。cron から叩くのにランタイムの用意が要らない |
+| パッケージ管理 | Go modules | `go.sum` で再現性。追加のツールは要らない |
+| 数値 | shopspring/decimal | 金額・株数は二進浮動小数点に載せない（丸め誤差が注文数量に出る） |
 | 価格データ | J-Quants API（日本株）/ FRED（米国の指数） | 日本株は JPX 公式・調整済み四本値。米国の指数は判断材料にだけ使うので、無料・キー不要・pandas 不要の FRED。取得済みは必ずローカルキャッシュ |
 | 状態の保存 | SQLite | 注文・シグナル・実行履歴。ACID と冪等性の担保 |
 | 時系列の保存 | Parquet + DuckDB | 足データの高速な集計・分析 |
@@ -231,10 +231,12 @@ Broker                PaperBroker（証券会社の実装を足せる）
 ## セットアップ
 
 ```bash
-uv sync
+deploy/build.sh              # bin/ に wbjp / accum / daytrade / jquants / discord-post を作る
+export PATH="$PWD/bin:$PATH"
 ```
 
-`uv` が Python 3.14 を自動で取得する。システムのPythonには一切触らない。
+必要なのは Go 1.26 以上だけ。`go build ./...` でも同じものが作れる。
+DuckDB を使う機能（`jquants query`）は cgo を要求するので、C コンパイラが要る。
 
 ---
 
@@ -262,13 +264,19 @@ APIキーはリポジトリに置かない。
 | 2 | `.env` | キーチェーンの無いホスト。**`chmod 600` 必須** |
 | 3 | OS キーチェーン | ローカル開発の推奨 |
 
-変数名は `WBJP_<ENV>_APP_KEY` / `_APP_SECRET` / `_ACCOUNT_ID`（例: `WBJP_PROD_APP_KEY`）。
+変数名は `TACHIBANA_<ENV>_AUTH_ID` / `_PRIVATE_KEY_FILE` / `_ORDER_PASSWORD`
+（例: `TACHIBANA_PROD_AUTH_ID`）。J-Quants の API キーは環境で分けず `WBJP_JQUANTS_API_KEY`。
 どこから読まれているかは `wbjp credentials check --env prod` の「取得元」で確認できる。
 
 ### ローカル開発（macOS など）
 
+キーチェーンへの**書き込みは OS の道具で行う**（このリポジトリに保存用の
+コマンドは無い。秘密を書く経路を増やさないため）。サービス名は
+`<namespace>/<env>`（小文字）、キーは環境変数名と同じ。
+
 ```bash
-uv run wbjp credentials set --env uat   # キーチェーンに保存
+security add-generic-password -s tachibana/uat -a TACHIBANA_UAT_AUTH_ID -w
+wbjp credentials check --env uat   # 取得元が「キーチェーン」になれば成功
 ```
 
 ### Linux サーバー
@@ -279,7 +287,7 @@ uv run wbjp credentials set --env uat   # キーチェーンに保存
 ```bash
 sudo install -d -m 750 -o root -g wbjp /etc/wbjp
 sudo install -m 640 -o root -g wbjp /dev/null /etc/wbjp/wbjp.env
-sudo vi /etc/wbjp/wbjp.env   # WBJP_PROD_APP_KEY=... 等
+sudo vi /etc/wbjp/wbjp.env   # TACHIBANA_PROD_AUTH_ID=... 等（.env.example 参照）
 ```
 
 ```ini
@@ -288,14 +296,14 @@ sudo vi /etc/wbjp/wbjp.env   # WBJP_PROD_APP_KEY=... 等
 User=wbjp
 EnvironmentFile=/etc/wbjp/wbjp.env
 WorkingDirectory=/opt/wbjp
-ExecStart=/opt/wbjp/.venv/bin/wbjp run --live
+ExecStart=/opt/wbjp/bin/wbjp run --live
 ```
 
 リポジトリ内の `.env` は `WBJP_ENV` やログ設定など秘密でない項目に使う。
 `.env` に秘密を書く場合は `chmod 600` すること（緩ければ起動時に警告が出る）。
 
-`.env` は `dotenv_values()` で読んでおり、値は `os.environ` に**入れない**。
-`load_dotenv()` と違って子プロセスや `/proc/<pid>/environ` から秘密が読めない。
+`.env` は読み取って内部の設定に持つだけで、プロセスの環境変数には**入れない**。
+子プロセスや `/proc/<pid>/environ` から秘密が読めないようにするため。
 
 ---
 
@@ -303,19 +311,19 @@ ExecStart=/opt/wbjp/.venv/bin/wbjp run --live
 
 ```bash
 # UAT（テスト口座。実弾なし）
-WBJP_ENV=uat uv run wbjp account
-WBJP_ENV=uat uv run wbjp run --live
+WBJP_ENV=uat wbjp account
+WBJP_ENV=uat wbjp run --live
 
 # バックテスト
-uv run wbjp backtest --from 2023-01-01 --to 2026-06-30
+wbjp backtest --from 2023-01-01 --to 2026-06-30
 # 指値の約定モデルを変えて突き合わせる。既定の open は寄付だけで判定（保守的）、
 # intrabar はその足の高安に届けば約定（楽観的）。判断ロジックは同一なので、
 # 成行だけの設定なら両者は完全に一致する。差は指値の約定しやすさの違いだけ
-uv run wbjp backtest --from 2023-01-01 --to 2026-06-30 --fill-model intrabar
+wbjp backtest --from 2023-01-01 --to 2026-06-30 --fill-model intrabar
 
 # 本番（--live なしは常に dry-run）
-WBJP_ENV=prod uv run wbjp run
-WBJP_ENV=prod uv run wbjp run --live
+WBJP_ENV=prod wbjp run
+WBJP_ENV=prod wbjp run --live
 ```
 
 ---
@@ -326,15 +334,15 @@ WBJP_ENV=prod uv run wbjp run --live
 
 ```bash
 # 初回: 一括ダウンロード（月次 csv.gz）で全期間（約 15 分）
-uv run jquants backfill
+jquants backfill
 # 一括に無い端点（EDINET 3 種・決算予定）を日付で遡る（約 75 分。夜に）
-uv run jquants sync --days 3650
+jquants sync --days 3650
 # 日次: 台帳を見て必要な分だけ（cron で固定間隔）
-uv run jquants sync
+jquants sync
 # 端点ごとの保存状況 / 直近 30 日の営業日に欠けが無いか（あれば非 0）
-uv run jquants status
-uv run jquants check
-uv run jquants query "SELECT Code, DiscDate, NP FROM fins_summary WHERE Code='72030' ORDER BY DiscDate DESC LIMIT 4"
+jquants status
+jquants check
+jquants query "SELECT Code, DiscDate, NP FROM fins_summary WHERE Code='72030' ORDER BY DiscDate DESC LIMIT 4"
 ```
 
 （zsh の対話シェルは行の途中の `#` をコメントとして扱わないので、コマンドの後ろにコメントを付けたまま貼らないこと）
@@ -348,14 +356,14 @@ cron が溜め続ける J-Quants アーカイブ（`data/jquants`、2016 年〜�
 
 | 段階 | コマンド | 何が出るか |
 |---|---|---|
-| データ | `uv run jquants status` / `jquants check` | 端点ごとの蓄積状況と営業日の欠け |
-| | `uv run jquants sync` | 足りない日付だけ取る（cron が 30 分ごとに回している） |
-| デイトレ | `uv run daytrade plan --config-dir config/daytrade_margin` | 翌営業日の母集団（`state/daytrade/plan-<日付>.parquet`）。cron が 20:30 に回す |
-| | `uv run daytrade backtest --config-dir config/daytrade_margin --since 2025-01-01` | ロング＋ショートの年別損益・Sharpe・最大 DD（数秒） |
-| スイング | `uv run wbjp data sync --config-dir config` | `universe.symbols` の日足をアーカイブから揃える |
-| | `uv run wbjp screen --config-dir config` | 戦略の合致度の順位表（`--show-failed` で落ちた理由） |
-| | `uv run wbjp backtest --config-dir config --from 2025-01-01` | 資産曲線・勝率・シャープ。`--fill-model intrabar` で約定モデルを変えて突き合わせ |
-| 積立 | `uv run accum sync` → `accum backtest` / `accum compare 1306.T` | 戦略ごとの結果と対照群（S&P500 等の判定用指数は FRED） |
+| データ | `jquants status` / `jquants check` | 端点ごとの蓄積状況と営業日の欠け |
+| | `jquants sync` | 足りない日付だけ取る（cron が 30 分ごとに回している） |
+| デイトレ | `daytrade plan --config-dir config/daytrade_margin` | 翌営業日の母集団（`state/daytrade/plan-<日付>.parquet`）。cron が 20:30 に回す |
+| | `daytrade backtest --config-dir config/daytrade_margin --since 2025-01-01` | ロング＋ショートの年別損益・Sharpe・最大 DD（数秒） |
+| スイング | `wbjp data sync --config-dir config` | `universe.symbols` の日足をアーカイブから揃える |
+| | `wbjp screen --config-dir config` | 戦略の合致度の順位表（`--show-failed` で落ちた理由） |
+| | `wbjp backtest --config-dir config --from 2025-01-01` | 資産曲線・勝率・シャープ。`--fill-model intrabar` で約定モデルを変えて突き合わせ |
+| 積立 | `accum sync` → `accum backtest` / `accum compare 1306.T` | 戦略ごとの結果と対照群（S&P500 等の判定用指数は FRED） |
 
 ### 運用の結果から改善する（[docs/FEEDBACK.md](docs/FEEDBACK.md)）
 
@@ -384,7 +392,7 @@ cron が溜め続ける J-Quants アーカイブ（`data/jquants`、2016 年〜�
 # 平日 16:30 に日次サイクルを実行
 CRON_TZ=Asia/Tokyo
 # stderr も JSONL と同じ WBJP_LOG_DIR に残す（ログの置き場は 1 箇所）。systemd なら journald でよい
-30 16 * * 1-5 cd /opt/wbjp && WBJP_ENV=prod /opt/wbjp/.venv/bin/wbjp run --live --yes >> state/logs/wbjp-run.log 2>&1
+30 16 * * 1-5 cd /opt/wbjp && WBJP_ENV=prod /opt/wbjp/bin/wbjp run --live --yes >> state/logs/wbjp-run.log 2>&1
 ```
 
 cron で詰まりやすい点:
@@ -396,8 +404,7 @@ cron で詰まりやすい点:
   cron は `$HOME` で起動するので、`cd` しないと設定が見つからない。
   `cd` を使わないなら `WBJP_ENV_FILE=/etc/wbjp/wbjp.env` で `.env` を
   絶対パス指定できる
-- **フルパスで呼ぶ。** cron の `PATH` は最小限。`uv run` ではなく
-  `.venv/bin/wbjp` を直接叩く
+- **フルパスで呼ぶ。** cron の `PATH` は最小限。`bin/wbjp` を直接叩く
 - **祝日は考慮されない。** 東証の休場日にも起動するが、新しい足が増えないため
   基準日が前営業日のままになり、同じ注文IDが再生成されて冪等に弾かれる
 - **同じ日の二重実行は安全。** 注文IDは「取引日 × 銘柄 × 売買 × 数量」から
@@ -412,56 +419,74 @@ cron を消さなくても次のサイクルから発注しなくなる。
 ## 構成
 
 ```
-src/wbcore/              共通基盤（wbjp / accum のどちらからも使う。逆向きの依存は無い）
-├── credentials.py       認証情報の解決（キーチェーン / 環境変数 / .env。秘密はここを通す）
-├── settings.py          環境変数由来の設定（WBJP_ENV など）と実発注の可否判定
-├── registry.py          名前 → クラス の登録簿（両プロジェクトの戦略登録に使う）
-├── logging.py           構造化ログ + 秘匿情報マスク
-├── domain/
-│   ├── models.py        Bar / Signal / Order / Position（すべて Decimal）、決定論的な注文ID
-│   ├── market_rules.py  取引ルールの抽象化（実装は東証のみ）
-│   └── jp_rules.py      呼値・値幅制限・単元株・取引時間・差金決済
-├── data/                MarketDataProvider → J-Quants / FRED / CSV / Parquet+DuckDB
-├── indicators/ohlcv.py  polars 式で SMA/EMA/RSI/ATR/MACD/BB/ADX/Donchian
-└── broker/              Broker ABC → 立花証券 e支店 API / Paper / レート制限 / 接続の組み立て（factory）
+pkg/wbcore/              共通基盤（wbjp / accum / daytrade のどれからも使う。逆向きの依存は無い）
+├── credentials/         認証情報の解決（キーチェーン / 環境変数 / .env。秘密はここを通す）
+├── settings/            環境変数由来の設定（WBJP_ENV など）と実発注の可否判定
+├── registry/            名前 → 実装 の登録簿（戦略・取得元の登録に使う）
+├── logging/             構造化ログ（JSONL）+ 秘匿情報マスク
+├── domain/models.go     Bar / Signal / Order / Position（すべて Decimal）、決定論的な注文ID
+├── marketrules/         取引ルール（呼値・値幅制限・単元株・取引時間・差金決済。実装は東証のみ）
+├── data/                MarketDataProvider → J-Quants / FRED / CSV、BarStore（Parquet）
+├── indicators/          SMA/EMA/RSI/ATR/MACD/BB/ADX/Donchian
+├── history/             追記専用の Parquet 履歴と DuckDB での読み出し
+├── execution/           実行品質（判断した値と約定した値の差）の記録
+├── notify/              Webhook 通知（アラート / 日次レポートの配達）
+└── broker/              Broker → 立花証券 e支店 API / Paper / レート制限
 
-src/wbjp/                スイング売買
-├── config.py            settings.toml / strategies.toml（ユニバース・リスク・出口・レジーム）
-├── strategy/            Strategy ABC / 合成器4種 / サンプル戦略7本
-├── portfolio/sizer.py   equal_weight / fixed_notional / atr_risk
-├── risk/                リスク上限 / ストップの合成
-├── engine/              リコンサイル / バックテスト / 日次ランナー
-├── db/                  SQLite の判断ジャーナル
-└── cli.py               `wbjp`
+pkg/wbjp/                スイング売買
+├── config/              settings.toml / strategies.toml（ユニバース・リスク・出口・レジーム）
+├── strategy/            Strategy / 合成器4種 / サンプル戦略7本
+├── portfolio/sizer.go   equal_weight / fixed_notional / atr_risk
+├── risk/                リスク上限 / ストップの合成 / レジーム
+├── engine/              リコンサイル / バックテスト / 成績分析
+├── repo/                SQLite の判断ジャーナル
+├── evaluate/            事後検証（採用・次点・圏外の比較）
+└── history/
 
-src/accum/               積立
-├── config.py            accum.toml（戦略と銘柄の対応・予算・発注）
-├── tactics.py           Tactic ABC / constant / bear_stack / stack_ladder / drawdown_ladder
-├── stack.py, window.py  移動平均の配列判定 / 発注時間帯
-├── plan.py              日足と戦略 → 日ごとの投下額
-├── simulate.py, basket.py  検証（対照群との比較 / 複数銘柄への配分）
-├── execute.py           投下額 → 成行の買い注文（wbcore.broker へ渡す）
-└── cli.py               `accum`
+pkg/accum/               積立
+├── config/              accum.toml（戦略と銘柄の対応・予算・発注）
+├── tactics/             Tactic / constant / bear_stack / stack_ladder / drawdown_ladder
+├── window/              発注時間帯
+├── plan/                日足と戦略 → 日ごとの投下額
+├── simulate/, basket/   検証（対照群との比較 / 複数銘柄への配分）
+├── execute/             投下額 → 買い注文、前回注文の照会（sync.go）
+└── ledger/              SQLite の台帳（当月いくら発注済みか）
+
+pkg/daytrade/            デイトレ（ギャップ逆張り）
+├── config/, calendar/   設定と取引カレンダー
+├── universe/, selection/ 母集団の構築と当日の絞り込み
+├── regime/, usmarket/   地合いの判定（IV・TOPIX ドリフト・米国市場）
+├── plan/, quotes/       候補の作成と気配の取得
+├── backtest/            資金固定・単元・段階手数料つきの検証
+├── evaluate/            事後検証と `review`
+└── ledger/, fees/, history/
+
+pkg/jquants/archive/     J-Quants の生データ保管庫（端点ごとの月次 Parquet + 取り込み台帳）
+
+cmd/wbjp, cmd/accum, cmd/daytrade, cmd/jquants   各 CLI（cobra）
+cmd/discord-post                                  日次レポートの配達係
 ```
 
 ### 実装上の注意点（実機で確認した挙動）
 
 | 箇所 | 内容 |
 |---|---|
-| `logging.py` | 証券会社の SDK は起動時に**自前のログハンドラとログファイル**を作り、マスクを迂回することがある。SDK を足すときは、その抑止も一緒に書く |
-| `jp_rules.py` | 呼値は「以下」区分、値幅制限は「未満」区分。引き方が違う |
-| `indicators/ohlcv.py` | `diff()` の先頭 null は `pl.when` で明示的に通す。0 に化けると Wilder 平滑化の種が汚れて TA-Lib と値がずれる |
-| `engine/backtest.py` | 指標は全期間で一度だけ計算する（指標が因果的なので等価）。毎日再計算すると約50倍遅い |
-| `broker/paper.py` | 注文の失効は**約定処理のあと**。先に失効させると注文が一度も約定しない |
-| `engine/analysis.py` | 決済トレードは約定列を銘柄ごと FIFO で突き合わせて作る。シャープは 1 本ごとのリターンの標本標準偏差で年率換算（245 営業日）。値が出せないときは "-" |
+| `logging/` | 秘密は `RegisterSecret` を通したものだけがマスクされる。認証情報を増やしたら登録も一緒に書く |
+| `marketrules/` | 呼値は「以下」区分、値幅制限は「未満」区分。引き方が違う |
+| `indicators/` | Wilder 平滑化の種は先頭の差分を落とさずに作る。0 で埋めると TA-Lib と値がずれる |
+| `wbjp/engine/backtest.go` | 指標は全期間で一度だけ計算する（指標が因果的なので等価）。毎日再計算すると日数の二乗で遅くなる |
+| `broker/paper.go` | 注文の失効は**約定処理のあと**。先に失効させると注文が一度も約定しない |
+| `wbjp/engine/analysis.go` | 決済トレードは約定列を銘柄ごと FIFO で突き合わせて作る。シャープは 1 本ごとのリターンの標本標準偏差で年率換算（245 営業日）。値が出せないときは "-" |
+| `data/jquants_code.go` | 株式は**調整済み**（`AdjO`/`AdjC` 等）を読む。未調整のままだと分割日に巨大な偽の下落が現れる |
+| `accum/execute/sync.go` | 応答が返らず PENDING のまま残った注文は 1 日後に REJECTED に落とす。放置すると永久に「発注済み」として当月の予算を食う |
 
 ## 開発
 
 ```bash
-uv run pytest              # ネットワークを使うものは既定でスキップ
-uv run pytest -m network   # 実ネットワーク接続を伴うもの
-uv run ruff check .
-uv run mypy                # strict
+go test ./...              # ネットワークを使うものは既定でスキップ
+go test ./... -short       # 時間のかかる検証を飛ばす
+go vet ./...
+gofmt -l .                 # 整形されていないファイルを列挙
 ```
 
 ## 次にやること

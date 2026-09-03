@@ -134,13 +134,13 @@ cron は今と同じ「固定間隔で叩き、必要かどうかは中で判断
 
 ### 読み出し（オフラインでの検討）
 
-- polars: `pl.scan_parquet("data/jquants/equities_bars_daily/*.parquet")`。月ファイルなので期間で絞れば必要な分しか読まない
+- DuckDB: `jquants query "SELECT … FROM read_parquet('data/jquants/equities_bars_daily/*.parquet')"`。月ファイルなので期間で絞れば必要な分しか読まない
 - DuckDB: `BarStore.query` と同じく、端点ごとにビューを張る補助を用意する（`jquants.bars`、`jquants.fins` …）。研究ノートから SQL で横断できる
 - 「その時点で見えていた財務」は `fins_summary` を `DiscDate <= 判定日` で絞って `Code` ごとに最新 1 件を取る。ルックアヘッドを避ける定型なので関数にする（`as_of(frame, date)`）
 
 ### CLI（案）
 
-`wbjp` / `accum` と同じ構成で、蓄積専用の入口を切る（保管庫は `wbcore.data.jquants_archive`、CLI は `src/jquants/`、コマンド名は `jquants`。`jq` は JSON ツールと衝突するので使わない）。
+`wbjp` / `accum` と同じ構成で、蓄積専用の入口を切る（保管庫は `pkg/jquants/archive`、CLI は `cmd/jquants/`、コマンド名は `jquants`。`jq` は JSON ツールと衝突するので使わない）。
 
 ```
 jquants sync [--days N] [--only 端点]   台帳を見て必要な端点・日付だけ取る（cron 用。冪等）。--days で未取得日を遡って埋める
