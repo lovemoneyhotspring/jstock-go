@@ -301,6 +301,31 @@ func (p *PaperBroker) Mark(prices map[string]decimal.Decimal) {
 	}
 }
 
+// AccrueInterest は待機資金に利息を付ける（短期国債・MMF に置いた想定）。
+//
+// annualRate は年率（0.05 = 5%）。日割りは 360 日（T-Bill の慣行）。
+// 返り値は付いた利息。金利ゼロ・現金ゼロなら何もしない。
+func (p *PaperBroker) AccrueInterest(annualRate decimal.Decimal, days int) decimal.Decimal {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if annualRate.LessThanOrEqual(decimal.Zero) || p.cash.LessThanOrEqual(decimal.Zero) || days <= 0 {
+		return decimal.Zero
+	}
+	interest := p.cash.Mul(annualRate).Mul(decimal.NewFromInt(int64(days))).
+		Div(decimal.NewFromInt(360))
+	interest = roundToUnit(interest, p.cent())
+	p.cash = p.cash.Add(interest)
+	return interest
+}
+
+// roundToUnit は unit 刻みに丸める（円なら 1、ドルならセント）。
+func roundToUnit(value, unit decimal.Decimal) decimal.Decimal {
+	if unit.IsZero() {
+		return value
+	}
+	return value.Div(unit).Round(0).Mul(unit)
+}
+
 func (p *PaperBroker) BeginDay() {
 	p.mu.Lock()
 	defer p.mu.Unlock()

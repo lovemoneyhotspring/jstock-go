@@ -72,6 +72,7 @@ func TestRunBacktestWithCrossSectionalStrategy(t *testing.T) {
 		strategy.CombineWeightedVote,
 		allBars,
 		decimal.NewFromInt(1_000_000),
+		BacktestOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +107,7 @@ func TestBacktestScalesLinearlyInDays(t *testing.T) {
 			strategy.CombineWeightedVote,
 			allBars,
 			decimal.NewFromInt(1_000_000),
+			BacktestOptions{},
 		)
 		if err != nil {
 			t.Fatal(err)
