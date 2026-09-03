@@ -10,7 +10,9 @@
 #
 # 有効化の段階:
 #   1. 今: データ（J-Quants / FRED）・候補（daytrade plan）・監視だけ。発注経路は止めたまま
-#   2. .env に TACHIBANA_PROD_* を入れ `wbjp credentials check --env prod` が通ったら、
+#   2. 発注に関わる電文のうち注文照会・信用建玉・信用発注は**実機未検証**。
+#      docs/BROKER_VERIFY.md の手順を UAT で全部通すまで下の行は開けない
+#   3. .env に TACHIBANA_PROD_* を入れ `wbjp credentials check --env prod` が通ったら、
 #      下の「発注経路」の行のコメントを外す（まず --live 無しで数日、次に --live）
 
 # 実行ファイルは deploy/build.sh が bin/ に作る（Go のみ。uv も Python も要らない）
