@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,5 +105,85 @@ func TestWindow(t *testing.T) {
 func TestMissingFile(t *testing.T) {
 	if _, err := Load(t.TempDir()); err == nil {
 		t.Error("設定が無いのにエラーにならない")
+	}
+}
+
+func TestExtendsOverlaysBase(t *testing.T) {
+	root := t.TempDir()
+	base := filepath.Join(root, "base")
+	child := filepath.Join(root, "child")
+	for dir, body := range map[string]string{
+		base:  "[capital]\nmax_capital = 1000000\norder_budget = 500000\n[universe]\nsegments = [\"standard\"]\nmin_turnover = 5\n[regime]\nskip_months = [12]\n",
+		child: "extends = \"../base\"\n[capital]\norder_budget = 250000\n[universe]\nsegments = [\"prime\", \"growth\"]\n[margin]\nenabled = true\n",
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, Filename), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := Load(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 子に無い項目は土台の値
+	if !cfg.Capital.MaxCapital.Equal(decimal.NewFromInt(1_000_000)) || !cfg.Universe.MinTurnover.Equal(decimal.NewFromInt(5)) {
+		t.Errorf("土台の値が残っていない: %+v", cfg.Capital)
+	}
+	if len(cfg.Regime.SkipMonths) != 1 || cfg.Regime.SkipMonths[0] != 12 {
+		t.Errorf("土台の配列が残っていない: %v", cfg.Regime.SkipMonths)
+	}
+	// 子に書いた項目は子の値。配列は丸ごと置き換え
+	if !cfg.Capital.OrderBudget.Equal(decimal.NewFromInt(250_000)) {
+		t.Errorf("子の値で上書きされていない: %s", cfg.Capital.OrderBudget)
+	}
+	if len(cfg.Universe.Segments) != 2 || cfg.Universe.Segments[0] != "prime" {
+		t.Errorf("配列が置き換わっていない: %v", cfg.Universe.Segments)
+	}
+	if !cfg.Margin.Enabled {
+		t.Error("子だけにある表が効いていない")
+	}
+}
+
+func TestExtendsRejectsCycle(t *testing.T) {
+	root := t.TempDir()
+	a := filepath.Join(root, "a")
+	b := filepath.Join(root, "b")
+	for dir, body := range map[string]string{a: "extends = \"../b\"\n", b: "extends = \"../a\"\n"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, Filename), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Load(a); err == nil {
+		t.Error("循環する extends がエラーにならない")
+	}
+}
+
+func TestMarginConfigMatchesBaseLongRules(t *testing.T) {
+	// daytrade_margin はロング側を config/daytrade から継ぐ。両者の [universe] / [signal] が
+	// ずれていたら、extends が効いていないか、片方だけ直したということ
+	base, err := Load("../../../config/daytrade")
+	if err != nil {
+		t.Fatal(err)
+	}
+	margin, err := Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(base.Universe) != fmt.Sprint(margin.Universe) {
+		t.Errorf("[universe] がずれている:\n base   %+v\n margin %+v", base.Universe, margin.Universe)
+	}
+	if fmt.Sprint(base.Signal) != fmt.Sprint(margin.Signal) {
+		t.Errorf("[signal] がずれている:\n base   %+v\n margin %+v", base.Signal, margin.Signal)
+	}
+	if fmt.Sprint(base.Regime) != fmt.Sprint(margin.Regime) {
+		t.Errorf("[regime] がずれている:\n base   %+v\n margin %+v", base.Regime, margin.Regime)
+	}
+	if !margin.Margin.Enabled || !margin.Capital.MaxCapital.Equal(decimal.NewFromInt(3_000_000)) {
+		t.Errorf("子の上書きが効いていない: %+v", margin.Capital)
 	}
 }

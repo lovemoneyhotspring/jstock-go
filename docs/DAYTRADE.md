@@ -2,7 +2,7 @@
 
 日本株のギャップ逆張り `jp_gap_fade` を回す CLI。根拠と数字は
 [research/2026-08-jp-daytrade-selection.md](research/2026-08-jp-daytrade-selection.md)。
-設定は `config/daytrade/daytrade.toml`、実装は `src/daytrade/`。
+設定は `config/daytrade/daytrade.toml`、実装は `pkg/daytrade/`（発注は `pkg/daytrade/execute`）。
 
 ## 規則（1 行で）
 
@@ -58,6 +58,10 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
   売りの約定をブローカーに照会し、売れ残りがあれば通知する（`daytrade.carry`）。翌朝に手で売る
 
 ## 信用売りの脚 `jp_gap_up_short`（`config/daytrade_margin`）
+
+`config/daytrade_margin/daytrade.toml` は `extends = "../daytrade"` でロング側の規則を `config/daytrade` から
+継ぎ、資金（`[capital]`）と `[margin]` だけを書く。ロング側を直すときは `config/daytrade` を直せば両方に効く。
+子に同じ項目を書けばそちらが優先される（配列は丸ごと置き換え）。
 
 立花証券 e支店（信用手数料 0 円）で、ロング `jp_gap_fade` に**信用売り**の脚を足す。根拠と数字は
 [research/2026-09-jp-gap-up-short.md](research/2026-09-jp-gap-up-short.md)。
