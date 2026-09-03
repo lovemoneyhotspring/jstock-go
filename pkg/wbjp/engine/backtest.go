@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
@@ -21,9 +22,44 @@ type BacktestStats struct {
 	TotalReturn   decimal.Decimal
 	MaxDrawdown   decimal.Decimal
 	TotalFills    int
+	SellFills     int
+	Days          int
 	WinningTrades int
 	LosingTrades  int
 	WinRate       float64
+	Interest      decimal.Decimal
+	// Analysis は表示用の追加指標（勝率・シャープレシオ・最長ドローダウン等）。
+	Analysis map[string]string
+}
+
+// BacktestOptions は検証の条件。ゼロ値は「全期間・寄付約定・無利息」。
+type BacktestOptions struct {
+	// Start / End は売買の対象期間（YYYY-MM-DD、両端を含む）。
+	// この前の足は捨てずにウォームアップ（指標の確定）に使う。
+	Start string
+	End   string
+	// FillModel は指値の約定判定。"open"（寄付だけ。保守的）か
+	// "intrabar"（高安も見る。楽観的）。
+	FillModel string
+	// CashYield は待機資金の年利（%）の日足。^IRX など。
+	// 与えると現金に日割り（360 日）で利息を付ける。
+	CashYield []domain.Bar
+}
+
+// FillModels は選べる約定モデル。
+var FillModels = []string{"open", "intrabar"}
+
+// ValidFillModel は fill が選べる約定モデルかどうか。空文字は既定（open）として通す。
+func ValidFillModel(fill string) bool {
+	if fill == "" {
+		return true
+	}
+	for _, m := range FillModels {
+		if m == fill {
+			return true
+		}
+	}
+	return false
 }
 
 // RunBacktest は指定期間の過去日足データを用いてスイング売買のシミュレーションを行う。
@@ -35,12 +71,23 @@ func RunBacktest(
 	combineFunc strategy.Combiner,
 	allBars map[string][]domain.Bar,
 	initialCash decimal.Decimal,
+	opts BacktestOptions,
 ) (*BacktestStats, error) {
 	if initialCash.LessThanOrEqual(decimal.Zero) {
 		initialCash = decimal.NewFromInt(1000000)
 	}
+	if !ValidFillModel(opts.FillModel) {
+		return nil, fmt.Errorf("約定モデルは open / intrabar のいずれか: %q", opts.FillModel)
+	}
 
-	pb := broker.NewPaperBroker(initialCash, "open")
+	pb := broker.NewPaperBroker(initialCash, opts.FillModel)
+
+	// 待機資金の年利（%）を日付で引けるようにする。営業日が飛んでも
+	// 直前の値を持ち越す（金利は毎日公表されるわけではない）。
+	yields := make(map[string]decimal.Decimal, len(opts.CashYield))
+	for _, b := range opts.CashYield {
+		yields[b.Date] = b.Close.Div(decimal.NewFromInt(100))
+	}
 
 	// 全日付のユニオンを昇順で作成
 	dateSet := make(map[string]struct{})
@@ -51,11 +98,23 @@ func RunBacktest(
 	}
 	var dates []string
 	for d := range dateSet {
+		// Start より前の足は捨てない。ウォームアップとして戦略に見せた上で、
+		// 売買の対象からだけ外す（indicators が確定しないまま建てさせない）。
+		if opts.Start != "" && d < opts.Start {
+			continue
+		}
+		if opts.End != "" && d > opts.End {
+			continue
+		}
 		dates = append(dates, d)
 	}
 	sort.Strings(dates)
 
 	if len(dates) == 0 {
+		if opts.Start != "" || opts.End != "" {
+			return nil, fmt.Errorf("対象期間（%s〜%s）に取引日がありません",
+				orDash(opts.Start), orDash(opts.End))
+		}
 		return nil, fmt.Errorf("バックテスト用の足データがありません")
 	}
 
@@ -92,34 +151,61 @@ func RunBacktest(
 
 	var allFills []domain.Fill
 	equityHistory := make([]decimal.Decimal, 0, len(dates))
+	totalInterest := decimal.Zero
+	lastYield := decimal.Zero
+	previousDay := ""
 
 	// 各日をシミュレーション
 	for dayIdx, today := range dates {
 		// 1. 今日の寄付・高値・安値・終値マップ
 		openPrices := make(map[string]decimal.Decimal)
 		closePrices := make(map[string]decimal.Decimal)
+		highs := make(map[string]decimal.Decimal)
+		lows := make(map[string]decimal.Decimal)
 		for sym := range allBars {
 			if b, ok := barByDate[sym][today]; ok {
 				openPrices[sym] = b.Open
 				closePrices[sym] = b.Close
+				highs[sym] = b.High
+				lows[sym] = b.Low
 			}
 		}
 
-		// 2. 前日出した注文を当日の寄付で約定
+		// 2. 待機資金に利息を付ける。暦日の差で日割りするので、
+		//    連休を挟んだ日はその日数ぶんまとめて付く。
+		if len(yields) > 0 {
+			if y, ok := yields[today]; ok {
+				lastYield = y
+			}
+			if previousDay != "" {
+				if days := calendarDaysBetween(previousDay, today); days > 0 {
+					totalInterest = totalInterest.Add(pb.AccrueInterest(lastYield, days))
+				}
+			}
+		}
+		previousDay = today
+
+		// 3. 前日出した注文を当日の寄付で約定。
+		//    intrabar はその足の高安でも指値を約定させる（楽観的な第 2 の見立て）。
 		pb.Mark(openPrices)
 		pb.BeginDay()
-		fills := pb.Settle(openPrices, nil, nil, nil)
+		var fills []domain.Fill
+		if opts.FillModel == "intrabar" {
+			fills = pb.Settle(openPrices, highs, lows, nil)
+		} else {
+			fills = pb.Settle(openPrices, nil, nil, nil)
+		}
 		allFills = append(allFills, fills...)
 		pb.ExpireOpenOrders()
 
-		// 3. 当日の終値でマーク
+		// 4. 当日の終値でマーク
 		pb.Mark(closePrices)
 		bal, _ := pb.GetBalance()
 		equity := bal.CashBalance.Add(bal.MarketValue)
 		equityHistory = append(equityHistory, equity)
 		posMap, _ := pb.PositionsBySymbol()
 
-		// 4. 当日までの確定足を戦略に見せる眺めを作る。
+		// 5. 当日までの確定足を戦略に見せる眺めを作る。
 		//
 		// 未来の足は構造として見えない（Context が as_of で切り詰める）ので、
 		// 先読みバイアスは規律ではなく仕組みで防がれる。
@@ -136,7 +222,7 @@ func RunBacktest(
 			}
 		}
 
-		// 5. ストップロスの管理と手仕舞い判定
+		// 6. ストップロスの管理と手仕舞い判定
 		//
 		// ライブ（cmd/wbjp/run.go）と同じ順序・同じ設定で処理する。
 		// ここが食い違うと、検証結果が実運用を予測しなくなる。
@@ -145,7 +231,7 @@ func RunBacktest(
 		stopBook.UpdateTrailing(closePrices, atrMap)
 		stopBook.UpdateBreakeven(closePrices, setCfg.Stops.BreakevenAfterR)
 
-		// 6. 戦略のシグナル評価とサイジング
+		// 7. 戦略のシグナル評価とサイジング
 		//
 		// ライブ（cmd/wbjp/run.go）と同じく、戦略には全銘柄をまとめて渡す。
 		signalMap := make(map[string]domain.CombinedSignal)
@@ -199,7 +285,7 @@ func RunBacktest(
 			targets[t.Symbol] = t
 		}
 
-		// 7. リコンサイル
+		// 8. リコンサイル
 		openOrders, _ := pb.GetOpenOrders()
 		plan, err := Reconcile(targets, posMap, openOrders, closePrices, lotSizes,
 			ReconcileSettings{
@@ -213,7 +299,7 @@ func RunBacktest(
 			continue
 		}
 
-		// 8. リスク検査と発注
+		// 9. リスク検査と発注
 		riskCtx := risk.RiskContext{
 			Equity:           equity,
 			Balance:          *bal,
@@ -259,16 +345,49 @@ func RunBacktest(
 	// 勝率は約定を FIFO で往復に突き合わせないと出せない（analysis.go）
 	winning, losing, winRate := TradeStats(allFills)
 
+	sells := 0
+	for _, f := range allFills {
+		if f.Side == domain.SideSell {
+			sells++
+		}
+	}
+
 	return &BacktestStats{
 		InitialEquity: initialCash,
 		FinalEquity:   finalEquity,
 		TotalReturn:   totalReturn,
 		MaxDrawdown:   maxDD,
 		TotalFills:    len(allFills),
+		SellFills:     sells,
+		Days:          len(dates),
 		WinningTrades: winning,
 		LosingTrades:  losing,
 		WinRate:       winRate,
+		Interest:      totalInterest,
+		Analysis:      Analyze(equityHistory, allFills),
 	}, nil
+}
+
+// orDash は空文字を "—" にする（期間の片側だけ指定されたときの表示用）。
+func orDash(value string) string {
+	if value == "" {
+		return "—"
+	}
+	return value
+}
+
+// calendarDaysBetween は 2 つの ISO 日付（YYYY-MM-DD）の暦日の差。
+// 解釈できなければ 0（利息を付けない）。
+func calendarDaysBetween(from, to string) int {
+	a, err := time.Parse("2006-01-02", from)
+	if err != nil {
+		return 0
+	}
+	b, err := time.Parse("2006-01-02", to)
+	if err != nil {
+		return 0
+	}
+	return int(b.Sub(a).Hours() / 24)
 }
 
 // benchmarkInput はバックテスト時点での地合い判定材料を組み立てる。

@@ -6,6 +6,7 @@ import (
 	"text/tabwriter"
 
 	accumcfg "github.com/lovemoneyhotspring/jstock-go/pkg/accum/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/execute"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
@@ -98,26 +99,23 @@ func checkOpenOrders(cfg *accumcfg.AccumConfig, led *ledger.Ledger) error {
 	if err != nil {
 		return err
 	}
-	for _, o := range open {
-		remote, err := b.GetOrder(o.ClientOrderID, o.BrokerOrderID)
-		if err != nil {
-			return fmt.Errorf("照会に失敗: %w", err)
-		}
-		if remote == nil || !remote.Status.IsTerminal() {
-			continue
-		}
-		// 約定額が分かるときだけ額を上書きする。未約定のまま失効した注文は
-		// 元の額を残し、EffectiveAmount 側で約定ぶんに按分させる
-		var amount *decimal.Decimal
-		if remote.AvgFillPrice != nil && remote.FilledQuantity.IsPositive() {
-			filled := remote.FilledQuantity.Mul(*remote.AvgFillPrice)
-			amount = &filled
-		}
-		if err := led.UpdateStatusDetail(o.ClientOrderID, string(remote.Status),
-			&remote.FilledQuantity, remote.AvgFillPrice, remote.BrokerOrderID, amount); err != nil {
-			return err
-		}
-		fmt.Printf("更新: %s %s → %s（%s 約定）\n", o.Symbol, o.ClientOrderID, remote.Status, remote.FilledQuantity)
+	synced, err := execute.SyncOrderStatus(led, b, clock.NowUTC())
+	for _, change := range synced.Changes {
+		fmt.Println("更新: " + change.Describe())
+	}
+	// 照会できなかった注文は台帳をそのままにしてある。人が口座を見て
+	// 判断する必要があるので、黙って「変化なし」にはしない。
+	for _, u := range synced.Unresolved {
+		fmt.Println("保留（照会できず）: " + u.Describe())
+	}
+	if err != nil {
+		return err
+	}
+	if len(synced.Changes) == 0 && len(synced.Unresolved) == 0 {
+		fmt.Println("変化のあった注文はありません")
+	}
+	if len(synced.Unresolved) > 0 {
+		return fmt.Errorf("%d 件の注文を照会できませんでした", len(synced.Unresolved))
 	}
 	return nil
 }

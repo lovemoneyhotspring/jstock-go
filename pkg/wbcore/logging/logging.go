@@ -138,6 +138,14 @@ func NewLogger(app, env, runID, command, logDir string) (*Logger, error) {
 			return nil, fmt.Errorf("failed to create log dir: %w", err)
 		}
 		logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s.jsonl", app, env))
+
+		// 開く前に日付が変わっていれば退避する。cron のプロセスはどれも短命なので、
+		// 起動時に 1 度見れば「その日の最初のプロセスが退避する」形になる。
+		// 退避に失敗してもログは書きたいので、警告を stderr に出して続ける。
+		if err := rotateLog(logPath, time.Now(), RetainDays); err != nil {
+			fmt.Fprintf(os.Stderr, "[warn] ログを退避できませんでした: %v\n", err)
+		}
+
 		file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open log file %s: %w", logPath, err)

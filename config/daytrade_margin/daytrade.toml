@@ -5,8 +5,8 @@
 # ショート側は独立した母集団（margin 節の segments 等）で「決算なし × ギャップ +5% 以上」を寄付で売り、
 # 大引で買い戻す（常時）。
 #
-# 使い方:  uv run daytrade plan  --config-dir config/daytrade_margin
-#          uv run daytrade backtest --config-dir config/daytrade_margin
+# 使い方:  daytrade plan  --config-dir config/daytrade_margin
+#          daytrade backtest --config-dir config/daytrade_margin
 #
 # 根拠と数字は docs/research/2026-09-jp-gap-up-short.md（ショート）と
 # docs/research/2026-08-jp-daytrade-selection.md「信用売り（2026-09-01 追記）」（ロングの信用買い）。

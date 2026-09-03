@@ -134,13 +134,13 @@ cron は今と同じ「固定間隔で叩き、必要かどうかは中で判断
 
 ### 読み出し（オフラインでの検討）
 
-- polars: `pl.scan_parquet("data/jquants/equities_bars_daily/*.parquet")`。月ファイルなので期間で絞れば必要な分しか読まない
+- DuckDB: `jquants query "SELECT … FROM read_parquet('data/jquants/equities_bars_daily/*.parquet')"`。月ファイルなので期間で絞れば必要な分しか読まない
 - DuckDB: `BarStore.query` と同じく、端点ごとにビューを張る補助を用意する（`jquants.bars`、`jquants.fins` …）。研究ノートから SQL で横断できる
 - 「その時点で見えていた財務」は `fins_summary` を `DiscDate <= 判定日` で絞って `Code` ごとに最新 1 件を取る。ルックアヘッドを避ける定型なので関数にする（`as_of(frame, date)`）
 
 ### CLI（案）
 
-`wbjp` / `accum` と同じ構成で、蓄積専用の入口を切る（保管庫は `wbcore.data.jquants_archive`、CLI は `src/jquants/`、コマンド名は `jquants`。`jq` は JSON ツールと衝突するので使わない）。
+`wbjp` / `accum` と同じ構成で、蓄積専用の入口を切る（保管庫は `pkg/jquants/archive`、CLI は `cmd/jquants/`、コマンド名は `jquants`。`jq` は JSON ツールと衝突するので使わない）。
 
 ```
 jquants sync [--days N] [--only 端点]   台帳を見て必要な端点・日付だけ取る（cron 用。冪等）。--days で未取得日を遡って埋める
@@ -178,6 +178,42 @@ jquants query "SELECT …"               DuckDB で端点名のビューを張�
 | 生 CSV（保険） | | 1–2 GB |
 
 日次の通信は 15 リクエスト程度（レート制限の 1 分ぶんにも満たない）。
+
+## メモリ
+
+**保管庫は 1 端点 10 年で 1,000 万行になるので、「全期間を読む」経路を作ってはいけない。**
+`Frame` の 1 行は `map[string]*string` で、実測 **1 セルおよそ 96 バイト**（15 列で 1,469 B/行、30 列で 2,842 B/行）。
+Parquet 上では数十バイトの行が、メモリでは 30〜100 倍に膨らむ。bars の 10 年ぶんを丸ごと `Frame` に載せると 15GB を超える。
+
+### 読み方の決まり
+
+| 欲しいもの | 使うもの | 5 年（480 万行）での実測 |
+|---|---|---|
+| 保存されている日付だけ | `Dates()` | 0.08 秒・常駐 5.5MB |
+| 1 銘柄・数列ぶん | `ReadWhere` に `Columns` と `Keep` | 0.27 秒・常駐 33MB |
+| ある月・ある日ぶん | `Read(ep, start, end)` | 0.08 秒・常駐 114MB（1 か月＝8 万行） |
+| 全期間・全列 | **無い**（`Scan` は上限に当たって止まる） | — |
+
+- `Dates()` は日付列だけを Parquet の列単位で読む。行を組み立てないので、10 年でも常駐は日付の種類ぶん（2,500 個）。
+  ページの統計で `min == max` のページは値を読まずに済ませる（日付順に書いているのでほぼ毎回効く）
+- `ReadWhere` の `Keep` は **`Frame` に載る前**の行（`RowView`）に対して呼ばれる。落とした行には文字列も map も作らない。
+  `RowView.Equal` / `HasPrefix` は値を複製せずに比べる。判定用の列は `Columns` に入れなくてもよい
+- `Columns` で指定しなかった列は文字列に起こさない（ページのバッファも引きずらない）。日付列は黙って足される
+- 月ファイルは最大 4 本並行で読む。絞り込みを押し下げてあるので、並行にしても常駐は増えない
+- `Scan()`（全期間・全列）は取引カレンダーのような小さい端点だけ。行数の多い端点に使うと下の上限に当たる
+
+### 上限
+
+1 回の読み出しが `Frame` に載せていい量に上限がある（既定 2GiB、`JQUANTS_READ_BUDGET_MB` で変更）。
+超えると **OOM で殺される代わりに**、どの端点で何 MB になったか・何を絞れば通るかを書いたエラーで止まる。
+cron では `GOMEMLIMIT`（Go のヒープの soft 上限）と `GOGC` も併せて渡す（`deploy/crontab.txt`）——
+上限に余裕があるうちは GC を控えて速く動き、近づいたら GC が先に頑張る。
+
+### 書き込み
+
+`Upsert` は月ファイル単位（8 万行）で読み直して書き戻すので、1 か月ぶん（bars で約 300MB）が上限。
+`writeParquet` は 8,192 行ずつ書く（全行ぶんの `[]parquet.Row` を作らない）。
+`sortByKey` は鍵を行ごとに 1 回だけ組む（比較関数の中で組むと 8 万行で 270 万回のアロケートになる）。
 
 ## 分足（アドオン）
 
@@ -231,5 +267,8 @@ jquants query "SELECT …"               DuckDB で端点名のビューを張�
 
 ## 状態
 
+- 2026-09-03: メモリの節約。`Dates()` が全期間を `Frame` に載せていたのをやめ（bars 10 年で 15GB 超 → 数 MB）、
+  `ReadWhere`（列の射影・`RowView` での行の絞り込み）を足した。読み出しに上限を入れて、
+  超えたら OOM ではなくエラーで止まるようにした。「メモリ」の節を参照。
 - 2026-09-03: 分足（アドオン）の設計を追記。実装は未着手。ティックは取らない。
 - 2026-08-31: 実装済み（`wbcore.data.jquants_client` / `wbcore.data.jquants_archive` / `jquants` CLI）。`JQuantsProvider` はアーカイブに揃っていればそこから読み、API から取ったぶんはアーカイブに書く。**実機（Standard）での疎通は未確認**——一括 CSV の列名が API と同じ前提、`HolDiv` の値、確報の反映時刻は初回実行で確かめる。

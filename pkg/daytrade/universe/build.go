@@ -202,7 +202,13 @@ type masterRow struct {
 
 // loadMaster は判定日以前の最新 1 日ぶんの銘柄一覧。
 func loadMaster(arch *archive.Archive, day, prevDay time.Time) (map[string]masterRow, error) {
-	frame, err := arch.Read(EPMaster, prevDay.AddDate(0, 0, -10), day)
+	// 使う列だけ読む。master は列が多く、1 か月で 8 万行あるので、
+	// 全列を載せると 1 回で数百 MB になる
+	frame, err := arch.ReadWhere(EPMaster, archive.ReadOptions{
+		Start:   prevDay.AddDate(0, 0, -10),
+		End:     day,
+		Columns: []string{"Code", "CoName", "MktNm", "ProdCat", "Mrgn"},
+	})
 	if err != nil || frame == nil {
 		return nil, err
 	}
@@ -237,7 +243,10 @@ func loadMaster(arch *archive.Archive, day, prevDay time.Time) (map[string]maste
 
 // loadEarningsPrev は前営業日の**引け後**に決算短信を開示した銘柄。
 func loadEarningsPrev(arch *archive.Archive, prevDay time.Time) (map[string]bool, error) {
-	frame, err := arch.Read(EPFins, prevDay, prevDay)
+	frame, err := arch.ReadWhere(EPFins, archive.ReadOptions{
+		Start: prevDay, End: prevDay,
+		Columns: []string{"Code", "DiscTime"},
+	})
 	if err != nil || frame == nil {
 		return map[string]bool{}, err
 	}
@@ -258,7 +267,11 @@ func loadEarningsPrev(arch *archive.Archive, prevDay time.Time) (map[string]bool
 
 // loadEarningsToday は当日に決算発表の予定がある銘柄（予定が前日までに出ているもの）。
 func loadEarningsToday(arch *archive.Archive, day time.Time) (map[string]bool, error) {
-	frame, err := arch.Read(EPEarningsDate, day.AddDate(0, 0, -120), day)
+	frame, err := arch.ReadWhere(EPEarningsDate, archive.ReadOptions{
+		Start:   day.AddDate(0, 0, -120),
+		End:     day,
+		Columns: []string{"Code", "SchDate", "PubDate"},
+	})
 	if err != nil || frame == nil {
 		return map[string]bool{}, err
 	}
@@ -282,7 +295,10 @@ func loadEarningsToday(arch *archive.Archive, day time.Time) (map[string]bool, e
 // loadMarginAlert は前営業日に信用規制で公表された銘柄と、そのうち売り禁のもの。
 func loadMarginAlert(arch *archive.Archive, prevDay time.Time) (alert, jsfStop map[string]bool, err error) {
 	alert, jsfStop = map[string]bool{}, map[string]bool{}
-	frame, err := arch.Read(EPMarginAlert, prevDay, prevDay)
+	frame, err := arch.ReadWhere(EPMarginAlert, archive.ReadOptions{
+		Start: prevDay, End: prevDay,
+		Columns: []string{"Code", "PubReason"},
+	})
 	if err != nil || frame == nil {
 		return alert, jsfStop, err
 	}

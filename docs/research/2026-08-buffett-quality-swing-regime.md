@@ -70,9 +70,9 @@
 ## 再現
 
 ```bash
-uv run wbjp quality --config-dir config/us-quality --candidates config/us-quality/candidates.txt --relaxed --out config/us-quality/universe.txt
-uv run wbjp data sync --config-dir config/us-quality --days 4400 --force
-uv run wbjp backtest --config-dir config/us-quality --from 2015-09-01
+wbjp quality --config-dir config/us-quality --candidates config/us-quality/candidates.txt --relaxed --out config/us-quality/universe.txt
+wbjp data sync --config-dir config/us-quality --days 4400 --force
+wbjp backtest --config-dir config/us-quality --from 2015-09-01
 ```
 
 ## 罠

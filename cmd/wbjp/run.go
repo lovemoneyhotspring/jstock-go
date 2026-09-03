@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
@@ -21,11 +22,13 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/strategy"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 func newRunCmd() *cobra.Command {
 	var liveFlag bool
 	var yesFlag bool
+	var noSyncFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -53,6 +56,11 @@ func newRunCmd() *cobra.Command {
 			}(), reason)
 
 			if canLive && !yesFlag {
+				// cron には stdin が無い。ここで確認を求めると黙って中止されるだけで、
+				// ログには理由が残らない。何が足りないかを明示して落とす。
+				if !term.IsTerminal(int(os.Stdin.Fd())) {
+					return fmt.Errorf("非対話環境では確認を取れません。cron から回すなら --yes を付けてください")
+				}
 				fmt.Print("本番注文を送信します。続行しますか？ [y/N]: ")
 				var input string
 				_, _ = fmt.Scanln(&input)
@@ -82,6 +90,16 @@ func newRunCmd() *cobra.Command {
 				mode = "live"
 			}
 			_ = rep.StartRun(runID, todayJST, string(appSettings.Env), mode)
+
+			// 判断の前に足を更新する。cron の data sync とは独立に、
+			// この実行が見る足を自分で最新にしてから判断する
+			// （--no-sync で抑止。取得元が不調な日に保存済みだけで回すため）。
+			if !noSyncFlag {
+				if failures := syncUniverseBars(setCfg, logger, runSyncDays, false, false); failures > 0 {
+					logger.Warn("run.sync_failed",
+						fmt.Sprintf("%d 銘柄の足を更新できませんでした（保存済みの足で続けます）", failures))
+				}
+			}
 
 			barStore := data.NewBarStore(appSettings.BarsDir())
 
@@ -279,7 +297,19 @@ func newRunCmd() *cobra.Command {
 			_ = rep.RecordTargets(runID, targetList)
 
 			// 4. リコンサイル
-			openOrders, _ := b.GetOpenOrders()
+			//
+			// 板に残っている注文が見えないと、同じ注文をもう一度出しうる。
+			// 発注する回では照会に失敗した時点で止める（dry-run は記録だけ
+			// なので、見えないまま続けても実害は無い）。
+			openOrders, err := b.GetOpenOrders()
+			if err != nil {
+				if canLive {
+					return fmt.Errorf("板の注文を照会できないため発注を中止しました（二重発注を避けます）: %w", err)
+				}
+				logger.Warn("run.open_orders_failed",
+					fmt.Sprintf("板の注文を照会できません（dry-run のため続行）: %v", err))
+				openOrders = nil
+			}
 
 			orderType := domain.OrderTypeLimit
 			if setCfg.Execution.OrderType == "market" {
@@ -398,6 +428,7 @@ func newRunCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&liveFlag, "live", false, "実際にブローカーへ発注する")
-	cmd.Flags().BoolVar(&yesFlag, "yes", false, "本番発注時の確認プロンプトをスキップする")
+	cmd.Flags().BoolVarP(&yesFlag, "yes", "y", false, "本番発注時の確認プロンプトをスキップする")
+	cmd.Flags().BoolVar(&noSyncFlag, "no-sync", false, "足の更新をしない")
 	return cmd
 }

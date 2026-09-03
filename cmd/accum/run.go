@@ -22,6 +22,7 @@ func newRunCmd() *cobra.Command {
 	var liveFlag bool
 	var yesFlag bool
 	var ignoreWindowFlag bool
+	var noSyncFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -66,6 +67,16 @@ func newRunCmd() *cobra.Command {
 			}
 			defer logger.Close()
 
+			// 判断の前に足を更新する。cron の sync とは独立に、この実行が見る
+			// 足を自分で最新にしてから倍率を決める（--no-sync で抑止）。
+			// 長い履歴は保存済みなので、直近ぶんだけ取り直せば足りる。
+			if !noSyncFlag {
+				if _, failures := syncAccumBars(cfg, logger, runSyncDays, false, false); failures > 0 {
+					logger.Warn("accum.sync_failed",
+						fmt.Sprintf("%d 銘柄の足を更新できませんでした（保存済みの足で続けます）", failures))
+				}
+			}
+
 			barStore := data.NewBarStore(appSettings.BarsDir())
 			led, err := ledger.OpenLedger(appSettings.AccumDBPath())
 			if err != nil {
@@ -97,5 +108,6 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&liveFlag, "live", false, "実際にブローカーへ発注する")
 	cmd.Flags().BoolVarP(&yesFlag, "yes", "y", false, "本番発注時の確認プロンプトをスキップする")
 	cmd.Flags().BoolVar(&ignoreWindowFlag, "ignore-window", false, "発注時間帯の外でも注文を作る")
+	cmd.Flags().BoolVar(&noSyncFlag, "no-sync", false, "足の更新をしない")
 	return cmd
 }

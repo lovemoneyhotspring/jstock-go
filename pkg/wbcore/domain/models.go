@@ -122,7 +122,20 @@ type Bar struct {
 	Volume decimal.Decimal
 }
 
+// NewBar は日足 1 本を作る。価格として成り立たない値は受け付けない。
+//
+// 四本値のいずれかが 0 以下の足を通すと、指標がゼロ除算や偽の暴落を生み、
+// そのまま売買の判断に乗る。取得元の項目名が変わったときに黙って 0 が
+// 並ぶことが実際にあったので、境界は入口で閉じる。
 func NewBar(symbol, date string, o, h, l, c, v decimal.Decimal) (Bar, error) {
+	for name, price := range map[string]decimal.Decimal{"open": o, "high": h, "low": l, "close": c} {
+		if price.LessThanOrEqual(decimal.Zero) {
+			return Bar{}, fmt.Errorf("%s %s: %s が 0 以下です (%s)", symbol, date, name, price)
+		}
+	}
+	if v.IsNegative() {
+		return Bar{}, fmt.Errorf("%s %s: 出来高が負です (%s)", symbol, date, v)
+	}
 	if h.LessThan(l) {
 		return Bar{}, fmt.Errorf("%s %s: high < low (%s < %s)", symbol, date, h, l)
 	}
@@ -211,6 +224,11 @@ type Position struct {
 	Currency          string
 	TaxType           TaxAccountType
 	Trade             TradeType
+
+	// BrokerPositionID は建玉を一意に指す証券会社側の番号。
+	// 信用の返済は「どの建玉を返すか」を指定するので、これが無いと
+	// 手仕舞いの電文を組み立てられない。現物では空。
+	BrokerPositionID string
 }
 
 func (p Position) MarketValue() decimal.Decimal {

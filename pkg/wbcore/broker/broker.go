@@ -79,3 +79,32 @@ type InsufficientFundsError struct {
 func (e *InsufficientFundsError) Error() string {
 	return fmt.Sprintf("insufficient funds: %s", e.Message)
 }
+
+// MarginAware は信用の建玉も返せるブローカー。
+//
+// Broker の GetPositions は現物だけを返す実装があり（立花証券は
+// CLMGenbutuKabuList）、信用で建てた玉が見えない。日計りの手仕舞いは
+// 建玉が見えないと数量を決められないので、返せる実装だけを見分ける。
+type MarginAware interface {
+	AllPositions() ([]domain.Position, error)
+}
+
+// PositionsIncludingMargin は現物と信用建玉をまとめて返す。
+//
+// 信用に対応していないブローカー（ペーパー口座は建玉を GetPositions に
+// 含めている）ではそのまま GetPositions を使う。
+func PositionsIncludingMargin(b Broker) ([]domain.Position, error) {
+	if m, ok := b.(MarginAware); ok {
+		return m.AllPositions()
+	}
+	return b.GetPositions()
+}
+
+// PositionsBySymbolIncludingMargin は PositionsIncludingMargin を銘柄で引ける形に。
+func PositionsBySymbolIncludingMargin(b Broker) (map[string]domain.Position, error) {
+	positions, err := PositionsIncludingMargin(b)
+	if err != nil {
+		return nil, err
+	}
+	return PositionsBySymbolHelper(positions), nil
+}

@@ -258,7 +258,10 @@ func loadJQuantsAPIKey(dotenv map[string]string) (string, error) {
 // FetchDailyBars は 1 銘柄の日足を取る。symbol は "7203.T" でも "72030" でもよい。
 // start / end は "YYYY-MM-DD"（API には区切り無しで渡す）。
 func (c *JQuantsClient) FetchDailyBars(symbol, start, end string) ([]domain.Bar, error) {
-	code := strings.TrimSuffix(symbol, ".T")
+	code, isIndex, err := ToJQuantsCode(symbol)
+	if err != nil {
+		return nil, err
+	}
 	params := url.Values{}
 	params.Set("code", code)
 	if start != "" {
@@ -272,7 +275,7 @@ func (c *JQuantsClient) FetchDailyBars(symbol, start, end string) ([]domain.Bar,
 		if page >= maxPages {
 			return nil, fmt.Errorf("J-Quants の頁送りが終わりません（%s）", code)
 		}
-		resp, err := c.Get("/equities/bars/daily", params)
+		resp, err := c.Get(JQuantsDailyPath(isIndex), params)
 		if err != nil {
 			return nil, err
 		}
@@ -281,19 +284,7 @@ func (c *JQuantsClient) FetchDailyBars(symbol, start, end string) ([]domain.Bar,
 			if err := json.Unmarshal(item, &raw); err != nil {
 				continue // 1 行の形が違っても他の足は活かす
 			}
-			date := raw.Date
-			if len(date) == 8 {
-				date = fmt.Sprintf("%s-%s-%s", date[:4], date[4:6], date[6:])
-			}
-			bars = append(bars, domain.Bar{
-				Date:   date,
-				Open:   parseDec(raw.Open),
-				High:   parseDec(raw.High),
-				Low:    parseDec(raw.Low),
-				Close:  parseDec(raw.Close),
-				Volume: parseDec(raw.Volume),
-				Symbol: symbol,
-			})
+			bars = append(bars, raw.ToBar(symbol, isIndex))
 		}
 		if resp.PaginationKey == "" {
 			return bars, nil

@@ -5,8 +5,10 @@ import (
 	"strings"
 
 	dtledger "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/execution"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
@@ -68,11 +70,31 @@ func runVerify(date string) error {
 		return err
 	}
 
+	// 照会できなかった注文は数えておく。verify の役目は持ち越しの検出なので、
+	// 「確かめられなかった」を「持ち越し無し」として通すと役目を果たさない。
+	var unconfirmed []string
+	noteUnconfirmed := func(order dtledger.Order, err error) {
+		reason := "応答に該当の注文がありません"
+		if err != nil {
+			reason = err.Error()
+		}
+		unconfirmed = append(unconfirmed, fmt.Sprintf("%s %s: %s", order.Symbol, order.Leg(), reason))
+		logWarn("daytrade.unconfirmed", "注文を照会できません", map[string]any{
+			"day": day.Format(DateLayout), "symbol": order.Symbol,
+			"client_order_id": order.ClientOrderID, "error": reason,
+		})
+	}
+
 	opened := map[string]decimal.Decimal{}
 	for _, order := range entries {
 		key := order.Symbol + "|" + order.Leg()
 		filled := order.FilledQuantity
-		if current, err := b.GetOrder(order.ClientOrderID, order.BrokerOrderID); err == nil && current != nil {
+		current, err := b.GetOrder(order.ClientOrderID, order.BrokerOrderID)
+		if err != nil || current == nil {
+			if domain.OrderStatus(order.Status).IsOpen() {
+				noteUnconfirmed(order, err)
+			}
+		} else {
 			filled = current.FilledQuantity
 			_ = led.UpdateStatus(order.ClientOrderID, current.Status, filled, current.AvgFillPrice, current.BrokerOrderID)
 		}
@@ -82,7 +104,13 @@ func runVerify(date string) error {
 	for _, order := range exits {
 		key := order.Symbol + "|" + order.Leg()
 		filled := order.FilledQuantity
-		if current, err := b.GetOrder(order.ClientOrderID, order.BrokerOrderID); err == nil && current != nil {
+		current, err := b.GetOrder(order.ClientOrderID, order.BrokerOrderID)
+		if err != nil || current == nil {
+			if domain.OrderStatus(order.Status).IsOpen() {
+				noteUnconfirmed(order, err)
+			}
+		}
+		if current != nil {
 			filled = current.FilledQuantity
 			_ = led.UpdateStatus(order.ClientOrderID, current.Status, filled, current.AvgFillPrice, current.BrokerOrderID)
 			logInfo("daytrade.fill", "手仕舞い注文の約定状況", map[string]any{
@@ -121,10 +149,11 @@ func runVerify(date string) error {
 	}
 
 	// 台帳と食い違う建玉（送信結果不明の注文が実は通っていた等）はブローカー側で確かめる
-	positions, err := b.PositionsBySymbol()
+	positions, err := broker.PositionsBySymbolIncludingMargin(b)
 	if err != nil {
 		logWarn("daytrade.reconcile", "建玉を照会できず突合を省略", map[string]any{"error": err.Error()})
 		positions = nil
+		unconfirmed = append(unconfirmed, fmt.Sprintf("建玉の照会に失敗: %v", err))
 	}
 	for _, key := range keys {
 		symbol, leg, _ := strings.Cut(key, "|")
@@ -159,6 +188,20 @@ func runVerify(date string) error {
 			strings.Join(carried, "\n"))
 		return nil
 	}
+
+	// 照会できなかった注文があるなら「持ち越しなし」とは言えない。
+	// ここで正常終了すると、確かめられなかっただけの日と本当に無事な日が
+	// ログの上で区別できなくなる。
+	if len(unconfirmed) > 0 {
+		logError("daytrade.unconfirmed", "照会できず持ち越しを判定できません",
+			map[string]any{"day": day.Format(DateLayout), "orders": unconfirmed})
+		digest.Anomaly("daytrade.unconfirmed",
+			fmt.Sprintf("%d 件を照会できず持ち越しを判定できません", len(unconfirmed)))
+		alert("デイトレ: 注文を照会できず持ち越しを判定できません。口座を確認してください",
+			strings.Join(unconfirmed, "\n"))
+		return fmt.Errorf("%d 件の注文を照会できませんでした", len(unconfirmed))
+	}
+
 	fmt.Println("手仕舞いを確認しました（持ち越しなし）")
 	logInfo("daytrade.run", "手仕舞いを確認",
 		map[string]any{"phase": "verify", "live": true, "carried": 0})

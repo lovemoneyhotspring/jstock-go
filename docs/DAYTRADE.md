@@ -151,8 +151,8 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 ## バックテスト
 
 ```bash
-uv run daytrade backtest --since 2017-01-01          # 設定どおり（資金固定・100 株単位・段階手数料）
-uv run daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
+daytrade backtest --since 2017-01-01          # 設定どおり（資金固定・100 株単位・段階手数料）
+daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
 ```
 
 前夜の `plan` と同じ式（`daytrade.universe.eligible_expr`）と 9:00 と同じ順位付け
@@ -190,17 +190,16 @@ uv run daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
 「なぜ X が選ばれなかったか」は `ranking` に無ければ `quotes`（ギャップが条件外・ストップ安・気配なし）で追える。
 
 ```bash
-uv run daytrade history                                  # 種類ごとのファイル数と期間
-uv run daytrade history ranking --date 2026-09-03 --latest
-uv run daytrade history open_run --from 2026-09-01 --csv /tmp/open_run.csv
+daytrade history                                  # 種類ごとのファイル数と期間
+daytrade history ranking --date 2026-09-03 --latest
+daytrade history open_run --from 2026-09-01 --csv /tmp/open_run.csv
 ```
 
-分析は polars / DuckDB で直接読む（列が増えても古いファイルはそのまま読める）:
+分析は DuckDB で直接読む（列が増えても古いファイルはそのまま読める）:
 
-```python
-import polars as pl
-r = pl.read_parquet("state/daytrade/history/ranking/*.parquet")
-picks = r.filter(pl.col("picked")).sort(["day", "recorded_at"])
+```bash
+jquants query "SELECT * FROM read_parquet('state/daytrade/history/ranking/*.parquet')
+               WHERE picked ORDER BY day, recorded_at"
 ```
 
 `state/` はホスト固有なので、`state/daytrade/history/` も台帳と同じく別ホストへ同期する（`docs/DEPLOY.md`）。
@@ -221,19 +220,18 @@ picks = r.filter(pl.col("picked")).sort(["day", "recorded_at"])
 - `quotes` の日は `gap`（9:00 の気配）と `gap_open`（実際の始値）の差で、気配の当たり具合も見える
 
 ```bash
-uv run daytrade evaluate --config-dir config/daytrade_margin                 # 今日（cron: 20:20）
-uv run daytrade evaluate --date 2026-09-02 --config-dir config/daytrade_margin
-uv run daytrade review                                                       # 直近 20 日
-uv run daytrade review --from 2026-09-01 --csv /tmp/review.csv
+daytrade evaluate --config-dir config/daytrade_margin                 # 今日（cron: 20:20）
+daytrade evaluate --date 2026-09-02 --config-dir config/daytrade_margin
+daytrade review                                                       # 直近 20 日
+daytrade review --from 2026-09-01 --csv /tmp/review.csv
 ```
 
 `review` は日 × 脚ごとに「選んだ N の平均 net bp」「次点の平均」「候補全体の平均」と想定損益・
 実現損益を並べ、期間の合計に「picked が勝った日」「picked が all を上回った日」の割合を出す。
 選定が効いていれば picked ≥ next ≥ all の日が多い。逆が続けば、順位付けの規則（ギャップの
-小さい順／大きい順）がその相場で効いていない合図。全行は polars で直接読める:
+小さい順／大きい順）がその相場で効いていない合図。全行は DuckDB で直接読める:
 
-```python
-import polars as pl
-ev = pl.read_parquet("state/daytrade/history/evaluation/*.parquet")
-ev.filter(pl.col("side") == "SELL").group_by("rank_group").agg(pl.col("net_bp").mean())
+```bash
+jquants query "SELECT rank_group, avg(net_bp) FROM read_parquet('state/daytrade/history/evaluation/*.parquet')
+               WHERE side = 'SELL' GROUP BY rank_group"
 ```

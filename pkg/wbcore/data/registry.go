@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/registry"
@@ -80,8 +82,12 @@ func DefaultProvider(market domain.Market) string {
 }
 
 // jquantsProvider は既存の JQuantsClient を MarketDataProvider に合わせる薄い層。
+//
+// arch があれば API より先に読む。cron（jquants sync）が毎日蓄積している
+// 端点をもう一度 API から取り直すと、レート制限を無駄に消費する。
 type jquantsProvider struct {
 	client *JQuantsClient
+	arch   BarArchive
 }
 
 func (p *jquantsProvider) Name() string { return ProviderJQuants }
@@ -89,9 +95,20 @@ func (p *jquantsProvider) Name() string { return ProviderJQuants }
 func (p *jquantsProvider) FetchBars(symbols []string, start, end string) (map[string][]domain.Bar, error) {
 	result := map[string][]domain.Bar{}
 	for _, symbol := range symbols {
-		bars, err := fetchJQuantsDaily(p.client, symbol, start, end)
+		code, isIndex, err := ToJQuantsCode(symbol)
 		if err != nil {
-			return nil, NewMarketDataError(p.Name(), symbol+" の日足を取得できません", err)
+			// 米国の指数（^GSPC 等）が混ざっていても他の銘柄は取る。
+			// 取れなかった銘柄はキーごと省く（抽象の約束）
+			fmt.Fprintf(os.Stderr, "[warn] %s は J-Quants で取れません: %v\n", symbol, err)
+			continue
+		}
+		bars, ok := archiveDailyBarsFor(p.arch, symbol, code, isIndex, start, end)
+		if !ok {
+			var err error
+			bars, err = fetchJQuantsDaily(p.client, p.arch, symbol, code, isIndex, start, end)
+			if err != nil {
+				return nil, NewMarketDataError(p.Name(), symbol+" の日足を取得できません", err)
+			}
 		}
 		normalized, err := NormalizeBars(bars)
 		if err != nil {
@@ -116,7 +133,11 @@ func connectJQuants(params ProviderParams) (MarketDataProvider, error) {
 	if err != nil {
 		return nil, NewMarketDataError(ProviderJQuants, "API キーを解決できません", err)
 	}
-	return &jquantsProvider{client: NewJQuantsClient(apiKey)}, nil
+	var arch BarArchive
+	if params.Settings != nil {
+		arch = archive.NewArchive(params.Settings.JQuantsArchiveDir())
+	}
+	return &jquantsProvider{client: NewJQuantsClient(apiKey), arch: arch}, nil
 }
 
 // fredProvider は既存の FREDProvider を MarketDataProvider に合わせる薄い層。
@@ -154,9 +175,9 @@ func connectFred(params ProviderParams) (MarketDataProvider, error) {
 // fetchJQuantsDaily は 1 銘柄の日足を J-Quants から取る。
 //
 // 既存の JQuantsClient は汎用の HTTP 層だけを持つので、日足の問い合わせ方
-// （エンドポイントと日付の書式）はここで組み立てる。
-func fetchJQuantsDaily(client *JQuantsClient, symbol, start, end string) ([]domain.Bar, error) {
-	code := strings.TrimSuffix(symbol, ".T")
+// （エンドポイントと日付の書式）はここで組み立てる。code と isIndex は
+// ToJQuantsCode で解決済みのものを受け取る——指数と株式でエンドポイントが違う。
+func fetchJQuantsDaily(client *JQuantsClient, arch BarArchive, symbol, code string, isIndex bool, start, end string) ([]domain.Bar, error) {
 	params := url.Values{}
 	params.Set("code", code)
 	if start != "" {
@@ -166,10 +187,13 @@ func fetchJQuantsDaily(client *JQuantsClient, symbol, start, end string) ([]doma
 		params.Set("to", strings.ReplaceAll(end, "-", ""))
 	}
 
-	resp, err := client.Get("/equities/bars/daily", params)
+	resp, err := client.Get(JQuantsDailyPath(isIndex), params)
 	if err != nil {
 		return nil, err
 	}
+
+	// 取れたぶんは保管庫に書き戻す。次回は API を叩かずに済む
+	storeToArchive(arch, isIndex, resp.Data)
 
 	bars := make([]domain.Bar, 0, len(resp.Data))
 	for _, item := range resp.Data {
@@ -177,20 +201,7 @@ func fetchJQuantsDaily(client *JQuantsClient, symbol, start, end string) ([]doma
 		if err := json.Unmarshal(item, &raw); err != nil {
 			continue
 		}
-		date := raw.Date
-		if len(date) == 8 {
-			// J-Quants は YYYYMMDD で返す。保存と比較は ISO 8601 に揃える
-			date = fmt.Sprintf("%s-%s-%s", date[:4], date[4:6], date[6:])
-		}
-		bars = append(bars, domain.Bar{
-			Symbol: symbol,
-			Date:   date,
-			Open:   parseDec(raw.Open),
-			High:   parseDec(raw.High),
-			Low:    parseDec(raw.Low),
-			Close:  parseDec(raw.Close),
-			Volume: parseDec(raw.Volume),
-		})
+		bars = append(bars, raw.ToBar(symbol, isIndex))
 	}
 	return bars, nil
 }

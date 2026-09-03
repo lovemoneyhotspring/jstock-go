@@ -85,3 +85,26 @@ func TestPaperBroker_Lifecycle(t *testing.T) {
 		t.Errorf("expected positive realized pnl, got %s", pb.realizedPnL)
 	}
 }
+
+// 待機資金の利息は年率を 360 日で日割りする（T-Bill の慣行）。
+func TestPaperBrokerAccrueInterest(t *testing.T) {
+	p := NewPaperBroker(decimal.NewFromInt(3_600_000), "open")
+
+	// 年 5% を 36 日 → 3,600,000 × 0.05 × 36/360 = 18,000
+	got := p.AccrueInterest(decimal.RequireFromString("0.05"), 36)
+	if !got.Equal(decimal.NewFromInt(18_000)) {
+		t.Errorf("利息 = %s, want 18000", got)
+	}
+	bal, _ := p.GetBalance()
+	if !bal.CashBalance.Equal(decimal.NewFromInt(3_618_000)) {
+		t.Errorf("残高 = %s, want 3618000", bal.CashBalance)
+	}
+
+	// 金利ゼロ・日数ゼロでは何もしない
+	if !p.AccrueInterest(decimal.Zero, 30).IsZero() {
+		t.Error("金利ゼロで利息が付きました")
+	}
+	if !p.AccrueInterest(decimal.RequireFromString("0.05"), 0).IsZero() {
+		t.Error("日数ゼロで利息が付きました")
+	}
+}

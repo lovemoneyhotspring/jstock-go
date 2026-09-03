@@ -10,19 +10,30 @@
 #
 # 有効化の段階:
 #   1. 今: データ（J-Quants / FRED）・候補（daytrade plan）・監視だけ。発注経路は止めたまま
-#   2. .env に TACHIBANA_PROD_* を入れ `wbjp credentials check --env prod` が通ったら、
+#   2. 発注に関わる電文のうち注文照会・信用建玉・信用発注は**実機未検証**。
+#      docs/BROKER_VERIFY.md の手順を UAT で全部通すまで下の行は開けない
+#   3. .env に TACHIBANA_PROD_* を入れ `wbjp credentials check --env prod` が通ったら、
 #      下の「発注経路」の行のコメントを外す（まず --live 無しで数日、次に --live）
 
+# 実行ファイルは deploy/build.sh が bin/ に作る（Go のみ。uv も Python も要らない）
 WBJP_HOME=/home/abobo/jstock
-WBJP_BIN=/home/abobo/jstock/.venv/bin
+WBJP_BIN=/home/abobo/jstock/bin
 
 # --- データ ------------------------------------------------------------------
+# J-Quants のメモリ（docs/JQUANTS_ARCHIVE.md「メモリ」）:
+#   JQUANTS_READ_BUDGET_MB … 1 回の読み出しが Frame に載せていい量。超えたら
+#                            OOM で殺される代わりに、何を絞れば通るかを書いたエラーで止まる
+#   GOMEMLIMIT             … Go のヒープの上限（soft）。ここに近づくと GC が先に頑張る
+#   GOGC                   … 上限に余裕があるうちは GC を控える（=速い）。GOMEMLIMIT が天井を守る
+# `env $JQ_MEM` で渡す。$JQ_MEM を直に置くと、展開後の "A=1" は代入ではなく
+# コマンド名として扱われてしまう（sh は代入プレフィックスを展開前に決める）
+JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=3GiB GOGC=400
 # J-Quants: 台帳とカレンダーを見て必要な端点・日付だけ取る（冪等）。16:30〜の更新を 30 分刻みで拾う
-13,43 * * * *   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/jquants.lock   $WBJP_BIN/jquants sync                                     >> state/logs/jquants-sync.log     2>&1
+13,43 * * * *   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/jquants.lock   $WBJP_BIN/jquants sync                         >> state/logs/jquants-sync.log     2>&1
 # 月初に一括ダウンロードで取りこぼしを埋める（更新分だけ取る）
-50 3 2-5 * *    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/jquants.lock   $WBJP_BIN/jquants backfill                                 >> state/logs/jquants-backfill.log 2>&1
+50 3 2-5 * *    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/jquants.lock   $WBJP_BIN/jquants backfill                     >> state/logs/jquants-backfill.log 2>&1
 # 営業日ごとの欠けを監視（WBJP_ALERT_WEBHOOK_URL があれば通知）
-0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod                              $WBJP_BIN/jquants check --notify                           >> state/logs/jquants-check.log    2>&1
+0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM                          $WBJP_BIN/jquants check --notify                   >> state/logs/jquants-check.log    2>&1
 # スイング売買の銘柄の日足を J-Quants アーカイブから揃える（wbjp screen / backtest の材料）
 5 19 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-data.lock $WBJP_BIN/wbjp data sync --config-dir config               >> state/logs/wbjp-data-sync.log   2>&1
 10 19 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod                              $WBJP_BIN/wbjp data check --config-dir config --notify     >> state/logs/wbjp-data-check.log  2>&1

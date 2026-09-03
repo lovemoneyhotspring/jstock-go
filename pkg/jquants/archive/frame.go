@@ -377,10 +377,22 @@ func dedupeLast(f *Frame, key []string) *Frame {
 }
 
 // sortByKey は鍵の昇順に並べる。差分を見やすくし、Parquet の圧縮も効かせる。
+//
+// 鍵は行ごとに一度だけ組む。比較関数の中で組むと O(n log n) 回の文字列生成に
+// なり、8 万行で 270 万回のアロケートになる。
 func sortByKey(f *Frame, key []string) {
-	sort.SliceStable(f.Rows, func(i, j int) bool {
-		return keyOf(f.Rows[i], key) < keyOf(f.Rows[j], key)
-	})
+	keys := make([]string, len(f.Rows))
+	order := make([]int, len(f.Rows))
+	for i, row := range f.Rows {
+		keys[i] = keyOf(row, key)
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return keys[order[a]] < keys[order[b]] })
+	sorted := make([]map[string]*string, len(f.Rows))
+	for i, from := range order {
+		sorted[i] = f.Rows[from]
+	}
+	f.Rows = sorted
 }
 
 // concatDiagonal は列を和集合にして 2 つの表を縦に繋ぐ

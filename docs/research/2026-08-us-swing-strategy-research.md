@@ -167,9 +167,9 @@ CAGR は 8pt 上がるが DD は SPY 並みに戻る（実体は SPY 6 割＋押
 ## 7. 再現方法
 
 ```bash
-uv run wbjp data sync --config-dir config/us --days 4400 --force      # 12 年分
-uv run wbjp backtest --config-dir config/us --from 2019-01-01
-uv run wbjp backtest --config-dir config/us-momentum --from 2015-09-01
+wbjp data sync --config-dir config/us --days 4400 --force      # 12 年分
+wbjp backtest --config-dir config/us --from 2019-01-01
+wbjp backtest --config-dir config/us-momentum --from 2015-09-01
 ```
 
 出口別の集計・年別比較・投下率の測定は、`BacktestRunner` の

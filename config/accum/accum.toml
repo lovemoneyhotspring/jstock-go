@@ -4,10 +4,10 @@
 # あちらは全戦略が意見を出して合成されるが、積立は銘柄ごとに戦略が1つ決まり、
 # 予算 × 倍率で買い増すだけで売却しない。
 #
-#   uv run accum strategies   … 使える戦略
-#   uv run accum list         … この対応表
-#   uv run accum plan         … 今いくら買うか
-#   uv run accum run --live   … 実際に発注（本番は WBJP_ENV=prod も必要）
+#   accum strategies   … 使える戦略
+#   accum list         … この対応表
+#   accum plan         … 今いくら買うか
+#   accum run --live   … 実際に発注（本番は WBJP_ENV=prod も必要）
 #
 # 命名の方針:
 #   tactic … 機構の名前。登録簿の鍵。倍率などの数値は含めない
