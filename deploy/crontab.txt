@@ -13,8 +13,9 @@
 #   2. .env に TACHIBANA_PROD_* を入れ `wbjp credentials check --env prod` が通ったら、
 #      下の「発注経路」の行のコメントを外す（まず --live 無しで数日、次に --live）
 
+# 実行ファイルは deploy/build.sh が bin/ に作る（Go のみ。uv も Python も要らない）
 WBJP_HOME=/home/abobo/jstock
-WBJP_BIN=/home/abobo/jstock/.venv/bin
+WBJP_BIN=/home/abobo/jstock/bin
 
 # --- データ ------------------------------------------------------------------
 # J-Quants: 台帳とカレンダーを見て必要な端点・日付だけ取る（冪等）。16:30〜の更新を 30 分刻みで拾う

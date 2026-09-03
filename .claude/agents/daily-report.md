@@ -13,7 +13,7 @@ tools: Bash, Read, Glob, Grep
 - **発注系のコマンドを実行しない**。`--live` を含むコマンド、`daytrade open` / `daytrade close` /
   `wbjp run` / `accum run` は、たとえ dry-run に見えても叩かない。
 - 叩いてよいのは**読み取り専用のコマンドだけ**——`cat` / `jq` / `ls` / `grep`、および
-  `.venv/bin/{daytrade,wbjp,accum} review|evaluate --json`、`.venv/bin/jquants check`。
+  `bin/{daytrade,wbjp,accum} review|evaluate --json`、`bin/jquants check`。
   `evaluate` は cron が既に回した結果を読み直すだけなので副作用はないが、迷ったら
   `review --json`（履歴を読むだけ）を優先する。
 - **パラメータの自動反映は提案までで止める**（`docs/FEEDBACK.md`「自動化するときの線引き」）。
@@ -51,9 +51,9 @@ jq -c 'select(.anomalies)' state/digest/prod-<日付>.jsonl
 ### 層 2: 判断の妥当性
 
 ```bash
-.venv/bin/daytrade review --json --days 20   # 選んだ N / 次点 / 候補全体の平均 net bp
-.venv/bin/wbjp     review --json --config-dir config
-.venv/bin/accum    evaluate --json
+bin/daytrade review --json --days 20   # 選んだ N / 次点 / 候補全体の平均 net bp
+bin/wbjp     review --json --config-dir config
+bin/accum    evaluate --json
 ```
 
 見どころは「選んだものは、選ばなかったものより良かったか」。
@@ -64,10 +64,11 @@ jq -c 'select(.anomalies)' state/digest/prod-<日付>.jsonl
 実行品質（判断した値と約定した値の差）を見るなら:
 
 ```bash
-ls state/daytrade/history/execution/ 2>/dev/null
+bin/daytrade history execution --from <日付> --json
 ```
 
-Parquet は polars で読む（`.venv/bin/python -c "import polars as pl; ..."`）。列を絞って読むこと。
+Parquet を直接開く必要はない。`history` が読んで JSON にする（`--limit` で行数を絞る）。
+横断して集計したいときだけ `bin/jquants query "SELECT ... FROM read_parquet('...')"` を使う。
 
 ### 層 3: 構造化ログ（異常の深掘りのときだけ）
 

@@ -6,7 +6,7 @@
 #   DRY_RUN=1 deploy/daily-report.sh    # 生成するだけで Discord に送らない
 #
 # 設計の要点:
-#   - レポートの生成（claude）と配達（discord_post.py）を分ける。モデルが
+#   - レポートの生成（claude）と配達（discord-post）を分ける。モデルが
 #     「送るのを忘れる」経路を無くし、配達は決め打ちのスクリプトが担う
 #   - 生成に失敗しても黙って消えないよう、失敗した事実を Discord に流す
 #   - 本文は state/reports/ に必ず残す。Discord に届かなくても後から読める
@@ -36,6 +36,9 @@ export WBJP_ENV="${WBJP_ENV:-prod}"
 # cron の PATH には ~/.local/bin が入っていないので絶対パスで持つ
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 [ -x "$CLAUDE_BIN" ] || CLAUDE_BIN="$(command -v claude || echo "$CLAUDE_BIN")"
+
+# 配達係（deploy/build.sh が bin/ に作る）
+POST_BIN="${POST_BIN:-$HOME_DIR/bin/discord-post}"
 
 # ダイジェストを起動前に写し取る。エージェントが叩く `review` / `evaluate` は
 # それ自体がダイジェストに 1 行足すので、生のファイルを読ませると自分の足跡を
@@ -74,7 +77,7 @@ if [ $STATUS -ne 0 ] || [ ! -s "$REPORT" ]; then
     tail -c 800 "$REPORT_DIR/daily-$DAY.err" 2>/dev/null
     echo '```'
     echo "サーバーで確認: \`$HOME_DIR/deploy/daily-report.sh $DAY\`"
-  } | "$HOME_DIR/.venv/bin/python" "$HOME_DIR/deploy/discord_post.py"
+  } | "$POST_BIN"
   exit 1
 fi
 
@@ -83,4 +86,4 @@ if [ "${DRY_RUN:-}" = "1" ]; then
   exit 0
 fi
 
-"$HOME_DIR/.venv/bin/python" "$HOME_DIR/deploy/discord_post.py" < "$REPORT"
+"$POST_BIN" < "$REPORT"
