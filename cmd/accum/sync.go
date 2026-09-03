@@ -17,14 +17,32 @@ import (
 //
 // 200日移動平均を使ううえ、増額が効くのは暴落局面なので、売買用の銘柄より
 // ずっと長い履歴が要る。上昇局面しか含まない短い期間で検証すると、増額の
-// 効果が実際より小さく出る。
+// 効果が実際より小さく出る。判定に使う米国指数（FRED）はここまで遡れる。
 const defaultSyncDays = 10_950
+
+// jquantsMaxSyncDays は J-Quants から遡れる上限（約10年）。
+//
+// Standard プランの配信範囲は過去 10 年で、それより前は要求しても返らない。
+// 日本株にこれより長い期間を投げても取れる足は増えないので、要求のほうを詰める。
+const jquantsMaxSyncDays = 3_650
 
 // runSyncDays は run が判断の直前に足を更新するときの期間。
 //
-// 判断に要るのは直近の足だけで、長い履歴は既に保存済み。毎回 30 年ぶん
+// 判断に要るのは直近の足だけで、長い履歴は既に保存済み。毎回 既定の期間を
 // 取り直すと発注時間帯（14:00〜15:00）を食い潰す。
 const runSyncDays = 30
+
+// syncDaysFor は取得元が実際に遡れる範囲まで期間を詰める。
+//
+// 取れない期間を要求しても足は増えず、レート制限と待ち時間だけを使う。
+// 詰めても既に保存済みの古い足は消えない——保存は Upsert で、取得できた
+// ぶんを重ねるだけだから。
+func syncDaysFor(provider string, days int) int {
+	if provider == data.ProviderJQuants && days > jquantsMaxSyncDays {
+		return jquantsMaxSyncDays
+	}
+	return days
+}
 
 func newSyncCmd() *cobra.Command {
 	var days int
@@ -60,7 +78,7 @@ func newSyncCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().IntVar(&days, "days", defaultSyncDays, "何日ぶん遡って取得するか")
+	cmd.Flags().IntVar(&days, "days", defaultSyncDays, "何日ぶん遡って取得するか（日本株は J-Quants の配信範囲 約10年 で頭打ち）")
 	cmd.Flags().BoolVar(&force, "force", false, "保存済みを無視して取り直す")
 	return cmd
 }
@@ -114,7 +132,6 @@ func syncAccumBars(
 ) (total int, failures int) {
 	today := clock.TodayUTC()
 	end := today.Format("2006-01-02")
-	start := today.AddDate(0, 0, -days).Format("2006-01-02")
 	barStore := data.NewBarStore(appSettings.BarsDir())
 
 	grouped := accumSyncSymbols(cfg)
@@ -131,6 +148,7 @@ func syncAccumBars(
 		if name == "" {
 			name = data.DefaultProvider(market)
 		}
+		start := today.AddDate(0, 0, -syncDaysFor(name, days)).Format("2006-01-02")
 		provider, err := data.Connect(name, data.ProviderParams{
 			Env: appSettings.Env, Market: market, Settings: appSettings,
 		})

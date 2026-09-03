@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
 )
 
 func TestSplitLogLine(t *testing.T) {
@@ -60,5 +62,20 @@ func TestYenRoundsLargeAmounts(t *testing.T) {
 	}
 	if got := yen(1_234_567); got != "123万" {
 		t.Errorf("大きい額は万に丸める: %q", got)
+	}
+}
+
+func TestSyncDaysFor(t *testing.T) {
+	// 日本株は J-Quants の配信範囲（約10年）で頭打ち
+	if got := syncDaysFor(data.ProviderJQuants, defaultSyncDays); got != jquantsMaxSyncDays {
+		t.Errorf("jquants の既定 = %d, want %d", got, jquantsMaxSyncDays)
+	}
+	// 上限より短い指定はそのまま
+	if got := syncDaysFor(data.ProviderJQuants, runSyncDays); got != runSyncDays {
+		t.Errorf("jquants の短い指定 = %d, want %d", got, runSyncDays)
+	}
+	// 30 年遡れる取得元は詰めない
+	if got := syncDaysFor(data.ProviderFred, defaultSyncDays); got != defaultSyncDays {
+		t.Errorf("fred の既定 = %d, want %d", got, defaultSyncDays)
 	}
 }
