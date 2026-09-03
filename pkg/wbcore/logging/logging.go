@@ -1,6 +1,9 @@
 package logging
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -102,16 +105,16 @@ func Redact(text string) string {
 
 // LogRecord は JSON Lines ログの1行の構造。
 type LogRecord struct {
-	Schema    int            `json:"schema"`
-	TSUTC     string         `json:"ts_utc"`
-	RunID     string         `json:"run_id"`
-	App       string         `json:"app"`
-	Env       string         `json:"env"`
-	Command   string         `json:"command"`
-	Level     string         `json:"level"`
-	Code      string         `json:"code,omitempty"`
-	Msg       string         `json:"msg"`
-	Extra     map[string]any `json:"extra,omitempty"`
+	Schema  int            `json:"schema"`
+	TSUTC   string         `json:"ts_utc"`
+	RunID   string         `json:"run_id"`
+	App     string         `json:"app"`
+	Env     string         `json:"env"`
+	Command string         `json:"command"`
+	Level   string         `json:"level"`
+	Code    string         `json:"code,omitempty"`
+	Msg     string         `json:"msg"`
+	Extra   map[string]any `json:"extra,omitempty"`
 }
 
 // Logger は構造化ロガー。
@@ -123,6 +126,8 @@ type Logger struct {
 	command string
 	file    *os.File
 	out     io.Writer
+	// tz は端末表示の時間帯。ファイルに書く ts_utc は常に UTC。
+	tz *time.Location
 }
 
 // NewLogger は新しい構造化ロガーを作成する。
@@ -147,6 +152,7 @@ func NewLogger(app, env, runID, command, logDir string) (*Logger, error) {
 		command: command,
 		file:    f,
 		out:     os.Stderr,
+		tz:      clock.Tokyo,
 	}, nil
 }
 
@@ -197,7 +203,11 @@ func (l *Logger) log(level, code, msg string, extra map[string]any) {
 
 	// 端末表示 (簡潔なフォーマット)
 	if l.out != nil {
-		timestamp := clock.Fmt(time.Now(), clock.Tokyo, true)
+		tz := l.tz
+		if tz == nil {
+			tz = clock.Tokyo
+		}
+		timestamp := clock.Fmt(time.Now(), tz, true)
 		codeStr := ""
 		if code != "" {
 			codeStr = "[" + code + "] "
@@ -236,4 +246,137 @@ func (l *Logger) Debug(code, msg string, extra ...map[string]any) {
 		ex = extra[0]
 	}
 	l.log("debug", code, msg, ex)
+}
+
+// ---------------------------------------------------------------------------
+// 実行コンテキスト（run_id）
+//
+// 1 回の CLI 実行のログを後から 1 本の線として読めるようにするための仕組み。
+// Python 版は structlog の contextvars に束ねていた。Go には contextvars が
+// 無いので context.Context で持ち回る。ただし記録系（history / execution /
+// digest）は context を受け取らない経路からも run_id を必要とするため、
+// 「このプロセスの現在の実行」もパッケージ変数に控えておく
+// （CLI プロセスの実行は 1 回きりなので、これで取り違えは起きない）。
+// ---------------------------------------------------------------------------
+
+// RunContext は 1 回の実行のあいだ全ログに付く項目。
+type RunContext struct {
+	RunID string
+	// Fields は app / env / command / config_dir など、その実行を特定する情報。
+	Fields map[string]any
+}
+
+type runContextKey struct{}
+
+var (
+	runMu      sync.RWMutex
+	currentRun *RunContext
+)
+
+// NewRunID は実行の識別子を発行する。12 桁の 16 進——ログを目で追うときに
+// 短く、1 日の実行回数に対して衝突しない長さ。
+func NewRunID() string {
+	buf := make([]byte, 6)
+	if _, err := rand.Read(buf); err != nil {
+		// 乱数が取れないのは異常事態だが、ログの識別子のために実行を落とさない
+		return fmt.Sprintf("%012x", time.Now().UnixNano()&0xffffffffffff)
+	}
+	return hex.EncodeToString(buf)
+}
+
+// BindRunContext はこの実行のあいだ全ログに付く項目を束ね、run_id を発行する。
+// 返した context を以降の処理に渡す。
+func BindRunContext(ctx context.Context, fields map[string]any) (context.Context, string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	copied := make(map[string]any, len(fields))
+	for key, value := range fields {
+		copied[key] = value
+	}
+	run := &RunContext{RunID: NewRunID(), Fields: copied}
+
+	runMu.Lock()
+	currentRun = run
+	runMu.Unlock()
+
+	return context.WithValue(ctx, runContextKey{}, run), run.RunID
+}
+
+// RunContextOf は context に束ねられた実行情報を返す。無ければプロセスの現在の実行。
+func RunContextOf(ctx context.Context) *RunContext {
+	if ctx != nil {
+		if run, ok := ctx.Value(runContextKey{}).(*RunContext); ok && run != nil {
+			return run
+		}
+	}
+	runMu.RLock()
+	defer runMu.RUnlock()
+	return currentRun
+}
+
+// CurrentRunID はいま束ねている実行の run_id。BindRunContext の前なら空文字。
+//
+// ログ以外の記録（選定の履歴など）に同じ ID を付け、ログと突き合わせられるようにする。
+func CurrentRunID(ctx context.Context) string {
+	if run := RunContextOf(ctx); run != nil {
+		return run.RunID
+	}
+	return ""
+}
+
+// ResetRunContext はプロセスの現在の実行を捨てる（テスト用）。
+func ResetRunContext() {
+	runMu.Lock()
+	defer runMu.Unlock()
+	currentRun = nil
+}
+
+// ---------------------------------------------------------------------------
+// 時間帯付きのタイムスタンプ
+// ---------------------------------------------------------------------------
+
+// Timestamper は指定した時間帯で表示用の時刻文字列を作る関数を返す。
+//
+// 未知の時間帯名はここで早めに弾く（毎行の出力時に失敗すると気づけない）。
+// 保存と演算は常に UTC で、時間帯は表示にだけ効く。
+func Timestamper(timezone string) (func() string, error) {
+	loc, err := clock.Zone(timezone)
+	if err != nil {
+		return nil, err
+	}
+	return func() string { return clock.StampISO(loc) }, nil
+}
+
+// SetTimezone は端末表示の時間帯を差し替える。ファイルに書く ts_utc は常に UTC
+// のままなので、表示だけが変わる。
+func (l *Logger) SetTimezone(timezone string) error {
+	loc, err := clock.Zone(timezone)
+	if err != nil {
+		return err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.tz = loc
+	return nil
+}
+
+// SetOutput は端末表示の書き出し先を差し替える（テスト用。nil なら表示しない）。
+func (l *Logger) SetOutput(w io.Writer) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.out = w
+}
+
+// RunID はこのロガーが付ける実行の識別子。
+func (l *Logger) RunID() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.runID
+}
+
+// NewLoggerForRun は context に束ねた run_id を使ってロガーを作る。
+// BindRunContext の直後に呼べば、ログと履歴の run_id が必ず一致する。
+func NewLoggerForRun(ctx context.Context, app, env, command, logDir string) (*Logger, error) {
+	return NewLogger(app, env, CurrentRunID(ctx), command, logDir)
 }
