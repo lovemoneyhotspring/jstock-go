@@ -144,7 +144,7 @@ func (r *RSIReversion) OnBars(symbol string, bars []domain.Bar) (*domain.Signal,
 }
 
 // Combiner は複数戦略の意見を1本に合成する。
-type Combiner func(signals []domain.Signal, weights map[string]float64) domain.CombinedSignal
+type Combiner func(symbol string, signals []domain.Signal, weights map[string]float64) domain.CombinedSignal
 
 // CombineWeightedVote は重み付き平均合成。
 func CombineWeightedVote(symbol string, signals []domain.Signal, weights map[string]float64) domain.CombinedSignal {

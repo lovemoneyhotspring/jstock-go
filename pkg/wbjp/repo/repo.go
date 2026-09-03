@@ -349,3 +349,46 @@ func (r *Repo) GetStops() (map[string]StopRecord, error) {
 
 	return stops, nil
 }
+
+func (r *Repo) SaveStop(rec StopRecord) error {
+	now := clock.NowUTC().Format(time.RFC3339)
+	var hcStr, initStopStr, initQtyStr *string
+	if rec.HighestClose != nil {
+		s := rec.HighestClose.String()
+		hcStr = &s
+	}
+	if rec.InitialStopPrice != nil {
+		s := rec.InitialStopPrice.String()
+		initStopStr = &s
+	}
+	if rec.InitialQuantity != nil {
+		s := rec.InitialQuantity.String()
+		initQtyStr = &s
+	}
+
+	trailingInt := 0
+	if rec.Trailing {
+		trailingInt = 1
+	}
+	scaledOutInt := 0
+	if rec.ScaledOut {
+		scaledOutInt = 1
+	}
+
+	query := `INSERT OR REPLACE INTO stops (
+		symbol, stop_price, entry_price, created_on, trailing, atr_multiple,
+		highest_close, initial_stop_price, initial_quantity, scaled_out, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	_, err := r.db.Exec(query,
+		rec.Symbol, rec.StopPrice.String(), rec.EntryPrice.String(), rec.CreatedOn,
+		trailingInt, rec.ATRMultiple.String(), hcStr, initStopStr, initQtyStr, scaledOutInt, now,
+	)
+	return err
+}
+
+func (r *Repo) DeleteStop(symbol string) error {
+	_, err := r.db.Exec("DELETE FROM stops WHERE symbol = ?;", symbol)
+	return err
+}
+

@@ -59,8 +59,15 @@ func PlanOrders(
 			tactic = tactics.NewBearStack(entry.Multiplier, entry.Fast, entry.Mid, entry.Slow)
 		case "stack_ladder":
 			tactic = tactics.NewStackLadder(nil, entry.Fast, entry.Mid, entry.Slow)
+		case "drawdown_ladder":
+			tactic = tactics.NewDrawdownLadder(nil, nil, true, 200)
 		default:
 			tactic = &tactics.Constant{}
+		}
+
+		var signalBars []domain.Bar
+		if entry.SignalSymbol != "" {
+			signalBars, _ = barStore.Read(entry.SignalSymbol, "", "")
 		}
 
 		for _, sym := range entry.Symbols {
@@ -84,7 +91,14 @@ func PlanOrders(
 				continue
 			}
 
-			p, err := plan.BuildPlan(completed, tactic, entry.MonthlyBudget)
+			var completedSignal []domain.Bar
+			for _, sb := range signalBars {
+				if sb.Date < todayJST {
+					completedSignal = append(completedSignal, sb)
+				}
+			}
+
+			p, err := plan.BuildPlanWithSignal(completed, completedSignal, true, tactic, entry.MonthlyBudget)
 			if err != nil || len(p.Rows) == 0 {
 				continue
 			}

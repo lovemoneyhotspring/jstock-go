@@ -2,6 +2,7 @@ package tactics
 
 import (
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
@@ -218,3 +219,97 @@ func (s *StackLadder) Multipliers(bars []domain.Bar) []float64 {
 
 	return res
 }
+
+// DrawdownLadder は過去最高値からの下落率に応じて段階的に増額する。
+type DrawdownLadder struct {
+	Levels           []float64
+	Values           []float64
+	RequireDowntrend bool
+	Slow             int
+}
+
+func NewDrawdownLadder(levels, values []float64, requireDowntrend bool, slow int) *DrawdownLadder {
+	if len(levels) == 0 {
+		levels = []float64{0.10, 0.20, 0.30}
+		values = []float64{2.0, 3.0, 4.0}
+	}
+	if slow <= 0 {
+		slow = 200
+	}
+	return &DrawdownLadder{
+		Levels:           levels,
+		Values:           values,
+		RequireDowntrend: requireDowntrend,
+		Slow:             slow,
+	}
+}
+
+func (d *DrawdownLadder) Name() string {
+	return "drawdown_ladder"
+}
+
+func (d *DrawdownLadder) Describe() string {
+	return "drawdown_ladder"
+}
+
+func (d *DrawdownLadder) WarmupBars() int {
+	if d.RequireDowntrend {
+		return d.Slow
+	}
+	return 1
+}
+
+func (d *DrawdownLadder) Multipliers(bars []domain.Bar) []float64 {
+	n := len(bars)
+	res := make([]float64, n)
+	for i := range res {
+		res[i] = 1.0
+	}
+	if n == 0 {
+		return res
+	}
+
+	closes := make([]float64, n)
+	for i, bar := range bars {
+		c, _ := bar.Close.Float64()
+		closes[i] = c
+	}
+
+	var smaSlow []float64
+	if d.RequireDowntrend {
+		smaSlow, _ = indicators.SMA(closes, d.Slow)
+	}
+
+	cumMax := closes[0]
+	for i := 0; i < n; i++ {
+		p := closes[i]
+		if p > cumMax {
+			cumMax = p
+		}
+		dd := (p - cumMax) / cumMax // <= 0
+
+		gate := true
+		if d.RequireDowntrend {
+			if i < d.Slow-1 || math.IsNaN(smaSlow[i]) || p >= smaSlow[i] {
+				gate = false
+			}
+		}
+
+		if !gate {
+			continue
+		}
+
+		mult := 1.0
+		for idx, level := range d.Levels {
+			if dd <= -level {
+				if idx < len(d.Values) && d.Values[idx] > mult {
+					mult = d.Values[idx]
+				}
+			}
+		}
+		res[i] = mult
+	}
+
+	return res
+}
+

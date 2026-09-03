@@ -11,11 +11,13 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/execute"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/plan"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/simulate"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/tactics"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 	"github.com/shopspring/decimal"
@@ -46,6 +48,7 @@ func main() {
 			fmt.Fprintln(w, "constant\t定額。常に1倍。純粋なドル平均法")
 			fmt.Fprintln(w, "bear_stack\t完全下降配列（終値 < MA20 < MA50 < MA200）で増額")
 			fmt.Fprintln(w, "stack_ladder\t弱気スコア（0〜6）に応じて段階的に増額")
+			fmt.Fprintln(w, "drawdown_ladder\t過去最高値からの下落率に応じて段階的に増額")
 			w.Flush()
 		},
 	}
@@ -73,6 +76,54 @@ func main() {
 		},
 	}
 
+	// sync サブコマンド
+	var cmdSync = &cobra.Command{
+		Use:   "sync",
+		Short: "設定銘柄（日本株および判定用指数）の最新日足を同期する",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := accumcfg.LoadAccumConfig(configDirFlag)
+			if err != nil {
+				return err
+			}
+
+			runID := fmt.Sprintf("accum-sync-%d", time.Now().Unix())
+			logger, _ := logging.NewLogger("accum", string(appSettings.Env), runID, "sync", appSettings.LogDir)
+			defer logger.Close()
+
+			barStore := data.NewBarStore(appSettings.BarsDir())
+			fredClient := data.NewFREDProvider(15 * time.Second)
+
+			var jqClient *data.JQuantsClient
+			if apiKey, err := credentials.LoadAPIKey("WBJP_JQUANTS_API_KEY", appSettings.DotenvMap); err == nil && apiKey != "" {
+				jqClient = data.NewJQuantsClient(apiKey)
+			}
+
+			// 同期対象銘柄を収集
+			targets := make(map[string]struct{})
+			for _, t := range cfg.Tactics {
+				if !t.IsEnabled() {
+					continue
+				}
+				for _, s := range t.Symbols {
+					targets[s] = struct{}{}
+				}
+				if t.SignalSymbol != "" {
+					targets[t.SignalSymbol] = struct{}{}
+				}
+			}
+
+			fmt.Printf("日足データを同期中（全 %d 銘柄）...\n", len(targets))
+			for sym := range targets {
+				if err := data.SyncSymbolBars(sym, barStore, jqClient, fredClient, logger); err != nil {
+					fmt.Printf("[エラー] %s: %v\n", sym, err)
+				} else {
+					fmt.Printf("[完了] %s\n", sym)
+				}
+			}
+			return nil
+		},
+	}
+
 	// plan サブコマンド
 	var cmdPlan = &cobra.Command{
 		Use:   "plan",
@@ -92,8 +143,18 @@ func main() {
 					continue
 				}
 				var tactic tactics.Tactic = &tactics.Constant{}
-				if entry.Tactic == "bear_stack" {
+				switch entry.Tactic {
+				case "bear_stack":
 					tactic = tactics.NewBearStack(entry.Multiplier, entry.Fast, entry.Mid, entry.Slow)
+				case "stack_ladder":
+					tactic = tactics.NewStackLadder(nil, entry.Fast, entry.Mid, entry.Slow)
+				case "drawdown_ladder":
+					tactic = tactics.NewDrawdownLadder(nil, nil, true, 200)
+				}
+
+				var signalBars []domain.Bar
+				if entry.SignalSymbol != "" {
+					signalBars, _ = barStore.Read(entry.SignalSymbol, "", "")
 				}
 
 				for _, sym := range entry.Symbols {
@@ -101,7 +162,7 @@ func main() {
 					if err != nil || len(bars) == 0 {
 						continue
 					}
-					p, err := plan.BuildPlan(bars, tactic, entry.MonthlyBudget)
+					p, err := plan.BuildPlanWithSignal(bars, signalBars, false, tactic, entry.MonthlyBudget)
 					if err != nil || len(p.Rows) == 0 {
 						continue
 					}
@@ -223,12 +284,70 @@ func main() {
 	}
 
 	cmdRun.Flags().BoolVar(&liveFlag, "live", false, "実際にブローカーへ発注する")
-	cmdRun.Flags().BoolVar(&yesFlag, "yes", false, "本番発注時の確認プロンプトをスキップする")
+	// backtest サブコマンド
+	var cmdBacktest = &cobra.Command{
+		Use:   "backtest",
+		Short: "登録された積立戦略の過去検証を実行する",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := accumcfg.LoadAccumConfig(configDirFlag)
+			if err != nil {
+				return err
+			}
+			barStore := data.NewBarStore(appSettings.BarsDir())
+
+			for _, entry := range cfg.Tactics {
+				if !entry.IsEnabled() {
+					continue
+				}
+				var tactic tactics.Tactic = &tactics.Constant{}
+				switch entry.Tactic {
+				case "bear_stack":
+					tactic = tactics.NewBearStack(entry.Multiplier, entry.Fast, entry.Mid, entry.Slow)
+				case "stack_ladder":
+					tactic = tactics.NewStackLadder(nil, entry.Fast, entry.Mid, entry.Slow)
+				case "drawdown_ladder":
+					tactic = tactics.NewDrawdownLadder(nil, nil, true, 200)
+				}
+
+				var signalBars []domain.Bar
+				if entry.SignalSymbol != "" {
+					signalBars, _ = barStore.Read(entry.SignalSymbol, "", "")
+				}
+
+				for _, sym := range entry.Symbols {
+					bars, err := barStore.Read(sym, "", "")
+					if err != nil || len(bars) == 0 {
+						continue
+					}
+					p, err := plan.BuildPlanWithSignal(bars, signalBars, false, tactic, entry.MonthlyBudget)
+					if err != nil || len(p.Rows) == 0 {
+						continue
+					}
+
+					res, err := simulate.Simulate(bars, p, entry.MonthlyBudget)
+					if err != nil {
+						fmt.Printf("[%s] 検証失敗: %v\n", sym, err)
+						continue
+					}
+
+					fmt.Printf("=== 積立バックテスト: %s (%s) ===\n", entry.ID, sym)
+					fmt.Printf("期間: %s 〜 %s\n", res.StartDate, res.EndDate)
+					fmt.Printf("総投入額: %s 円 (基本予算の %.2f 倍)\n", res.Contributed, res.CapitalMultiple)
+					fmt.Printf("平均取得単価: %.2f 円 (対照群比: %+.2f%%)\n", res.AverageCost, res.CostEdge*100)
+					fmt.Printf("期末評価額: %.0f 円 (総リターン: %+.2f%%)\n", res.TerminalValue, res.TotalReturn*100)
+					fmt.Printf("増額発動日数: %d 日\n\n", res.BoostedDays)
+				}
+			}
+			return nil
+		},
+	}
 
 	rootCmd.AddCommand(cmdStrategies)
 	rootCmd.AddCommand(cmdList)
+	rootCmd.AddCommand(cmdSync)
 	rootCmd.AddCommand(cmdPlan)
 	rootCmd.AddCommand(cmdOrders)
+	rootCmd.AddCommand(cmdBacktest)
 	rootCmd.AddCommand(cmdRun)
 
 	if err := rootCmd.Execute(); err != nil {

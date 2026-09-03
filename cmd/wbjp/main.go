@@ -19,10 +19,34 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/engine"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/portfolio"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/repo"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/risk"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/strategy"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 )
+
+func buildStrategies(stratCfg *wbjpcfg.StrategiesConfig) ([]strategy.Strategy, map[string]float64) {
+	var strats []strategy.Strategy
+	weights := make(map[string]float64)
+
+	for _, se := range stratCfg.Strategies {
+		if !se.IsEnabled() {
+			continue
+		}
+		weights[se.Name] = se.Weight
+		switch se.Name {
+		case "sma_cross":
+			strats = append(strats, strategy.NewSMACross(se.Fast, se.Slow))
+		case "rsi_reversion":
+			strats = append(strats, strategy.NewRSIReversion(se.Period, 30, 70, 40))
+		case "atr_breakout":
+			strats = append(strats, strategy.NewATRBreakout(20, 14, 0.005))
+		case "trend_pullback":
+			strats = append(strats, strategy.NewTrendPullback())
+		}
+	}
+	return strats, weights
+}
 
 func main() {
 	appSettings := settings.LoadAppSettings()
@@ -88,6 +112,37 @@ func main() {
 		},
 	}
 
+	// stops サブコマンド
+	var cmdStops = &cobra.Command{
+		Use:   "stops",
+		Short: "ストップロスの現在状況を確認する",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rep, err := repo.OpenRepo(appSettings.DBPath())
+			if err != nil {
+				return err
+			}
+			defer rep.Close()
+
+			stopMap, err := rep.GetStops()
+			if err != nil {
+				return err
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "銘柄\tストップ価格\t建値\tATR倍率\t最高終値\t作成日")
+			for sym, st := range stopMap {
+				hc := "-"
+				if st.HighestClose != nil {
+					hc = st.HighestClose.String()
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+					sym, st.StopPrice, st.EntryPrice, st.ATRMultiple, hc, st.CreatedOn)
+			}
+			w.Flush()
+			return nil
+		},
+	}
+
 	// screen サブコマンド
 	var cmdScreen = &cobra.Command{
 		Use:   "screen",
@@ -103,22 +158,8 @@ func main() {
 			}
 
 			barStore := data.NewBarStore(appSettings.BarsDir())
-
-			// 戦略の構築
-			var strats []strategy.Strategy
-			weights := make(map[string]float64)
-			for _, se := range stratCfg.Strategies {
-				if !se.IsEnabled() {
-					continue
-				}
-				weights[se.Name] = se.Weight
-				switch se.Name {
-				case "sma_cross":
-					strats = append(strats, strategy.NewSMACross(se.Fast, se.Slow))
-				case "rsi_reversion":
-					strats = append(strats, strategy.NewRSIReversion(se.Period, 30, 70, 40))
-				}
-			}
+			strats, weights := buildStrategies(stratCfg)
+			combineFunc := strategy.GetCombinerByName(stratCfg.Combiner)
 
 			type screenItem struct {
 				symbol    string
@@ -141,7 +182,7 @@ func main() {
 					}
 				}
 
-				combined := strategy.CombineWeightedVote(sym, sigs, weights)
+				combined := combineFunc(sym, sigs, weights)
 				items = append(items, screenItem{
 					symbol:    sym,
 					direction: combined.Direction,
@@ -248,27 +289,11 @@ func main() {
 				return err
 			}
 			equity := bal.CashBalance.Add(bal.MarketValue)
+			posMap, _ := b.PositionsBySymbol()
 
-			// 1. 戦略の評価
-			var strats []strategy.Strategy
-			weights := make(map[string]float64)
-			for _, se := range stratCfg.Strategies {
-				if !se.IsEnabled() {
-					continue
-				}
-				weights[se.Name] = se.Weight
-				switch se.Name {
-				case "sma_cross":
-					strats = append(strats, strategy.NewSMACross(se.Fast, se.Slow))
-				case "rsi_reversion":
-					strats = append(strats, strategy.NewRSIReversion(se.Period, 30, 70, 40))
-				}
-			}
-
-			var allSignals []domain.Signal
-			var combinedSignals []domain.CombinedSignal
-			targets := make(map[string]domain.TargetPosition)
+			// 1. 日足の収集と ATR / 直近終値
 			lastPrices := make(map[string]decimal.Decimal)
+			atrMap := make(map[string]decimal.Decimal)
 			lotSizes := make(map[string]decimal.Decimal)
 
 			for _, sym := range setCfg.Universe.Symbols {
@@ -284,7 +309,6 @@ func main() {
 				lastBar := bars[len(bars)-1]
 				lastPrices[sym] = lastBar.Close
 
-				// ATR 計算
 				highs := make([]float64, len(bars))
 				lows := make([]float64, len(bars))
 				closes := make([]float64, len(bars))
@@ -297,10 +321,73 @@ func main() {
 					closes[i] = c
 				}
 				atrVals, _ := indicators.ATR(highs, lows, closes, 14)
-				atr := decimal.Zero
-				if len(atrVals) > 0 && !clock.EnsureUTC(time.Now()).IsZero() {
-					atr = decimal.NewFromFloat(atrVals[len(atrVals)-1])
+				if len(atrVals) > 0 {
+					atrMap[sym] = decimal.NewFromFloat(atrVals[len(atrVals)-1])
 				}
+			}
+
+			// 2. ストップロスの管理と更新
+			savedStops, _ := rep.GetStops()
+			stopObjMap := make(map[string]*risk.Stop)
+			for sym, st := range savedStops {
+				stopObjMap[sym] = &risk.Stop{
+					Symbol:           st.Symbol,
+					StopPrice:        st.StopPrice,
+					EntryPrice:       st.EntryPrice,
+					CreatedOn:        st.CreatedOn,
+					Trailing:         st.Trailing,
+					ATRMultiple:      st.ATRMultiple,
+					HighestClose:     st.HighestClose,
+					InitialStopPrice: st.InitialStopPrice,
+					InitialQuantity:  st.InitialQuantity,
+					ScaledOut:        st.ScaledOut,
+				}
+			}
+			stopBook := risk.NewStopBook(stopObjMap)
+			stopBook.Ensure(posMap, atrMap, todayJST, setCfg.Sizing.ATRStopMultiple, true)
+			stopBook.UpdateTrailing(lastPrices, atrMap)
+
+			// DB へのストップ保存
+			for sym, st := range stopBook.All() {
+				_ = rep.SaveStop(repo.StopRecord{
+					Symbol:           sym,
+					StopPrice:        st.StopPrice,
+					EntryPrice:       st.EntryPrice,
+					CreatedOn:        st.CreatedOn,
+					Trailing:         st.Trailing,
+					ATRMultiple:      st.ATRMultiple,
+					HighestClose:     st.HighestClose,
+					InitialStopPrice: st.InitialStopPrice,
+					InitialQuantity:  st.InitialQuantity,
+					ScaledOut:        st.ScaledOut,
+				})
+			}
+
+			// 3. 戦略の評価
+			strats, weights := buildStrategies(stratCfg)
+			combineFunc := strategy.GetCombinerByName(stratCfg.Combiner)
+
+			var allSignals []domain.Signal
+			var combinedSignals []domain.CombinedSignal
+			targets := make(map[string]domain.TargetPosition)
+
+			// ストップ抵触による手仕舞いを最優先で目標建玉（0株）に設定
+			for _, exitTarget := range stopBook.ExitTargets(lastPrices) {
+				targets[exitTarget.Symbol] = exitTarget
+				logger.Warn("wbjp.stop_exit", fmt.Sprintf("%s: %s", exitTarget.Symbol, exitTarget.Reason))
+			}
+
+			for _, sym := range setCfg.Universe.Symbols {
+				// 既にストップ手仕舞い対象なら戦略シグナルはスキップ
+				if _, hasExit := targets[sym]; hasExit {
+					continue
+				}
+
+				bars, err := barStore.Read(sym, "", "")
+				if err != nil || len(bars) == 0 {
+					continue
+				}
+				lastBar := bars[len(bars)-1]
 
 				var sigs []domain.Signal
 				for _, s := range strats {
@@ -311,11 +398,11 @@ func main() {
 					}
 				}
 
-				combined := strategy.CombineWeightedVote(sym, sigs, weights)
+				combined := combineFunc(sym, sigs, weights)
 				combinedSignals = append(combinedSignals, combined)
 
 				if combined.Direction >= stratCfg.EntryThreshold {
-					target, err := portfolio.SizePosition(combined, equity, lastBar.Close, atr, lotSizes[sym], setCfg.Sizing)
+					target, err := portfolio.SizePosition(combined, equity, lastBar.Close, atrMap[sym], lotSizes[sym], setCfg.Sizing)
 					if err == nil {
 						targets[sym] = target
 					}
@@ -331,8 +418,7 @@ func main() {
 			}
 			_ = rep.RecordTargets(runID, targetList)
 
-			// 2. リコンサイル
-			positions, _ := b.PositionsBySymbol()
+			// 4. リコンサイル
 			openOrders, _ := b.GetOpenOrders()
 
 			orderType := domain.OrderTypeLimit
@@ -346,17 +432,34 @@ func main() {
 				}
 			}
 
-			reconciled, err := engine.Reconcile(targets, positions, openOrders, lastPrices, lotSizes, orderType, limitOffset, todayJST)
+			reconciled, err := engine.Reconcile(targets, posMap, openOrders, lastPrices, lotSizes, orderType, limitOffset, todayJST)
 			if err != nil {
 				return err
 			}
 
-			// 3. 発注
+			// 5. リスク管理チェック (RiskManager)
+			riskMgr := risk.NewRiskManager(setCfg.Risk, setCfg.Universe.Symbols)
+			riskCtx := risk.RiskContext{
+				Equity:           equity,
+				Balance:          *bal,
+				Positions:        posMap,
+				BasePrices:       lastPrices,
+				PendingValue:     make(map[string]decimal.Decimal),
+				OrdersToday:      0,
+				RealizedPnLToday: decimal.Zero,
+			}
+
 			for _, res := range reconciled {
 				if res.Request == nil {
 					continue
 				}
 				req := *res.Request
+
+				decision := riskMgr.Check(req, riskCtx, nil)
+				if !decision.Approved {
+					logger.Warn("wbjp.risk_rejected", fmt.Sprintf("%s 発注見送り: %s", req.Symbol, decision.Reason))
+					continue
+				}
 
 				if !canLive {
 					_ = rep.RecordOrder(runID, req, "dry_run", nil)
@@ -372,6 +475,7 @@ func main() {
 
 				_ = rep.RecordOrder(runID, req, string(ack.Status), ack.BrokerOrderID)
 				logger.Info("wbjp.order", fmt.Sprintf("発注成功: %s %s %s株 (ID: %s)", req.Symbol, req.Side, req.Quantity, req.ClientOrderID))
+				riskCtx.OrdersToday++
 			}
 
 			_ = rep.FinishRun(runID, "success", &equity, &bal.CashBalance, nil)
@@ -382,8 +486,90 @@ func main() {
 	cmdRun.Flags().BoolVar(&liveFlag, "live", false, "実際にブローカーへ発注する")
 	cmdRun.Flags().BoolVar(&yesFlag, "yes", false, "本番発注時の確認プロンプトをスキップする")
 
+	// sync サブコマンド
+	var cmdSync = &cobra.Command{
+		Use:   "sync",
+		Short: "ユニバース銘柄の最新日足を J-Quants から同期する",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			setCfg, err := wbjpcfg.LoadSettingsFile(configDirFlag)
+			if err != nil {
+				return err
+			}
+
+			runID := fmt.Sprintf("wbjp-sync-%d", time.Now().Unix())
+			logger, _ := logging.NewLogger("wbjp", string(appSettings.Env), runID, "sync", appSettings.LogDir)
+			defer logger.Close()
+
+			barStore := data.NewBarStore(appSettings.BarsDir())
+			fredClient := data.NewFREDProvider(15 * time.Second)
+
+			var jqClient *data.JQuantsClient
+			if apiKey, err := credentials.LoadAPIKey("WBJP_JQUANTS_API_KEY", appSettings.DotenvMap); err == nil && apiKey != "" {
+				jqClient = data.NewJQuantsClient(apiKey)
+			}
+
+			fmt.Printf("ユニバース銘柄の日足を同期中（全 %d 銘柄）...\n", len(setCfg.Universe.Symbols))
+			for _, sym := range setCfg.Universe.Symbols {
+				if err := data.SyncSymbolBars(sym, barStore, jqClient, fredClient, logger); err != nil {
+					fmt.Printf("[エラー] %s: %v\n", sym, err)
+				} else {
+					fmt.Printf("[完了] %s\n", sym)
+				}
+			}
+			return nil
+		},
+	}
+
+	// backtest サブコマンド
+	var cmdBacktest = &cobra.Command{
+		Use:   "backtest",
+		Short: "過去データを用いてスイング戦略のバックテストを実行する",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			setCfg, err := wbjpcfg.LoadSettingsFile(configDirFlag)
+			if err != nil {
+				return err
+			}
+			stratCfg, err := wbjpcfg.LoadStrategiesConfig(configDirFlag)
+			if err != nil {
+				return err
+			}
+
+			barStore := data.NewBarStore(appSettings.BarsDir())
+			allBars := make(map[string][]domain.Bar)
+			for _, sym := range setCfg.Universe.Symbols {
+				bars, err := barStore.Read(sym, "", "")
+				if err == nil && len(bars) > 0 {
+					allBars[sym] = bars
+				}
+			}
+
+			if len(allBars) == 0 {
+				return fmt.Errorf("バックテスト用の足データがありません。先に 'wbjp sync' を実行してください")
+			}
+
+			strats, weights := buildStrategies(stratCfg)
+			combineFunc := strategy.GetCombinerByName(stratCfg.Combiner)
+
+			stats, err := engine.RunBacktest(setCfg, stratCfg, strats, weights, combineFunc, allBars, decimal.NewFromInt(1000000))
+			if err != nil {
+				return err
+			}
+
+			fmt.Println("=== スイング売買 バックテスト結果 ===")
+			fmt.Printf("初期資金: %s 円\n", stats.InitialEquity)
+			fmt.Printf("最終資産: %s 円\n", stats.FinalEquity.Round(0))
+			fmt.Printf("総リターン: %.2f%%\n", stats.TotalReturn.Mul(decimal.NewFromInt(100)).InexactFloat64())
+			fmt.Printf("最大ドローダウン: %.2f%%\n", stats.MaxDrawdown.Mul(decimal.NewFromInt(100)).InexactFloat64())
+			fmt.Printf("総約定数: %d 回\n", stats.TotalFills)
+			return nil
+		},
+	}
+
 	rootCmd.AddCommand(cmdAccount)
+	rootCmd.AddCommand(cmdStops)
 	rootCmd.AddCommand(cmdScreen)
+	rootCmd.AddCommand(cmdSync)
+	rootCmd.AddCommand(cmdBacktest)
 	rootCmd.AddCommand(cmdRun)
 
 	if err := rootCmd.Execute(); err != nil {

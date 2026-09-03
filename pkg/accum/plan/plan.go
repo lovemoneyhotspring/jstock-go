@@ -26,13 +26,51 @@ type AccumPlan struct {
 
 // BuildPlan は日足とタクティクスから日ごとの投下計画を計算する。
 func BuildPlan(bars []domain.Bar, tactic tactics.Tactic, monthlyBudget decimal.Decimal) (*AccumPlan, error) {
+	return BuildPlanWithSignal(bars, nil, false, tactic, monthlyBudget)
+}
+
+// BuildPlanWithSignal は判定用の足（signalBars）を併用して投下計画を計算する。
+func BuildPlanWithSignal(
+	bars []domain.Bar,
+	signalBars []domain.Bar,
+	signalStrict bool,
+	tactic tactics.Tactic,
+	monthlyBudget decimal.Decimal,
+) (*AccumPlan, error) {
 	n := len(bars)
 	if n == 0 {
 		return &AccumPlan{}, nil
 	}
 
 	budgetFloat, _ := monthlyBudget.Float64()
-	mults := tactic.Multipliers(bars)
+
+	var mults []float64
+	if len(signalBars) == 0 {
+		mults = tactic.Multipliers(bars)
+	} else {
+		sigMults := tactic.Multipliers(signalBars)
+		mults = make([]float64, n)
+
+		sigIdx := 0
+		lastSigMult := 1.0
+
+		for i, bar := range bars {
+			for sigIdx < len(signalBars) {
+				sbDate := signalBars[sigIdx].Date
+				isOk := sbDate <= bar.Date
+				if signalStrict {
+					isOk = sbDate < bar.Date
+				}
+				if isOk {
+					lastSigMult = sigMults[sigIdx]
+					sigIdx++
+				} else {
+					break
+				}
+			}
+			mults[i] = lastSigMult
+		}
+	}
 
 	// 月ごとの営業日数を数える (YYYY-MM -> count)
 	monthCounts := make(map[string]int)
@@ -75,7 +113,6 @@ func BuildPlan(bars []domain.Bar, tactic tactics.Tactic, monthlyBudget decimal.D
 		}
 
 		t, _ := time.Parse("2006-01-02", bar.Date)
-		// 翌週の月曜日を計算 (Sunday=0, Monday=1, ..., Saturday=6)
 		weekday := int(t.Weekday())
 		daysToNextMon := (8 - weekday) % 7
 		if daysToNextMon == 0 {
@@ -105,12 +142,10 @@ func BuildPlan(bars []domain.Bar, tactic tactics.Tactic, monthlyBudget decimal.D
 		}
 	}
 
-	// 各 nextWeek に対して、実際に足が存在する最初の営業日にマッピング
 	sessionScheduled := make(map[string]int64)
 	sessionDays := make(map[string]int)
 
 	for weekStart, accVal := range weeklyAccrued {
-		// weekStart 以降で最初の営業日を探す
 		for _, bar := range bars {
 			if bar.Date >= weekStart {
 				sessionScheduled[bar.Date] += accVal
@@ -120,7 +155,6 @@ func BuildPlan(bars []domain.Bar, tactic tactics.Tactic, monthlyBudget decimal.D
 		}
 	}
 
-	// 累積が threshold (monthlyBudget) に届いた日、または入金日にリリース
 	threshold := int64(budgetFloat)
 	releasedExtra := make(map[string]int64)
 	releasedDays := make(map[string]int)
@@ -144,7 +178,6 @@ func BuildPlan(bars []domain.Bar, tactic tactics.Tactic, monthlyBudget decimal.D
 		}
 	}
 
-	// 最終的な PlanRow を作成
 	rows := make([]PlanRow, n)
 	for i, d := range daily {
 		extraVal := releasedExtra[d.date]
