@@ -487,6 +487,17 @@ func (p *PaperBroker) referencePriceLocked(req domain.OrderRequest) (decimal.Dec
 	return mark, nil
 }
 
+// BoughtToday はその日に買い付けた銘柄。差金決済の回避に使う。
+//
+// 返すのは複製なので、呼び出し側が触っても内部状態は変わらない。
+func (p *PaperBroker) BoughtToday() map[string]struct{} {
+	out := make(map[string]struct{}, len(p.boughtToday))
+	for sym := range p.boughtToday {
+		out[sym] = struct{}{}
+	}
+	return out
+}
+
 func (p *PaperBroker) commission(gross decimal.Decimal) decimal.Decimal {
 	return gross.Mul(p.commissionRate).Round(0)
 }
