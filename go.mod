@@ -6,9 +6,13 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/marcboeker/go-duckdb v1.8.5
 	github.com/parquet-go/parquet-go v0.32.0
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/shopspring/decimal v1.4.0
+	github.com/spf13/cobra v1.10.2
 	github.com/zalando/go-keyring v0.2.8
+	golang.org/x/term v0.45.0
 	golang.org/x/text v0.21.0
+	golang.org/x/time v0.15.0
 	modernc.org/sqlite v1.58.0
 )
 
@@ -29,10 +33,8 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/parquet-go/bitpack v1.0.0 // indirect
 	github.com/parquet-go/jsonlite v1.0.0 // indirect
-	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/twpayne/go-geom v1.6.1 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
