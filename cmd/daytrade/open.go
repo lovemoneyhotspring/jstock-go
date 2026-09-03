@@ -308,6 +308,17 @@ func runOpen(opts openOptions) error {
 		return err
 	}
 
+	// 台帳に無い建玉がブローカーにあれば、この実行は二重に建てることになる。
+	//
+	// 冪等性は台帳の client_order_id で担保しているので、台帳を失う・別ホストへ
+	// 移す・復元した直後は効かない。ブローカー側の建玉は失われないので、発注の
+	// 直前に突き合わせる（積立の UnrecordedFills と同じ考え）。
+	if allowed {
+		if err := ensureNoUnrecordedPositions(cfg, led, day, picks); err != nil {
+			return err
+		}
+	}
+
 	orders, failures, err := placePicks(cfg, led, picks, day, allowed)
 	if err != nil {
 		return err
@@ -679,4 +690,79 @@ func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOver
 		"missing": len(missing), "missing_sample": sample(missing),
 	})
 	return found, nil
+}
+
+// ensureNoUnrecordedPositions は、これから建てる銘柄に台帳外の建玉が無いか確かめる。
+//
+// 台帳（client_order_id）に基づく冪等性は台帳が生きている前提の仕組みで、失うと
+// 効かない。ブローカー側の建玉は失われないので、発注の直前にそちらと突き合わせる。
+// 見つかったら**発注を中止する**——自動で手仕舞うと他の戦略の保有を触りかねないし、
+// 二重に建てると日計りの資金計画が崩れる。人が確かめるまで止める。
+//
+// 照会できないときも中止する。二重建てを否定できないまま実弾を出さない。
+func ensureNoUnrecordedPositions(
+	cfg dtconfig.Config,
+	led *dtledger.Ledger,
+	day time.Time,
+	picks []selection.Pick,
+) error {
+	if len(picks) == 0 {
+		return nil
+	}
+	b, err := connectBroker(cfg)
+	if err != nil {
+		return fmt.Errorf("建玉を突き合わせられないため発注を中止しました: %w", err)
+	}
+	positions, err := broker.PositionsBySymbolIncludingMargin(b)
+	if err != nil {
+		logError("daytrade.unrecorded_check_failed", "建玉を照会できません",
+			map[string]any{"day": day.Format(DateLayout), "error": err.Error()})
+		return fmt.Errorf("建玉を照会できないため発注を中止しました（二重に建てないため）: %w", err)
+	}
+
+	// 台帳が知っている今日の建玉ぶんは差し引く（正常な再実行では止めない）
+	recorded := map[string]decimal.Decimal{}
+	if entries, err := led.EntriesOn(day); err == nil {
+		for _, o := range entries {
+			if o.IsDryRun() || o.IsDead() {
+				continue
+			}
+			sign := decimal.NewFromInt(1)
+			if o.Side != domain.SideBuy {
+				sign = decimal.NewFromInt(-1)
+			}
+			recorded[o.Symbol] = recorded[o.Symbol].Add(sign.Mul(o.Quantity))
+		}
+	}
+
+	var unrecorded []string
+	seen := map[string]struct{}{}
+	for _, pick := range picks {
+		if _, done := seen[pick.Symbol]; done {
+			continue
+		}
+		seen[pick.Symbol] = struct{}{}
+		held, ok := positions[pick.Symbol]
+		if !ok || held.Quantity.IsZero() {
+			continue
+		}
+		if leftover := held.Quantity.Sub(recorded[pick.Symbol]); !leftover.IsZero() {
+			unrecorded = append(unrecorded, fmt.Sprintf("%s %s 株（台帳の記録は %s 株）",
+				pick.Symbol, leftover, recorded[pick.Symbol]))
+		}
+	}
+	if len(unrecorded) == 0 {
+		return nil
+	}
+
+	sortStrings(unrecorded)
+	message := strings.Join(unrecorded, "、")
+	logError("daytrade.unrecorded_positions", "台帳に無い建玉があります",
+		map[string]any{"day": day.Format(DateLayout), "positions": unrecorded})
+	digest.Anomaly("daytrade.unrecorded_positions",
+		fmt.Sprintf("%d 銘柄に台帳外の建玉", len(unrecorded)))
+	alert("デイトレ: 台帳に無い建玉があります（二重に建てる恐れ）。発注を中止しました", message)
+	return fmt.Errorf("台帳に無い建玉があります（二重に建てます）: %s\n"+
+		"台帳（%s）が失われているか、別の環境で発注した可能性があります。"+
+		"口座を確かめてから実行してください", message, led.Path())
 }

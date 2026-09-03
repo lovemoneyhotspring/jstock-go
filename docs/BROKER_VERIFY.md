@@ -13,8 +13,12 @@
 | `CLMKabuNewOrder`（信用） | 信用新規・返済の発注 | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
 | `CLMStkGetIssueMstKabu` | 売買単位 | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
 
-現物の残高・建玉・新規注文・取消（`CLMZanKaiSummary` / `CLMGenbutuKabuList` /
-`CLMKabuNewOrder`（現物）/ `CLMKabuCancelOrder`）は移植前から通っていた経路。
+残高・現物建玉（`CLMZanKaiSummary` / `CLMGenbutuKabuList`）も**未検証**。Go への移植時に
+項目名を取り違えていた（`aCLMKabuZan` / `sGenkinZandaka` などは実在しない）ので、
+削除済み Python 実装から移植し直した。
+
+項目名と区分コードの出所は、**削除済みの Python 実装**（`git show ac1eb7a:src/wbcore/broker/tachibana.py`）。
+Go への初回移植で推定に頼って多数取り違えたため、そこから写し直してある。
 
 ## 設計: 分からないときは必ず止まる
 
@@ -45,16 +49,18 @@
 
 | 直すもの | 場所 |
 |---|---|
-| 注文一覧のキー・項目名 | `tachibana_orders.go` の `orderListKey` / `field*` / `fields*` |
-| 注文状態コードの対応表 | `tachibana_orders.go` の `tachibanaOrderStatus` |
-| 建玉一覧のキー・項目名 | `tachibana_trade.go` の `marginPositionsKey` ほか |
-| 売買区分・現金信用区分・課税区分 | `tachibana_trade.go` の `tachibanaSide*` / `kubun*` / `zei*` |
+| 売買区分・現金信用区分・課税区分・注文状態 | `tachibana_codes.go` |
+| 注文一覧／単品照会の項目名 | `tachibana_orders.go` の `fieldList*` / `fieldDetail*` |
+| 残高・現物建玉・信用建玉の項目名 | `tachibana_trade.go` の `fieldCash*` / `fieldMargin*` |
+| 応答の配列のキー | `tachibana.go` の `*Key` 定数 |
 
-数量・価格の項目は電文ごとに名前が揺れるので、`fieldsFilledQty` のように**候補を並べて**
-先に見つかったものを使う。実機で確定したら 1 つに絞ってよい。
+**電文ごとに項目名が違う**ことに注意。注文一覧（`CLMOrderList`）は `sOrder*` の接頭辞が
+付き、単品照会（`CLMOrderListDetail`）は付かない。約定数量は一覧が `sOrderYakuzyouSuryo`、
+単品が `sYakuzyouSuryou`（末尾の `u` の有無まで違う）。取り違えると 0 として読める。
 
 知らない状態コードは `OrderStatusUnknown` に落ちる。Unknown は `IsTerminal()` が false
 なので、**確定していない注文を「終わった」と誤認して台帳から落とすことはない**。
+売買区分と現金信用区分は、知らない値を買い・現物に落とさず**エラー**にする。
 
 ## UAT での確認順
 
@@ -94,9 +100,19 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin
 
 信用で確認したいのはこの 3 点。
 
-1. 建てた玉が `MarginPositions` に現れ、**建玉番号が取れる**（返済の指定に要る）
+1. 建てた玉が `MarginPositions` に現れ、**建玉番号（`sOrderTategyokuNumber`）が取れる**
+   （返済の指定に要る）
 2. `close` が返済として通る（現物売りになっていない。手数料と受渡が信用のものか）
 3. `verify` が「持ち越しなし」で終わる（＝ `close` の数量が建玉と一致した）
+
+## 既知の制約
+
+- **`CLMOrderList` は当日（＋繰越）分しか返らない。** 前日以前の注文は照会できないので、
+  積立の `UnrecordedFills` が捕まえられるのは当日の再実行までとなる
+- **注文番号は二重発注の防止には使えない。** 発注が受理されて初めて返るので、
+  「送ったか分からない」瞬間には手元に無い。防止は `client_order_id` と
+  発注前の台帳記録で行い、注文番号は事後の照会・取消に使う
+- 空売り価格規制により、**51 単元以上の信用新規売りは成行で出せない**（発注前に弾く）
 
 ## 本番へ移すときの条件
 
