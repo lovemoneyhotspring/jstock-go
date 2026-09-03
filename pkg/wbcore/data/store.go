@@ -134,7 +134,17 @@ func (s *BarStore) Read(symbol string, start, end string) ([]domain.Bar, error) 
 	return bars, nil
 }
 
+// Write は足を丸ごと書き換える。
+//
+// 価格として成り立たない足は書かせない。取得元の項目名が変わって四本値が
+// 0 で並んだことが実際にあり、そのまま Parquet に残ると以後の判断が壊れる。
+// 追記は Upsert を使う（こちらは NormalizeBars を通す）。
 func (s *BarStore) Write(symbol string, bars []domain.Bar) error {
+	for _, b := range bars {
+		if _, err := domain.NewBar(b.Symbol, b.Date, b.Open, b.High, b.Low, b.Close, b.Volume); err != nil {
+			return fmt.Errorf("%s の足を保存できません: %w", symbol, err)
+		}
+	}
 	path, err := s.PathFor(symbol)
 	if err != nil {
 		return err
