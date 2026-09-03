@@ -62,6 +62,15 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=3GiB GOGC=400
 # 読むだけで、config も発注も触らない（docs/FEEDBACK.md「自動化するときの線引き」）
 0 21 * * 1-5    cd $WBJP_HOME && flock -n /tmp/daily-report.lock $WBJP_HOME/deploy/daily-report.sh >> state/logs/daily-report.log 2>&1
 
+# --- 夜間自己修復（Claude Code）------------------------------------------------
+# 6:00: 前夜からの実行ログに異常があれば、night-repair サブエージェント
+# （.claude/agents/night-repair.md）に原因調査とコード修正案の作成までやらせる。
+# 異常が無ければ claude は起動しない（deploy/night-repair.sh 側で判定）。
+# main への直接コミット・本番反映（bin/ の書き換え・crontab の変更）・--live
+# 実行は禁止（プロンプトと --disallowedTools の二重）。直せたら新しいブランチに
+# push して PR を作るところまで——マージは人が判断する。
+0 6 * * *       cd $WBJP_HOME && flock -n /tmp/night-repair.lock $WBJP_HOME/deploy/night-repair.sh >> state/logs/night-repair.log 2>&1
+
 # --- 発注経路（立花証券の認証情報を入れたら有効化。まず --live 無しで数日回す）-------------
 # 9:01・9:04・9:07: 気配でギャップ下位 N（ロング）／上位（ショート）を寄付で建てる
 #1,4,7 9 * * 1-5     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes >> state/logs/daytrade-open.log   2>&1
