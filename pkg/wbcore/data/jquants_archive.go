@@ -24,23 +24,28 @@ type BarArchive interface {
 	Upsert(ep archive.Endpoint, f *archive.Frame) (int, error)
 }
 
-// archiveDailyBars は要求範囲がアーカイブに揃っていればそこから日足を作る。
+// archiveDailyBars はアーカイブにある範囲の日足を作り、要求範囲が揃っているかを返す。
 //
+// 戻り値は（保存済みの足、保存済み最終日、揃っているか）。
 // 「揃っている」は、その銘柄の保存済み最終日が end までの直近営業日以上であること。
-// 判定には取引カレンダーが要るので、無ければ使わない（API に倒す）。
+// 判定には取引カレンダーが要るので、無ければ揃っていない扱いにする。
+//
+// 揃っていなくても保存済みの足は返す。呼び手はその最終日から先だけを API に
+// 求める——足りないのが直近の数日でも、要求範囲（積立は 30 年）を丸ごと API に
+// 投げると、購読の対象外の日付を含む要求として 400 で拒まれる。
 // これがあると、cron で毎日蓄積している端点を二度取りせずに済む。
 func archiveDailyBars(
 	arch BarArchive,
 	symbol, code string,
 	isIndex bool,
 	start, end time.Time,
-) ([]domain.Bar, bool) {
+) (bars []domain.Bar, haveLast string, complete bool) {
 	if arch == nil || start.IsZero() || end.IsZero() {
-		return nil, false
+		return nil, "", false
 	}
 	ep, err := archive.LookupEndpoint(JQuantsDailyPath(isIndex))
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
 	// 1 銘柄ぶんしか要らないので、銘柄と列を保管庫の読み出しに押し下げる。
 	// 全銘柄を載せてから捨てると、2 年ぶんで数 GB を一度に抱えることになる。
@@ -55,19 +60,12 @@ func archiveDailyBars(
 	if err != nil {
 		// 壊れたファイル等。API に倒す
 		fmt.Fprintf(os.Stderr, "[warn] アーカイブを読めません（%s）: %v\n", ep.Path, err)
-		return nil, false
+		return nil, "", false
 	}
 	if stored == nil || stored.Height() == 0 || !stored.HasColumn("Code") {
-		return nil, false
+		return nil, "", false
 	}
 
-	lastTrading, ok := lastTradingDay(arch, end)
-	if !ok {
-		return nil, false
-	}
-
-	var bars []domain.Bar
-	haveLast := ""
 	for i := 0; i < stored.Height(); i++ {
 		// 銘柄は ReadWhere の Keep で絞ってあるので、ここでは見ない
 		date := stored.Get(i, ep.DateColumn)
@@ -79,11 +77,16 @@ func archiveDailyBars(
 		}
 		bars = append(bars, archiveRowToBar(stored, i, *date, symbol, isIndex))
 	}
-	if len(bars) == 0 || haveLast < lastTrading.Format("2006-01-02") {
-		// 直近営業日ぶんが未着なら、揃っていないとみなして API から取り直す
-		return nil, false
+	if len(bars) == 0 {
+		return nil, "", false
 	}
-	return bars, true
+	lastTrading, ok := lastTradingDay(arch, end)
+	if !ok || haveLast < lastTrading.Format("2006-01-02") {
+		// 直近営業日ぶんが未着（またはカレンダーが無くて判定できない）。
+		// 保存済みの足は活かし、足りないぶんだけ API から取る
+		return bars, haveLast, false
+	}
+	return bars, haveLast, true
 }
 
 // barColumns は足を組むのに要る列。保管庫の読み出しで射影に使う
@@ -191,17 +194,17 @@ func archiveDailyBarsFor(
 	symbol, code string,
 	isIndex bool,
 	start, end string,
-) ([]domain.Bar, bool) {
+) (bars []domain.Bar, haveLast string, complete bool) {
 	if start == "" || end == "" {
-		return nil, false
+		return nil, "", false
 	}
 	from, err := time.Parse("2006-01-02", start)
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
 	to, err := time.Parse("2006-01-02", end)
 	if err != nil {
-		return nil, false
+		return nil, "", false
 	}
 	return archiveDailyBars(arch, symbol, code, isIndex, from, to)
 }

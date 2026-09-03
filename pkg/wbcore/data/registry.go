@@ -102,13 +102,21 @@ func (p *jquantsProvider) FetchBars(symbols []string, start, end string) (map[st
 			fmt.Fprintf(os.Stderr, "[warn] %s は J-Quants で取れません: %v\n", symbol, err)
 			continue
 		}
-		bars, ok := archiveDailyBarsFor(p.arch, symbol, code, isIndex, start, end)
-		if !ok {
-			var err error
-			bars, err = fetchJQuantsDaily(p.client, p.arch, symbol, code, isIndex, start, end)
+		bars, haveLast, complete := archiveDailyBarsFor(p.arch, symbol, code, isIndex, start, end)
+		if !complete {
+			// 保管庫に途中まであるなら、その最終日から先だけを API に求める
+			// （最終日そのものは訂正に備えて取り直し、NormalizeBars の後勝ちで潰す）。
+			// 要求範囲を丸ごと投げ直すと、購読の対象外の古い日付を含む要求として
+			// 400 で拒まれる（積立の既定は 30 年、購読は直近 10 年）
+			from := start
+			if haveLast > from {
+				from = haveLast
+			}
+			fetched, err := fetchJQuantsDaily(p.client, p.arch, symbol, code, isIndex, from, end)
 			if err != nil {
 				return nil, NewMarketDataError(p.Name(), symbol+" の日足を取得できません", err)
 			}
+			bars = append(bars, fetched...)
 		}
 		normalized, err := NormalizeBars(bars)
 		if err != nil {
