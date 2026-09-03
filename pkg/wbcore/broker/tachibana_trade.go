@@ -212,7 +212,7 @@ func (t *TachibanaBroker) AllPositions() ([]domain.Position, error) {
 // 前提で、当日の既約定分にこの注文を足したときの増分を見積もる。
 // 個別手数料コースの口座では過小になる（コースは Web で選ぶ）。
 func (t *TachibanaBroker) Preview(req domain.OrderRequest) (*domain.OrderPreview, error) {
-	cost := decimal.Zero
+	var cost decimal.Decimal
 	if req.LimitPrice != nil {
 		cost = req.LimitPrice.Mul(req.Quantity).Round(0)
 	} else {
