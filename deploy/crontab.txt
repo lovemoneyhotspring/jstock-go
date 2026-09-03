@@ -6,6 +6,7 @@
 #   - 開始の分は互いにずらす（J-Quants のレート制限と、同じファイルへの同時書き込みを避ける）
 #   - flock -n で同じジョブの重なりを防ぐ
 #   - --live が無い行は判断と記録だけで注文を出さない（dry-run）
+#   - 実行の要約は state/digest/<env>-<日付>.jsonl に 1 行ずつ溜まる（docs/FEEDBACK.md）
 #
 # 有効化の段階:
 #   1. 今: データ（J-Quants / FRED）・候補（daytrade plan）・監視だけ。発注経路は止めたまま
@@ -31,6 +32,16 @@ WBJP_BIN=/home/abobo/jstock/.venv/bin
 # --- 銘柄選定（デイトレ）----------------------------------------------------------
 # 前夜 20:30: 翌営業日の母集団を state/daytrade/plan-<日付>.parquet に保存（ロング＋ショート）
 30 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock  $WBJP_BIN/daytrade plan --config-dir config/daytrade_margin >> state/logs/daytrade-plan.log    2>&1
+# 20:20（日足の取り込み後、plan の前）: 朝の候補（選んだ銘柄も次点も）に当日の日足を当てて結果を履歴に残す。
+# 9:00 の順位表が無い日は plan × 始値で順位を作り直して評価する。妥当性の確認は `daytrade review`
+20 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
+
+# --- 判断の妥当性（改善ループ。docs/FEEDBACK.md）---------------------------------
+# スイング: スクリーニングの結果に 20 営業日後の終値を当てる。採用・次点・圏外を比べる
+#（`wbjp review` で日別に並ぶ）。日足の取り込み後に回す
+25 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-eval.lock  $WBJP_BIN/wbjp  evaluate --config-dir config >> state/logs/wbjp-evaluate.log  2>&1
+# 積立: 増額した日は本当に安かったか（倍率の帯ごと。対照群は倍率 1.0 の日）。週 1 で足りる
+35 20 * * 5     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/accum-eval.lock $WBJP_BIN/accum evaluate >> state/logs/accum-evaluate.log 2>&1
 
 # --- 発注経路（立花証券の認証情報を入れたら有効化。まず --live 無しで数日回す）-------------
 # 9:01・9:04・9:07: 気配でギャップ下位 N（ロング）／上位（ショート）を寄付で建てる

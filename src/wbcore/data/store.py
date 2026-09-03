@@ -182,7 +182,7 @@ class BarStore:
                 needed[symbol] = max(start, last - dt.timedelta(days=OVERLAP_DAYS))
 
         if not needed:
-            log.info("足は最新です", symbols=len(symbols))
+            log.info("足は最新です", symbols=len(symbols), routine=True)
             return {s: self.read(s).height for s in symbols}
 
         # 取得開始日ごとにまとめて問い合わせ、通信回数を減らす
@@ -203,7 +203,7 @@ class BarStore:
         for symbol in symbols:
             counts.setdefault(symbol, self.read(symbol).height)
 
-        log.info("足を更新しました", updated=len(needed), total=len(symbols))
+        log.info("足を更新しました", updated=len(needed), total=len(symbols), routine=True)
         return counts
 
     # -- 分析 ---------------------------------------------------------------

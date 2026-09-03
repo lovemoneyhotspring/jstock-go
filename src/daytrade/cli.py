@@ -25,9 +25,11 @@ from rich.console import Console
 from rich.table import Table
 
 from daytrade.config import DEFAULT_CONFIG_DIR, DaytradeConfig, load
+from wbcore import digest, execution
 from wbcore.clock import fmt, now_utc, to_zone
 from wbcore.domain.models import Market
 from wbcore.logging import bind_run_context, configure_logging, get_logger
+from wbcore.output import emit_json
 from wbcore.settings import AppSettings, allows_live_orders, describe_mode
 
 if TYPE_CHECKING:
@@ -71,8 +73,14 @@ def main(
         timezone=settings.timezone,
         log_file=settings.log_file("daytrade"),
     )
-    run_id = bind_run_context(
-        app="daytrade", env=settings.env.value, command=ctx.invoked_subcommand or ""
+    command = ctx.invoked_subcommand or ""
+    run_id = bind_run_context(app="daytrade", env=settings.env.value, command=command)
+    digest.start_run(
+        app="daytrade",
+        env=settings.env.value,
+        command=command,
+        run_id=run_id,
+        state_dir=settings.state_dir,
     )
     ctx.obj = {"settings": settings, "run_id": run_id}
 
@@ -228,6 +236,7 @@ def _crash(title: str, code: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
                 raise
             except Exception as exc:
                 log.exception(f"{title}が異常終了", code=code, error=str(exc))
+                digest.fail(code, f"{type(exc).__name__}: {exc}")
                 alert(f"デイトレ: {title}が異常終了", f"{type(exc).__name__}: {exc}")
                 raise typer.Exit(1) from exc
 
@@ -256,9 +265,11 @@ def _plan_day(settings: AppSettings, date: dt.date | None, now: dt.datetime) -> 
 
 def _build_plan(settings: AppSettings, config: DaytradeConfig, day: dt.date) -> Plan:
     from daytrade import plan as planning
+    from daytrade.history import store_for
 
     plan = planning.build(_archive(settings), config, day)
-    parquet, _ = planning.save(plan, settings.daytrade_dir)
+    # 最新（open が読む）と履歴（振り返り用、上書きしない）の両方に残す
+    parquet, _ = planning.save(plan, settings.daytrade_dir, history=store_for(settings))
     log.info(
         "候補を作成",
         code="daytrade.plan",
@@ -270,6 +281,12 @@ def _build_plan(settings: AppSettings, config: DaytradeConfig, day: dt.date) -> 
         budget=plan.meta.budget_per_order,
         iv_prev=plan.meta.iv_prev,
         path=str(parquet),
+        history=str(settings.daytrade_history_dir),
+    )
+    digest.note(
+        candidates=plan.meta.candidates,
+        eligible=plan.meta.eligible,
+        positions=plan.meta.positions,
     )
     return plan
 
@@ -528,25 +545,75 @@ def _entry_request(
 
 
 def _place_recorded(
-    broker: Broker, ledger: Ledger, request: OrderRequest, day: dt.date, price: Decimal
+    broker: Broker,
+    ledger: Ledger,
+    request: OrderRequest,
+    day: dt.date,
+    price: Decimal,
+    *,
+    fee: Decimal | None = None,
 ) -> None:
     """送る前に台帳へ PENDING を書き、送ったら結果で更新する。
 
     送信後に落ちても台帳には残るので、次の実行で同じ注文を送り直さない
     （二重買付より買い漏れの方がまし）。
+
+    同時に実行品質の ``intent`` 行を残す。台帳の ``price`` は後で約定額に
+    上書きされうるので、判断時の想定はここで別に控えておく
+    （:mod:`wbcore.execution`）。
     """
     from wbcore.broker.base import OrderRejectedError
     from wbcore.domain.models import OrderStatus
 
+    def _intent(reason: execution.ReasonCode, note: str | None = None) -> None:
+        execution.collect(
+            event="intent",
+            app="daytrade",
+            symbol=request.symbol,
+            side=request.side.value,
+            trade=getattr(request.trade, "value", None),
+            client_order_id=request.client_order_id,
+            live=True,
+            quantity=request.quantity,
+            intent_price=price,
+            intent_amount=price * request.quantity,
+            intent_fee=fee,
+            reason=reason,
+            note=note,
+        )
+
     ledger.record(request, day, OrderStatus.PENDING.value, price=price)
     try:
         ack = broker.place(request)
-    except OrderRejectedError:
+    except OrderRejectedError as exc:
         # 明確な拒否は台帳にも拒否と書く。PENDING のままだと「送信結果不明」と区別できず、
         # 次の実行が再送しない
         ledger.update_status(request.client_order_id, OrderStatus.REJECTED)
+        _intent(execution.ReasonCode.BROKER_ERROR, str(exc))
         raise
     ledger.update_status(request.client_order_id, ack.status, broker_order_id=ack.broker_order_id)
+    _intent(execution.ReasonCode.PLACED)
+
+
+def _skip_row(
+    pick: Pick, request: OrderRequest, reason: execution.ReasonCode, note: str | None = None
+) -> None:
+    """発注しなかった建玉を実行品質に残す。**見送りの理由の分布が改善の材料になる。**"""
+    execution.collect(
+        event="skip",
+        app="daytrade",
+        symbol=pick.symbol,
+        side=request.side.value,
+        trade=getattr(request.trade, "value", None),
+        client_order_id=request.client_order_id,
+        live=False,
+        quantity=pick.quantity,
+        intent_price=pick.price,
+        intent_amount=pick.amount,
+        intent_fee=pick.fee,
+        reason=reason,
+        note=note,
+    )
 
 
 @app.command("open")
@@ -574,7 +641,16 @@ def open_command(
 ) -> None:
     """9:00: 気配でギャップ下位 N 銘柄を選び、成行で買う（``[margin]`` が有効なら
     ギャップ上位の貸借銘柄を信用で売建てる）。既定は dry-run。"""
+    import polars as pl
+
     from daytrade import plan as planning
+    from daytrade.history import (
+        OPEN_RUN_SCHEMA,
+        open_run_frame,
+        quotes_frame,
+        ranking_frame,
+        store_for,
+    )
     from daytrade.ledger import DRY_RUN_STATUS, Ledger
     from daytrade.select import pick as pick_symbols
     from daytrade.select import rank as rank_symbols
@@ -649,22 +725,41 @@ def open_command(
         if config.margin.enabled and not watch_only:
             # ショートの母集団はロングと別なので、気配はその和集合で取る
             symbols = sorted(set(symbols) | set(plan.short_eligible["symbol"].to_list()))
-        quotes = _fresh(
-            _quotes_for(settings, config, symbols, source=quote_source, quote_file=quote_file),
-            config,
-            now,
-            allow_delayed=allow_delayed,
+        received = _quotes_for(
+            settings, config, symbols, source=quote_source, quote_file=quote_file
         )
+        quotes = _fresh(received, config, now, allow_delayed=allow_delayed)
+        # 履歴（振り返り用）: 台帳は dry-run を消し、ログは順位表の上位数件しか持たないので、
+        # 気配の全件・順位表の全行・この実行の要約を実行ごとに 1 ファイルずつ積む（上書きしない）
+        history = store_for(settings)
+        prev_all = dict(plan.frame.select("symbol", "prev_close").iter_rows())
+        history.append("quotes", quotes_frame(received, set(quotes), prev_all), day=day)
+        summary: dict[str, Any] = {
+            "mode": "watch" if watch_only else ("live" if allowed else "dry_run"),
+            "quotes_requested": len(symbols),
+            "quotes_received": len(received),
+            "quotes_usable": len(quotes),
+        }
+
+        def finish(outcome: str, **extra: Any) -> None:
+            """この実行の要約を 1 行残す（判断まで進んだ実行だけ。休場・時間帯外は残さない）。"""
+            row = {**summary, **extra, "outcome": outcome}
+            history.append("open_run", open_run_frame(**row), day=day)
+
         if not quotes:
             console.print("[red]使える気配がありません。発注しません[/red]")
             log.error("気配が無いため見送り", code="daytrade.skip", reason="no_quotes")
             alert("デイトレ: 気配が取れず寄付の買いを見送り", f"{day} 候補 {len(symbols)} 銘柄")
+            finish("no_quotes")
             return
         from daytrade.regime import market_gap_of
 
         prev = dict(plan.eligible.select("symbol", "prev_close").iter_rows())
         gaps = [float(q.price) / prev[sym] - 1 for sym, q in quotes.items() if prev.get(sym)]
         verdict = _verdict(settings, config, plan, day, market_gap_of(gaps))
+        # notes には scale も入っている（ログと同じ診断値）。要約の列にあるものだけ取る
+        summary.update(trade=verdict.trade, reasons=verdict.reasons, scale=verdict.scale)
+        summary.update({k: v for k, v in verdict.notes.items() if k in OPEN_RUN_SCHEMA})
         if not verdict.trade:
             console.print(
                 "[yellow]危険信号により今日は取引しません: "
@@ -674,6 +769,7 @@ def open_command(
             log.info(
                 "危険信号で見送り", code="daytrade.skip", reason="regime", reasons=verdict.reasons
             )
+            finish("regime")
             return
         # 様子見モードでは「買うとしたら」の上位を目安の予算で見せる。
         # 次点（N の先 RANKING_EXTRA 件）も順位表として残す——「なぜ X が選ばれなかったか」を後から追うため
@@ -700,6 +796,9 @@ def open_command(
             ranked=ranking,
         )
         picked = {p.symbol: p for p in picks}
+        long_picks = picks
+        rank_frames = [ranking_frame(ranking, picks, side="BUY", n=n, budget=budget)]
+        summary.update(n=n, budget=budget, weighting=config.capital.weighting, weak=weak)
         _print_picks(picks, quotes, plan, watch_only=watch_only)
         log.info(
             "順位表（N と次点）",
@@ -756,6 +855,20 @@ def open_command(
                 f"対象 {short_universe.height} 銘柄[/dim]"
             )
             _print_picks(short_picks, quotes, plan, label="寄付の売建（信用）")
+            rank_frames.append(
+                ranking_frame(
+                    short_ranking,
+                    short_picks,
+                    side="SELL",
+                    n=config.margin.positions,
+                    budget=short_budget,
+                )
+            )
+            summary.update(
+                short_n=config.margin.positions,
+                short_budget=short_budget,
+                short_multiplier=short_multiplier,
+            )
             log.info(
                 "順位表（ショート）",
                 code="daytrade.ranking",
@@ -773,6 +886,9 @@ def open_command(
             picks = picks + short_picks
         elif config.margin.enabled and not watch_only:
             console.print("[dim]ショート: この日は建てない（倍率 0）[/dim]")
+        ranking_path = history.append("ranking", pl.concat(rank_frames), day=day)
+        summary.update(long_picks=len(long_picks), short_picks=len(picks) - len(long_picks))
+        console.print(f"[dim]履歴に追記 {ranking_path}[/dim]")
         for p in picks:
             log.info(
                 "銘柄を選定",
@@ -792,14 +908,17 @@ def open_command(
             log.info(
                 "条件に合う銘柄なし", code="daytrade.skip", reason="no_picks", quotes=len(quotes)
             )
+            finish("no_picks")
             return
         if watch_only:
             log.info(
                 "資金 0 のため買わない", code="daytrade.skip", reason="no_capital", picks=len(picks)
             )
+            finish("no_capital")
             return
         _confirm_live(settings, allowed, yes)
         failures: list[str] = []
+        orders = 0
         broker = _connect(settings, config) if allowed else None
         # 余力は取引区分ごと（現物は買付余力、信用は新規建可能額）。同じ枠を使う注文で減らしていく
         remaining: dict[str, Decimal] = {}
@@ -810,10 +929,13 @@ def open_command(
             label = "売建" if p.side is Side.SELL else "買い"
             if ledger.was_placed(request.client_order_id):
                 console.print(f"  {p.symbol}: [dim]{label}は発注済み（冪等）[/dim]")
+                _skip_row(p, request, execution.ReasonCode.IDEMPOTENT)
                 continue
             if broker is None:
                 ledger.record(request, day, DRY_RUN_STATUS, price=p.price)
+                _skip_row(p, request, execution.ReasonCode.DRY_RUN)
                 outcome = "dry-run"
+                orders += 1
             else:
                 try:
                     key = request.trade.value
@@ -826,10 +948,12 @@ def open_command(
                         )
                         failures.append(f"{p.symbol} {label}: {outcome}")
                         console.print(f"  {p.symbol}: [red]{outcome}[/red]")
+                        _skip_row(p, request, execution.ReasonCode.INSUFFICIENT_FUNDS, outcome)
                         continue
                     remaining[key] -= need
-                    _place_recorded(broker, ledger, request, day, p.price)
+                    _place_recorded(broker, ledger, request, day, p.price, fee=p.fee)
                     outcome = "発注"
+                    orders += 1
                 except BrokerError as exc:
                     outcome = f"失敗 {exc}"
                     failures.append(f"{p.symbol} {label}: {exc}")
@@ -850,6 +974,7 @@ def open_command(
             )
         if failures:
             alert(f"デイトレ: {len(failures)} 件の建玉が通らず", "\n".join(failures))
+        finish("picked", orders=orders, failures=len(failures))
         log.info(
             "寄付の買いを終了",
             code="daytrade.run",
@@ -862,7 +987,11 @@ def open_command(
             picks=len(picks),
             failures=len(failures),
         )
+        digest.note(phase="open", live=allowed, picks=len(picks), failures=len(failures))
+        if failures:
+            digest.anomaly("daytrade.order_failed", f"{len(failures)} 件の建玉が通らず")
     finally:
+        execution.flush(store_for(settings), day=day)
         ledger.close()
 
 
@@ -1004,6 +1133,23 @@ def close_command(
                     current = None
                 if current is not None:
                     filled, fill_price = current.filled_quantity, current.avg_fill_price
+                    execution.collect(
+                        event="fill",
+                        app="daytrade",
+                        symbol=order.symbol,
+                        side=order.side,
+                        trade=order.trade,
+                        client_order_id=order.client_order_id,
+                        broker_order_id=current.broker_order_id,
+                        live=True,
+                        quantity=order.quantity,
+                        intent_price=order.price,
+                        fill_quantity=filled,
+                        fill_price=fill_price,
+                        reason=execution.ReasonCode.FILLED
+                        if filled
+                        else execution.ReasonCode.EXPIRED,
+                    )
                     ledger.update_status(
                         order.client_order_id,
                         current.status,
@@ -1124,7 +1270,13 @@ def close_command(
             sells=len(targets),
             failures=len(failures),
         )
+        digest.note(phase="close", live=allowed, sells=len(targets), failures=len(failures))
+        if failures:
+            digest.anomaly("daytrade.exit_failed", f"{len(failures)} 件の手仕舞いが通らず")
     finally:
+        from daytrade.history import store_for as _store_for
+
+        execution.flush(_store_for(settings), day=day)
         ledger.close()
 
 
@@ -1274,6 +1426,7 @@ def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
                 )
         if carried:
             log.error("持ち越し", code="daytrade.carry", day=day.isoformat(), positions=carried)
+            digest.anomaly("daytrade.carry", f"{len(carried)} 銘柄が未返済のまま")
             alert(
                 "デイトレ: 売れ残りがあります（持ち越し）。翌朝に手で売ってください",
                 "\n".join(carried),
@@ -1284,12 +1437,403 @@ def verify_command(ctx: typer.Context, date: _Date = None, config_dir: _ConfigDi
         console.print(f"[red]照会に失敗: {exc}[/red]")
         raise typer.Exit(1) from None
     finally:
+        from daytrade.history import store_for as _store_for
+
+        execution.flush(_store_for(settings), day=day)
         ledger.close()
 
 
 # --------------------------------------------------------------------------
-# status / quotes / backtest
+# history / status / quotes / backtest
 # --------------------------------------------------------------------------
+
+
+@app.command("history")
+def history_command(
+    ctx: typer.Context,
+    kind: Annotated[
+        str | None,
+        typer.Argument(help="種類（plan / plan_meta / quotes / ranking / open_run）。省略で一覧"),
+    ] = None,
+    date: _Date = None,
+    start: Annotated[str | None, typer.Option("--from", help="開始日 YYYY-MM-DD")] = None,
+    end: Annotated[str | None, typer.Option("--to", help="終了日 YYYY-MM-DD")] = None,
+    latest: Annotated[
+        bool, typer.Option("--latest", help="その日（--date か最終日）の最後の実行ぶんだけ")
+    ] = False,
+    limit: Annotated[int, typer.Option(help="表示する行数")] = 50,
+    csv: Annotated[
+        Path | None, typer.Option("--csv", help="該当する全行をこのファイルに書き出す")
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="表の代わりに JSON を 1 個だけ出す（AI・パイプ用）")
+    ] = False,
+) -> None:
+    """選定の履歴（追記専用の Parquet）を一覧・表示・CSV に書き出す。
+
+    置き場は ``state/daytrade/history/<種類>/``。1 回の plan / open が 1 ファイルで、
+    再試行や dry-run の確認も全部残る。polars や DuckDB から直接 ``read_parquet`` で読める。
+    """
+    from daytrade.history import store_for
+    from wbcore.history import show_history
+
+    settings = _settings(ctx)
+    day = _parse_date(date)
+    show_history(
+        console,
+        store_for(settings),
+        kind,
+        start=day or _parse_date(start),
+        end=day or _parse_date(end),
+        latest_only=latest,
+        limit=limit,
+        csv_path=csv,
+        as_json=as_json,
+    )
+
+
+# --------------------------------------------------------------------------
+# evaluate / review（候補の結果と選定の妥当性）
+# --------------------------------------------------------------------------
+
+
+def _plan_for(settings: AppSettings, day: dt.date) -> Plan | None:
+    """その日の plan。``plan-<日付>`` が無ければ履歴（history/plan）から組み立てる。"""
+    from daytrade import plan as planning
+    from daytrade.history import store_for
+    from daytrade.plan import Plan, PlanMeta
+    from wbcore.history import KEY_COLUMNS
+
+    found = planning.load(settings.daytrade_dir, day)
+    if found is not None:
+        return found
+    history = store_for(settings)
+    frame = history.latest("plan", day)
+    meta = history.latest("plan_meta", day)
+    if frame.height == 0 or meta.height == 0:
+        return None
+    m = meta.row(0, named=True)
+    return Plan(
+        meta=PlanMeta(
+            day=day.isoformat(),
+            prev_day=m["prev_day"].isoformat(),
+            positions=int(m["positions"]),
+            budget_per_order=str(m["budget_per_order"]),
+            iv_prev=m["iv_prev"],
+            iv_gate=str(m["iv_gate"]),
+            drift=m["drift"],
+            candidates=int(m["candidates"]),
+            eligible=int(m["eligible"]),
+            created_at=str(m["created_at"]),
+            short_eligible=int(m["short_eligible"] or 0),
+        ),
+        frame=frame.drop(list(KEY_COLUMNS)),
+    )
+
+
+def _bp(value: object) -> str:
+    return f"{float(value):+.1f}" if value is not None else ""  # type: ignore[arg-type]
+
+
+def _pnl(value: object, *, when: object = True) -> str:
+    """円損益。``when`` が偽（建てていない等）なら空欄。-0 は +0 に寄せる。"""
+    if value is None or not when:
+        return ""
+    return f"{float(value) + 0.0:+,.0f}"  # type: ignore[arg-type]
+
+
+def _print_evaluation(day: dt.date, result: Any, source: str) -> None:
+    from daytrade.evaluate import summarize
+
+    label = "9:00 の気配" if source == "quotes" else "前夜の plan × 当日の始値（作り直し）"
+    console.print(f"[bold]{day} の候補の結果[/bold]  順位表: {label}  候補 {result.height} 銘柄")
+    summary = summarize(result)
+    if summary.height == 0:
+        console.print("[dim]日足を当てられる候補がありません[/dim]")
+        return
+    table = Table(title="脚 × 群（picked=選んだ N / next=次点 / rest=それ以外）")
+    for column in ("脚", "群", "件数", "平均 net bp", "勝率", "想定損益", "約定", "実現損益"):
+        table.add_column(column, justify="right" if column not in ("脚", "群") else "left")
+    for r in summary.iter_rows(named=True):
+        table.add_row(
+            r["side"],
+            r["rank_group"],
+            str(r["count"]),
+            _bp(r["avg_net_bp"]),
+            f"{r['win_rate']:.0%}" if r["win_rate"] is not None else "",
+            _pnl(r["hypo_pnl"]),
+            str(int(r["traded"] or 0)),
+            _pnl(r["actual_pnl"], when=r["traded"]),
+        )
+    console.print(table)
+    shown = result.filter(pl_col("rank_group") != "rest")
+    detail = Table(title="選んだ銘柄と次点（想定損益は「建てていたら」）")
+    for column in (
+        "脚",
+        "#",
+        "銘柄",
+        "名称",
+        "順位の gap",
+        "始値",
+        "終値",
+        "gross bp",
+        "net bp",
+        "想定損益",
+        "建てた",
+        "実現損益",
+        "備考",
+    ):
+        detail.add_column(
+            column, justify="right" if column not in ("脚", "銘柄", "名称") else "left"
+        )
+    for r in shown.iter_rows(named=True):
+        notes = []
+        if r["limit_up_close"]:
+            notes.append("引けS高")
+        if r["limit_down_close"]:
+            notes.append("引けS安")
+        if r["open"] is None:
+            notes.append("日足なし")
+        detail.add_row(
+            r["side"],
+            f"{r['rank']}{'*' if r['picked'] else ''}",
+            r["symbol"],
+            (r["name"] or "")[:10],
+            f"{r['gap']:+.2%}" if r["gap"] is not None else "",
+            _yen(r["open"]) if r["open"] is not None else "",
+            _yen(r["close"]) if r["close"] is not None else "",
+            _bp(r["gross_bp"]),
+            _bp(r["net_bp"]),
+            _pnl(r["hypo_pnl"], when=r["hypo_quantity"]),
+            "○" if r["traded"] else "",
+            _pnl(r["actual_pnl"], when=r["traded"]),
+            "、".join(notes),
+        )
+    console.print(detail)
+    console.print(
+        "[dim]# の * は選んだ銘柄。net bp は費用（滑り・貸株料等の見込み）を引いた後[/dim]"
+    )
+
+
+@app.command("evaluate")
+@_crash("候補の評価", "daytrade.crash")
+def evaluate_command(
+    ctx: typer.Context,
+    date: _Date = None,
+    config_dir: _ConfigDir = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="表の代わりに JSON を 1 個だけ出す（AI・パイプ用）")
+    ] = False,
+) -> None:
+    """大引後: 朝の候補（選んだ銘柄も次点も）に当日の日足を当て、結果を履歴に残す。
+
+    「建てていたらいくらだったか」を候補の全行について計算し、``history/evaluation`` に
+    追記する。9:00 の順位表が無い日（発注経路を止めている間）は、前夜の plan と当日の
+    始値から同じ規則で順位を作り直して評価する（``ranking_source = archive_open``）。
+    cron では日足の取り込み後（20:20）に回す。
+    """
+    from daytrade.evaluate import bars_for, evaluate, reconstruct_ranking, summarize
+    from daytrade.history import store_for
+    from daytrade.ledger import Ledger
+
+    settings = _settings(ctx)
+    config = _load(config_dir)
+    now = now_utc()
+    day = _parse_date(date) or _today_jst(now)
+    _log_config(config, settings, phase="evaluate", day=day.isoformat())
+    if _skip_holiday(settings, day, "evaluate"):
+        return
+    bars = bars_for(_archive(settings), day)
+    if bars.height == 0:
+        console.print(
+            f"[yellow]{day} の日足がまだアーカイブに無いので評価しません（jquants sync の後に）[/yellow]"
+        )
+        log.warning(
+            "日足が無く評価を見送り",
+            code="daytrade.skip",
+            reason="no_bars",
+            phase="evaluate",
+            day=day.isoformat(),
+        )
+        return
+    history = store_for(settings)
+    ranking = history.latest("ranking", day)
+    source = "quotes"
+    if ranking.height == 0:
+        plan = _plan_for(settings, day)
+        if plan is None:
+            console.print(f"[yellow]{day} の順位表も plan も無いので評価できません[/yellow]")
+            log.warning(
+                "順位表も plan も無く評価を見送り",
+                code="daytrade.skip",
+                reason="no_plan",
+                phase="evaluate",
+                day=day.isoformat(),
+            )
+            return
+        ranking = reconstruct_ranking(plan, bars, config, at=now)
+        source = "archive_open"
+        console.print(
+            "[dim]9:00 の順位表が無いので、前夜の plan と当日の始値から順位を作り直しました[/dim]"
+        )
+    with Ledger(settings.daytrade_db_path) as ledger:
+        orders = ledger.orders_on(day)
+    result = evaluate(ranking, bars, config, orders, source=source)
+    path = history.append("evaluation", result, day=day)
+    if as_json:
+        emit_json(
+            {
+                "ok": True,
+                "day": day,
+                "source": source,
+                "path": path,
+                "summary": summarize(result).to_dicts(),
+                "rows": result.to_dicts(),
+            }
+        )
+    else:
+        _print_evaluation(day, result, source)
+        console.print(f"[dim]履歴に追記 {path}[/dim]")
+    log.info(
+        "候補を評価",
+        code="daytrade.evaluate",
+        day=day.isoformat(),
+        source=source,
+        rows=result.height,
+        picked=int(result["picked"].sum()),
+        traded=int(result["traded"].sum()),
+        path=str(path),
+        summary=[
+            {
+                "side": r["side"],
+                "group": r["rank_group"],
+                "count": r["count"],
+                "avg_net_bp": round(r["avg_net_bp"], 1) if r["avg_net_bp"] is not None else None,
+                "win_rate": round(r["win_rate"], 3) if r["win_rate"] is not None else None,
+                "hypo_pnl": round(r["hypo_pnl"]) if r["hypo_pnl"] is not None else None,
+            }
+            for r in summarize(result).iter_rows(named=True)
+        ],
+    )
+    digest.note(
+        rows=result.height,
+        picked=int(result["picked"].sum()),
+        traded=int(result["traded"].sum()),
+        source=source,
+    )
+
+
+@app.command("review")
+def review_command(
+    ctx: typer.Context,
+    start: Annotated[str | None, typer.Option("--from", help="開始日 YYYY-MM-DD")] = None,
+    end: Annotated[str | None, typer.Option("--to", help="終了日 YYYY-MM-DD")] = None,
+    days: Annotated[int, typer.Option(help="期間を省いたとき、直近の評価日数")] = 20,
+    csv: Annotated[
+        Path | None, typer.Option("--csv", help="日別の表をこのファイルに書き出す")
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="表の代わりに JSON を 1 個だけ出す（AI・パイプ用）")
+    ] = False,
+) -> None:
+    """選定の妥当性を日ごとに見る。選んだ N・次点・候補全体の平均 net bp と損益を並べる。
+
+    選定が効いていれば picked ≥ next ≥ all の日が多い。逆が続けば、順位付けの規則が
+    その相場で効いていない合図。材料は ``daytrade evaluate`` が積んだ履歴。
+    """
+    from daytrade.evaluate import review, review_totals
+    from daytrade.history import store_for
+
+    settings = _settings(ctx)
+    store = store_for(settings)
+    first, last = _parse_date(start), _parse_date(end)
+    if first is None and last is None:
+        known = store.days("evaluation")
+        if not known:
+            if as_json:
+                emit_json({"ok": True, "rows": [], "totals": []})
+            else:
+                console.print("[dim]評価の履歴がまだありません（daytrade evaluate を回す）[/dim]")
+            return
+        first = known[-days] if len(known) >= days else known[0]
+    table = review(store.read("evaluation", start=first, end=last))
+    if as_json:
+        emit_json(
+            {
+                "ok": True,
+                "from": first,
+                "to": last,
+                "rows": table.to_dicts(),
+                "totals": review_totals(table).to_dicts() if table.height else [],
+            }
+        )
+        return
+    if table.height == 0:
+        console.print("[dim]期間内に評価の履歴がありません[/dim]")
+        return
+    if csv is not None:
+        csv.parent.mkdir(parents=True, exist_ok=True)
+        table.write_csv(csv)
+        console.print(f"[green]{table.height} 行を {csv} に書き出しました[/green]")
+    daily = Table(title="日別（net bp は費用後の平均。想定損益は選んだ N を建てていた場合）")
+    for column in (
+        "日付",
+        "脚",
+        "順位表",
+        "N",
+        "picked bp",
+        "next bp",
+        "all bp",
+        "想定損益",
+        "建てた",
+        "実現損益",
+        "候補",
+    ):
+        daily.add_column(
+            column, justify="right" if column not in ("日付", "脚", "順位表") else "left"
+        )
+    for r in table.iter_rows(named=True):
+        daily.add_row(
+            r["day"].isoformat(),
+            r["side"],
+            "気配" if r["source"] == "quotes" else "始値",
+            str(int(r["picked_n"] or 0)),
+            _bp(r["picked_bp"]),
+            _bp(r["next_bp"]),
+            _bp(r["all_bp"]),
+            _pnl(r["picked_pnl"]),
+            str(int(r["traded"] or 0)),
+            _pnl(r["actual_pnl"], when=r["traded"]),
+            str(r["candidates"]),
+        )
+    console.print(daily)
+    totals = review_totals(table)
+    total_table = Table(title="期間の合計（bp は日別平均の平均）")
+    for column in (
+        "脚",
+        "日数",
+        "picked bp",
+        "next bp",
+        "all bp",
+        "picked が勝った日",
+        "picked が all を上回った日",
+        "想定損益",
+        "実現損益",
+    ):
+        total_table.add_column(column, justify="right" if column != "脚" else "left")
+    for r in totals.iter_rows(named=True):
+        total_table.add_row(
+            r["side"],
+            str(r["days"]),
+            _bp(r["picked_bp"]),
+            _bp(r["next_bp"]),
+            _bp(r["all_bp"]),
+            f"{r['picked_win_days']:.0%}" if r["picked_win_days"] is not None else "",
+            f"{r['beat_all_days']:.0%}" if r["beat_all_days"] is not None else "",
+            _pnl(r["picked_pnl"]),
+            _pnl(r["actual_pnl"], when=r["traded"]),
+        )
+    console.print(total_table)
 
 
 @app.command("status")

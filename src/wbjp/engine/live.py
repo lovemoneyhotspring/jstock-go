@@ -27,6 +27,7 @@ from decimal import Decimal
 
 import polars as pl
 
+from wbcore import digest, execution
 from wbcore.broker.base import Broker, BrokerError, OrderRejectedError
 from wbcore.clock import today_utc
 from wbcore.data.provider import MarketDataProvider
@@ -36,6 +37,7 @@ from wbcore.domain.models import (
     Balance,
     CombinedSignal,
     Order,
+    OrderPreview,
     OrderRequest,
     OrderStatus,
     Position,
@@ -105,6 +107,37 @@ class CycleResult:
     @property
     def dry_run(self) -> bool:
         return not self.live
+
+
+def _execution_row(
+    request: OrderRequest,
+    reason: execution.ReasonCode,
+    *,
+    preview: OrderPreview | None = None,
+    broker_order_id: str | None = None,
+    note: str | None = None,
+    live: bool = False,
+) -> None:
+    """スイング売買の 1 注文を実行品質に残す。
+
+    想定価格は指値（成行は ``None``）。見積り（:class:`OrderPreview`）が
+    取れているときは、そこから想定の代金と手数料も控える。
+    """
+    execution.collect(
+        event="intent" if reason is execution.ReasonCode.PLACED else "skip",
+        app="wbjp",
+        symbol=request.symbol,
+        side=request.side.value,
+        client_order_id=request.client_order_id,
+        broker_order_id=broker_order_id,
+        live=live,
+        quantity=request.quantity,
+        intent_price=request.limit_price,
+        intent_amount=preview.estimated_cost if preview else None,
+        intent_fee=preview.estimated_fee if preview else None,
+        reason=reason,
+        note=note or request.reason,
+    )
 
 
 class LiveRunner:
@@ -381,6 +414,12 @@ class LiveRunner:
             rejected=len(rejected),
             mode="実発注" if allowed else "dry-run",
         )
+        digest.note(
+            live=allowed,
+            planned=len(plan.orders),
+            placed=len(placed),
+            rejected=len(rejected),
+        )
         return result
 
     def _sync_pending_orders(self) -> None:
@@ -397,6 +436,22 @@ class LiveRunner:
             if order is None:
                 continue
             self.journal.update_order(order)
+            execution.collect(
+                event="fill",
+                app="wbjp",
+                symbol=order.symbol,
+                side=order.side.value,
+                client_order_id=client_order_id,
+                broker_order_id=order.broker_order_id,
+                live=True,
+                quantity=order.quantity,
+                intent_price=order.limit_price,
+                fill_quantity=order.filled_quantity,
+                fill_price=order.avg_fill_price,
+                reason=execution.ReasonCode.FILLED
+                if order.filled_quantity
+                else execution.ReasonCode.EXPIRED,
+            )
             log.info(
                 "注文状態を確定",
                 code="wbjp.order_sync",
@@ -404,6 +459,7 @@ class LiveRunner:
                 symbol=order.symbol,
                 status=order.status.value,
                 filled_quantity=str(order.filled_quantity),
+                avg_fill_price=str(order.avg_fill_price) if order.avg_fill_price else None,
             )
 
     def _place(
@@ -425,6 +481,7 @@ class LiveRunner:
                     symbol=request.symbol,
                     client_order_id=request.client_order_id,
                 )
+                _execution_row(request, execution.ReasonCode.IDEMPOTENT)
                 continue
 
             if not live:
@@ -437,6 +494,7 @@ class LiveRunner:
                     reason=request.reason,
                 )
                 self.journal.record_order(run_id, request, Journal.DRY_RUN_STATUS)
+                _execution_row(request, execution.ReasonCode.DRY_RUN)
                 continue
 
             try:
@@ -453,6 +511,12 @@ class LiveRunner:
                 )
                 if not decision.approved:
                     rejected[request.symbol] = decision.reason
+                    _execution_row(
+                        request,
+                        execution.ReasonCode.RISK_REJECTED,
+                        preview=preview,
+                        note=decision.reason,
+                    )
                     continue
 
                 # 台帳に先に記録してから送る。送信後・記録前にプロセスが
@@ -466,10 +530,24 @@ class LiveRunner:
                 self.journal.record_order(run_id, request, OrderStatus.PENDING.value)
                 try:
                     ack = self.broker.place(request)
-                except OrderRejectedError:
+                except OrderRejectedError as exc:
                     self.journal.record_order(run_id, request, OrderStatus.REJECTED.value)
+                    _execution_row(
+                        request,
+                        execution.ReasonCode.BROKER_ERROR,
+                        preview=preview,
+                        note=str(exc),
+                        live=True,
+                    )
                     raise
                 self.journal.record_order(run_id, request, ack.status.value, ack.broker_order_id)
+                _execution_row(
+                    request,
+                    execution.ReasonCode.PLACED,
+                    preview=preview,
+                    broker_order_id=ack.broker_order_id,
+                    live=True,
+                )
                 placed.append(request)
             except BrokerError as exc:
                 rejected[request.symbol] = str(exc)

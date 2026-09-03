@@ -89,6 +89,35 @@ class AppSettings(BaseSettings):
         return self._stateful("daytrade", directory=True)
 
     @property
+    def daytrade_history_dir(self) -> Path:
+        """デイトレの選定履歴（候補・気配・順位表・実行の要約）。追記専用の Parquet。
+
+        ``plan-<日付>.parquet`` は「最新」で ``open`` が読む用。こちらは実行のたびに
+        1 ファイル足し、上書きしない（:mod:`daytrade.history`）。
+        """
+        return self.daytrade_dir / "history"
+
+    @property
+    def wbjp_history_dir(self) -> Path:
+        """スイング売買のスクリーニング履歴（``wbjp screen``）。追記専用の Parquet。"""
+        return self.state_dir / "wbjp" / "history"
+
+    @property
+    def accum_history_dir(self) -> Path:
+        """積立の判断履歴（``accum plan`` / ``run`` の判断と、その後の実績）。追記専用の Parquet。"""
+        return self.state_dir / "accum" / "history"
+
+    def history_dir(self, app: str) -> Path:
+        """アプリ名から履歴の置き場を引く（実行品質の記録が全アプリ共通で使う）。"""
+        match app:
+            case "daytrade":
+                return self.daytrade_history_dir
+            case "accum":
+                return self.accum_history_dir
+            case _:
+                return self.wbjp_history_dir
+
+    @property
     def backup_dir(self) -> Path:
         """台帳バックアップの置き場（``accum backup``）。"""
         return self._stateful("backup", directory=True)

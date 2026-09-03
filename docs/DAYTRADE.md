@@ -167,3 +167,73 @@ uv run daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
 ## ログ
 
 `state/logs/daytrade-<env>.jsonl`。`code` は `docs/LOGGING.md` の「デイトレ」の節。
+
+## 履歴（振り返り・検証用）
+
+台帳は「今日もう建てたか」に答えるための現在の状態で、dry-run の記録は確認のたびに消す。
+ログは順位表の上位 N+5 件しか持たず 90 日で消える。日々の振り返りと検証に要る
+「何が候補で、何を選び、何を選ばなかったか」は `state/daytrade/history/<種類>/` に
+**追記専用の Parquet** で残す。1 回の `plan` / `open` が 1 ファイル
+（`<判定日>T<時刻>Z-<run_id>.parquet`）で、同じ日に何度走っても上書きしない
+（cron の 9:01 / 9:04 / 9:07 の再試行も、dry-run の確認も全部残る）。
+
+| 種類 | 1 行 | いつ |
+|---|---|---|
+| `plan` | 母集団の 1 銘柄（`eligible` / `short_eligible` と除外理由の列ごと） | `plan` のたび |
+| `plan_meta` | `plan` 1 回の要約（件数・IV・ドリフト） | `plan` のたび |
+| `quotes` | 9:00 に受け取った気配 1 銘柄。`usable`（鮮度の検査を通った）と `gap` 付き | `open` が気配を取ったとき |
+| `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount` | `open` が順位を付けたとき |
+| `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数 | `open` が判断まで進んだとき |
+
+全ファイルに `day`（判定日）・`run_id`（ログと同じ）・`recorded_at`（UTC）が付く。
+「その日の最終判断」は `recorded_at` が最大の `run_id`（`--latest`）。
+「なぜ X が選ばれなかったか」は `ranking` に無ければ `quotes`（ギャップが条件外・ストップ安・気配なし）で追える。
+
+```bash
+uv run daytrade history                                  # 種類ごとのファイル数と期間
+uv run daytrade history ranking --date 2026-09-03 --latest
+uv run daytrade history open_run --from 2026-09-01 --csv /tmp/open_run.csv
+```
+
+分析は polars / DuckDB で直接読む（列が増えても古いファイルはそのまま読める）:
+
+```python
+import polars as pl
+r = pl.read_parquet("state/daytrade/history/ranking/*.parquet")
+picks = r.filter(pl.col("picked")).sort(["day", "recorded_at"])
+```
+
+`state/` はホスト固有なので、`state/daytrade/history/` も台帳と同じく別ホストへ同期する（`docs/DEPLOY.md`）。
+
+## 候補の結果と選定の妥当性（`evaluate` / `review`）
+
+建てなかった候補（次点、順位表の残り）がその日どう動いたかを追えないと、選定が妥当か
+分からない。`daytrade evaluate` は大引後に朝の順位表の**全行**へ当日の日足を当て、
+「建てていたらいくらだったか」を `history/evaluation` に残す（1 回 1 ファイル、上書きしない）。
+
+- 順位表は 9:00 の記録（`ranking_source = quotes`）を使う。**無い日は前夜の plan と当日の
+  始値から同じ規則で作り直す**（`archive_open`。バックテストと同じ近似）。発注経路を止めて
+  `open` を回していない間でも評価は毎日積める
+- 1 行 = 候補 1 銘柄。`rank_group`（picked / next / rest）、始値・終値、`gross_bp`（寄付 → 大引を
+  建て方向で見た bp）、`cost_bp`（滑り・貸株料等の見込み）、`net_bp`、`hypo_quantity` / `hypo_pnl`
+  （選んだ銘柄は記録の株数、それ以外は予算で買える株数）、`limit_up_close` / `limit_down_close`
+  （売建の持ち越しリスク）、`traded` / `actual_pnl`（台帳の本発注の約定）
+- `quotes` の日は `gap`（9:00 の気配）と `gap_open`（実際の始値）の差で、気配の当たり具合も見える
+
+```bash
+uv run daytrade evaluate --config-dir config/daytrade_margin                 # 今日（cron: 20:20）
+uv run daytrade evaluate --date 2026-09-02 --config-dir config/daytrade_margin
+uv run daytrade review                                                       # 直近 20 日
+uv run daytrade review --from 2026-09-01 --csv /tmp/review.csv
+```
+
+`review` は日 × 脚ごとに「選んだ N の平均 net bp」「次点の平均」「候補全体の平均」と想定損益・
+実現損益を並べ、期間の合計に「picked が勝った日」「picked が all を上回った日」の割合を出す。
+選定が効いていれば picked ≥ next ≥ all の日が多い。逆が続けば、順位付けの規則（ギャップの
+小さい順／大きい順）がその相場で効いていない合図。全行は polars で直接読める:
+
+```python
+import polars as pl
+ev = pl.read_parquet("state/daytrade/history/evaluation/*.parquet")
+ev.filter(pl.col("side") == "SELL").group_by("rank_group").agg(pl.col("net_bp").mean())
+```

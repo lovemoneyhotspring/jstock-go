@@ -560,7 +560,14 @@ def _cli_env(tmp_path: Path, max_capital: int) -> tuple[Path, dict[str, str]]:
     }
     (plans / f"plan-{DAY}.json").write_text(json.dumps(meta), encoding="utf-8")
     (tmp_path / "q.csv").write_text("symbol,price\nA,950\nB,970\nC,990\nD,1010\n", encoding="utf-8")
-    env = {"WBJP_STATE_DIR": str(state), "WBJP_DATA_DIR": str(tmp_path / "data"), "WBJP_ENV": "uat"}
+    # WBJP_LOG_DIR も tmp に向ける。.env が絶対パスで指していると、ログが本物の state/logs に
+    # 漏れて（テストが JSONL を読めず）落ちる
+    env = {
+        "WBJP_STATE_DIR": str(state),
+        "WBJP_DATA_DIR": str(tmp_path / "data"),
+        "WBJP_LOG_DIR": str(state / "logs"),
+        "WBJP_ENV": "uat",
+    }
     return cfg, env
 
 
@@ -1145,7 +1152,14 @@ def _cli_env_margin(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     (tmp_path / "q.csv").write_text(
         "symbol,price\nA,950\nB,970\nC,990\nE,1060\nF,1080\n", encoding="utf-8"
     )
-    env = {"WBJP_STATE_DIR": str(state), "WBJP_DATA_DIR": str(tmp_path / "data"), "WBJP_ENV": "uat"}
+    # WBJP_LOG_DIR も tmp に向ける。.env が絶対パスで指していると、ログが本物の state/logs に
+    # 漏れて（テストが JSONL を読めず）落ちる
+    env = {
+        "WBJP_STATE_DIR": str(state),
+        "WBJP_DATA_DIR": str(tmp_path / "data"),
+        "WBJP_LOG_DIR": str(state / "logs"),
+        "WBJP_ENV": "uat",
+    }
     return cfg, env
 
 
@@ -1186,3 +1200,311 @@ def test_open_and_close_dry_run_with_margin(tmp_path: Path) -> None:
         assert exits["A"].side is Side.SELL and exits["A"].trade is TradeType.MARGIN_CLOSE
         assert exits["E"].side is Side.BUY and exits["E"].trade is TradeType.MARGIN_CLOSE
         assert exits["E"].quantity == Decimal(900) and exits["E"].leg == "short"
+
+
+# --------------------------------------------------------------------------
+# 履歴（振り返り用、追記専用）
+# --------------------------------------------------------------------------
+
+
+def _invoke_open(tmp_path: Path, cfg: Path, env: dict[str, str]):  # type: ignore[no-untyped-def]
+    from typer.testing import CliRunner
+
+    from daytrade.cli import app
+
+    return CliRunner().invoke(
+        app,
+        [
+            "open",
+            "--date",
+            DAY.isoformat(),
+            "--quote-source",
+            "csv",
+            "--quote-file",
+            str(tmp_path / "q.csv"),
+            "--config-dir",
+            str(cfg),
+        ],
+        env=env,
+    )
+
+
+def test_open_appends_history_every_run_and_never_overwrites(tmp_path: Path) -> None:
+    """気配の全件・順位表の全行・実行の要約が実行ごとに 1 ファイルずつ増える。
+
+    台帳の dry-run は 2 回目で消えるが、履歴は 1 回目の分も残る。
+    """
+    from wbcore.history import HistoryStore
+
+    cfg, env = _cli_env(tmp_path, 2_000_000)
+    result = _invoke_open(tmp_path, cfg, env)
+    assert result.exit_code == 0, result.stdout
+    store = HistoryStore(tmp_path / "state" / "daytrade" / "history")
+
+    ranking = store.read("ranking")
+    assert ranking["symbol"].to_list() == ["A", "B", "C"]  # D はギャップ正で順位表に入らない
+    assert ranking["picked"].to_list() == [True, True, True]
+    assert ranking["side"].unique().to_list() == ["BUY"]
+    # 総予算 200 万を 3 等分 → 950 円は 700 株、970 / 990 円は 600 株（単元切り捨て）
+    assert ranking["quantity"].to_list() == [700.0, 600.0, 600.0]
+    quotes = store.read("quotes")
+    assert quotes["symbol"].to_list() == ["A", "B", "C", "D"]
+    assert quotes["usable"].all()
+    assert quotes.filter(pl.col("symbol") == "D")["gap"][0] > 0  # 選ばれなかった理由が追える
+    run = store.read("open_run")
+    assert run.height == 1
+    row = run.row(0, named=True)
+    assert row["mode"] == "dry_run" and row["outcome"] == "picked" and row["trade"] is True
+    assert row["long_picks"] == 3 and row["short_picks"] == 0 and row["orders"] == 3
+    assert row["quotes_requested"] == 4 and row["quotes_usable"] == 4
+    assert row["run_id"] == ranking["run_id"][0] == quotes["run_id"][0]
+
+    result = _invoke_open(tmp_path, cfg, env)
+    assert result.exit_code == 0, result.stdout
+    assert len(store.files("ranking")) == 2
+    assert store.read("open_run").height == 2
+    assert store.latest("ranking", DAY)["run_id"].n_unique() == 1
+    with Ledger(tmp_path / "state" / "daytrade-uat.db") as ledger:
+        assert len(ledger.orders_on(DAY)) == 3  # 台帳は最新の dry-run だけ
+
+
+def test_open_watch_only_records_outcome_in_history(tmp_path: Path) -> None:
+    from wbcore.history import HistoryStore
+
+    code, out, _ = _open(tmp_path, 0)
+    assert code == 0, out
+    run = HistoryStore(tmp_path / "state" / "daytrade" / "history").read("open_run")
+    row = run.row(0, named=True)
+    assert row["mode"] == "watch" and row["outcome"] == "no_capital" and row["orders"] is None
+
+
+def test_open_history_has_both_legs_with_margin(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from daytrade.cli import app
+    from wbcore.history import HistoryStore
+
+    cfg, env = _cli_env_margin(tmp_path)
+    result = CliRunner().invoke(
+        app,
+        [
+            "open",
+            "--date",
+            DAY.isoformat(),
+            "--config-dir",
+            str(cfg),
+            "--quote-source",
+            "csv",
+            "--quote-file",
+            str(tmp_path / "q.csv"),
+        ],
+        env=env,
+    )
+    assert result.exit_code == 0, result.stdout
+    store = HistoryStore(tmp_path / "state" / "daytrade" / "history")
+    ranking = store.read("ranking")
+    shorts = ranking.filter(pl.col("side") == "SELL")
+    assert shorts["symbol"].to_list() == ["E"] and shorts["picked"].to_list() == [True]
+    assert ranking.filter(pl.col("side") == "BUY")["symbol"].to_list() == ["A", "B", "C"]
+    row = store.read("open_run").row(0, named=True)
+    assert row["long_picks"] == 3 and row["short_picks"] == 1 and row["short_n"] == 2
+    # 履歴のコマンドが読める
+    listing = CliRunner().invoke(app, ["history"], env=env)
+    assert listing.exit_code == 0 and "ranking" in listing.stdout
+    out = tmp_path / "ranking.csv"
+    detail = CliRunner().invoke(
+        app,
+        ["history", "ranking", "--date", DAY.isoformat(), "--latest", "--csv", str(out)],
+        env=env,
+    )
+    assert detail.exit_code == 0, detail.stdout
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("day,run_id,recorded_at,side,rank,symbol")
+    assert len(lines) == 1 + ranking.height
+    assert any(",SELL,1,E," in line and ",500000.0" in line for line in lines[1:])  # 桁区切り無し
+
+
+def test_plan_save_keeps_latest_and_appends_history(tmp_path: Path) -> None:
+    """plan-<日付> は最新（上書き）、履歴は plan のたびに 1 ファイル増える。"""
+    from daytrade.plan import Plan, PlanMeta, load, save
+    from wbcore.history import HistoryStore
+
+    frame = _cands([("A", 1000)])
+    meta = PlanMeta(
+        day=DAY.isoformat(),
+        prev_day=PREV.isoformat(),
+        positions=3,
+        budget_per_order="666666",
+        iv_prev=None,
+        iv_gate="0",
+        drift=0.001,
+        candidates=1,
+        eligible=1,
+        created_at="2026-08-31T12:00:00+00:00",
+    )
+    store = HistoryStore(tmp_path / "history")
+    plans = tmp_path / "plans"
+    save(Plan(meta=meta, frame=frame), plans, history=store)
+    save(
+        Plan(meta=meta, frame=frame.with_columns(pl.lit(False).alias("eligible"))),
+        plans,
+        history=store,
+    )
+    latest = load(plans, DAY)
+    assert latest is not None and latest.frame["eligible"].to_list() == [False]
+    assert len(store.files("plan")) == 2
+    history = store.read("plan")
+    assert history["eligible"].to_list() == [True, False]
+    meta_rows = store.read("plan_meta")
+    assert meta_rows.height == 2 and meta_rows["prev_day"].to_list() == [PREV, PREV]
+    assert meta_rows["budget_per_order"].to_list() == [666666.0, 666666.0]
+    assert meta_rows["drift"].to_list() == [0.001, 0.001]
+
+
+# --------------------------------------------------------------------------
+# 候補の結果の評価（evaluate / review）
+# --------------------------------------------------------------------------
+
+
+def _write_bars(data_dir: Path, day: dt.date, rows: dict[str, tuple[float, float]]) -> None:
+    """アーカイブに当日の日足を書く。rows は code → (始値, 終値)。"""
+    from wbcore.data.jquants_archive import Archive, endpoint, rows_to_frame
+
+    ep = endpoint("equities_bars_daily")
+    records = [
+        {
+            "Date": day.isoformat(),
+            "Code": code,
+            "O": str(o),
+            "H": str(max(o, c) + 5),
+            "L": str(min(o, c) - 5),
+            "C": str(c),
+            "UL": "0",
+            "LL": "0",
+            "Vo": "1000",
+        }
+        for code, (o, c) in rows.items()
+    ]
+    Archive(data_dir / "jquants").upsert(ep, rows_to_frame(records, ep))
+
+
+def test_evaluate_reconstructs_from_open_and_scores_every_candidate(tmp_path: Path) -> None:
+    """9:00 の順位表が無い日は plan × 始値で順位を作り直し、選んだ銘柄も次点も評価する。"""
+    from typer.testing import CliRunner
+
+    from daytrade.cli import app
+    from wbcore.history import HistoryStore
+
+    cfg, env = _cli_env_margin(tmp_path)
+    # A〜C はギャップダウン（ロング候補）、D は上、E は +6%（ショート候補）、F は貸借でない
+    _write_bars(
+        tmp_path / "data",
+        DAY,
+        {
+            "A0": (950, 960),  # +1.05%
+            "B0": (970, 960),  # −1.03%
+            "C0": (990, 1000),  # +1.01%
+            "D0": (1010, 1000),
+            "E0": (1060, 1040),  # 売建なら +1.89%
+            "F0": (1080, 1100),
+        },
+    )
+    common = ["--date", DAY.isoformat(), "--config-dir", str(cfg)]
+    result = CliRunner().invoke(app, ["evaluate", *common], env=env)
+    assert result.exit_code == 0, result.stdout
+    assert "作り直しました" in result.stdout
+
+    store = HistoryStore(tmp_path / "state" / "daytrade" / "history")
+    ev = store.read("evaluation")
+    assert ev["ranking_source"].unique().to_list() == ["archive_open"]
+    longs = ev.filter(pl.col("side") == "BUY").sort("rank")
+    assert longs["symbol"].to_list() == ["A", "B", "C"]
+    assert longs["picked"].to_list() == [True, True, True]
+    assert longs["rank_group"].to_list() == ["picked"] * 3
+    # 始値 950 → 終値 960 は +105 bp、費用（信用買い 5 bp）を引いて +100 bp
+    a = longs.row(0, named=True)
+    assert abs(a["gross_bp"] - 105.26) < 0.1 and abs(a["net_bp"] - 100.26) < 0.1
+    assert (
+        a["hypo_quantity"] == 700 and abs(a["hypo_pnl"] - (700 * 10 - 700 * 950 * 5 / 1e4)) < 0.01
+    )
+    assert a["traded"] is False and a["actual_pnl"] is None
+    b = longs.row(1, named=True)
+    assert b["net_bp"] < 0
+    shorts = ev.filter(pl.col("side") == "SELL")
+    assert shorts["symbol"].to_list() == ["E"] and shorts["picked"].to_list() == [True]
+    e = shorts.row(0, named=True)
+    assert e["gross_bp"] > 0 and abs(e["gross_bp"] - (1 - 1040 / 1060) * 1e4) < 0.1
+    assert e["cost_bp"] == 5.0  # margin.extra_cost_bp の既定
+
+
+def test_evaluate_uses_recorded_ranking_and_review_aggregates(tmp_path: Path) -> None:
+    """open の記録があればそれを使う（quotes）。review は日別に picked / next / all を並べる。"""
+    from typer.testing import CliRunner
+
+    from daytrade.cli import app
+    from wbcore.history import HistoryStore
+
+    cfg, env = _cli_env_margin(tmp_path)
+    _write_bars(
+        tmp_path / "data",
+        DAY,
+        {
+            "A0": (950, 970),
+            "B0": (970, 980),
+            "C0": (990, 985),
+            "D0": (1010, 1000),
+            "E0": (1060, 1070),
+        },
+    )
+    runner = CliRunner()
+    common = ["--date", DAY.isoformat(), "--config-dir", str(cfg)]
+    opened = runner.invoke(
+        app,
+        ["open", *common, "--quote-source", "csv", "--quote-file", str(tmp_path / "q.csv")],
+        env=env,
+    )
+    assert opened.exit_code == 0, opened.stdout
+    result = runner.invoke(app, ["evaluate", *common], env=env)
+    assert result.exit_code == 0, result.stdout
+    store = HistoryStore(tmp_path / "state" / "daytrade" / "history")
+    ev = store.read("evaluation")
+    assert ev["ranking_source"].unique().to_list() == ["quotes"]
+    assert ev["ranking_run_id"].n_unique() == 1 and ev["ranking_run_id"][0] is not None
+    # 9:00 の気配（950）と始値（950）が同じなので gap と gap_open が一致する
+    a = ev.filter(pl.col("symbol") == "A").row(0, named=True)
+    assert abs(a["gap"] - a["gap_open"]) < 1e-9
+    # E の売建は 1060 → 1070 で負け（−94 bp − 費用）
+    e = ev.filter(pl.col("symbol") == "E").row(0, named=True)
+    assert e["net_bp"] < -90
+
+    # 2 回目の evaluate は上書きせず増える
+    assert runner.invoke(app, ["evaluate", *common], env=env).exit_code == 0
+    assert len(store.files("evaluation")) == 2
+
+    out = tmp_path / "review.csv"
+    reviewed = runner.invoke(app, ["review", "--csv", str(out)], env=env)
+    assert reviewed.exit_code == 0, reviewed.stdout
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("day,side,source,picked_n,picked_bp,next_bp,all_bp,picked_pnl")
+    assert len(lines) == 3  # BUY と SELL の 1 日ずつ（最後の evaluate だけ）
+    buy = next(line for line in lines[1:] if ",BUY," in line)
+    assert ",quotes,3," in buy
+
+
+def test_evaluate_without_bars_or_plan_skips_quietly(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from daytrade.cli import app
+
+    cfg, env = _cli_env_margin(tmp_path)
+    common = ["--config-dir", str(cfg)]
+    # 日足が無い
+    result = CliRunner().invoke(app, ["evaluate", "--date", DAY.isoformat(), *common], env=env)
+    assert result.exit_code == 0 and "日足がまだ" in result.stdout
+    # 日足はあるが plan も順位表も無い日
+    other = dt.date(2026, 9, 2)
+    _write_bars(tmp_path / "data", other, {"A0": (1000, 1010)})
+    result = CliRunner().invoke(app, ["evaluate", "--date", other.isoformat(), *common], env=env)
+    assert result.exit_code == 0 and "評価できません" in result.stdout
+    review = CliRunner().invoke(app, ["review"], env=env)
+    assert review.exit_code == 0 and "まだありません" in review.stdout

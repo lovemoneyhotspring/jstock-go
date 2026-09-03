@@ -11,6 +11,7 @@ import datetime as dt
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import polars as pl
 
@@ -18,6 +19,9 @@ from daytrade.calendar import TradingCalendar
 from daytrade.config import DaytradeConfig
 from daytrade.universe import Inputs, candidates, num
 from wbcore.data.jquants_archive import Archive, endpoint
+
+if TYPE_CHECKING:
+    from wbcore.history import HistoryStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,13 +126,21 @@ def build(
     return Plan(meta=meta, frame=frame)
 
 
-def save(plan: Plan, directory: Path) -> tuple[Path, Path]:
+def save(plan: Plan, directory: Path, *, history: HistoryStore | None = None) -> tuple[Path, Path]:
+    """「最新」として ``plan-<日付>`` に置き（同じ日なら上書き。``open`` はこれを読む）、
+    ``history`` があれば母集団と要約を 1 ファイルずつ追記する（こちらは上書きしない）。"""
     parquet, meta = plan_paths(directory, plan.day)
     directory.mkdir(parents=True, exist_ok=True)
     tmp = parquet.with_suffix(".parquet.tmp")
     plan.frame.write_parquet(tmp)
     tmp.replace(parquet)
     meta.write_text(json.dumps(asdict(plan.meta), ensure_ascii=False, indent=1), encoding="utf-8")
+    if history is not None:
+        from daytrade.history import plan_frames
+
+        frame, meta_frame = plan_frames(plan)
+        history.append("plan", frame, day=plan.day)
+        history.append("plan_meta", meta_frame, day=plan.day)
     return parquet, meta
 
 

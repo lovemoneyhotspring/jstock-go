@@ -357,6 +357,19 @@ cron が溜め続ける J-Quants アーカイブ（`data/jquants`、2016 年〜�
 | | `uv run wbjp backtest --config-dir config --from 2025-01-01` | 資産曲線・勝率・シャープ。`--fill-model intrabar` で約定モデルを変えて突き合わせ |
 | 積立 | `uv run accum sync` → `accum backtest` / `accum compare 1306.T` | 戦略ごとの結果と対照群（S&P500 等の判定用指数は FRED） |
 
+### 運用の結果から改善する（[docs/FEEDBACK.md](docs/FEEDBACK.md)）
+
+バックテストは規則を過去に当て直すが、**実際に運用が見た値**からも改善の材料を取る。
+
+| 段階 | コマンド | 何が出るか |
+|---|---|---|
+| 今日どう動いたか | `jq 'select(.anomalies)' state/digest/prod-<日付>.jsonl` | 実行 1 回が 1 行。異常のあったものだけ絞れる |
+| 選定は効いたか | `daytrade review` / `wbjp review` / `accum evaluate` | 選んだものと選ばなかったものの比較 |
+| 約定は想定どおりか | `state/<app>/history/execution/*.parquet` | 想定価格との差（bp）、見送りの理由の分布 |
+
+`review` / `evaluate` / `history` / `screen` には `--json` があり、表の代わりに JSON を
+1 個だけ出す（`jq` にそのまま渡せる）。
+
 パラメータは `config/<dir>/*.toml` を書き換えて再実行する。別案を試すときは `config/` をディレクトリごと複製し
 `--config-dir` で指す（cron が読む設定を壊さない）。研究の記録は `docs/research/` に日付付きで残す。
 

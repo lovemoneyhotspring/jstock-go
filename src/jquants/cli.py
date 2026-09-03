@@ -20,6 +20,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from wbcore import digest
 from wbcore.clock import fmt, now_utc, today_utc
 from wbcore.logging import bind_run_context, configure_logging, get_logger
 from wbcore.settings import AppSettings
@@ -51,8 +52,14 @@ def main(
         timezone=settings.timezone,
         log_file=settings.log_file("jquants"),
     )
-    run_id = bind_run_context(
-        app="jquants", env=settings.env.value, command=ctx.invoked_subcommand or ""
+    command = ctx.invoked_subcommand or ""
+    run_id = bind_run_context(app="jquants", env=settings.env.value, command=command)
+    digest.start_run(
+        app="jquants",
+        env=settings.env.value,
+        command=command,
+        run_id=run_id,
+        state_dir=settings.state_dir,
     )
     ctx.obj = {"settings": settings, "run_id": run_id}
 
@@ -253,6 +260,7 @@ def check(
     if missing_total:
         console.print(table)
         log.warning("欠けがあります", code="jquants.gap", missing=missing_total)
+        digest.anomaly("jquants.gap", f"{missing_total} 件の営業日が欠けている")
         if notify:
             from wbcore.notify import alert
 

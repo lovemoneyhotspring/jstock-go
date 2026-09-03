@@ -161,7 +161,46 @@ def _timestamper(timezone: str) -> Any:
 
 
 #: 機械が読むログの形式の版。項目を変えたら上げる（docs/LOGGING.md）。
-LOG_SCHEMA = "wbjp.log.v1"
+#:
+#: v2 での変更（読み手を AI に絞ったための最適化）:
+#:   - ``timestamp``（表示用の時間帯）をファイル出力から外した。``ts_utc`` と
+#:     同じ時刻の二重持ちで、1 行あたり約 55 バイトを占めていた。端末表示には残る
+#:   - ``routine`` を追加。「動いただけ」の定型行に ``true`` が付く（:data:`ROUTINE_CODES`）
+LOG_SCHEMA = "wbjp.log.v2"
+
+#: 「動いただけ」＝読み飛ばしてよい定型イベントの ``code``。
+#:
+#: ここに載る行は ``routine: true`` が付き、AI は既定で読み飛ばす:
+#:
+#: .. code-block:: console
+#:
+#:     jq 'select(.routine != true)' state/logs/daytrade-prod.jsonl
+#:
+#: 判断・発注・異常は**絶対にここに入れない**。「いつも通り動いた」ことだけを
+#: 示す行——同期で変化が無かった、時間帯の外で何もしなかった、等——に限る。
+ROUTINE_CODES = frozenset(
+    {
+        "accum.skip",  # 発注時間帯の外
+        "jquants.no_calendar",  # カレンダーが無く平日で代用
+        "settings.state_migrated",  # 置き場の移動（1 回きり）
+    }
+)
+
+
+def _mark_routine(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+    """定型行に ``routine: true`` を付ける。
+
+    決め方は 2 通りで、呼び出し側の明示が優先する:
+        1. ``log.info(..., routine=True)`` — ``code`` の無い行はこちら
+        2. ``code`` が :data:`ROUTINE_CODES` にある
+
+    ``false`` は書かない（無い＝定型ではない）。AI が読む行数を減らすのが目的なので、
+    意味の無い項目を全行に足しては本末転倒になる。
+    """
+    explicit = event_dict.pop("routine", None)
+    if explicit is True or (explicit is None and event_dict.get("code") in ROUTINE_CODES):
+        event_dict["routine"] = True
+    return event_dict
 
 
 def _machine_fields(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
@@ -188,6 +227,15 @@ def bind_run_context(**fields: Any) -> str:
     run_id = uuid.uuid4().hex[:12]
     structlog.contextvars.bind_contextvars(run_id=run_id, **fields)
     return run_id
+
+
+def current_run_id() -> str:
+    """いま束ねている実行の ``run_id``。:func:`bind_run_context` の前なら空文字。
+
+    ログ以外の記録（選定の履歴など）に同じ ID を付け、ログと突き合わせられるようにする。
+    """
+    value = structlog.contextvars.get_contextvars().get("run_id", "")
+    return str(value)
 
 
 def configure_logging(
@@ -224,6 +272,7 @@ def configure_logging(
         # ``"exc_info": true`` しか残らず、後から原因を追えない。マスクの前に置き、
         # トレースバック本文（SDK がリクエストヘッダを載せる）も必ずマスクに通す
         structlog.processors.format_exc_info,
+        _mark_routine,
         redact_processor,
     ]
 
@@ -265,7 +314,7 @@ def configure_logging(
         )
         file_handler.setFormatter(
             _RedactingProcessorFormatter(
-                processor=structlog.processors.JSONRenderer(ensure_ascii=False, sort_keys=True),
+                processor=_machine_renderer(),
                 foreign_pre_chain=shared_processors,
             )
         )
@@ -274,6 +323,23 @@ def configure_logging(
 
     for name in quiet_loggers:
         logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def _machine_renderer() -> Any:
+    """ファイル（機械が読む側）用のレンダラ。
+
+    端末に出す ``timestamp``（表示の時間帯）を落としてから JSON にする。
+    同じ時刻は ``ts_utc`` にあり、読み手は AI なので時間帯の変換は難しくない。
+    1 行あたり約 55 バイト——全体の 15% ほど——がこれだけで減る。
+    """
+    render = structlog.processors.JSONRenderer(ensure_ascii=False, sort_keys=True)
+
+    def renderer(logger: Any, name: str, event_dict: dict[str, Any]) -> str:
+        event_dict.pop("timestamp", None)
+        rendered = render(logger, name, event_dict)
+        return rendered if isinstance(rendered, str) else rendered.decode("utf-8")
+
+    return renderer
 
 
 class _RedactingProcessorFormatter(structlog.stdlib.ProcessorFormatter):

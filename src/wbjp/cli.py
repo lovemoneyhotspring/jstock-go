@@ -17,6 +17,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from wbcore import digest, execution
 from wbcore.broker.base import BrokerError
 from wbcore.clock import fmt_iso, today_utc
 from wbcore.credentials import (
@@ -26,12 +27,14 @@ from wbcore.credentials import (
     load_tachibana_credentials,
 )
 from wbcore.data.provider import MarketDataProvider
+from wbcore.history import HistoryStore
 from wbcore.logging import bind_run_context, configure_logging, get_logger
+from wbcore.output import emit_json
 from wbcore.settings import describe_mode
 from wbjp.config import AppSettings, Config, load_config
 
 if TYPE_CHECKING:
-    pass
+    import polars as pl
 
 app = typer.Typer(
     help="日本株 自動売買システム",
@@ -60,7 +63,15 @@ def main(
         timezone=settings.timezone,
         log_file=settings.log_file("wbjp"),
     )
-    bind_run_context(app="wbjp", env=settings.env.value, command=ctx.invoked_subcommand or "")
+    command = ctx.invoked_subcommand or ""
+    run_id = bind_run_context(app="wbjp", env=settings.env.value, command=command)
+    digest.start_run(
+        app="wbjp",
+        env=settings.env.value,
+        command=command,
+        run_id=run_id,
+        state_dir=settings.state_dir,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -338,6 +349,7 @@ def run(
         for symbol, why in sorted(result.rejected.items()):
             console.print(f"  {symbol}: {why}")
 
+    execution.flush(HistoryStore(config.settings.wbjp_history_dir), day=result.as_of)
     journal.close()
 
 
@@ -430,11 +442,18 @@ def screen(
     show_failed: Annotated[
         bool, typer.Option("--show-failed", help="条件を満たさなかった銘柄も理由付きで表示")
     ] = False,
+    no_save: Annotated[
+        bool, typer.Option("--no-save", help="結果を履歴（state/wbjp/history/screen）に残さない")
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="表の代わりに JSON を 1 個だけ出す（AI・パイプ用）")
+    ] = False,
 ) -> None:
     """保存済みの足で銘柄をスクリーニングし、エントリー条件の合致度順に並べる。
 
     上位 sizing.max_positions 件が、次のサイクルで新規に建てる候補。
     ブローカーには接続しない（建玉は空として評価する）。
+    結果は閾値未満の銘柄も含めて履歴に追記する（``wbjp history screen`` で読める）。
     """
     from wbcore.data.store import BarStore
     from wbjp.strategy.base import StrategyContext
@@ -474,13 +493,52 @@ def screen(
     )
     meta = {sig.symbol: sig.meta for sig in signals if sig.meta}
     reasons = {sig.symbol: sig.reason for sig in signals}
+    limit = config.file.sizing.max_positions
+
+    from wbjp.history import screen_frame, store_for
+
+    # 履歴に残さないときも組み立てる（--json の中身がこれ）。作るだけなら副作用は無い
+    frame = screen_frame(
+        combined,
+        meta,
+        reasons,
+        threshold=threshold,
+        max_positions=limit,
+        combiner=config.file.strategies.combiner,
+        close=ctx.close,
+    )
+    saved: Path | None = None
+    if not no_save:
+        saved = store_for(config.settings).append("screen", frame, day=latest)
+        log.info(
+            "スクリーニングを履歴に追記",
+            code="wbjp.screen",
+            as_of=latest.isoformat(),
+            rows=frame.height,
+            matched=len(ranked),
+            path=str(saved),
+        )
+
+    if as_json:
+        emit_json(
+            {
+                "ok": True,
+                "as_of": latest,
+                "market": config.file.universe.market.value,
+                "universe": len(bars),
+                "matched": len(ranked),
+                "threshold": threshold,
+                "saved": saved,
+                "rows": frame.to_dicts(),
+            }
+        )
+        return
 
     console.print(
         f"\n[bold]スクリーニング[/bold]  基準日 {latest}  市場 {config.file.universe.market.value}"
         f"  対象 {len(bars)} 銘柄  合致 {len(ranked)} 銘柄"
     )
     if ranked:
-        limit = config.file.sizing.max_positions
         table = Table(title=f"順位（上位 {limit} 件が採用候補）", title_justify="left")
         for column in (
             "順位",
@@ -515,6 +573,8 @@ def screen(
         console.print(table)
     else:
         console.print("  条件を満たす銘柄はありません")
+    if saved is not None:
+        console.print(f"[dim]履歴に追記 {saved}[/dim]")
 
     if show_failed:
         pullbacks = [s for s in strategies if isinstance(s, TrendPullbackStrategy)]
@@ -532,6 +592,182 @@ def screen(
             frame = ctx.bars(symbol).with_columns(strategy.indicators())
             result = strategy.screen(frame)
             console.print(f"  {symbol}: " + " / ".join(result.failed))
+
+
+@app.command()
+def history(
+    kind: Annotated[str | None, typer.Argument(help="種類（screen）。省略で一覧")] = None,
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+    date: Annotated[str | None, typer.Option("--date", help="その基準日だけ YYYY-MM-DD")] = None,
+    start: Annotated[str | None, typer.Option("--from", help="開始日 YYYY-MM-DD")] = None,
+    end: Annotated[str | None, typer.Option("--to", help="終了日 YYYY-MM-DD")] = None,
+    latest: Annotated[
+        bool, typer.Option("--latest", help="その日（--date か最終日）の最後の実行ぶんだけ")
+    ] = False,
+    limit: Annotated[int, typer.Option(help="表示する行数")] = 50,
+    csv: Annotated[
+        Path | None, typer.Option("--csv", help="該当する全行をこのファイルに書き出す")
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="表の代わりに JSON を 1 個だけ出す（AI・パイプ用）")
+    ] = False,
+) -> None:
+    """スクリーニングの履歴（追記専用の Parquet）を一覧・表示・CSV に書き出す。
+
+    置き場は ``state/wbjp/history/<種類>/``。1 回の screen が 1 ファイルで上書きしない。
+    """
+    from wbcore.history import show_history
+    from wbjp.history import store_for
+
+    config = load_config(config_dir)
+    day = dt.date.fromisoformat(date) if date else None
+    show_history(
+        console,
+        store_for(config.settings),
+        kind,
+        start=day or (dt.date.fromisoformat(start) if start else None),
+        end=day or (dt.date.fromisoformat(end) if end else None),
+        latest_only=latest,
+        limit=limit,
+        csv_path=csv,
+        as_json=as_json,
+    )
+
+
+@app.command("evaluate")
+def evaluate_command(
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+    date: Annotated[str | None, typer.Option("--date", help="評価する判断日 YYYY-MM-DD")] = None,
+    horizon: Annotated[int, typer.Option(help="判断から何営業日後の終値で測るか")] = 20,
+    days: Annotated[int, typer.Option(help="--date を省いたとき、遡って評価する判断日数")] = 5,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="表の代わりに JSON を 1 個だけ出す（AI・パイプ用）")
+    ] = False,
+) -> None:
+    """スクリーニングの結果に後日の足を当て、選定が効いたかを履歴に残す。
+
+    採用した銘柄（``adopted``）だけを見ても相場全体の上下と区別できないので、
+    同じ日に候補へ挙がったが採用しなかった銘柄と並べて比べる。材料は
+    ``wbjp screen`` が積んだ履歴で、判断のロジックには触れない。
+    """
+    import polars as pl
+
+    from wbcore.data.store import BarStore
+    from wbjp import evaluate as evaluating
+    from wbjp.history import store_for
+
+    config = load_config(config_dir)
+    store = store_for(config.settings)
+    bars = BarStore(config.settings.bars_dir)
+
+    known = store.days("screen")
+    if not known:
+        message = "スクリーニングの履歴がありません（wbjp screen を回す）"
+        if as_json:
+            emit_json({"ok": True, "days": [], "message": message})
+        else:
+            console.print(f"[dim]{message}[/dim]")
+        return
+    targets = [dt.date.fromisoformat(date)] if date else known[-days:]
+
+    written: list[dict[str, object]] = []
+    for day in targets:
+        screens = store.latest("screen", day)
+        if screens.height == 0:
+            continue
+        result = evaluating.evaluate(screens, bars, day=day, horizon=horizon)
+        scored = result.filter(pl.col("ret_bp").is_not_null())
+        if scored.height == 0:
+            # horizon 本先の足がまだ無い日。次に回せば評価できるので残さない
+            if not as_json:
+                console.print(f"[dim]{day}: {horizon} 営業日後の足がまだありません[/dim]")
+            continue
+        path = store.append(evaluating.KIND, result, day=day)
+        written.append({"day": day, "rows": result.height, "path": path})
+        if not as_json:
+            console.print(f"\n[bold]{day}[/bold]  {horizon} 営業日後  [dim]{path}[/dim]")
+            _print_group_summary(evaluating.summarize(result))
+        log.info(
+            "スクリーニングを評価",
+            code="wbjp.evaluate",
+            day=day.isoformat(),
+            horizon=horizon,
+            rows=result.height,
+            scored=scored.height,
+            path=str(path),
+        )
+    digest.note(evaluated=len(written), horizon=horizon)
+    if as_json:
+        emit_json({"ok": True, "horizon": horizon, "days": written})
+    elif not written:
+        console.print("[dim]評価できる判断日がありませんでした[/dim]")
+
+
+def _print_group_summary(summary: pl.DataFrame) -> None:
+    table = Table(title="群ごとの実績（adopted が rest を上回っていれば選定が効いている）")
+    for column in ("群", "件数", "平均リターン bp", "勝率"):
+        table.add_column(column, justify="left" if column == "群" else "right")
+    for row in summary.iter_rows(named=True):
+        table.add_row(
+            row["group"],
+            f"{row['count']:,}",
+            f"{row['avg_ret_bp']:+,.1f}" if row["avg_ret_bp"] is not None else "-",
+            f"{row['win_rate']:.1%}" if row["win_rate"] is not None else "-",
+        )
+    console.print(table)
+
+
+@app.command("review")
+def review_command(
+    config_dir: Annotated[Path | None, typer.Option(help="設定ディレクトリ")] = None,
+    start: Annotated[str | None, typer.Option("--from", help="開始日 YYYY-MM-DD")] = None,
+    end: Annotated[str | None, typer.Option("--to", help="終了日 YYYY-MM-DD")] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="表の代わりに JSON を 1 個だけ出す（AI・パイプ用）")
+    ] = False,
+) -> None:
+    """選定の妥当性を日ごとに見る。採用・次点・圏外の平均リターンを並べる。
+
+    材料は ``wbjp evaluate`` が積んだ履歴。
+    """
+    from wbjp.evaluate import KIND, review, review_totals
+    from wbjp.history import store_for
+
+    config = load_config(config_dir)
+    store = store_for(config.settings)
+    first = dt.date.fromisoformat(start) if start else None
+    last = dt.date.fromisoformat(end) if end else None
+    table = review(store.read(KIND, start=first, end=last))
+    totals = review_totals(table)
+
+    if as_json:
+        emit_json({"ok": True, "rows": table.to_dicts(), "totals": totals.to_dicts()})
+        return
+    if table.height == 0:
+        console.print("[dim]評価の履歴がありません（wbjp evaluate を回す）[/dim]")
+        return
+
+    daily = Table(title="日別（bp は判断日の終値からのリターン）")
+    for column in ("判断日", "日数", "採用", "adopted bp", "passed bp", "rest bp"):
+        daily.add_column(column, justify="left" if column == "判断日" else "right")
+    for r in table.iter_rows(named=True):
+        daily.add_row(
+            r["day"].isoformat(),
+            str(r["horizon"]),
+            f"{r['adopted']:,}",
+            *[
+                f"{r[key]:+,.1f}" if r[key] is not None else "-"
+                for key in ("adopted_bp", "passed_bp", "rest_bp")
+            ],
+        )
+    console.print(daily)
+
+    for r in totals.iter_rows(named=True):
+        console.print(
+            f"\n[bold]合計[/bold]  {r['days']} 日  "
+            f"採用 {r['avg_adopted_bp']:+,.1f} bp / 圏外 {r['avg_rest_bp']:+,.1f} bp  "
+            f"採用が上回った日 {r['beat_rest_rate']:.1%}"
+        )
 
 
 def _score_breakdown(meta: dict[str, object]) -> str:

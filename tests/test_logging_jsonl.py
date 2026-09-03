@@ -46,13 +46,36 @@ def test_file_log_is_json_lines_with_fixed_fields(tmp_path: Path) -> None:
     # 実行コンテキストが全レコードに付く
     assert first["run_id"] == run_id
     assert first["app"] == "accum" and first["env"] == "uat" and first["command"] == "run"
-    # ts_utc は常に UTC、timestamp は表示の時間帯
+    # 時刻は ts_utc（常に UTC）だけ。表示用の timestamp はファイルには残さない
     assert first["ts_utc"].endswith("+00:00")
-    assert first["timestamp"].endswith("+09:00")
+    assert "timestamp" not in first
     # 鍵は辞書順（差分を取りやすく）
     assert list(first) == sorted(first)
     second = json.loads(lines[1])
     assert second["level"] == "warning" and second["symbols"] == {"563A": "2026-08-20"}
+
+
+def test_routine_lines_are_marked_so_they_can_be_skipped(tmp_path: Path) -> None:
+    """「動いただけ」の行に ``routine`` が付く。AI は既定でこれを読み飛ばす。"""
+    log_file = tmp_path / "accum-uat.jsonl"
+    configure_logging("INFO", log_file=log_file)
+    try:
+        # 1. code が既知の定型
+        get_logger("demo").info("発注時間帯の外", code="accum.skip")
+        # 2. code の無い行は呼び出し側が明示する
+        get_logger("demo").info("足は最新です", routine=True)
+        # 3. 判断・発注は定型ではない
+        get_logger("demo").info("積立の判断", code="accum.decision", symbol="452A")
+    finally:
+        _reset()
+
+    records = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
+    assert [r.get("routine") for r in records] == [True, True, None]
+    # 定型でない行に false を書かない（全行に無意味な項目を足さない）
+    assert "routine" not in records[2]
+
+    skipped = [r for r in records if not r.get("routine")]
+    assert [r["event"] for r in skipped] == ["積立の判断"]
 
 
 def test_file_log_redacts_secrets(tmp_path: Path) -> None:

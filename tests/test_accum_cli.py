@@ -25,6 +25,10 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         if key.startswith("WBJP_"):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr("wbcore.credentials.DEFAULT_ENV_FILE", tmp_path / "absent.env")
+    # 消しただけだと既定値（相対パスの ``state/``）とリポジトリ直下の ``.env`` が
+    # 顔を出し、本番のログに書いてしまう。置き場は必ず指し直す（tests/conftest.py）
+    monkeypatch.setenv("WBJP_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("WBJP_LOG_DIR", str(tmp_path / "state" / "logs"))
 
 
 def _accum(*args: str, config_dir: Path | None = None, env: dict[str, str] | None = None):  # type: ignore[no-untyped-def]

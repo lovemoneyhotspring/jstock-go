@@ -23,8 +23,11 @@ from rich.markup import escape
 from rich.table import Table
 
 from accum.config import DEFAULT_CONFIG_DIR, FILENAME, AccumConfig, load
+from wbcore import digest, execution
 from wbcore.clock import fmt, now_utc, today_utc
+from wbcore.history import HistoryStore
 from wbcore.logging import bind_run_context, configure_logging, get_logger
+from wbcore.output import emit_json
 from wbcore.settings import AppSettings, allows_live_orders, describe_mode
 
 if TYPE_CHECKING:
@@ -60,7 +63,15 @@ def main(
         timezone=settings.timezone,
         log_file=settings.log_file("accum"),
     )
-    bind_run_context(app="accum", env=settings.env.value, command=ctx.invoked_subcommand or "")
+    command = ctx.invoked_subcommand or ""
+    run_id = bind_run_context(app="accum", env=settings.env.value, command=command)
+    digest.start_run(
+        app="accum",
+        env=settings.env.value,
+        command=command,
+        run_id=run_id,
+        state_dir=settings.state_dir,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -344,7 +355,12 @@ class UnconfirmedOrderError(Exception):
 
 
 def _place_recorded(
-    broker: Broker, ledger: Ledger, request: OrderRequest, contribution: Contribution
+    broker: Broker,
+    ledger: Ledger,
+    request: OrderRequest,
+    contribution: Contribution,
+    *,
+    fee: Decimal | None = None,
 ) -> OrderAck:
     """台帳に**先に**記録してから発注する。
 
@@ -368,13 +384,33 @@ def _place_recorded(
         amount=amount,
         market=c.market,
     )
+    def _intent(reason: execution.ReasonCode, note: str | None = None) -> None:
+        # 台帳の amount は約定額で上書きされるので、判断時の想定はここで控える
+        execution.collect(
+            event="intent",
+            app="accum",
+            symbol=c.symbol,
+            side=request.side.value,
+            client_order_id=request.client_order_id,
+            live=True,
+            quantity=request.quantity,
+            intent_price=c.close,
+            intent_amount=amount,
+            intent_fee=fee,
+            reason=reason,
+            note=note,
+        )
+
     try:
         ack = broker.place(request)
-    except OrderRejectedError:
+    except OrderRejectedError as exc:
         ledger.update_status(request.client_order_id, OrderStatus.REJECTED)
+        _intent(execution.ReasonCode.BROKER_ERROR, str(exc))
         raise
     except BrokerError as exc:
+        _intent(execution.ReasonCode.UNCONFIRMED, str(exc))
         raise UnconfirmedOrderError(request.client_order_id, exc) from exc
+    _intent(execution.ReasonCode.PLACED)
     ledger.record(
         request,
         ack.status.value,
@@ -384,6 +420,43 @@ def _place_recorded(
         market=c.market,
     )
     return ack
+
+
+def _skip_reason(note: str | None) -> execution.ReasonCode:
+    """自由文の見送り理由を、集計できるコードに寄せる。
+
+    文言（``PlannedOrder.note``）は変わりうるので、集計はコードで行う。
+    どれにも当てはまらないものは :attr:`~wbcore.execution.ReasonCode.NOT_ELIGIBLE`。
+    """
+    text = note or ""
+    if "時間帯" in text:
+        return execution.ReasonCode.WINDOW_CLOSED
+    if "単元" in text or "予算" in text:
+        return execution.ReasonCode.LOT_TOO_SMALL
+    return execution.ReasonCode.NOT_ELIGIBLE
+
+
+def _skip_row(
+    contribution: Contribution,
+    request: OrderRequest | None,
+    reason: execution.ReasonCode,
+    note: str | None = None,
+) -> None:
+    """発注しなかった投下を実行品質に残す。見送りの理由の分布が改善の材料になる。"""
+    c = contribution
+    execution.collect(
+        event="skip",
+        app="accum",
+        symbol=c.symbol,
+        side="BUY",
+        client_order_id=request.client_order_id if request else None,
+        live=False,
+        quantity=request.quantity if request else None,
+        intent_price=c.close,
+        intent_amount=c.amount,
+        reason=reason,
+        note=note,
+    )
 
 
 def _notional(request: OrderRequest, contribution: Contribution) -> Decimal:
@@ -434,6 +507,7 @@ def run(
     except Exception as exc:
         # cron / systemd では誰も端末を見ていない。理由を通知してから落とす
         log.exception("積立の実行が異常終了", code="accum.crash", error=str(exc))
+        digest.fail("accum.crash", f"{type(exc).__name__}: {exc}")
         alert("積立: 実行が異常終了", f"{type(exc).__name__}: {exc}")
         raise typer.Exit(1) from exc
 
@@ -594,6 +668,20 @@ def _run(
             tactic=c.tactic.describe(),
             signal=next((e.signal_symbol for e in config.active if c.symbol in e.symbols), None),
         )
+    if contributions:
+        from accum.history import KIND as DECISION_KIND
+        from accum.history import decision_frame
+        from accum.history import store_for as history_store_for
+
+        saved = history_store_for(settings).append(
+            DECISION_KIND, decision_frame(contributions), day=today_utc()
+        )
+        log.info(
+            "積立の判断を履歴に追記",
+            code="accum.history",
+            rows=len(contributions),
+            path=str(saved),
+        )
     if not contributions:
         ledger.close()
         console.print("[dim]出すべき投下はありません（今月の目標に達しています）[/dim]")
@@ -675,10 +763,12 @@ def _run(
             key = f"{c.symbol} {c.date}"
             if item.request is None:
                 status[key] = f"[yellow]見送り[/yellow] {item.note}"
+                _skip_row(c, None, _skip_reason(item.note), item.note)
                 continue
             # 台帳にあれば同じ判断からの再実行（祝日で足が増えない日など）。送らない。
             if ledger.was_placed(item.request.client_order_id):
                 status[key] = "[dim]発注済み（冪等）[/dim]"
+                _skip_row(c, item.request, execution.ReasonCode.IDEMPOTENT)
                 continue
             if not allowed:
                 ledger.record(
@@ -689,6 +779,7 @@ def _run(
                     market=c.market,
                 )
                 status[key] = "[yellow]dry-run[/yellow]"
+                _skip_row(c, item.request, execution.ReasonCode.DRY_RUN)
                 continue
             try:
                 broker = broker_for(c.market)
@@ -703,11 +794,12 @@ def _run(
                     note = f"買付余力不足（必要 {cost:,.0f} / 余力 {buying_power:,.0f}）"
                     status[key] = f"[red]見送り[/red] {note}"
                     failures.append(f"{key}: {note}")
+                    _skip_row(c, item.request, execution.ReasonCode.INSUFFICIENT_FUNDS, note)
                     continue
                 remaining[c.market] = buying_power - cost
                 request = item.request
                 try:
-                    _place_recorded(broker, ledger, request, c)
+                    _place_recorded(broker, ledger, request, c, fee=preview.estimated_fee)
                 except BrokerError as exc:
                     if not (
                         config.execution.fallback_to_limit
@@ -730,7 +822,7 @@ def _run(
                         symbol=c.symbol,
                         limit_price=str(request.limit_price),
                     )
-                    _place_recorded(broker, ledger, request, c)
+                    _place_recorded(broker, ledger, request, c, fee=preview.estimated_fee)
                     status[key] = f"[green]発注[/green]（指値 {request.limit_price:,} に切替）"
             except UnconfirmedOrderError as exc:
                 # 送ったかどうか分からない。台帳には送信中として残してあるので
@@ -744,6 +836,7 @@ def _run(
                     client_order_id=exc.client_order_id,
                     error=str(exc),
                 )
+                digest.anomaly("accum.unconfirmed", f"{c.symbol}: 届いたか不明（要照会）")
             except BrokerError as exc:
                 status[key] = f"[red]失敗[/red] {exc}"
                 failures.append(f"{key}: {exc}")
@@ -777,6 +870,10 @@ def _run(
         orders=len(planned),
         failures=len(failures),
     )
+    execution.flush(HistoryStore(settings.accum_history_dir), day=today_utc())
+    digest.note(live=allowed, orders=len(planned), failures=len(failures))
+    if failures:
+        digest.anomaly("accum.order_failed", f"{len(failures)} 件の発注に失敗")
     if failures:
         alert(f"積立: {len(failures)} 件の発注に失敗", "\n".join(failures))
 
@@ -940,6 +1037,120 @@ def orders(
 # --------------------------------------------------------------------------
 # 検証
 # --------------------------------------------------------------------------
+
+
+@app.command("history")
+def history_command(
+    kind: Annotated[
+        str | None, typer.Argument(help="種類（decision / evaluation）。省略で一覧")
+    ] = None,
+    start: Annotated[str | None, typer.Option("--from", help="開始日 YYYY-MM-DD")] = None,
+    end: Annotated[str | None, typer.Option("--to", help="終了日 YYYY-MM-DD")] = None,
+    limit: Annotated[int, typer.Option(help="表示する行数")] = 50,
+    csv: Annotated[
+        Path | None, typer.Option("--csv", help="該当する全行をこのファイルに書き出す")
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="表の代わりに JSON を 1 個だけ出す（AI・パイプ用）")
+    ] = False,
+) -> None:
+    """積立の判断・評価の履歴（追記専用の Parquet）を一覧・表示・CSV に書き出す。
+
+    置き場は ``state/accum/history/<種類>/``。台帳（発注したものだけ）と違い、
+    発注に至らなかった判断も残る。
+    """
+    from accum.history import store_for
+    from wbcore.history import show_history
+
+    settings = AppSettings()
+    show_history(
+        console,
+        store_for(settings),
+        kind,
+        start=dt.date.fromisoformat(start) if start else None,
+        end=dt.date.fromisoformat(end) if end else None,
+        limit=limit,
+        csv_path=csv,
+        as_json=as_json,
+    )
+
+
+@app.command("evaluate")
+def evaluate_command(
+    horizon: Annotated[int, typer.Option(help="判断から何営業日後の終値で測るか")] = 20,
+    start: Annotated[str | None, typer.Option("--from", help="開始日 YYYY-MM-DD")] = None,
+    end: Annotated[str | None, typer.Option("--to", help="終了日 YYYY-MM-DD")] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="表の代わりに JSON を 1 個だけ出す（AI・パイプ用）")
+    ] = False,
+) -> None:
+    """積立の判断に後日の足を当て、**増額した日は安かったか**を倍率の帯ごとに見る。
+
+    倍率 1.0（通常の積立）が対照群。増額の帯がそれより高いリターンなら、
+    下落局面で増やす規則は効いている。材料は ``accum run`` が積んだ判断履歴。
+    """
+    import polars as pl
+
+    from accum.evaluate import KIND, evaluate, summarize
+    from accum.history import KIND as DECISION_KIND
+    from accum.history import store_for
+    from wbcore.data.store import BarStore
+
+    settings = AppSettings()
+    store = store_for(settings)
+    first = dt.date.fromisoformat(start) if start else None
+    last = dt.date.fromisoformat(end) if end else None
+    decisions = store.read(DECISION_KIND, start=first, end=last)
+    if decisions.height == 0:
+        message = "判断の履歴がありません（accum run を回す）"
+        if as_json:
+            emit_json({"ok": True, "rows": [], "summary": [], "message": message})
+        else:
+            console.print(f"[dim]{message}[/dim]")
+        return
+
+    result = evaluate(decisions, BarStore(settings.bars_dir), horizon=horizon)
+    summary = summarize(result)
+    scored = result.filter(pl.col("ret_bp").is_not_null())
+    path = store.append(KIND, result, day=today_utc()) if scored.height else None
+    log.info(
+        "積立の判断を評価",
+        code="accum.evaluate",
+        horizon=horizon,
+        rows=result.height,
+        scored=scored.height,
+        path=str(path) if path else None,
+    )
+    digest.note(rows=result.height, scored=scored.height, horizon=horizon)
+
+    if as_json:
+        emit_json(
+            {
+                "ok": True,
+                "horizon": horizon,
+                "path": path,
+                "summary": summary.to_dicts(),
+                "rows": result.to_dicts(),
+            }
+        )
+        return
+    if scored.height == 0:
+        console.print(f"[dim]{horizon} 営業日後の足がまだありません[/dim]")
+        return
+    table = Table(title=f"倍率の帯ごとの実績（判断から {horizon} 営業日後）")
+    for column in ("倍率の帯", "件数", "平均リターン bp", "勝率", "投下額"):
+        table.add_column(column, justify="left" if column == "倍率の帯" else "right")
+    for r in summary.iter_rows(named=True):
+        table.add_row(
+            r["bucket"],
+            f"{r['count']:,}",
+            f"{r['avg_ret_bp']:+,.1f}" if r["avg_ret_bp"] is not None else "-",
+            f"{r['win_rate']:.1%}" if r["win_rate"] is not None else "-",
+            _yen(r["due"] or 0),
+        )
+    console.print(table)
+    if path is not None:
+        console.print(f"[dim]履歴に追記 {path}[/dim]")
 
 
 @app.command("backtest")

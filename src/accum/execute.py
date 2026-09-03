@@ -24,6 +24,7 @@ from accum.config import AccumConfig
 from accum.ledger import Ledger
 from accum.plan import AccumulationSettings, build_plan
 from accum.tactics import Tactic
+from wbcore import execution
 from wbcore.broker.base import Broker
 from wbcore.clock import now_utc, to_zone
 from wbcore.domain.market_rules import PriceRounding, rules_for
@@ -433,6 +434,23 @@ def sync_order_status(
             continue
         if order.status.value == row.status and order.filled_quantity == row.filled_quantity:
             continue
+        # amount はこの直後に約定額で上書きされる。想定はここでしか取れない
+        execution.collect(
+            event="fill",
+            app="accum",
+            symbol=row.symbol,
+            side="BUY",
+            client_order_id=row.client_order_id,
+            broker_order_id=order.broker_order_id,
+            live=True,
+            quantity=row.quantity,
+            intent_price=(row.amount / row.quantity) if row.amount and row.quantity else None,
+            fill_quantity=order.filled_quantity,
+            fill_price=order.avg_fill_price,
+            reason=execution.ReasonCode.FILLED
+            if order.filled_quantity
+            else execution.ReasonCode.EXPIRED,
+        )
         ledger.update_status(
             row.client_order_id,
             order.status,

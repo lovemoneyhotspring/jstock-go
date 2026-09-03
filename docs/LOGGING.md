@@ -3,11 +3,28 @@
 後から AI に読ませて改善に使う前提で、ログは **JSON Lines**（1 行 1 レコード、UTF-8）で
 ファイルに残す。端末に出る整形済みの表示とは別の経路で、常に書かれる。
 
+**読み手は AI であって人ではない**。そのため次の 3 段で「読む量」を削ってある。
+上から順に見て、必要になったときだけ下に降りる:
+
+| 段 | 何 | どこ |
+|---|---|---|
+| 1 | **日次ダイジェスト**——実行 1 回が 1 行。異常の有無だけ分かる | `state/digest/<env>-<日付>.jsonl` |
+| 2 | **判断・実行品質の履歴**——追記専用の Parquet。列で絞って読める | `state/<app>/history/<種類>/` |
+| 3 | この文書の JSONL——再現に要る全部 | `state/logs/<app>-<env>.jsonl` |
+
+```console
+# まず今日の全実行（数十 KB）。異常のあった実行だけ run_id を拾う
+jq 'select(.anomalies)' state/digest/prod-2026-09-03.jsonl
+
+# その run_id だけを JSONL から引く。定型行（routine）は読み飛ばす
+jq 'select(.run_id == "abc123" and .routine != true)' state/logs/daytrade-prod.jsonl
+```
+
 | 何 | どこ |
 |---|---|
 | 置き場 | `WBJP_LOG_DIR`（既定 `WBJP_STATE_DIR/logs`＝`state/logs`）。**ファイルに残すログはこの 1 箇所だけ。** cron で stderr を残すときもここへ。本番では絶対パスで指定する |
 | ファイル | `<WBJP_LOG_DIR>/<app>-<env>.jsonl`。`app` は `wbjp` / `accum` / `jquants` / `daytrade`、`env` は `uat` / `prod` |
-| ローテーション | 日次（UTC の 0 時）、90 日保持。ローテーション後は `…jsonl.YYYY-MM-DD` |
+| ローテーション | 日次（UTC の 0 時）、90 日保持。ローテーション後は `…jsonl.YYYY-MM-DD`。**日付ごとにファイルが分かれるので、他の日を読まずに済む** |
 | 文字 | UTF-8、`ensure_ascii=False`（日本語はそのまま） |
 | 鍵の並び | 辞書順（`sort_keys`）。差分を取りやすくするため |
 | 秘匿情報 | API キー・シークレット・口座 ID はファイルに書く前に `***` に置き換わる |
@@ -18,7 +35,7 @@
 |---|---|---|
 | `schema` | この形式の版。項目を変えたら上げる | `wbjp.log.v1` |
 | `ts_utc` | 記録時刻（**常に UTC**、オフセット付き ISO 8601）。並べ替えと突き合わせの鍵 | `2026-08-29T07:32:39.123456+00:00` |
-| `timestamp` | 同じ時刻を表示用の時間帯で（`WBJP_TIMEZONE`）。人が読む用 | `2026-08-29T16:32:39.123456+09:00` |
+| `routine` | 「動いただけ」の定型行に `true`。**付いていない行だけ読めばよい**（`false` は書かない） | `true` |
 | `level` | `debug` / `info` / `warning` / `error` | |
 | `logger` | 出したモジュール | `accum.cli` |
 | `event` | 出来事の説明（日本語） | `積立の判断` |
@@ -29,6 +46,20 @@
 | `code` | 出来事の**安定した識別子**（付いているものだけ）。集計や分類はこれで行う | `accum.decision` |
 
 `event` は人向けの文で、文言が変わることがある。分類には `code` を使うこと。
+
+`timestamp`（表示の時間帯）は**ファイルには残さない**。`ts_utc` と同じ時刻の
+二重持ちで、1 行あたり約 55 バイトを占めていた。端末の表示には従来どおり出る。
+
+## 定型行（`routine`）
+
+「いつも通り動いた」だけの行には `routine: true` が付く。付け方は 2 通りで、
+呼び出し側の明示が優先する:
+
+1. `log.info("足を更新しました", ..., routine=True)` — `code` の無い行はこちら
+2. `code` が `wbcore.logging.ROUTINE_CODES` にある
+
+**判断・発注・異常は絶対に定型にしない。** 同期して変化が無かった、時間帯の外で
+何もしなかった——といった「読み飛ばしてよい」行だけに付ける。
 
 ## `code` の一覧
 
@@ -61,6 +92,10 @@
 `daytrade.regime`）、**判断**（`daytrade.ranking` / `daytrade.pick` / `daytrade.skip`）、**結果**（`daytrade.order` / `daytrade.fill` /
 `daytrade.run` / `daytrade.crash`）——を毎回の実行に残す。1 回の実行は `run_id` で束ねる。
 
+ログは再現用で、順位表は上位 N+5 件、保持は 90 日。振り返り・検証のための**全行**（候補・気配・順位表・実行の要約）は
+`state/daytrade/history/` に追記専用の Parquet で残し、同じ `run_id` で突き合わせられる（`docs/DAYTRADE.md`「履歴」）。
+`wbjp screen` も同様に `state/wbjp/history/screen/` に残す（`wbjp.screen` の行に `path`）。
+
 | `code` | いつ | 主な項目 |
 |---|---|---|
 | `daytrade.config` | 実行の冒頭（plan / open / close） | `phase`, `day`, `live`, `enabled`, `max_capital`, `positions`（N）, `budget_per_order`, `segments`, `min_turnover`, `max_gap`, `skip_months`, `iv_gate`, `drift_gate`, `equity_curve_days`, `us_skip`, `quote_source`, `entry_window` / `exit_window`, `max_quote_age`, `kill_switch`, `watch_only`, `state_dir`, `data_dir` |
@@ -77,6 +112,7 @@
 | `daytrade.pnl_incomplete` | 資産曲線の評価で、売りの約定単価が確定していない日を除いた | `days` |
 | `daytrade.iv_missing` / `daytrade.us_missing` | 前日の IV／前夜の米国市場を取れず、そのゲート無しで進んだ | `prev_day` / `error` |
 | `daytrade.run` | 実行の終了 | `phase`（`open` / `close`）, `live`, `reason`, `n`, `budget`, `picks` / `sells`, `failures` |
+| `daytrade.evaluate` | 大引後に候補の全行へ日足を当てた（`docs/DAYTRADE.md`「候補の結果と選定の妥当性」） | `day`, `source`（`quotes` / `archive_open`）, `rows`, `picked`, `traded`, `path`, `summary`（脚 × 群の件数・平均 net bp・勝率・想定損益） |
 | `daytrade.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception`（トレースバック） |
 
 ブローカーとのやり取り（送ったペイロード・応答）は、各ブローカー実装が `event` で残す（`発注します` など。`code` 無し）。

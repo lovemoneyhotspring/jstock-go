@@ -168,6 +168,13 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
   台帳は「今月いくら発注済みか」の唯一の記録で失うと当月を買い直すので、`state/backup/` は
   別ディスクやオブジェクトストレージへ同期しておく。`accum run` は起動時にブローカーの当月の
   約定と台帳を突き合わせ、台帳に無い約定があれば発注を止めて通知する
+- 選定の履歴 `state/daytrade/history/` と `state/wbjp/history/`（追記専用の Parquet、
+  `docs/DAYTRADE.md`「履歴」）は `accum backup` の対象外。ファイルは増えるだけで書き換わらないので、
+  `state/backup/` と一緒に `rsync -a`（`--delete` なし）で別ホストへ同期する
+- 平日 20:20 の `daytrade evaluate` は、朝の候補（選んだ銘柄も次点も）に当日の日足を当てて
+  `state/daytrade/history/evaluation/` に残す。日足が取り込まれる前に走れば何もせず終わる
+  （翌日の 20:20 に `--date` 無しでは前日を拾わないので、抜けた日は手で `--date` を付けて回す）。
+  選定の妥当性は `daytrade review` で見る（`docs/DAYTRADE.md`）
 - `accum run --live` は発注時間帯（既定 14:00〜15:00 JST、土日除く）の外では足の同期も
   ブローカー接続もせずに終了する。`--live` 無しの dry-run は確認用なので、いつでも判断まで見せる
 

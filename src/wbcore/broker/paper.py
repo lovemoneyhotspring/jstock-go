@@ -203,7 +203,11 @@ class PaperBroker(Broker):
         if request.client_order_id in self._orders:
             # 冪等性: 同じ ID の再送は新規注文にしない
             existing = self._orders[request.client_order_id]
-            log.info("既知の注文IDのため再送を無視", client_order_id=request.client_order_id)
+            log.info(
+                "既知の注文IDのため再送を無視",
+                client_order_id=request.client_order_id,
+                routine=True,
+            )
             return OrderAck(request.client_order_id, request.client_order_id, existing.status)
 
         holding = self._holdings.get(request.symbol)
