@@ -14,42 +14,40 @@ import (
 )
 
 func newQueryCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "query [SQL]",
-		Short: "DuckDB で端点 Parquet をビューにして SQL クエリを実行する",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			sqlQuery := args[0]
+	var limit int
 
+	cmd := &cobra.Command{
+		Use:   "query [SQL]",
+		Short: "DuckDB で端点 Parquet をビューにして SQL を実行する（研究用）",
+		Long: "例: jquants query \"SELECT Code, Date, AdjC FROM equities_bars_daily " +
+			"WHERE Code='72030' ORDER BY Date DESC LIMIT 5\"",
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
 			db, err := storage.OpenDuckDB()
 			if err != nil {
-				return fmt.Errorf("failed to open duckdb: %w", err)
+				return err
 			}
 			defer db.Close()
 
-			// 各端点ディレクトリの Parquet をビューとして登録
-			arch, err := archive.OpenArchive(jquantsDir)
-			if err == nil {
-				defer arch.Close()
-				dirs, _ := arch.ExistingParquetDirs()
-				for _, dirName := range dirs {
-					globPath := filepath.Join(jquantsDir, dirName, "*.parquet")
-					createViewSQL := fmt.Sprintf("CREATE VIEW %s AS SELECT * FROM read_parquet('%s', union_by_name=true);", dirName, globPath)
-					_, _ = db.Exec(createViewSQL)
-				}
+			// 端点ディレクトリの Parquet をビューとして登録する。
+			// union_by_name で列が増えた月とも一緒に読める
+			arch := archive.NewArchive(jquantsDir)
+			for _, name := range arch.ExistingParquetDirs() {
+				glob := filepath.Join(jquantsDir, name, "*.parquet")
+				_, _ = db.Exec(fmt.Sprintf(
+					"CREATE VIEW %s AS SELECT * FROM read_parquet('%s', union_by_name=true);", name, glob))
 			}
 
-			results, err := storage.QueryDuckDB(db, sqlQuery)
+			results, err := storage.QueryDuckDB(db, args[0])
 			if err != nil {
-				return fmt.Errorf("query execution failed: %w", err)
+				return fmt.Errorf("クエリの実行に失敗しました: %w", err)
 			}
-
 			if len(results) == 0 {
 				fmt.Println("結果: 0 件")
 				return nil
 			}
 
-			// カラム名一覧を取得
 			var cols []string
 			for k := range results[0] {
 				cols = append(cols, k)
@@ -57,18 +55,31 @@ func newQueryCmd() *cobra.Command {
 			sort.Strings(cols)
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			// ヘッダ
 			fmt.Fprintln(w, strings.Join(cols, "\t"))
-			// 各行
-			for _, r := range results {
-				var vals []string
+			shown := results
+			if limit > 0 && len(shown) > limit {
+				shown = shown[:limit]
+			}
+			for _, r := range shown {
+				vals := make([]string, 0, len(cols))
 				for _, c := range cols {
+					if r[c] == nil {
+						vals = append(vals, "")
+						continue
+					}
 					vals = append(vals, fmt.Sprintf("%v", r[c]))
 				}
 				fmt.Fprintln(w, strings.Join(vals, "\t"))
 			}
-			w.Flush()
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			if len(shown) < len(results) {
+				fmt.Printf("…（全 %d 行のうち %d 行を表示）\n", len(results), len(shown))
+			}
 			return nil
 		},
 	}
+	cmd.Flags().IntVar(&limit, "limit", 50, "表示行数（0 で全件）")
+	return cmd
 }
