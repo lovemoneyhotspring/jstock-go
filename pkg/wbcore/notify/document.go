@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// threadNameLimit は Discord のスレッド名（フォーラムの投稿タイトル）の上限。
+const threadNameLimit = 100
 
 // ChunkLimit は 1 通の文字数の上限。
 //
@@ -79,6 +83,11 @@ func splitKeepEnds(text string) []string {
 // 見出しを持っている）と、上限で分割して連投すること。
 // 送り先が未設定なら何もせず false を返す——レポート本体はファイルに
 // 残っているので、配達の失敗で処理は止めない。
+//
+// 送り先はフォーラムチャンネルの Webhook を想定していて、最初のページで
+// thread_name により新しい投稿（スレッド）を作り、残りのページはその
+// スレッドに thread_id で追記する。固定のスレッド ID は使い回さない
+// ——呼ぶたびに別スレッドになる。
 func PostDocument(body, title string) (ok bool, err error) {
 	body = strings.TrimSpace(body)
 	if body == "" {
@@ -94,14 +103,24 @@ func PostDocument(body, title string) (ok bool, err error) {
 
 	pages := Chunks(body, ChunkLimit)
 	ok = true
+	threadID := ""
 	for i, page := range pages {
 		suffix := ""
 		if len(pages) > 1 {
 			suffix = fmt.Sprintf("\n_(%d/%d)_", i+1, len(pages))
 		}
-		if perr := postOnce(webhookURL, page+suffix, true); perr != nil {
+		newThreadName := ""
+		if i == 0 {
+			newThreadName = threadName(title)
+		}
+		createdID, perr := postMessage(webhookURL, page+suffix, newThreadName, threadID, true)
+		if perr != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", perr)
 			ok = false
+			continue
+		}
+		if i == 0 {
+			threadID = createdID
 		}
 		if i < len(pages)-1 {
 			time.Sleep(betweenPages)
@@ -110,16 +129,56 @@ func PostDocument(body, title string) (ok bool, err error) {
 	return ok, nil
 }
 
-// postOnce は 1 通送る。Discord も Slack も通るように text と content の
-// 両方を入れる。429（レート制限）は Retry-After を待って 1 度だけやり直す。
-func postOnce(webhookURL, content string, mayRetry bool) error {
-	payload, err := json.Marshal(map[string]string{"content": content, "text": content})
-	if err != nil {
-		return err
+// threadName はスレッド名（フォーラムの投稿タイトル）を作る。
+// 空・100 文字超えを避ける。
+func threadName(title string) string {
+	name := strings.TrimSpace(title)
+	if name == "" {
+		name = "wbjp"
 	}
-	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(payload))
+	r := []rune(name)
+	if len(r) > threadNameLimit {
+		r = r[:threadNameLimit]
+	}
+	return string(r)
+}
+
+// postMessage は 1 通送る。Discord も Slack も通るように text と content の
+// 両方を入れる。429（レート制限）は Retry-After を待って 1 度だけやり直す。
+//
+//   - newThreadName を指定すると、フォーラム/メディアチャンネル向けに
+//     新しい投稿（スレッド）を作りながら送る（thread_name）。戻り値の
+//     createdThreadID はその投稿のスレッド ID（Discord の応答の channel_id）。
+//   - threadID を指定すると、既存のスレッドに追記する（thread_id）。
+//
+// 両方は同時に使わない。
+func postMessage(webhookURL, content, newThreadName, threadID string, mayRetry bool) (createdThreadID string, err error) {
+	u, err := url.Parse(webhookURL)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("Webhook URL を解釈できません: %w", err)
+	}
+	q := u.Query()
+	if threadID != "" {
+		q.Set("thread_id", threadID)
+	}
+	if newThreadName != "" {
+		// 作った投稿の channel_id（= スレッド ID）を次のページ送信で
+		// 使うので、応答を待つ
+		q.Set("wait", "true")
+	}
+	u.RawQuery = q.Encode()
+
+	payload := map[string]any{"content": content, "text": content}
+	if newThreadName != "" {
+		payload["thread_name"] = newThreadName
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewReader(data))
+	if err != nil {
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	// 省略できない。Discord は Cloudflare の後ろにいて、既定の User-Agent だと
@@ -128,7 +187,7 @@ func postOnce(webhookURL, content string, mayRetry bool) error {
 
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
-		return fmt.Errorf("通知先 Discord への送信に失敗: %w", err)
+		return "", fmt.Errorf("通知先 Discord への送信に失敗: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -141,10 +200,20 @@ func postOnce(webhookURL, content string, mayRetry bool) error {
 			wait = 30
 		}
 		time.Sleep(time.Duration(wait * float64(time.Second)))
-		return postOnce(webhookURL, content, false)
+		return postMessage(webhookURL, content, newThreadName, threadID, false)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("通知先 Discord がエラーを返した: %d", resp.StatusCode)
+		return "", fmt.Errorf("通知先 Discord がエラーを返した: %d", resp.StatusCode)
 	}
-	return nil
+
+	if newThreadName == "" {
+		return "", nil
+	}
+	var msg struct {
+		ChannelID string `json:"channel_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
+		return "", fmt.Errorf("Discord の応答からスレッド ID を読めません: %w", err)
+	}
+	return msg.ChannelID, nil
 }

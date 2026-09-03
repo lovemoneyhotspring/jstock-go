@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -73,5 +74,43 @@ func TestDescribeModeShowsAccountAndOrders(t *testing.T) {
 	// キルスイッチはすべてに優先する
 	if line := s.DescribeMode(true, true); !strings.Contains(line, "発注: しない") || !strings.Contains(line, "緊急停止") {
 		t.Errorf("キルスイッチ = %s", line)
+	}
+}
+
+// notify.Alert など AppSettings を経由せず os.Getenv を直接見るコードが
+// .env の値を拾えるように、LoadAppSettings はプロセスの環境変数にも
+// 反映する（cron は .env を source しないので、ここでしか読めない）。
+func TestLoadAppSettingsExportsDotenvToProcessEnv(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("WBJP_TEST_ONLY_KEY=from-dotenv\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WBJP_ENV_FILE", envPath)
+	os.Unsetenv("WBJP_TEST_ONLY_KEY")
+	t.Cleanup(func() { os.Unsetenv("WBJP_TEST_ONLY_KEY") })
+
+	LoadAppSettings()
+
+	if got := os.Getenv("WBJP_TEST_ONLY_KEY"); got != "from-dotenv" {
+		t.Errorf("os.Getenv が .env の値を読めない: got %q, want %q", got, "from-dotenv")
+	}
+}
+
+// 環境変数がすでにあれば .env で上書きしない（環境変数が優先という
+// lookup と同じ優先順位を、プロセス全体でも保つ）。
+func TestLoadAppSettingsDoesNotOverrideExistingEnv(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("WBJP_TEST_ONLY_KEY2=from-dotenv\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WBJP_ENV_FILE", envPath)
+	t.Setenv("WBJP_TEST_ONLY_KEY2", "from-os-env")
+
+	LoadAppSettings()
+
+	if got := os.Getenv("WBJP_TEST_ONLY_KEY2"); got != "from-os-env" {
+		t.Errorf("既存の環境変数が .env で上書きされた: got %q", got)
 	}
 }

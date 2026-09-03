@@ -1,12 +1,8 @@
 package notify
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
-	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 )
@@ -16,7 +12,11 @@ const (
 	UserAgent     = "wbjp/1.0 (+https://github.com/lovemoneyhotspring/jstock-go)"
 )
 
-// Alert は Slack または Discord の Webhook へ運用通知（アラート）を送信する。
+// Alert は Discord の Webhook へ運用通知（アラート）を送信する。
+//
+// 送り先はフォーラムチャンネルの Webhook を想定していて、呼ぶたびに
+// thread_name で新しい投稿（スレッド）を作る。固定のスレッド ID を
+// 使い回すのではなく、通知のたびに別スレッドになる。
 func Alert(title, body string, logger *logging.Logger) bool {
 	webhookURL := os.Getenv(WebhookEnvVar)
 	if webhookURL == "" {
@@ -31,38 +31,11 @@ func Alert(title, body string, logger *logging.Logger) bool {
 		text = fmt.Sprintf("%s\n%s", text, body)
 	}
 
-	payload := map[string]string{
-		"text":    text,
-		"content": text,
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return false
-	}
-
-	req, err := http.NewRequest("POST", webhookURL, bytes.NewReader(data))
-	if err != nil {
-		return false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", UserAgent)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
+	if _, err := postMessage(webhookURL, text, threadName(title), "", true); err != nil {
 		if logger != nil {
 			logger.Error("notify.failed", fmt.Sprintf("通知送信失敗: %v", err))
 		}
 		return false
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if logger != nil {
-			logger.Error("notify.http_error", fmt.Sprintf("通知先がHTTP %d を返しました", resp.StatusCode))
-		}
-		return false
-	}
-
 	return true
 }

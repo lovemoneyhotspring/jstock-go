@@ -43,6 +43,10 @@ func LoadAppSettings() *AppSettings {
 	dotenvMap := make(map[string]string)
 	if envs, err := godotenv.Read(envFile); err == nil {
 		dotenvMap = envs
+		// notify.Alert 等、AppSettings を経由せず os.Getenv を直接見る箇所が
+		// .env の値を拾えるよう、既存の環境変数を上書きしない形でプロセスにも
+		// 反映する（cron は .env を source しないので、ここでしか読めない）
+		_ = godotenv.Load(envFile)
 	} else if !os.IsNotExist(err) {
 		// ファイルはあるのに読めない（権限・壊れた行）。黙って空で進むと
 		// 認証情報が無いまま UAT 扱いになり、原因が分からない
