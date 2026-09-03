@@ -16,11 +16,16 @@ import (
 // 「ブローカーが知らない」＝ nil を返す（応答が返らなかった注文の再現）。
 type lookupBroker struct {
 	broker.Broker
-	orders map[string]*domain.Order
+	orders  map[string]*domain.Order
+	history []domain.Order // 当日の注文一覧（送信結果不明の突き合わせ用）
 }
 
 func (l *lookupBroker) GetOrder(clientOrderID string, brokerOrderID *string) (*domain.Order, error) {
 	return l.orders[clientOrderID], nil
+}
+
+func (l *lookupBroker) GetOrderHistory(start, end time.Time) ([]domain.Order, error) {
+	return l.history, nil
 }
 
 func openTestLedger(t *testing.T) *ledger.Ledger {
@@ -51,13 +56,14 @@ func recordPending(t *testing.T, led *ledger.Ledger, id, symbol string, qty, amo
 	return req
 }
 
-// 応答が返らず PENDING のまま残った注文は、猶予を過ぎたら REJECTED に落とす。
-// これをしないと、届かなかった注文が永久に「発注済み」として当月の予算を食う。
+// 応答が返らず PENDING のまま残った注文は、猶予を過ぎたら当日の注文一覧と突き合わせ、
+// 無ければ UNSENT（届いていない）に落とす。これをしないと、届かなかった注文が
+// 永久に「発注済み」として当月の予算を食う。
 func TestSyncOrderStatusRejectsStalePending(t *testing.T) {
 	led := openTestLedger(t)
 	recordPending(t, led, "order-1", "1306.T", 100, 250_000)
 
-	b := &lookupBroker{orders: map[string]*domain.Order{}} // ブローカーは知らない
+	b := &lookupBroker{orders: map[string]*domain.Order{}} // 一覧にも無い
 	later := time.Now().UTC().Add(UnconfirmedGrace + time.Hour)
 
 	synced, err := SyncOrderStatus(led, b, later)
@@ -67,8 +73,11 @@ func TestSyncOrderStatusRejectsStalePending(t *testing.T) {
 	if len(synced.Changes) != 1 {
 		t.Fatalf("変化の件数 = %d, want 1", len(synced.Changes))
 	}
-	if synced.Changes[0].After != domain.OrderStatusRejected {
-		t.Errorf("状態 = %s, want REJECTED", synced.Changes[0].After)
+	if synced.Changes[0].After != domain.OrderStatusUnsent {
+		t.Errorf("状態 = %s, want UNSENT", synced.Changes[0].After)
+	}
+	if synced.Resolved.NotSent != 1 {
+		t.Errorf("集計 = %+v", synced.Resolved)
 	}
 	if !synced.Changes[0].LostAmountRatio().Equal(decimal.NewFromInt(1)) {
 		t.Errorf("未約定割合 = %s, want 1", synced.Changes[0].LostAmountRatio())
@@ -92,7 +101,7 @@ func TestSyncOrderStatusKeepsFreshPending(t *testing.T) {
 	recordPending(t, led, "order-1", "1306.T", 100, 250_000)
 
 	b := &lookupBroker{orders: map[string]*domain.Order{}}
-	soon := time.Now().UTC().Add(time.Hour)
+	soon := time.Now().UTC().Add(time.Minute)
 
 	synced, err := SyncOrderStatus(led, b, soon)
 	if err != nil {
@@ -178,12 +187,15 @@ type errorBroker struct {
 }
 
 func (e *errorBroker) GetOrder(string, *string) (*domain.Order, error) { return nil, e.err }
+func (e *errorBroker) GetOrderHistory(time.Time, time.Time) ([]domain.Order, error) {
+	return nil, e.err
+}
 
-// 照会できない注文は、勝手に失効させず保留にする。
+// 当日の注文一覧を照会できないときは、勝手に失効させず保留にする。
 //
 // 立花証券は client_order_id を持たないので、送信結果が分からず
-// broker_order_id の無い注文は引きようがない。ここで REJECTED に倒すと、
-// 実は約定していた場合に翌日もう一度買ってしまう。
+// broker_order_id の無い注文は一覧との突き合わせでしか決められない。
+// 一覧が取れないのに UNSENT に倒すと、実は約定していた場合に翌日もう一度買ってしまう。
 func TestSyncOrderStatusHoldsUnqueryableOrders(t *testing.T) {
 	led := openTestLedger(t)
 	recordPending(t, led, "order-1", "1306.T", 100, 250_000)
@@ -210,5 +222,45 @@ func TestSyncOrderStatusHoldsUnqueryableOrders(t *testing.T) {
 	placed, _ := led.PlacedAmount("1306.T", month)
 	if !placed.Equal(decimal.NewFromInt(250_000)) {
 		t.Errorf("発注済み額 = %s, want 250000（保留中は動かさない）", placed)
+	}
+}
+
+// 送信結果不明の注文が当日の注文一覧にあれば、注文番号と約定を台帳に帰属させる。
+// 人が口座を見なくても「届いていた」が分かり、二重買付にも買い漏れにもならない。
+func TestSyncOrderStatusAttributesPendingFromHistory(t *testing.T) {
+	led := openTestLedger(t)
+	req := recordPending(t, led, "order-1", "1306.T", 100, 250_000)
+
+	id := "123/20260904"
+	avg := decimal.NewFromInt(2450)
+	created := time.Now().UTC()
+	b := &lookupBroker{history: []domain.Order{{
+		ClientOrderID: id, BrokerOrderID: &id, Symbol: "1306.T", Side: domain.SideBuy,
+		Trade: domain.TradeTypeCash, Quantity: req.Quantity, FilledQuantity: req.Quantity,
+		Status: domain.OrderStatusFilled, AvgFillPrice: &avg, CreatedAt: &created,
+	}}}
+	later := time.Now().UTC().Add(UnconfirmedGrace + time.Minute)
+
+	synced, err := SyncOrderStatus(led, b, later)
+	if err != nil {
+		t.Fatalf("照会に失敗: %v", err)
+	}
+	if synced.Resolved.Attributed != 1 || len(synced.Changes) != 1 || synced.Changes[0].After != domain.OrderStatusFilled {
+		t.Fatalf("帰属されていない: %+v / %+v", synced.Resolved, synced.Changes)
+	}
+	recent, _ := led.Recent(1)
+	if len(recent) != 1 || recent[0].BrokerOrderID == nil || *recent[0].BrokerOrderID != id {
+		t.Errorf("注文番号が台帳に無い: %+v", recent)
+	}
+	month, _ := time.Parse("2006-01-02", "2026-08-01")
+	placed, _ := led.PlacedAmount("1306.T", month)
+	if !placed.Equal(decimal.NewFromInt(245_000)) {
+		t.Errorf("発注済み額 = %s, want 245000（約定単価に置き換え）", placed)
+	}
+	// 一覧に載った注文はもう「知っている」ので、次の同期で別の PENDING に帰属しない
+	recordPending(t, led, "order-2", "1306.T", 100, 250_000)
+	synced, _ = SyncOrderStatus(led, b, later)
+	if synced.Resolved.NotSent != 1 {
+		t.Errorf("既知の注文番号が二重に帰属された: %+v", synced.Resolved)
 	}
 }

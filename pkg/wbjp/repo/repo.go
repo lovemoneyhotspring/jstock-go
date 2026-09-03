@@ -402,10 +402,29 @@ func (r *Repo) DeleteStop(symbol string) error {
 func (r *Repo) WasPlaced(clientOrderID string) bool {
 	var dummy int
 	err := r.db.QueryRow(
-		"SELECT 1 FROM orders WHERE client_order_id = ? AND status NOT IN (?, ?);",
-		clientOrderID, "dry_run", string(domain.OrderStatusRejected),
+		"SELECT 1 FROM orders WHERE client_order_id = ? AND status NOT IN (?, ?, ?);",
+		clientOrderID, "dry_run", string(domain.OrderStatusRejected), string(domain.OrderStatusUnsent),
 	).Scan(&dummy)
 	return err == nil
+}
+
+// BrokerOrderIDs は台帳が知っている注文番号（broker_order_id）の集合。
+// 送信結果不明の注文をブローカーの一覧と突き合わせるとき、既に帰属済みのものを除くのに使う。
+func (r *Repo) BrokerOrderIDs() (map[string]struct{}, error) {
+	rows, err := r.db.Query("SELECT broker_order_id FROM orders WHERE broker_order_id IS NOT NULL AND broker_order_id != ''")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // OrdersToday はその日に実際に発注した件数。
@@ -503,10 +522,11 @@ func (r *Repo) UnresolvedOrders() ([]OrderRecord, error) {
 		`SELECT client_order_id, run_id, broker_order_id, symbol, side, order_type,
 		        quantity, limit_price, status, filled_quantity, avg_fill_price, reason, placed_at
 		 FROM orders
-		 WHERE status NOT IN (?, ?, ?, ?, ?)
+		 WHERE status NOT IN (?, ?, ?, ?, ?, ?)
 		 ORDER BY placed_at;`,
 		string(domain.OrderStatusFilled), string(domain.OrderStatusCancelled),
-		string(domain.OrderStatusRejected), string(domain.OrderStatusExpired), "dry_run",
+		string(domain.OrderStatusRejected), string(domain.OrderStatusExpired),
+		string(domain.OrderStatusUnsent), "dry_run",
 	)
 	if err != nil {
 		return nil, err

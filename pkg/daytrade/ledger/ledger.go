@@ -27,6 +27,7 @@ var deadStatuses = map[string]struct{}{
 	string(domain.OrderStatusCancelled): {},
 	string(domain.OrderStatusRejected):  {},
 	string(domain.OrderStatusExpired):   {},
+	string(domain.OrderStatusUnsent):    {},
 }
 
 // Order は台帳の 1 行。
@@ -212,6 +213,36 @@ func (l *Ledger) DeadCount(day time.Time, symbol string, side domain.Side) int {
 		}
 	}
 	return n
+}
+
+// Get は 1 件の注文。無ければ ok が偽。
+func (l *Ledger) Get(clientOrderID string) (Order, bool, error) {
+	orders, err := l.query("SELECT client_order_id, broker_order_id, day, symbol, side, quantity,"+
+		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade"+
+		" FROM orders WHERE client_order_id = ?", clientOrderID)
+	if err != nil || len(orders) == 0 {
+		return Order{}, false, err
+	}
+	return orders[0], true, nil
+}
+
+// BrokerOrderIDs は台帳が知っている注文番号（broker_order_id）の集合。
+// 送信結果不明の注文をブローカーの一覧と突き合わせるとき、既に帰属済みのものを除くのに使う。
+func (l *Ledger) BrokerOrderIDs() (map[string]struct{}, error) {
+	rows, err := l.db.Query("SELECT broker_order_id FROM orders WHERE broker_order_id IS NOT NULL AND broker_order_id != ''")
+	if err != nil {
+		return nil, fmt.Errorf("台帳の注文番号を読めません: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // OrdersOn はその日の注文（dry-run を含む）。side が nil なら全部。

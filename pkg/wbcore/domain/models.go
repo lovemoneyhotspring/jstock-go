@@ -95,12 +95,16 @@ const (
 	OrderStatusCancelled       OrderStatus = "CANCELLED"
 	OrderStatusRejected        OrderStatus = "REJECTED"
 	OrderStatusExpired         OrderStatus = "EXPIRED"
-	OrderStatusUnknown         OrderStatus = "UNKNOWN"
+	// OrderStatusUnsent は送信結果が分からなかった注文（PENDING）を当日の注文一覧と
+	// 突き合わせ、ブローカーに届いていなかったと判定したもの。終了状態で、同じ判断を
+	// 種を変えて送り直してよい（wbcore/reconcile）。
+	OrderStatusUnsent  OrderStatus = "UNSENT"
+	OrderStatusUnknown OrderStatus = "UNKNOWN"
 )
 
 func (s OrderStatus) IsTerminal() bool {
 	switch s {
-	case OrderStatusFilled, OrderStatusCancelled, OrderStatusRejected, OrderStatusExpired:
+	case OrderStatusFilled, OrderStatusCancelled, OrderStatusRejected, OrderStatusExpired, OrderStatusUnsent:
 		return true
 	default:
 		return false
