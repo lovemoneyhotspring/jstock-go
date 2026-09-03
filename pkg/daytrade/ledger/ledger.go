@@ -102,13 +102,10 @@ type Ledger struct {
 // Path は台帳ファイルの置き場所。二重発注を疑う場面で人に示す。
 func (l *Ledger) Path() string { return l.path }
 
-// Open は台帳を開き、必要なら表を作る。
-func Open(dbPath string) (*Ledger, error) {
-	db, err := storage.OpenSQLite(dbPath)
-	if err != nil {
-		return nil, err
-	}
-	create := `CREATE TABLE IF NOT EXISTS orders (
+// migrations は台帳のスキーマの履歴。版は PRAGMA user_version（storage.Migrate）。
+// 列を足すときは末尾に段を足す——既存の段を書き換えても適用済みの DB には効かない。
+var migrations = []storage.Migration{
+	{Name: "orders", Up: storage.Exec(`CREATE TABLE IF NOT EXISTS orders (
 		client_order_id TEXT PRIMARY KEY,
 		broker_order_id TEXT,
 		day TEXT NOT NULL,
@@ -123,49 +120,28 @@ func Open(dbPath string) (*Ledger, error) {
 		placed_at TEXT NOT NULL,
 		updated_at TEXT,
 		trade TEXT NOT NULL DEFAULT 'CASH'
-	);`
-	if _, err := db.Exec(create); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("台帳の表を作れません: %w", err)
-	}
+	)`, "CREATE INDEX IF NOT EXISTS orders_day ON orders(day, side)")},
 	// 既存の台帳（trade 列が無い）を壊さずに列を足す。既定 CASH = 従来の現物
-	if !hasColumn(db, "orders", "trade") {
-		if _, err := db.Exec("ALTER TABLE orders ADD COLUMN trade TEXT NOT NULL DEFAULT 'CASH'"); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("台帳に trade 列を足せません: %w", err)
-		}
+	{Name: "orders.trade", Up: storage.AddColumns("orders", map[string]string{
+		"trade": "TEXT NOT NULL DEFAULT 'CASH'",
+	})},
+}
+
+// Open は台帳を開き、スキーマを最新に揃える。
+func Open(dbPath string) (*Ledger, error) {
+	db, err := storage.OpenSQLite(dbPath)
+	if err != nil {
+		return nil, err
 	}
-	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS orders_day ON orders(day, side)"); err != nil {
+	if err := storage.Migrate(db, migrations); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("台帳の索引を作れません: %w", err)
+		return nil, fmt.Errorf("台帳 %s: %w", dbPath, err)
 	}
 	return &Ledger{db: db, path: dbPath}, nil
 }
 
 // Close は台帳を閉じる。
 func (l *Ledger) Close() error { return l.db.Close() }
-
-func hasColumn(db *sql.DB, table, column string) bool {
-	rows, err := db.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return false
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull int
-		var dflt any
-		var pk int
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return false
-		}
-		if name == column {
-			return true
-		}
-	}
-	return false
-}
 
 // Record は発注の結果を残す。同じ ID なら上書き（dry-run → 本発注の順で来る）。
 func (l *Ledger) Record(req domain.OrderRequest, day time.Time, status string, price *decimal.Decimal, brokerOrderID *string) error {

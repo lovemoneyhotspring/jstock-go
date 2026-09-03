@@ -66,84 +66,45 @@ type Ledger struct {
 // Path は台帳ファイルの置き場所。二重買付を疑う場面で人に示す。
 func (l *Ledger) Path() string { return l.path }
 
-func OpenLedger(dbPath string) (*Ledger, error) {
-	db, err := storage.OpenSQLite(dbPath)
-	if err != nil {
-		return nil, err
-	}
-
-	createOrders := `CREATE TABLE IF NOT EXISTS orders (
+// migrations は台帳のスキーマの履歴。版は PRAGMA user_version（storage.Migrate）。
+// 列を足すときは末尾に段を足す——既存の段を書き換えても適用済みの DB には効かない。
+var migrations = []storage.Migration{
+	{Name: "orders+accumulation", Up: storage.Exec(`CREATE TABLE IF NOT EXISTS orders (
 		client_order_id TEXT PRIMARY KEY,
 		broker_order_id TEXT,
 		symbol TEXT NOT NULL,
 		quantity TEXT NOT NULL,
 		status TEXT NOT NULL,
 		reason TEXT,
-		placed_at TEXT NOT NULL
-	);`
-	if _, err := db.Exec(createOrders); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to create orders table: %w", err)
-	}
-
-	createAccum := `CREATE TABLE IF NOT EXISTS accumulation (
+		placed_at TEXT NOT NULL,
+		plan_month TEXT,
+		amount TEXT,
+		market TEXT,
+		filled_quantity TEXT,
+		avg_fill_price TEXT,
+		updated_at TEXT
+	)`, `CREATE TABLE IF NOT EXISTS accumulation (
 		symbol TEXT PRIMARY KEY,
 		started_on TEXT NOT NULL
-	);`
-	if _, err := db.Exec(createAccum); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to create accumulation table: %w", err)
-	}
-
-	l := &Ledger{db: db, path: dbPath}
-	if err := l.migrate(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-
-	return l, nil
+	)`)},
+	// 古い台帳（初期の 7 列だけ）に後から足した列
+	{Name: "orders.columns", Up: storage.AddColumns("orders", map[string]string{
+		"plan_month": "TEXT", "amount": "TEXT", "market": "TEXT",
+		"filled_quantity": "TEXT", "avg_fill_price": "TEXT", "updated_at": "TEXT",
+	})},
 }
 
-func (l *Ledger) migrate() error {
-	rows, err := l.db.Query("PRAGMA table_info(orders);")
+// OpenLedger は台帳を開き、スキーマを最新に揃える。
+func OpenLedger(dbPath string) (*Ledger, error) {
+	db, err := storage.OpenSQLite(dbPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer rows.Close()
-
-	existing := make(map[string]struct{})
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dfltValue *string
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err == nil {
-			existing[name] = struct{}{}
-		}
+	if err := storage.Migrate(db, migrations); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("台帳 %s: %w", dbPath, err)
 	}
-
-	neededColumns := []struct {
-		name string
-		kind string
-	}{
-		{"plan_month", "TEXT"},
-		{"amount", "TEXT"},
-		{"market", "TEXT"},
-		{"filled_quantity", "TEXT"},
-		{"avg_fill_price", "TEXT"},
-		{"updated_at", "TEXT"},
-	}
-
-	for _, col := range neededColumns {
-		if _, ok := existing[col.name]; !ok {
-			alterSQL := fmt.Sprintf("ALTER TABLE orders ADD COLUMN %s %s;", col.name, col.kind)
-			if _, err := l.db.Exec(alterSQL); err != nil {
-				return fmt.Errorf("failed to alter table orders: %w", err)
-			}
-		}
-	}
-
-	return nil
+	return &Ledger{db: db, path: dbPath}, nil
 }
 
 func (l *Ledger) Close() error {
