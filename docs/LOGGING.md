@@ -24,7 +24,7 @@ jq 'select(.run_id == "abc123" and .routine != true)' state/logs/daytrade-prod.j
 |---|---|
 | 置き場 | `WBJP_LOG_DIR`（既定 `WBJP_STATE_DIR/logs`＝`state/logs`）。**ファイルに残すログはこの 1 箇所だけ。** cron で stderr を残すときもここへ。本番では絶対パスで指定する |
 | ファイル | `<WBJP_LOG_DIR>/<app>-<env>.jsonl`。`app` は `wbjp` / `accum` / `jquants` / `daytrade`、`env` は `uat` / `prod` |
-| ローテーション | 日次（UTC の 0 時）、90 日保持。ローテーション後は `…jsonl.YYYY-MM-DD`。**日付ごとにファイルが分かれるので、他の日を読まずに済む** |
+| ローテーション | 日次（UTC の 0 時）、90 日保持。ローテーション後は `…jsonl.YYYY-MM-DD`（日付は**中身が書かれた日**）。**日付ごとにファイルが分かれるので、他の日を読まずに済む**。退避はプロセスの起動時に行う（cron のプロセスはどれも短命なので、その日の最初の 1 本が退避する） |
 | 文字 | UTF-8、`ensure_ascii=False`（日本語はそのまま） |
 | 鍵の並び | 辞書順（`sort_keys`）。差分を取りやすくするため |
 | 秘匿情報 | API キー・シークレット・口座 ID はファイルに書く前に `***` に置き換わる |
