@@ -344,18 +344,18 @@ func RunAccumulation(
 		}
 	}
 
-	// 1. オープン注文の約定状況をブローカーに照会
-	openOrders, err := led.OpenOrders()
-	if err == nil {
-		for _, oo := range openOrders {
-			bo, err := b.GetOrder(oo.ClientOrderID, oo.BrokerOrderID)
-			if err == nil && bo != nil {
-				if bo.Status.IsTerminal() {
-					_ = led.UpdateStatus(oo.ClientOrderID, string(bo.Status), &bo.FilledQuantity, bo.AvgFillPrice)
-					logger.Info("accum.fill", fmt.Sprintf("%s 注文確定: %s (%s約定)", oo.Symbol, bo.Status, bo.FilledQuantity))
-				}
-			}
-		}
+	// 1. 前回までに送った注文がどうなったかを先に確かめる。
+	//
+	// 失効・拒否なら「発注済み」から外れ、この後の差額の計算で自動的に
+	// 埋め直される。照会できないときは前回の状態のまま先へ進む——
+	// ここで止めると、ブローカー側の一時的な不調で積立が丸ごと飛ぶ。
+	changes, err := SyncOrderStatus(led, b, now)
+	if err != nil {
+		logger.Warn("accum.sync_failed",
+			fmt.Sprintf("注文の照会に失敗（前回の状態のまま続けます）: %v", err))
+	}
+	for _, change := range changes {
+		logger.Info("accum.fill", "前回の注文: "+change.Describe())
 	}
 
 	// 2. 本日の発注計画
