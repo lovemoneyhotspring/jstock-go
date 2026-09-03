@@ -217,7 +217,7 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
 ```bash
 cd /home/abobo/jstock-go
 flock /tmp/accum-run.lock git pull --ff-only   # 走行中の accum run と重ならないようにロックを取る
-go test ./... -short                           # 任意: 動作確認
+make ci                                        # 任意: build + vet + staticcheck + test（push 時の CI と同じ）
 flock /tmp/accum-run.lock deploy/build.sh      # 実行ファイルを作り直す（走行中と重ならないように）
 ```
 
