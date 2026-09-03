@@ -365,40 +365,18 @@ func (t *TachibanaBroker) PositionsBySymbol() (map[string]domain.Position, error
 	return PositionsBySymbolHelper(positions), nil
 }
 
-func (t *TachibanaBroker) GetOpenOrders() ([]domain.Order, error) {
-	return nil, nil // 必要に応じて実装
-}
-
-func (t *TachibanaBroker) GetOrder(clientOrderID string, brokerOrderID *string) (*domain.Order, error) {
-	return nil, nil // brokerOrderID を用いて CLMOrderListDetail を照会
-}
-
-func (t *TachibanaBroker) GetOrderHistory(start, end time.Time) ([]domain.Order, error) {
-	return nil, nil
-}
-
-func (t *TachibanaBroker) LotSizes(symbols []string) map[string]decimal.Decimal {
-	return make(map[string]decimal.Decimal)
-}
-
-func (t *TachibanaBroker) Preview(req domain.OrderRequest) (*domain.OrderPreview, error) {
-	price := decimal.Zero
-	if req.LimitPrice != nil {
-		price = *req.LimitPrice
-	}
-	cost := price.Mul(req.Quantity).Round(0)
-	fee := decimal.Zero // 立花定額テーブルに基づく概算
-	return &domain.OrderPreview{
-		EstimatedCost: cost,
-		EstimatedFee:  fee,
-	}, nil
-}
-
+// Place は 1 注文を出す。
+//
+// 現物・信用新規・信用返済を取引種別（req.Trade）で振り分ける。以前は
+// 現物固定だったため、信用の設定（config/daytrade_margin）で回すと
+// 別の商品として発注されていた。
+//
+// 返済は建玉の指定が要る。指定できないときは**発注せずにエラーにする**——
+// 現物売りとして通すと、持っていない株を売ろうとすることになる。
 func (t *TachibanaBroker) Place(req domain.OrderRequest) (*domain.OrderAck, error) {
-	// 注文電文パラメータ
-	sideKubun := "3" // 買
-	if req.Side == domain.SideSell {
-		sideKubun = "1" // 売
+	tradeKubun, err := tradeKubunOf(req.Trade)
+	if err != nil {
+		return nil, err
 	}
 
 	priceStr := "0" // 成行
@@ -407,14 +385,22 @@ func (t *TachibanaBroker) Place(req domain.OrderRequest) (*domain.OrderAck, erro
 	}
 
 	params := map[string]any{
-		"sBaibaiKubun":        sideKubun,
-		"sGenkinShinyouKubun": "0", // 現物
+		"sBaibaiKubun":        sideKubunOf(req.Side),
+		"sGenkinShinyouKubun": tradeKubun,
 		"sIssueCode":          req.Symbol,
 		"sOrderSuryo":         req.Quantity.String(),
 		"sOrderPrice":         priceStr,
 		"sSecondPassword":     t.creds.OrderPassword,
-		"sZyoutoekiKazeiC":    "1", // 特定口座
+		"sZyoutoekiKazeiC":    zeiKubunOf(req.TaxType),
 		"sCondition":          "0", // なし
+	}
+
+	if req.Trade == domain.TradeTypeMarginClose {
+		tategyoku, err := t.closeTargets(req)
+		if err != nil {
+			return nil, err
+		}
+		params["aCLMKabuHensaiData"] = tategyoku
 	}
 
 	res, err := t.postRequest(clmNewOrder, params)
@@ -423,20 +409,71 @@ func (t *TachibanaBroker) Place(req domain.OrderRequest) (*domain.OrderAck, erro
 	}
 
 	resCode, _ := res["sResultCode"].(string)
-	if resCode != "0" {
+	if strings.TrimSpace(resCode) != "0" {
 		resText, _ := res["sResultText"].(string)
 		return nil, &OrderRejectedError{Message: fmt.Sprintf("立花発注拒否 [%s]: %s", resCode, resText)}
 	}
 
 	orderNum, _ := res["sOrderNumber"].(string)
 	eigyouDay, _ := res["sEigyouDay"].(string)
-	brokerOrderID := fmt.Sprintf("%s/%s", strings.TrimSpace(orderNum), strings.TrimSpace(eigyouDay))
+	if strings.TrimSpace(orderNum) == "" {
+		// 受理されたのに注文番号が取れないと、以後この注文を照会できない。
+		// 黙って進むと台帳に broker_order_id の無い注文が残る。
+		return nil, &ErrUnverifiedResponse{
+			CLMID: clmNewOrder, Expected: "sOrderNumber", Got: keysOf(res)}
+	}
+	brokerOrderID := brokerOrderIDOf(orderNum, eigyouDay)
 
 	return &domain.OrderAck{
 		ClientOrderID: req.ClientOrderID,
 		BrokerOrderID: &brokerOrderID,
 		Status:        domain.OrderStatusSubmitted,
 	}, nil
+}
+
+// closeTargets は返済する建玉を古い順に積む（日計りは建てた当日の玉を返す）。
+//
+// 建玉が足りなければエラー。足りないまま出すと、返済できなかった分が
+// そのまま持ち越しになる。
+func (t *TachibanaBroker) closeTargets(req domain.OrderRequest) ([]map[string]any, error) {
+	positions, err := t.MarginPositions()
+	if err != nil {
+		return nil, fmt.Errorf("返済する建玉を照会できません (%s): %w", req.Symbol, err)
+	}
+
+	remaining := req.Quantity
+	var targets []map[string]any
+	for _, p := range positions {
+		if p.Symbol != req.Symbol || remaining.LessThanOrEqual(decimal.Zero) {
+			continue
+		}
+		// 買埋（返済買い）は売建玉、売埋（返済売り）は買建玉を返す
+		isShortPosition := p.Quantity.IsNegative()
+		if (req.Side == domain.SideBuy) != isShortPosition {
+			continue
+		}
+		if p.BrokerPositionID == "" {
+			return nil, &ErrUnverifiedResponse{
+				CLMID: clmMarginPositions, Expected: "建玉番号", Got: []string{p.Symbol}}
+		}
+		available := p.AvailableQuantity.Abs()
+		if available.IsZero() {
+			continue
+		}
+		use := decimal.Min(available, remaining)
+		targets = append(targets, map[string]any{
+			"sTategyokuNumber": p.BrokerPositionID,
+			"sOrderSuryo":      use.String(),
+		})
+		remaining = remaining.Sub(use)
+	}
+
+	if remaining.IsPositive() {
+		return nil, fmt.Errorf(
+			"%s の返済に必要な建玉が足りません（不足 %s 株）。手仕舞いを中止します",
+			req.Symbol, remaining)
+	}
+	return targets, nil
 }
 
 func (t *TachibanaBroker) Cancel(clientOrderID string, brokerOrderID *string) error {
