@@ -32,15 +32,15 @@ const (
 	BaseURLUAT  = "https://demo-kabuka.e-shiten.jp/e_api_v4r10/"
 	BaseURLProd = "https://kabuka.e-shiten.jp/e_api_v4r10/"
 
-	clmLogin          = "CLMAuthLoginRequest"
-	clmBalanceSummary = "CLMZanKaiSummary"
-	clmCashPositions  = "CLMGenbutuKabuList"
+	clmLogin           = "CLMAuthLoginRequest"
+	clmBalanceSummary  = "CLMZanKaiSummary"
+	clmCashPositions   = "CLMGenbutuKabuList"
 	clmMarginPositions = "CLMShinyouTategyokuList"
-	clmOrderList      = "CLMOrderList"
-	clmNewOrder       = "CLMKabuNewOrder"
-	clmCancelOrder    = "CLMKabuCancelOrder"
-	clmMarketPrice    = "CLMMfdsGetMarketPrice"
-	clmStockMaster    = "CLMStkGetIssueMstKabu"
+	clmOrderList       = "CLMOrderList"
+	clmNewOrder        = "CLMKabuNewOrder"
+	clmCancelOrder     = "CLMKabuCancelOrder"
+	clmMarketPrice     = "CLMMfdsGetMarketPrice"
+	clmStockMaster     = "CLMStkGetIssueMstKabu"
 )
 
 type TachibanaSession struct {
@@ -210,6 +210,23 @@ func (t *TachibanaBroker) ensureSession() error {
 }
 
 func (t *TachibanaBroker) postRequest(clmID string, params map[string]any) (map[string]any, error) {
+	return t.postTo(interfaceRequest, clmID, params)
+}
+
+// postPriceRequest は時価問合（仮想URL sUrlPrice）へ送る。
+// 発注系（sUrlRequest）とは別の口で、上限も別に数えられている。
+func (t *TachibanaBroker) postPriceRequest(clmID string, params map[string]any) (map[string]any, error) {
+	return t.postTo(interfacePrice, clmID, params)
+}
+
+// 仮想URL の種別。ログイン応答で口ごとに別の URL が返る。
+const (
+	interfaceRequest = "request"
+	interfacePrice   = "price"
+)
+
+// postTo は仮想URL を選んで 1 リクエスト送る。postRequest / postPriceRequest の実体。
+func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]any) (map[string]any, error) {
 	if err := t.ensureSession(); err != nil {
 		return nil, err
 	}
@@ -247,7 +264,11 @@ func (t *TachibanaBroker) postRequest(clmID string, params map[string]any) (map[
 		sjisBytes = bodyBytes
 	}
 
-	resp, err := t.httpClient.Post(t.session.URLRequest, "application/json", bytes.NewReader(sjisBytes))
+	endpoint := t.session.URLRequest
+	if iface == interfacePrice && t.session.URLPrice != "" {
+		endpoint = t.session.URLPrice
+	}
+	resp, err := t.httpClient.Post(endpoint, "application/json", bytes.NewReader(sjisBytes))
 	if err != nil {
 		return nil, fmt.Errorf("立花証券API通信エラー: %w", err)
 	}
@@ -386,14 +407,14 @@ func (t *TachibanaBroker) Place(req domain.OrderRequest) (*domain.OrderAck, erro
 	}
 
 	params := map[string]any{
-		"sBaibaiKubun":          sideKubun,
-		"sGenkinShinyouKubun":   "0", // 現物
-		"sIssueCode":            req.Symbol,
-		"sOrderSuryo":           req.Quantity.String(),
-		"sOrderPrice":           priceStr,
-		"sSecondPassword":       t.creds.OrderPassword,
-		"sZyoutoekiKazeiC":      "1", // 特定口座
-		"sCondition":            "0", // なし
+		"sBaibaiKubun":        sideKubun,
+		"sGenkinShinyouKubun": "0", // 現物
+		"sIssueCode":          req.Symbol,
+		"sOrderSuryo":         req.Quantity.String(),
+		"sOrderPrice":         priceStr,
+		"sSecondPassword":     t.creds.OrderPassword,
+		"sZyoutoekiKazeiC":    "1", // 特定口座
+		"sCondition":          "0", // なし
 	}
 
 	res, err := t.postRequest(clmNewOrder, params)
