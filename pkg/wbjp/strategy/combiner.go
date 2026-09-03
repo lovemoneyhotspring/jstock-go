@@ -8,6 +8,44 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 )
 
+// Combiner は複数戦略の意見を1本に合成する。
+type Combiner func(symbol string, signals []domain.Signal, weights map[string]float64) domain.CombinedSignal
+
+// CombineWeightedVote は重み付き平均合成。
+func CombineWeightedVote(symbol string, signals []domain.Signal, weights map[string]float64) domain.CombinedSignal {
+	if len(signals) == 0 {
+		cs, _ := domain.NewCombinedSignal(symbol, 0.0, nil, "シグナルなし")
+		return cs
+	}
+
+	totalWeight := 0.0
+	weightedSum := 0.0
+	contributions := make(map[string]float64)
+
+	for _, s := range signals {
+		w := 1.0
+		if val, ok := weights[s.Strategy]; ok {
+			w = val
+		}
+		if w <= 0 {
+			continue
+		}
+		score := s.Score()
+		weightedSum += score * w
+		totalWeight += w
+		contributions[s.Strategy] = score * w
+	}
+
+	combinedDir := 0.0
+	if totalWeight > 0 {
+		combinedDir = weightedSum / totalWeight
+	}
+
+	reason := fmt.Sprintf("重み付き投票: 合計スコア %g / 重み %g", weightedSum, totalWeight)
+	cs, _ := domain.NewCombinedSignal(symbol, clamp(combinedDir), contributions, reason)
+	return cs
+}
+
 func clamp(v float64) float64 {
 	return math.Max(-1.0, math.Min(1.0, v))
 }
