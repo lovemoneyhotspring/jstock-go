@@ -24,6 +24,14 @@ func main() {
 	rootCmd.AddCommand(newBackupCmd())
 	rootCmd.AddCommand(newBacktestCmd())
 	rootCmd.AddCommand(newRunCmd())
+	rootCmd.AddCommand(newOrderCmd())
+	rootCmd.AddCommand(newHistoryCmd())
+	rootCmd.AddCommand(newEvaluateCmd())
+	rootCmd.AddCommand(newReviewCmd())
+	rootCmd.AddCommand(newExplainCmd())
+	rootCmd.AddCommand(newRunsCmd())
+	rootCmd.AddCommand(newDataCmd())
+	rootCmd.AddCommand(newCredentialsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

@@ -39,7 +39,10 @@ func newBacktestCmd() *cobra.Command {
 				return fmt.Errorf("バックテスト用の足データがありません。先に 'wbjp sync' を実行してください")
 			}
 
-			strats, weights := buildStrategies(stratCfg)
+			strats, weights, err := buildStrategies(stratCfg)
+			if err != nil {
+				return err
+			}
 			combineFunc := strategy.GetCombinerByName(stratCfg.Combiner)
 
 			stats, err := engine.RunBacktest(setCfg, stratCfg, strats, weights, combineFunc, allBars, decimal.NewFromInt(1000000))

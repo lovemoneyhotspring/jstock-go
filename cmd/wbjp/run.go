@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/indicators"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/engine"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/portfolio"
@@ -109,6 +111,7 @@ func newRunCmd() *cobra.Command {
 			lastPrices := make(map[string]decimal.Decimal)
 			atrMap := make(map[string]decimal.Decimal)
 			lotSizes := make(map[string]decimal.Decimal)
+			allBars := make(map[string][]domain.Bar)
 
 			for _, sym := range setCfg.Universe.Symbols {
 				lotSizes[sym] = decimal.NewFromInt(100)
@@ -120,6 +123,7 @@ func newRunCmd() *cobra.Command {
 				if err != nil || len(bars) == 0 {
 					continue
 				}
+				allBars[sym] = bars
 				lastBar := bars[len(bars)-1]
 				lastPrices[sym] = lastBar.Close
 
@@ -158,8 +162,11 @@ func newRunCmd() *cobra.Command {
 				}
 			}
 			stopBook := risk.NewStopBook(stopObjMap)
-			stopBook.Ensure(posMap, atrMap, todayJST, setCfg.Sizing.ATRStopMultiple, true)
+			stopBook.EnsureWithOptions(posMap, atrMap, todayJST,
+				risk.EnsureOptionsFrom(setCfg.Stops, setCfg.Sizing.ATRStopMultiple))
 			stopBook.UpdateTrailing(lastPrices, atrMap)
+			// 建値への引き上げは利確・トレーリングより先に行う。
+			stopBook.UpdateBreakeven(lastPrices, setCfg.Stops.BreakevenAfterR)
 
 			// DB へのストップ保存
 			for sym, st := range stopBook.All() {
@@ -178,48 +185,88 @@ func newRunCmd() *cobra.Command {
 			}
 
 			// 3. 戦略の評価
-			strats, weights := buildStrategies(stratCfg)
+			strats, weights, err := buildStrategies(stratCfg)
+			if err != nil {
+				return err
+			}
 			combineFunc := strategy.GetCombinerByName(stratCfg.Combiner)
 
 			var allSignals []domain.Signal
 			var combinedSignals []domain.CombinedSignal
 			targets := make(map[string]domain.TargetPosition)
 
-			// ストップ抵触による手仕舞いを最優先で目標建玉（0株）に設定
-			for _, exitTarget := range stopBook.ExitTargets(lastPrices) {
-				targets[exitTarget.Symbol] = exitTarget
-				logger.Warn("wbjp.stop_exit", fmt.Sprintf("%s: %s", exitTarget.Symbol, exitTarget.Reason))
+			// 3-1. 全銘柄のシグナルを出す。
+			//
+			// 戦略には銘柄ごとではなく全銘柄をまとめて渡す。モメンタムの
+			// 順位付けやベンチマークとの比較は、1 銘柄ずつ呼ぶ形では書けない。
+			stratCtx := strategy.NewContext(todayJST, allBars, posMap, equity)
+
+			signalsBySymbol := make(map[string][]domain.Signal)
+			for _, s := range strats {
+				sigs, err := s.OnBars(stratCtx)
+				if err != nil {
+					logger.Warn("wbjp.strategy_error", fmt.Sprintf("%s の評価に失敗: %v", s.Name(), err))
+					continue
+				}
+				for _, sig := range sigs {
+					signalsBySymbol[sig.Symbol] = append(signalsBySymbol[sig.Symbol], sig)
+					allSignals = append(allSignals, sig)
+				}
 			}
 
+			signalMap := make(map[string]domain.CombinedSignal)
 			for _, sym := range setCfg.Universe.Symbols {
-				if _, hasExit := targets[sym]; hasExit {
+				// 足の無い銘柄は判断材料が無い。合成すると「中立」を主張した
+				// ことになり、保有中なら手仕舞い扱いになってしまう。
+				if !stratCtx.HasBars(sym, 1) {
 					continue
 				}
-
-				bars, err := barStore.Read(sym, "", "")
-				if err != nil || len(bars) == 0 {
-					continue
-				}
-				lastBar := bars[len(bars)-1]
-
-				var sigs []domain.Signal
-				for _, s := range strats {
-					sig, err := s.OnBars(sym, bars)
-					if err == nil && sig != nil {
-						sigs = append(sigs, *sig)
-						allSignals = append(allSignals, *sig)
-					}
-				}
-
-				combined := combineFunc(sym, sigs, weights)
+				combined := combineFunc(sym, signalsBySymbol[sym], weights)
 				combinedSignals = append(combinedSignals, combined)
+				signalMap[sym] = combined
+			}
 
-				if combined.Direction >= stratCfg.EntryThreshold {
-					target, err := portfolio.SizePosition(combined, equity, lastBar.Close, atrMap[sym], lotSizes[sym], setCfg.Sizing)
-					if err == nil {
-						targets[sym] = target
-					}
-				}
+			// 3-2. 地合いに応じて露出を絞る。弱気なら新規を止めて全て手仕舞う。
+			sizingEquity := equity
+			if setCfg.Regime.Enabled {
+				regimeName, exposure := risk.RegimeExposure(setCfg.Regime, regimeInput(barStore, setCfg.Regime))
+				signalMap, sizingEquity = risk.ApplyRegime(regimeName, exposure, signalMap, posMap, equity)
+				logger.Info("wbjp.regime",
+					fmt.Sprintf("地合い %s: 露出 %s（サイジング基準 %s円）", regimeName, exposure, sizingEquity.Round(0)))
+			}
+
+			// 3-3. 保有銘柄数の上限・手仕舞い閾値・再サイジング抑制は
+			// ポートフォリオ全体を見ないと決まらないので一括で計算する。
+			sizer, err := portfolio.NewSizer(setCfg.Sizing)
+			if err != nil {
+				return err
+			}
+			strategyTargets := sizer.Size(signalMap, portfolio.SizingContext{
+				Equity:      sizingEquity,
+				BuyingPower: bal.BuyingPower,
+				Prices:      lastPrices,
+				ATR:         atrMap,
+				LotSizes:    lotSizes,
+				Positions:   posMap,
+			}, stratCfg.EntryThreshold, stratCfg.ExitThreshold)
+
+			// 3-4. ストップ由来の手仕舞いを集める。これらは戦略の判断より優先する。
+			quantities := quantitiesOf(posMap)
+			stopTargets := stopBook.ExitTargets(lastPrices)
+			stopTargets = append(stopTargets,
+				stopBook.TimeExitTargets(lastPrices, todayJST, setCfg.Stops.StaleExitDays, setCfg.Stops.MaxHoldDays)...)
+			stopTargets = append(stopTargets,
+				stopBook.TakeProfitTargets(lastPrices, quantities, lotSizes,
+					setCfg.Stops.TakeProfitR, setCfg.Stops.TakeProfitFraction, marketrules.DefaultLotSize)...)
+			stopTargets = append(stopTargets,
+				stopBook.RunnerTargets(lastPrices, quantities,
+					trendValues(barStore, setCfg.Universe.Symbols, setCfg.Stops), setCfg.Stops.TrendExitAlways)...)
+
+			for _, t := range risk.ApplyStopPriority(strategyTargets, stopTargets) {
+				targets[t.Symbol] = t
+			}
+			for _, t := range stopTargets {
+				logger.Warn("wbjp.stop_exit", fmt.Sprintf("%s: %s", t.Symbol, t.Reason))
 			}
 
 			_ = rep.RecordSignals(runID, allSignals)
@@ -245,28 +292,69 @@ func newRunCmd() *cobra.Command {
 				}
 			}
 
-			reconciled, err := engine.Reconcile(targets, posMap, openOrders, lastPrices, lotSizes, orderType, limitOffset, todayJST)
+			taxType := domain.TaxAccountSpecific
+			if setCfg.Execution.TaxAccountType != "" {
+				taxType = domain.TaxAccountType(setCfg.Execution.TaxAccountType)
+			}
+
+			// 当日買い付けた銘柄。現物の差金決済を避けるため売却を止める。
+			boughtToday, err := rep.BoughtToday(todayJST)
+			if err != nil {
+				return fmt.Errorf("当日の買付履歴を読めません: %w", err)
+			}
+
+			plan, err := engine.Reconcile(targets, posMap, openOrders, lastPrices, lotSizes,
+				engine.ReconcileSettings{
+					OrderType:         orderType,
+					LimitOffset:       limitOffset,
+					TaxType:           taxType,
+					BlocksSameDaySale: true,
+				},
+				boughtToday, todayJST)
 			if err != nil {
 				return err
 			}
 
+			for sym, why := range plan.Skipped {
+				logger.Info("wbjp.reconcile_skip", fmt.Sprintf("%s 見送り: %s", sym, why))
+			}
+
 			// 5. リスク管理チェック (RiskManager)
 			riskMgr := risk.NewRiskManager(setCfg.Risk, setCfg.Universe.Symbols)
+
+			// 未約定の買い注文が押さえている金額と、当日の発注件数は
+			// プロセスをまたいで数える。実行ごとに 0 から数え直すと
+			// 1日に何度 run しても上限が効かない。
+			pendingValue, err := rep.PendingBuyValue(lastPrices)
+			if err != nil {
+				return fmt.Errorf("未約定注文を読めません: %w", err)
+			}
+			ordersToday, err := rep.OrdersToday(todayJST)
+			if err != nil {
+				return fmt.Errorf("当日の発注件数を読めません: %w", err)
+			}
+
 			riskCtx := risk.RiskContext{
 				Equity:           equity,
 				Balance:          *bal,
 				Positions:        posMap,
 				BasePrices:       lastPrices,
-				PendingValue:     make(map[string]decimal.Decimal),
-				OrdersToday:      0,
+				PendingValue:     pendingValue,
+				OrdersToday:      ordersToday,
 				RealizedPnLToday: decimal.Zero,
 			}
 
-			for _, res := range reconciled {
+			for _, res := range plan.Orders {
 				if res.Request == nil {
 					continue
 				}
 				req := *res.Request
+
+				// 送信後・記録前に落ちた注文を再送しない。
+				if rep.WasPlaced(req.ClientOrderID) {
+					logger.Info("wbjp.skip", fmt.Sprintf("%s: 既に発注済み (ID: %s)", req.Symbol, req.ClientOrderID))
+					continue
+				}
 
 				decision := riskMgr.Check(req, riskCtx, nil)
 				if !decision.Approved {
@@ -280,13 +368,26 @@ func newRunCmd() *cobra.Command {
 					continue
 				}
 
-				ack, err := b.Place(req)
-				if err != nil {
-					logger.Error("wbjp.order_failed", fmt.Sprintf("%s 発注拒否: %v", req.Symbol, err))
-					continue
+				// 送信前に記録する。応答が返らなくても次回の再送を止める。
+				if err := rep.RecordOrder(runID, req, string(domain.OrderStatusPending), nil); err != nil {
+					return fmt.Errorf("発注前の記録に失敗しました（発注を中止します）: %w", err)
 				}
 
-				_ = rep.RecordOrder(runID, req, string(ack.Status), ack.BrokerOrderID)
+				ack, err := b.Place(req)
+				if err != nil {
+					var rejected *broker.OrderRejectedError
+					if errors.As(err, &rejected) {
+						_ = rep.UpdateOrder(req.ClientOrderID, domain.OrderStatusRejected, decimal.Zero, nil, nil)
+						logger.Error("wbjp.order_failed", fmt.Sprintf("%s 発注拒否: %v", req.Symbol, err))
+						continue
+					}
+					// 届いたか分からない。送信中のまま残して人に確かめてもらう。
+					logger.Error("wbjp.unconfirmed",
+						fmt.Sprintf("%s 注文 %s の結果を確認できません（送信済みの可能性）: %v", req.Symbol, req.ClientOrderID, err))
+					return fmt.Errorf("注文 %s の結果を確認できませんでした: %w", req.ClientOrderID, err)
+				}
+
+				_ = rep.UpdateOrder(req.ClientOrderID, ack.Status, decimal.Zero, nil, ack.BrokerOrderID)
 				logger.Info("wbjp.order", fmt.Sprintf("発注成功: %s %s %s株 (ID: %s)", req.Symbol, req.Side, req.Quantity, req.ClientOrderID))
 				riskCtx.OrdersToday++
 			}
