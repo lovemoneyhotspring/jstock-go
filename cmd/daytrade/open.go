@@ -3,10 +3,12 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/execute"
 	dthistory "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/history"
 	dtledger "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
 	dtplan "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/plan"
@@ -308,18 +310,26 @@ func runOpen(opts openOptions) error {
 		return err
 	}
 
-	// 台帳に無い建玉がブローカーにあれば、この実行は二重に建てることになる。
-	//
-	// 冪等性は台帳の client_order_id で担保しているので、台帳を失う・別ホストへ
-	// 移す・復元した直後は効かない。ブローカー側の建玉は失われないので、発注の
-	// 直前に突き合わせる（積立の UnrecordedFills と同じ考え）。
+	env := execute.Env{Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout}
+	var b broker.Broker
 	if allowed {
-		if err := ensureNoUnrecordedPositions(cfg, led, day, picks); err != nil {
+		if b, err = connectBroker(cfg); err != nil {
+			return fmt.Errorf("建玉を突き合わせられないため発注を中止しました: %w", err)
+		}
+		// 台帳に無い建玉がブローカーにあれば、この実行は二重に建てることになる。
+		// 冪等性は台帳の client_order_id で担保しているので、台帳を失う・別ホストへ
+		// 移す・復元した直後は効かない。発注の直前にブローカーと突き合わせる
+		if err := execute.EnsureNoUnrecordedPositions(env, b, picks); err != nil {
+			var unrecorded *execute.ErrUnrecordedPositions
+			if errors.As(err, &unrecorded) {
+				digest.Anomaly("daytrade.unrecorded_positions",
+					fmt.Sprintf("%d 銘柄に台帳外の建玉", len(unrecorded.Positions)))
+			}
 			return err
 		}
 	}
 
-	orders, failures, err := placePicks(cfg, led, picks, day, allowed)
+	orders, failures, err := execute.PlacePicks(env, b, picks)
 	if err != nil {
 		return err
 	}
@@ -337,178 +347,6 @@ func runOpen(opts openOptions) error {
 		"phase": "open", "live": allowed, "picks": len(picks), "failures": len(failures),
 	})
 	return nil
-}
-
-// placePicks は選んだ銘柄を順に発注する。台帳への記録が先（placeRecorded）。
-func placePicks(cfg dtconfig.Config, led *dtledger.Ledger, picks []selection.Pick, day time.Time, allowed bool) (orders int, failures []string, err error) {
-	var b broker.Broker
-	if allowed {
-		if b, err = connectBroker(cfg); err != nil {
-			return 0, nil, err
-		}
-	}
-	// 余力は取引区分ごと（現物は買付余力、信用は新規建可能額）。同じ枠を使う注文で減らしていく
-	remaining := map[domain.TradeType]decimal.Decimal{}
-
-	for _, pick := range picks {
-		attempt := led.DeadCount(day, pick.Symbol, pick.Side)
-		request := entryRequest(pick, day, cfg, attempt)
-		label := "買い"
-		if pick.Side == domain.SideSell {
-			label = "売建"
-		}
-		if led.WasPlaced(request.ClientOrderID) {
-			fmt.Printf("  %s: %sは発注済み（冪等）\n", pick.Symbol, label)
-			skipRow(pick, request, execution.ReasonIdempotent, "")
-			continue
-		}
-		outcome := ""
-		if b == nil {
-			if err := led.Record(request, day, dtledger.DryRunStatus, &pick.Price, nil); err != nil {
-				return orders, failures, err
-			}
-			skipRow(pick, request, execution.ReasonDryRun, "")
-			outcome = "dry-run"
-			orders++
-		} else {
-			if _, ok := remaining[request.Trade]; !ok {
-				balance, err := b.GetBalance()
-				if err != nil {
-					return orders, failures, err
-				}
-				remaining[request.Trade] = balance.BuyingPowerFor(request.Trade)
-			}
-			need := pick.Amount().Add(pick.Fee())
-			if need.GreaterThan(remaining[request.Trade]) {
-				outcome = fmt.Sprintf("見送り 余力不足（必要 %s / 余力 %s）", yen(need), yen(remaining[request.Trade]))
-				failures = append(failures, fmt.Sprintf("%s %s: %s", pick.Symbol, label, outcome))
-				fmt.Printf("  %s: %s\n", pick.Symbol, outcome)
-				skipRow(pick, request, execution.ReasonInsufficientFunds, outcome)
-				continue
-			}
-			remaining[request.Trade] = remaining[request.Trade].Sub(need)
-			fee := pick.Fee()
-			if err := placeRecorded(b, led, request, day, pick.Price, &fee); err != nil {
-				outcome = fmt.Sprintf("失敗 %v", err)
-				failures = append(failures, fmt.Sprintf("%s %s: %v", pick.Symbol, label, err))
-				fmt.Printf("  %s: %s\n", pick.Symbol, outcome)
-			} else {
-				outcome = "発注"
-				orders++
-			}
-		}
-		logInfo("daytrade.order", "寄付の注文", map[string]any{
-			"day": day.Format(DateLayout), "symbol": pick.Symbol,
-			"side": string(pick.Side), "trade": string(request.Trade),
-			"client_order_id": request.ClientOrderID,
-			"quantity":        pick.Quantity.String(), "price": pick.Price.String(),
-			"amount": pick.Amount().String(), "live": b != nil, "outcome": outcome,
-		})
-	}
-	return orders, failures, nil
-}
-
-// entryRequest は建てる注文。ロング（BUY）は現物か信用買い、ショート（SELL）は信用新規売り。
-func entryRequest(pick selection.Pick, day time.Time, cfg dtconfig.Config, attempt int) domain.OrderRequest {
-	// 前回が拒否されていたら種を変える（同じ ID はブローカーが弾く）。attempt 0 は従来と同じ ID
-	seed := "daytrade|" + day.Format(DateLayout)
-	if attempt > 0 {
-		seed = fmt.Sprintf("%s|%d", seed, attempt)
-	}
-	trade := domain.TradeTypeCash
-	action := "買い"
-	switch {
-	case pick.Side == domain.SideSell:
-		trade = domain.TradeTypeMarginOpen // 売建（空売り）
-		action = "売建"
-	case cfg.Margin.Enabled && cfg.Margin.LongViaMargin:
-		trade = domain.TradeTypeMarginOpen // 信用買い（日計り。手数料 0 円）
-	}
-	gap, _ := pick.Gap.Float64()
-	return domain.OrderRequest{
-		ClientOrderID: domain.MakeClientOrderID(seed, pick.Symbol, pick.Side, pick.Quantity),
-		Symbol:        pick.Symbol,
-		Side:          pick.Side,
-		OrderType:     domain.OrderTypeMarket,
-		Quantity:      pick.Quantity,
-		TaxType:       cfg.Execution.TaxAccountType,
-		Reason: fmt.Sprintf("%s %s gap %s #%d %s",
-			cfg.StrategyName(), day.Format(DateLayout), pct(gap), pick.Rank, action),
-		Trade: trade,
-	}
-}
-
-// ErrUnconfirmedOrder は送信したが結果を確認できなかった注文。
-//
-// 通信断やタイムアウトでは「届いていない」と「届いたが応答が返らない」を区別できない。
-// 台帳には送信中（PENDING）が残るので、次の実行は WasPlaced で弾かれて再送されない。
-type ErrUnconfirmedOrder struct {
-	ClientOrderID string
-	Err           error
-}
-
-func (e *ErrUnconfirmedOrder) Error() string {
-	return fmt.Sprintf("注文 %s の結果を確認できませんでした（送信済みの可能性があります）: %v",
-		e.ClientOrderID, e.Err)
-}
-
-func (e *ErrUnconfirmedOrder) Unwrap() error { return e.Err }
-
-// placeRecorded は送る前に台帳へ PENDING を書き、送ったら結果で更新する。
-//
-// 送信後に落ちても台帳には残るので、次の実行で同じ注文を送り直さない
-// （二重買付より買い漏れの方がまし）。
-//
-//   - 受理された           → その状態で上書き
-//   - 明確に拒否された     → REJECTED。PENDING のままだと「送信結果不明」と区別できない
-//   - それ以外（通信断等） → 送信中のまま残し ErrUnconfirmedOrder
-//
-// 同時に実行品質の intent 行を残す。台帳の price は後で約定額に上書きされうるので、
-// 判断時の想定はここで別に控えておく。
-func placeRecorded(b broker.Broker, led *dtledger.Ledger, request domain.OrderRequest, day time.Time, price decimal.Decimal, fee *decimal.Decimal) error {
-	intent := func(reason execution.ReasonCode, note string) {
-		execution.Collect(execution.Spec{
-			Event: execution.EventIntent, App: "daytrade",
-			Symbol: request.Symbol, Side: string(request.Side), Trade: string(request.Trade),
-			ClientOrderID: request.ClientOrderID, Live: true,
-			Quantity:     request.Quantity,
-			IntentPrice:  price,
-			IntentAmount: price.Mul(request.Quantity),
-			IntentFee:    fee,
-			Reason:       reason, Note: note,
-		})
-	}
-	if err := led.Record(request, day, string(domain.OrderStatusPending), &price, nil); err != nil {
-		return fmt.Errorf("発注前の台帳記録に失敗しました（発注を中止します）: %w", err)
-	}
-	ack, err := b.Place(request)
-	if err != nil {
-		var rejected *broker.OrderRejectedError
-		if errors.As(err, &rejected) {
-			_ = led.UpdateStatus(request.ClientOrderID, domain.OrderStatusRejected, decimal.Zero, nil, nil)
-			intent(execution.ReasonBrokerError, err.Error())
-			return err
-		}
-		intent(execution.ReasonUnconfirmed, err.Error())
-		return &ErrUnconfirmedOrder{ClientOrderID: request.ClientOrderID, Err: err}
-	}
-	_ = led.UpdateStatus(request.ClientOrderID, ack.Status, decimal.Zero, nil, ack.BrokerOrderID)
-	intent(execution.ReasonPlaced, "")
-	return nil
-}
-
-// skipRow は発注しなかった建玉を実行品質に残す。
-// **見送りの理由の分布が改善の材料になる。**
-func skipRow(pick selection.Pick, request domain.OrderRequest, reason execution.ReasonCode, note string) {
-	fee := pick.Fee()
-	execution.Collect(execution.Spec{
-		Event: execution.EventSkip, App: "daytrade",
-		Symbol: pick.Symbol, Side: string(request.Side), Trade: string(request.Trade),
-		ClientOrderID: request.ClientOrderID, Live: false,
-		Quantity: pick.Quantity, IntentPrice: pick.Price,
-		IntentAmount: pick.Amount(), IntentFee: fee,
-		Reason: reason, Note: note,
-	})
 }
 
 // evaluateRegime は危険信号を評価し、ログに残す。
@@ -690,79 +528,4 @@ func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOver
 		"missing": len(missing), "missing_sample": sample(missing),
 	})
 	return found, nil
-}
-
-// ensureNoUnrecordedPositions は、これから建てる銘柄に台帳外の建玉が無いか確かめる。
-//
-// 台帳（client_order_id）に基づく冪等性は台帳が生きている前提の仕組みで、失うと
-// 効かない。ブローカー側の建玉は失われないので、発注の直前にそちらと突き合わせる。
-// 見つかったら**発注を中止する**——自動で手仕舞うと他の戦略の保有を触りかねないし、
-// 二重に建てると日計りの資金計画が崩れる。人が確かめるまで止める。
-//
-// 照会できないときも中止する。二重建てを否定できないまま実弾を出さない。
-func ensureNoUnrecordedPositions(
-	cfg dtconfig.Config,
-	led *dtledger.Ledger,
-	day time.Time,
-	picks []selection.Pick,
-) error {
-	if len(picks) == 0 {
-		return nil
-	}
-	b, err := connectBroker(cfg)
-	if err != nil {
-		return fmt.Errorf("建玉を突き合わせられないため発注を中止しました: %w", err)
-	}
-	positions, err := broker.PositionsBySymbolIncludingMargin(b)
-	if err != nil {
-		logError("daytrade.unrecorded_check_failed", "建玉を照会できません",
-			map[string]any{"day": day.Format(DateLayout), "error": err.Error()})
-		return fmt.Errorf("建玉を照会できないため発注を中止しました（二重に建てないため）: %w", err)
-	}
-
-	// 台帳が知っている今日の建玉ぶんは差し引く（正常な再実行では止めない）
-	recorded := map[string]decimal.Decimal{}
-	if entries, err := led.EntriesOn(day); err == nil {
-		for _, o := range entries {
-			if o.IsDryRun() || o.IsDead() {
-				continue
-			}
-			sign := decimal.NewFromInt(1)
-			if o.Side != domain.SideBuy {
-				sign = decimal.NewFromInt(-1)
-			}
-			recorded[o.Symbol] = recorded[o.Symbol].Add(sign.Mul(o.Quantity))
-		}
-	}
-
-	var unrecorded []string
-	seen := map[string]struct{}{}
-	for _, pick := range picks {
-		if _, done := seen[pick.Symbol]; done {
-			continue
-		}
-		seen[pick.Symbol] = struct{}{}
-		held, ok := positions[pick.Symbol]
-		if !ok || held.Quantity.IsZero() {
-			continue
-		}
-		if leftover := held.Quantity.Sub(recorded[pick.Symbol]); !leftover.IsZero() {
-			unrecorded = append(unrecorded, fmt.Sprintf("%s %s 株（台帳の記録は %s 株）",
-				pick.Symbol, leftover, recorded[pick.Symbol]))
-		}
-	}
-	if len(unrecorded) == 0 {
-		return nil
-	}
-
-	sortStrings(unrecorded)
-	message := strings.Join(unrecorded, "、")
-	logError("daytrade.unrecorded_positions", "台帳に無い建玉があります",
-		map[string]any{"day": day.Format(DateLayout), "positions": unrecorded})
-	digest.Anomaly("daytrade.unrecorded_positions",
-		fmt.Sprintf("%d 銘柄に台帳外の建玉", len(unrecorded)))
-	alert("デイトレ: 台帳に無い建玉があります（二重に建てる恐れ）。発注を中止しました", message)
-	return fmt.Errorf("台帳に無い建玉があります（二重に建てます）: %s\n"+
-		"台帳（%s）が失われているか、別の環境で発注した可能性があります。"+
-		"口座を確かめてから実行してください", message, led.Path())
 }

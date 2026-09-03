@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
@@ -11,25 +9,23 @@ import (
 	dthistory "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/history"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/history"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 	"github.com/shopspring/decimal"
-	"golang.org/x/term"
 )
 
 var (
 	appSettings   = settings.LoadAppSettings()
 	configDirFlag string
-	runID         string
-	logger        *logging.Logger
+	// run はこの実行（run_id・ログ・ダイジェスト・通知）。入口で 1 回だけ起こす
+	run *cli.Run
 )
 
 // DateLayout は CLI が受け取る日付の形。
-const DateLayout = "2006-01-02"
+const DateLayout = cli.DateLayout
 
 // sampleSize はログに残す銘柄名の見本の上限（全部は長い。件数は別に残す）。
 const sampleSize = 20
@@ -43,43 +39,16 @@ const rankingExtra = 5
 // jst は東証の時間帯。判定はすべて JST で行う。
 var jst = clock.Tokyo
 
-// setupRun はログとダイジェストを起こす。CLI の入口から 1 回だけ呼ぶ。
-func setupRun(command string) {
-	runID = logging.NewRunID()
-	logger, _ = logging.NewLogger("daytrade", string(appSettings.Env), runID, command, appSettings.ResolvedLogDir())
-	digest.StartRun(digest.StartOptions{
-		App:      "daytrade",
-		Env:      string(appSettings.Env),
-		Command:  command,
-		RunID:    runID,
-		StateDir: appSettings.StateDir,
-	})
-}
+func logInfo(code, msg string, extra map[string]any)  { run.Info(code, msg, extra) }
+func logWarn(code, msg string, extra map[string]any)  { run.Warn(code, msg, extra) }
+func logError(code, msg string, extra map[string]any) { run.Error(code, msg, extra) }
 
-// teardownRun はダイジェストを書き出してログを閉じる。
-func teardownRun() {
-	_ = digest.Flush()
-	if logger != nil {
-		_ = logger.Close()
+// runID はこの実行の識別子（履歴の run_id をログと揃える）。
+func runID() string {
+	if run == nil {
+		return ""
 	}
-}
-
-func logInfo(code, msg string, extra map[string]any) {
-	if logger != nil {
-		logger.Info(code, msg, extra)
-	}
-}
-
-func logWarn(code, msg string, extra map[string]any) {
-	if logger != nil {
-		logger.Warn(code, msg, extra)
-	}
-}
-
-func logError(code, msg string, extra map[string]any) {
-	if logger != nil {
-		logger.Error(code, msg, extra)
-	}
+	return run.RunID
 }
 
 func loadConfig() (dtconfig.Config, error) {
@@ -98,7 +67,7 @@ func historyStore() *history.Store { return dthistory.StoreFor(appSettings) }
 
 // appendHistory は履歴に 1 ファイル足す。記録の失敗で売買を止めない。
 func appendHistory(kind string, frame history.Frame, day time.Time) string {
-	path, err := historyStore().Append(kind, frame, day, history.AppendOptions{RunID: runID})
+	path, err := historyStore().Append(kind, frame, day, history.AppendOptions{RunID: runID()})
 	if err != nil {
 		logWarn("daytrade.history", "履歴の追記に失敗", map[string]any{"kind": kind, "error": err.Error()})
 		return ""
@@ -167,91 +136,24 @@ func skipHoliday(day time.Time, phase string) bool {
 	return true
 }
 
-// connectBroker は設定のブローカーに繋ぐ。
+// connectBroker は設定のブローカーに繋ぐ（部品は wbcore/cli）。
+// デイトレは実機だけ——paper を通すと --live が模型に向いて「発注した」ことになる。
 func connectBroker(cfg dtconfig.Config) (broker.Broker, error) {
 	if cfg.Execution.Broker != "tachibana" {
-		return nil, fmt.Errorf("未知の broker: %q（tachibana）", cfg.Execution.Broker)
+		return nil, fmt.Errorf("未知の broker: %q（デイトレは tachibana のみ）", cfg.Execution.Broker)
 	}
-	creds, err := credentials.LoadTachibanaCredentials(appSettings.Env, appSettings.DotenvMap)
-	if err != nil {
-		return nil, err
-	}
-	return broker.NewTachibanaBroker(appSettings.Env, creds, appSettings.StateDir)
+	return cli.ConnectBroker(cfg.Execution.Broker, appSettings)
 }
 
-// confirmLive は本番発注の前に人に確かめる。
-//
-// 非対話（cron・パイプ）では確認を取れない。黙って通すと意図しない本番発注に
-// なるので、明示的に --yes を求める。
-func confirmLive(allowed, yes bool) error {
-	if !allowed || !appSettings.Env.IsProduction() || yes {
-		return nil
-	}
-	fmt.Println("本番環境で実際に発注します")
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return fmt.Errorf("非対話環境では確認を取れません。cron から回すなら --yes を付けてください")
-	}
-	fmt.Print("続行しますか? [y/N]: ")
-	var input string
-	_, _ = fmt.Scanln(&input)
-	if input != "y" && input != "Y" {
-		return fmt.Errorf("中止しました")
-	}
-	return nil
-}
+// confirmLive は本番発注の前に人に確かめる（部品は wbcore/cli）。
+func confirmLive(allowed, yes bool) error { return cli.ConfirmLive(appSettings, allowed, yes) }
 
 // crash は cron で誰も端末を見ていないときのために、落ちた理由を通知してから返す。
-func crash(title, code string, err error) error {
-	if err == nil {
-		return nil
-	}
-	logError(code, title+"が異常終了", map[string]any{"error": err.Error()})
-	digest.Fail(code, err.Error())
-	alert("デイトレ: "+title+"が異常終了", err.Error())
-	return err
-}
+func crash(title, code string, err error) error { return run.Crash(title, code, err) }
 
-func alert(title, body string) {
-	if logger != nil {
-		_ = notifyAlert(title, body)
-	}
-}
+func alert(title, body string) { run.Alert(title, body) }
 
-func yen(v any) string {
-	switch value := v.(type) {
-	case decimal.Decimal:
-		return addCommas(value.Round(0).String())
-	case float64:
-		return addCommas(decimal.NewFromFloat(value).Round(0).String())
-	case int:
-		return addCommas(fmt.Sprint(value))
-	default:
-		return fmt.Sprint(v)
-	}
-}
-
-// addCommas は 3 桁区切り。金額は必ずこれを通す（画面とログで見た目を揃える）。
-func addCommas(text string) string {
-	negative := strings.HasPrefix(text, "-")
-	text = strings.TrimPrefix(text, "-")
-	var out []byte
-	for i, r := range []byte(text) {
-		if i > 0 && (len(text)-i)%3 == 0 {
-			out = append(out, ',')
-		}
-		out = append(out, r)
-	}
-	if negative {
-		return "-" + string(out)
-	}
-	return string(out)
-}
-
-func pct(v float64) string { return fmt.Sprintf("%+.2f%%", v*100) }
-
-func yenPtr(v *decimal.Decimal) string {
-	if v == nil {
-		return ""
-	}
-	return yen(*v)
-}
+// 金額・割合の整形は wbcore/cli に集めてある。呼び出しが多いので短い別名を残す。
+func yen(v any) string                 { return cli.Yen(v) }
+func pct(v float64) string             { return cli.Pct(v) }
+func yenPtr(v *decimal.Decimal) string { return cli.Yen(v) }

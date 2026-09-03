@@ -56,7 +56,7 @@ func writeParquet(path string, f *Frame, dateColumns map[string]bool) error {
 	schema, order := buildSchema(f.Columns, dateColumns)
 	handle, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("Parquet を作成できません %s: %w", path, err)
+		return fmt.Errorf("保管庫の Parquet を作成できません %s: %w", path, err)
 	}
 	writer := parquet.NewWriter(handle, schema, parquet.Compression(&parquet.Zstd))
 	batch := make([]parquet.Row, 0, writeRowBatch)
@@ -66,7 +66,7 @@ func writeParquet(path string, f *Frame, dateColumns map[string]bool) error {
 			return nil
 		}
 		if _, err := writer.WriteRows(batch); err != nil {
-			return fmt.Errorf("Parquet の書き込みに失敗しました %s: %w", path, err)
+			return fmt.Errorf("保管庫の Parquet の書き込みに失敗しました %s: %w", path, err)
 		}
 		batch = batch[:0]
 		return nil
@@ -90,10 +90,10 @@ func writeParquet(path string, f *Frame, dateColumns map[string]bool) error {
 	}
 	if err := writer.Close(); err != nil {
 		handle.Close()
-		return fmt.Errorf("Parquet の確定に失敗しました %s: %w", path, err)
+		return fmt.Errorf("保管庫の Parquet の確定に失敗しました %s: %w", path, err)
 	}
 	if err := handle.Close(); err != nil {
-		return fmt.Errorf("Parquet を閉じられません %s: %w", path, err)
+		return fmt.Errorf("保管庫の Parquet を閉じられません %s: %w", path, err)
 	}
 	return nil
 }
@@ -207,17 +207,17 @@ func (o scanOptions) filtering() bool {
 func openParquet(path string) (*os.File, *parquet.File, []string, error) {
 	handle, err := os.Open(path)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("Parquet を開けません %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("保管庫の Parquet を開けません %s: %w", path, err)
 	}
 	info, err := handle.Stat()
 	if err != nil {
 		handle.Close()
-		return nil, nil, nil, fmt.Errorf("Parquet の大きさを取れません %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("保管庫の Parquet の大きさを取れません %s: %w", path, err)
 	}
 	file, err := parquet.OpenFile(handle, info.Size())
 	if err != nil {
 		handle.Close()
-		return nil, nil, nil, fmt.Errorf("Parquet を解釈できません %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("保管庫の Parquet を解釈できません %s: %w", path, err)
 	}
 	leaves := file.Schema().Columns()
 	columns := make([]string, 0, len(leaves))
@@ -301,7 +301,7 @@ func scanParquet(path string, opt scanOptions) (*Frame, error) {
 				if isEOF(readErr) {
 					break
 				}
-				return nil, fmt.Errorf("Parquet の読み取りに失敗しました %s: %w", path, readErr)
+				return nil, fmt.Errorf("保管庫の Parquet の読み取りに失敗しました %s: %w", path, readErr)
 			}
 			if n == 0 {
 				reader.Close()
@@ -405,7 +405,7 @@ func distinctColumn(path, column string) (map[string]bool, error) {
 				if isEOF(err) {
 					break
 				}
-				return nil, fmt.Errorf("Parquet の列を読めません %s (%s): %w", path, column, err)
+				return nil, fmt.Errorf("保管庫の Parquet の列を読めません %s (%s): %w", path, column, err)
 			}
 			if mn, mx, ok := page.Bounds(); ok && !mn.IsNull() && parquetText(mn) == parquetText(mx) {
 				out[parquetText(mn)] = true
@@ -425,7 +425,7 @@ func distinctColumn(path, column string) (map[string]bool, error) {
 						break
 					}
 					pages.Close()
-					return nil, fmt.Errorf("Parquet の列を読めません %s (%s): %w", path, column, err)
+					return nil, fmt.Errorf("保管庫の Parquet の列を読めません %s (%s): %w", path, column, err)
 				}
 				if n == 0 {
 					break

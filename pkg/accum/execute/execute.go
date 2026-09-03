@@ -467,7 +467,9 @@ func RunAccumulation(
 
 		if !isLive {
 			// dry-run
-			_ = led.Record(req, ledger.DryRunStatus, nil, &monthStart, &amt, &mkt)
+			if rerr := led.Record(req, ledger.DryRunStatus, nil, &monthStart, &amt, &mkt); rerr != nil {
+				logger.Warn("accum.ledger", fmt.Sprintf("%s: dry-run の記録に失敗: %v", po.Symbol, rerr))
+			}
 			logger.Info("accum.dry_run", fmt.Sprintf("[dry-run] %s %s株 @ %s円 (%s)", po.Symbol, req.Quantity, po.LimitPrice, req.Reason))
 			continue
 		}
@@ -610,7 +612,10 @@ func placeRecorded(
 		var rejected *broker.OrderRejectedError
 		if errors.As(err, &rejected) {
 			// 届いた上で拒否された。次回の差額で埋め直せる。
-			_ = led.UpdateStatus(req.ClientOrderID, string(domain.OrderStatusRejected), nil, nil)
+			if uerr := led.UpdateStatus(req.ClientOrderID, string(domain.OrderStatusRejected), nil, nil); uerr != nil {
+				// PENDING のまま残ると次回 WasPlaced で弾かれ、差額が埋まらない。拒否は事実なので併記して返す
+				return nil, fmt.Errorf("%w（さらに台帳を REJECTED にできませんでした。%s の行を確かめてください: %v）", err, led.Path(), uerr)
+			}
 			return nil, err
 		}
 		// 届いたかどうか分からない。送信中のまま残す。

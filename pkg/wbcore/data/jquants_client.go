@@ -250,11 +250,6 @@ func truncate(s string, n int) string {
 	return s[:n]
 }
 
-// loadJQuantsAPIKey は環境変数 / .env / Keychain から API キーを解決する。
-func loadJQuantsAPIKey(dotenv map[string]string) (string, error) {
-	return credentials.LoadAPIKey(JQuantsAPIKeyVar, dotenv)
-}
-
 // FetchDailyBars は 1 銘柄の日足を取る。symbol は "7203.T" でも "72030" でもよい。
 // start / end は "YYYY-MM-DD"（API には区切り無しで渡す）。
 func (c *JQuantsClient) FetchDailyBars(symbol, start, end string) ([]domain.Bar, error) {

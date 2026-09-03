@@ -52,8 +52,9 @@ func OpenRepo(dbPath string) (*Repo, error) {
 		return nil, err
 	}
 
-	// schema.sql を埋め込んでテーブル作成
-	ddl := `
+	// スキーマの履歴。版は PRAGMA user_version（storage.Migrate）。
+	// 列を足すときは末尾に段を足す——既存の段を書き換えても適用済みの DB には効かない
+	migrations := []storage.Migration{{Name: "initial", Up: storage.Exec(`
 	CREATE TABLE IF NOT EXISTS runs (
 		run_id        TEXT PRIMARY KEY,
 		started_at    TEXT NOT NULL,
@@ -166,11 +167,11 @@ func OpenRepo(dbPath string) (*Repo, error) {
 		last_price  TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_snapshots_as_of ON position_snapshots(as_of);
-	`
+	`)}}
 
-	if _, err := db.Exec(ddl); err != nil {
+	if err := storage.Migrate(db, migrations); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("failed to init wbjp tables: %w", err)
+		return nil, fmt.Errorf("wbjp の台帳 %s: %w", dbPath, err)
 	}
 
 	return &Repo{db: db}, nil

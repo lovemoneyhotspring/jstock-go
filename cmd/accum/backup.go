@@ -24,7 +24,6 @@ func newBackupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer logger.Close()
 
 			result, err := backup.BackupState(appSettings, backup.Options{Dest: dest, Keep: keep})
 			if err != nil {

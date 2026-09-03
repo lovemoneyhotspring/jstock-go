@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"os"
 	"text/tabwriter"
 
@@ -46,7 +47,7 @@ func newStatusCmd() *cobra.Command {
 					bulk = "○"
 				}
 				fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n",
-					ep.Path, len(months), dash(oldest), dash(latest), dash(last), bulk)
+					ep.Path, len(months), cli.Dash(oldest), cli.Dash(latest), cli.Dash(last), bulk)
 			}
 			return w.Flush()
 		},

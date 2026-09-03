@@ -1,4 +1,4 @@
-# wbjp — 日本株 自動売買システム（立花証券 e支店 API）
+# jstock-go — 日本株 自動売買システム（立花証券 e支店 API）
 
 立花証券 e支店 API（e_api_v4r10）で日本株（現物・信用）を売買するシステム。3つのパッケージからなる。
 足データは J-Quants（日本株）と FRED（判断材料に使う米国の指数）から取り、pandas も yfinance も使わない。
@@ -212,6 +212,17 @@ Broker                PaperBroker（証券会社の実装を足せる）
 - **冪等性** — 「差分だけ発注」なので、クラッシュ後に再実行しても二重発注しない
 - **テスト容易性** — 戦略は純粋な関数に近く、モック不要で単体テストできる
 - **同じコードがバックテストでも本番でも動く** — `Broker` を差し替えるだけ
+
+### 4 つの CLI が共有する入口（`wbcore/cli`）
+
+`wbjp` / `accum` / `daytrade` / `jquants` の入口は `wbcore/cli` に集めてある——run_id の発行、ログ、
+ダイジェスト、異常終了の通知（`Run.Crash`）、ブローカーへの接続（`ConnectBroker`）、本番発注前の
+確認（`ConfirmLive`）、金額・日付の整形。コマンドごとに書くと「daytrade には通知があるが wbjp には無い」
+のような抜けが起きるため。デイトレの発注（建玉・手仕舞い・照会の突き合わせ）は `daytrade/execute` に
+あり、模型のブローカーと一時的な台帳で検証している（`cmd/` には判断の流れだけを残す）。
+
+台帳（SQLite）のスキーマは `wbcore/storage.Migrate` で版管理する（`PRAGMA user_version`）。
+列を足すときは各台帳の `migrations` の末尾に段を足す。
 
 ---
 
@@ -486,6 +497,7 @@ cmd/discord-post                                  日次レポートの配達係
 go test ./...              # ネットワークを使うものは既定でスキップ
 go test ./... -short       # 時間のかかる検証を飛ばす
 go vet ./...
+make ci                    # build + vet + staticcheck + test（GitHub Actions と同じ手順）
 gofmt -l .                 # 整形されていないファイルを列挙
 ```
 

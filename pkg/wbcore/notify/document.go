@@ -128,7 +128,7 @@ func postOnce(webhookURL, content string, mayRetry bool) error {
 
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
-		return fmt.Errorf("Discord への送信に失敗: %w", err)
+		return fmt.Errorf("通知先 Discord への送信に失敗: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -144,7 +144,7 @@ func postOnce(webhookURL, content string, mayRetry bool) error {
 		return postOnce(webhookURL, content, false)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("Discord がエラーを返した: %d", resp.StatusCode)
+		return fmt.Errorf("通知先 Discord がエラーを返した: %d", resp.StatusCode)
 	}
 	return nil
 }

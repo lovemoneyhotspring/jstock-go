@@ -46,9 +46,7 @@ func newDataSyncCmd() *cobra.Command {
 				return fmt.Errorf("--days は 1 以上で指定してください: %d", days)
 			}
 
-			runID := fmt.Sprintf("wbjp-sync-%d", time.Now().Unix())
-			logger, _ := logging.NewLogger("wbjp", string(appSettings.Env), runID, "sync", appSettings.LogDir)
-			defer logger.Close()
+			logger := run.Logger
 
 			failures := syncUniverseBars(setCfg, logger, days, force, true)
 			if failures > 0 {

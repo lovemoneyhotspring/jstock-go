@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"os"
 	"text/tabwriter"
 	"time"
@@ -44,7 +45,7 @@ func newEvaluateCmd() *cobra.Command {
 
 			targets := known
 			if date != "" {
-				day, err := parseDay(date)
+				day, err := cli.ParseDay(date)
 				if err != nil {
 					return err
 				}

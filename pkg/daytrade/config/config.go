@@ -170,6 +170,10 @@ type Execution struct {
 
 // Config はデイトレの設定ぜんぶ。
 type Config struct {
+	// Extends は土台にする設定ディレクトリ（この設定ディレクトリからの相対パス）。
+	// 土台を読んだ上に、このファイルに書いた項目だけを重ねる。ロング側の規則を
+	// config/daytrade と config/daytrade_margin の 2 箇所に書かないため。
+	Extends   string    `toml:"extends"`
 	Capital   Capital   `toml:"capital"`
 	Universe  Universe  `toml:"universe"`
 	Signal    Signal    `toml:"signal"`
@@ -315,20 +319,57 @@ func Load(configDir string) (Config, error) {
 	if configDir == "" {
 		configDir = DefaultConfigDir
 	}
+	cfg, err := load(configDir, nil)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", filepath.Join(configDir, Filename), err)
+	}
+	return cfg, nil
+}
+
+// load は 1 つの設定ディレクトリを読む。extends があれば先にその土台を読み、
+// その上にこのファイルの項目を重ねる（配列は置き換え、表は項目ごとに上書き）。
+// visited は循環（A extends B extends A）の検出。
+func load(configDir string, visited []string) (Config, error) {
 	path := filepath.Join(configDir, Filename)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("デイトレの設定が見つかりません: %s", path)
 	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	for _, seen := range visited {
+		if seen == abs {
+			return Config{}, fmt.Errorf("%s: extends が循環しています", path)
+		}
+	}
+	visited = append(visited, abs)
+
+	// extends だけ先に読む（土台を決めてから全体を重ねる）
+	var head struct {
+		Extends string `toml:"extends"`
+	}
+	if err := toml.Unmarshal(raw, &head); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
 	cfg := Default()
+	if head.Extends != "" {
+		base, err := load(filepath.Join(configDir, head.Extends), visited)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s の土台（extends = %q）: %w", path, head.Extends, err)
+		}
+		cfg = base
+	}
+
 	decoder := toml.NewDecoder(newReader(raw))
 	// 未知の項目を黙って無視すると、綴りを間違えた設定が「効いているつもり」で
 	// 効かないまま本番に乗る。読めた時点で弾く。
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("%s: %w", path, err)
-	}
-	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil

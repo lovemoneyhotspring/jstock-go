@@ -164,9 +164,88 @@ func (t *TachibanaBroker) AccountID() string {
 	return t.creds.AuthID
 }
 
+// セッションと採番
+//
+// 立花の仮想URL はログインで発行され、以後の電文は p_no（通番）を付けて送る。
+// 同じ口座を cron の daytrade / wbjp / accum が別プロセスで叩くので、
+// **セッションファイルを採番の権威にし、flock の中で「読む → 進める → 書く → 送る」**
+// を 1 つの区間にする。メモリ上の値だけを進めると、並走する 2 プロセスが同じ番号を
+// 送り、後に書いた方が相手の採番を巻き戻す。
+//
+// p_errno（電文の枠組みのエラー。セッション失効など）が返ったらファイルを捨て、
+// 照会系なら 1 度だけログインし直して送り直す。発注（CLMKabuNewOrder）は
+// 送り直さない——届いた上で失効の応答が来た可能性を否定できないため。
+// 呼び出し側は「結果不明」として台帳に PENDING を残す。
+
+// ErrSession は p_errno が 0 以外だった応答。セッションは捨ててある。
+type ErrSession struct {
+	CLMID string
+	Errno string
+	Text  string
+}
+
+func (e *ErrSession) Error() string {
+	return fmt.Sprintf("%s の電文が受け付けられませんでした p_errno=%s %s（セッションを破棄。再実行で再ログインします）",
+		e.CLMID, e.Errno, strings.TrimSpace(e.Text))
+}
+
 func (t *TachibanaBroker) sessionFilePath() string {
 	today := clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("20060102")
 	return filepath.Join(t.stateDir, "tachibana", fmt.Sprintf("session-%s-%s.json", t.env, today))
+}
+
+// readSessionFile は保存済みのセッション。壊れている・仮想URL が無いなら偽。
+func readSessionFile(path string) (*TachibanaSession, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var s TachibanaSession
+	if err := json.Unmarshal(data, &s); err != nil || s.URLRequest == "" {
+		return nil, false
+	}
+	return &s, true
+}
+
+// writeSessionFile は一時ファイルに書いて rename する（途中で落ちても壊れた
+// ファイルを残さない。壊れたファイルは「セッション無し」と読まれ再ログインになる）。
+func writeSessionFile(path string, s *TachibanaSession) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// lockSession はセッションの排他ロック（プロセス間）。取れなければエラー——
+// ロック無しで進めると採番が衝突するので、黙って続けない。
+func lockSession(path string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, fmt.Errorf("セッションの置き場を作れません: %w", err)
+	}
+	lockFile, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("セッションのロックファイルを開けません: %w", err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("セッションのロックを取れません: %w", err)
+	}
+	return func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}, nil
 }
 
 func (t *TachibanaBroker) decryptURL(encryptedBase64 string) (string, error) {
@@ -183,25 +262,8 @@ func (t *TachibanaBroker) decryptURL(encryptedBase64 string) (string, error) {
 	return string(plainBytes), nil
 }
 
-func (t *TachibanaBroker) ensureSession() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	sessionPath := t.sessionFilePath()
-	if t.session != nil {
-		return nil
-	}
-
-	// 既存セッションファイルを確認
-	if data, err := os.ReadFile(sessionPath); err == nil {
-		var s TachibanaSession
-		if err := json.Unmarshal(data, &s); err == nil && s.URLRequest != "" {
-			t.session = &s
-			return nil
-		}
-	}
-
-	// ログイン実行
+// login はログイン電文を送り、仮想URL を復号したセッションを返す（保存はしない）。
+func (t *TachibanaBroker) login() (*TachibanaSession, error) {
 	today := clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("20060102")
 	loginPayload := map[string]any{
 		"p_no":      1,
@@ -215,52 +277,74 @@ func (t *TachibanaBroker) ensureSession() error {
 	authURL := t.baseURL + "auth/"
 	resp, err := t.httpClient.Post(authURL, "application/json", bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("立花証券ログインHTTPエラー: %w", err)
+		return nil, fmt.Errorf("立花証券ログインHTTPエラー: %w", err)
 	}
 	defer resp.Body.Close()
 
 	utf8Reader := transform.NewReader(resp.Body, japanese.ShiftJIS.NewDecoder())
 	respBytes, err := io.ReadAll(utf8Reader)
 	if err != nil {
-		return fmt.Errorf("立花証券ログイン応答読込エラー: %w", err)
+		return nil, fmt.Errorf("立花証券ログイン応答読込エラー: %w", err)
 	}
 
 	var res map[string]any
 	if err := json.Unmarshal(respBytes, &res); err != nil {
-		return fmt.Errorf("立花証券ログインJSONパースエラー: %w", err)
+		return nil, fmt.Errorf("立花証券ログインJSONパースエラー: %w", err)
 	}
 
-	pErrno, _ := res["p_errno"].(string)
-	if pErrno != "0" {
-		return fmt.Errorf("立花証券ログインエラー p_errno=%s", pErrno)
+	if pErrno := strings.TrimSpace(text(res["p_errno"])); pErrno != "0" {
+		return nil, fmt.Errorf("立花証券ログインエラー p_errno=%s %s", pErrno, strings.TrimSpace(text(res["p_err"])))
 	}
 
-	encReq, _ := res["sUrlRequest"].(string)
-	encPrice, _ := res["sUrlPrice"].(string)
-	encMaster, _ := res["sUrlMaster"].(string)
-
-	decReq, err := t.decryptURL(encReq)
-	if err != nil {
-		return fmt.Errorf("sUrlRequest 復号エラー: %w", err)
+	// 3 つの仮想URL はどれも要る。復号できないものを空で通すと、postTo が
+	// 発注口（sUrlRequest）へ黙ってフォールバックし、時価問合が発注口の
+	// 上限を食う。ログインの時点で落とす。
+	urls := map[string]string{}
+	for _, key := range []string{"sUrlRequest", "sUrlPrice", "sUrlMaster"} {
+		decoded, err := t.decryptURL(text(res[key]))
+		if err != nil {
+			return nil, fmt.Errorf("%s 復号エラー: %w", key, err)
+		}
+		if decoded == "" {
+			return nil, fmt.Errorf("%s がログイン応答にありません", key)
+		}
+		urls[key] = decoded
 	}
-	decPrice, _ := t.decryptURL(encPrice)
-	decMaster, _ := t.decryptURL(encMaster)
 
-	session := TachibanaSession{
+	return &TachibanaSession{
 		PNo:        2,
-		URLRequest: decReq,
-		URLPrice:   decPrice,
-		URLMaster:  decMaster,
+		URLRequest: urls["sUrlRequest"],
+		URLPrice:   urls["sUrlPrice"],
+		URLMaster:  urls["sUrlMaster"],
 		Date:       today,
-	}
+	}, nil
+}
 
-	if err := os.MkdirAll(filepath.Dir(sessionPath), 0700); err == nil {
-		sessData, _ := json.MarshalIndent(session, "", "  ")
-		_ = os.WriteFile(sessionPath, sessData, 0600)
+// ensureSessionLocked は t.mu と flock を持った状態で呼ぶ。ファイルがあればそれを
+// 権威にし（採番はファイルとメモリの大きい方）、無ければログインして書く。
+func (t *TachibanaBroker) ensureSessionLocked(path string) error {
+	if saved, ok := readSessionFile(path); ok {
+		if t.session != nil && t.session.PNo > saved.PNo {
+			saved.PNo = t.session.PNo
+		}
+		t.session = saved
+		return nil
 	}
-
-	t.session = &session
+	session, err := t.login()
+	if err != nil {
+		return err
+	}
+	if err := writeSessionFile(path, session); err != nil {
+		return fmt.Errorf("セッションを保存できません: %w", err)
+	}
+	t.session = session
 	return nil
+}
+
+// invalidateSessionLocked はセッションを捨てる（次の電文でログインし直す）。
+func (t *TachibanaBroker) invalidateSessionLocked(path string) {
+	t.session = nil
+	_ = os.Remove(path)
 }
 
 func (t *TachibanaBroker) postRequest(clmID string, params map[string]any) (map[string]any, error) {
@@ -280,28 +364,54 @@ const (
 	interfaceMaster  = "master"
 )
 
+// resendable は p_errno でセッションを捨てたあと、ログインし直して送り直してよい電文か。
+// 新規注文だけは送り直さない（届いていた場合に二重発注になる）。
+func resendable(clmID string) bool {
+	return clmID != clmNewOrder
+}
+
 // postTo は仮想URL を選んで 1 リクエスト送る。postRequest / postPriceRequest の実体。
 func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]any) (map[string]any, error) {
-	if err := t.ensureSession(); err != nil {
-		return nil, err
-	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	sessionPath := t.sessionFilePath()
-	lockFile, err := os.OpenFile(sessionPath+".lock", os.O_CREATE|os.O_RDWR, 0600)
-	if err == nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX)
-		defer func() {
-			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-			_ = lockFile.Close()
-		}()
+	unlock, err := lockSession(sessionPath)
+	if err != nil {
+		return nil, err
 	}
+	defer unlock()
 
-	pNo := t.session.PNo
-	t.session.PNo++
+	for attempt := 0; ; attempt++ {
+		if err := t.ensureSessionLocked(sessionPath); err != nil {
+			return nil, err
+		}
+		// 採番はファイルを権威にする。送る前に進めて書く——送信後に落ちても
+		// 次のプロセスが同じ番号を使わない
+		pNo := t.session.PNo
+		t.session.PNo++
+		if err := writeSessionFile(sessionPath, t.session); err != nil {
+			return nil, fmt.Errorf("セッションを保存できません: %w", err)
+		}
 
+		res, err := t.send(iface, pNo, clmID, params)
+		if err != nil {
+			return nil, err
+		}
+		errno := strings.TrimSpace(text(res["p_errno"]))
+		if errno == "" || errno == "0" {
+			return res, nil
+		}
+		t.invalidateSessionLocked(sessionPath)
+		if attempt == 0 && resendable(clmID) {
+			continue
+		}
+		return nil, &ErrSession{CLMID: clmID, Errno: errno, Text: text(res["p_err"])}
+	}
+}
+
+// send は 1 電文を Shift_JIS で送り、応答を UTF-8 の map にする。
+func (t *TachibanaBroker) send(iface string, pNo int, clmID string, params map[string]any) (map[string]any, error) {
 	payload := map[string]any{
 		"p_no":      pNo,
 		"p_sd_date": t.session.Date,
@@ -312,18 +422,20 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 		payload[k] = v
 	}
 
-	bodyBytes, _ := json.Marshal(payload)
-	// Shift_JIS にエンコードして送信
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("立花証券API 電文の組み立てに失敗しました: %w", err)
+	}
 	sjisBytes, err := io.ReadAll(transform.NewReader(bytes.NewReader(bodyBytes), japanese.ShiftJIS.NewEncoder()))
 	if err != nil {
-		sjisBytes = bodyBytes
+		return nil, fmt.Errorf("立花証券API 電文を Shift_JIS にできません: %w", err)
 	}
 
 	endpoint := t.session.URLRequest
-	switch {
-	case iface == interfacePrice && t.session.URLPrice != "":
+	switch iface {
+	case interfacePrice:
 		endpoint = t.session.URLPrice
-	case iface == interfaceMaster && t.session.URLMaster != "":
+	case interfaceMaster:
 		endpoint = t.session.URLMaster
 	}
 	resp, err := t.httpClient.Post(endpoint, "application/json", bytes.NewReader(sjisBytes))
@@ -342,11 +454,6 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 	if err := json.Unmarshal(respBytes, &res); err != nil {
 		return nil, fmt.Errorf("立花証券API JSONパースエラー: %w", err)
 	}
-
-	if sessData, err := json.MarshalIndent(t.session, "", "  "); err == nil {
-		_ = os.WriteFile(sessionPath, sessData, 0600)
-	}
-
 	return res, nil
 }
 

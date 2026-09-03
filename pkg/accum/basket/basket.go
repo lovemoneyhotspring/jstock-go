@@ -532,8 +532,8 @@ func XIRR(dates []string, flows []float64, terminal float64) float64 {
 	// NPV が最初から小さく、粗い解で止まってしまう
 	tolerance := 1e-9 * scale
 	lo, hi := -0.99, 10.0
-	fLo, fHi := npv(lo), npv(hi)
-	if fLo*fHi > 0 {
+	fLo := npv(lo)
+	if fLo*npv(hi) > 0 {
 		return 0
 	}
 	for i := 0; i < 200; i++ {
@@ -543,12 +543,11 @@ func XIRR(dates []string, flows []float64, terminal float64) float64 {
 			return mid
 		}
 		if fLo*fMid < 0 {
-			hi, fHi = mid, fMid
+			hi = mid
 		} else {
 			lo, fLo = mid, fMid
 		}
 	}
-	_ = fHi
 	return (lo + hi) / 2
 }
 

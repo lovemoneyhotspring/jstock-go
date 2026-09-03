@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -62,7 +63,7 @@ func newDataCheckCmd() *cobra.Command {
 					problems = append(problems, c)
 				}
 				fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\n",
-					c.Symbol, c.Bars, dash(c.First), dash(c.Last), c.Describe())
+					c.Symbol, c.Bars, cli.Dash(c.First), cli.Dash(c.Last), c.Describe())
 			}
 			w.Flush()
 
@@ -118,11 +119,4 @@ func newDataStatusCmd() *cobra.Command {
 			return nil
 		},
 	}
-}
-
-func dash(text string) string {
-	if text == "" {
-		return "—"
-	}
-	return text
 }

@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,10 @@ func LoadAppSettings() *AppSettings {
 	dotenvMap := make(map[string]string)
 	if envs, err := godotenv.Read(envFile); err == nil {
 		dotenvMap = envs
+	} else if !os.IsNotExist(err) {
+		// ファイルはあるのに読めない（権限・壊れた行）。黙って空で進むと
+		// 認証情報が無いまま UAT 扱いになり、原因が分からない
+		fmt.Fprintf(os.Stderr, "[warn] %s を読めません（環境変数だけで続けます）: %v\n", envFile, err)
 	}
 
 	lookup := func(key, defaultVal string) string {

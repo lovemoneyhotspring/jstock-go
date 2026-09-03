@@ -9,9 +9,8 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/execute"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
-	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 )
 
@@ -122,12 +121,5 @@ func checkOpenOrders(cfg *accumcfg.AccumConfig, led *ledger.Ledger) error {
 
 // connectBroker は設定の発注先に繋ぐ。本番口座でなければ紙のブローカーで済ませる。
 func connectBroker(cfg *accumcfg.AccumConfig) (broker.Broker, error) {
-	if cfg.Execution.Broker == "paper" {
-		return broker.NewPaperBroker(decimal.Zero, "open"), nil
-	}
-	creds, err := credentials.LoadTachibanaCredentials(appSettings.Env, appSettings.DotenvMap)
-	if err != nil {
-		return nil, err
-	}
-	return broker.NewTachibanaBroker(appSettings.Env, creds, appSettings.StateDir)
+	return cli.ConnectBroker(cfg.Execution.Broker, appSettings)
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/strategy"
@@ -14,6 +15,8 @@ import (
 var (
 	appSettings   = settings.LoadAppSettings()
 	configDirFlag string
+	// run はこの実行（run_id・ログ・ダイジェスト・通知）。入口で 1 回だけ起こす
+	run *cli.Run
 )
 
 // buildStrategies は設定ファイルの記述から戦略を組み立てる。

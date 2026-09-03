@@ -22,8 +22,8 @@ func TestBindRunContext(t *testing.T) {
 		t.Errorf("context から引けない: %s", CurrentRunID(ctx))
 	}
 	// 記録系は context を受け取らない経路からも同じ ID を引ける
-	if CurrentRunID(nil) != runID {
-		t.Errorf("プロセスの現在の実行から引けない: %s", CurrentRunID(nil))
+	if CurrentRunID(context.TODO()) != runID {
+		t.Errorf("プロセスの現在の実行から引けない: %s", CurrentRunID(context.TODO()))
 	}
 
 	run := RunContextOf(ctx)

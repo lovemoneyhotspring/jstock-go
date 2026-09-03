@@ -5,6 +5,10 @@
 # ショート側は独立した母集団（margin 節の segments 等）で「決算なし × ギャップ +5% 以上」を寄付で売り、
 # 大引で買い戻す（常時）。
 #
+# **ロング側の規則は書かない。** `extends` で config/daytrade を土台にし、ここには
+# 違う項目（資金と [margin]）だけを書く。ロング側を直すときは config/daytrade を直せば
+# こちらにも効く。ここに同じ項目を書くと、そちらが優先される（配列は丸ごと置き換え）。
+#
 # 使い方:  daytrade plan  --config-dir config/daytrade_margin
 #          daytrade backtest --config-dir config/daytrade_margin
 #
@@ -13,41 +17,18 @@
 # 発注側: open はロングを信用買い（long_via_margin）・ショートを信用新規売り、close は返済、verify は脚ごとに突き合わせる。
 # 秘密は .env: TACHIBANA_<ENV>_AUTH_ID / _PRIVATE_KEY_FILE / _ORDER_PASSWORD（docs/DEPLOY.md）。
 
+extends = "../daytrade"
+
 [capital]
-enabled = true
 # ロング側の 1 日の建玉上限（円）。信用買いなので現金（200 万円 = 保証金）より大きくできる。
 # 200 万 = 現行 jp_gap_fade と同じ DD、300 万 = Sharpe・DD% を保ったまま利益 +46%、400 万 = DD −41%。
 # 保証金率 33% なので長短合計 600 万円まで（300 万 + ショート 200 万 = 500 万、保証金 165 万）。
 max_capital = 3000000
 order_budget = 1000000     # N = 3。手数料 0 円なので 67 万円の段階（20〜100 万一律）に縛られない
-max_positions = 10
-weighting = "inverse_vol"
 
-[universe]
-# ロング側の母集団。ショート側は [margin] に別に持つ
-segments = ["prime"]
-min_turnover = 100000000
-turnover_days = 20
-exclude_cap_terciles = 1
-exclude_earnings_prev = true
-exclude_earnings_today = true
-exclude_margin_alert = true
-
-[signal]
-max_gap = 0.0
-min_gap = -1.0
-skip_limit_down = true
-
-[regime]
-iv_gate = 0.0
-skip_months = [12]
-drift_days = 20
-drift_gap_override = 0.01
-equity_curve_days = 20     # ロング側の直近 20 日損益 ≤ 0 が「地合いが弱い」合図。ショートは常時なので記録のみ
-equity_curve_scale = 0.5   # 合図の日にロングを縮める倍率。margin.long_shrink = false のときロングには効かない
-us_skip_low = 0.0
-us_skip_high = 0.01
-us_vix_override = 24
+# [regime] の equity_curve_days / equity_curve_scale は土台と同じ値。ここでは
+# 「ロング側の直近 20 日損益 ≤ 0 が地合いが弱い合図」として読む。ショートは常時なので
+# 記録のみ。margin.long_shrink = false のときロングには効かない。
 
 [margin]
 enabled = true
@@ -80,12 +61,3 @@ long_extra_cost_bp = 5.7
 # 検証のみ: 引けがストップ高の売建を「翌営業日の寄付で返済」として計上する係数（1 = 全額、0 = 無視）。
 # 実態は 0〜1 の間で、運用で約定率を測って決める。プライム限定なら 1.0 でも負け年 0（研究ノート）
 carry_penalty = 1.0
-
-[execution]
-broker = "tachibana"
-tax_account_type = "SPECIFIC"
-quote_source = "tachibana" # 立花証券の時価問合（CLMMfdsGetMarketPrice）。寄付後は始値、無ければ現在値
-entry_window = ["09:00", "09:15"]
-exit_window = ["15:20", "15:30"]
-kill_switch = false
-max_quote_age = 90

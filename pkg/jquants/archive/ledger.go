@@ -60,9 +60,11 @@ func OpenLedger(path string) (*Ledger, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(ledgerSchema); err != nil {
+	// 版は PRAGMA user_version（storage.Migrate）。列を足すときは末尾に段を足す
+	migrations := []storage.Migration{{Name: "ingest", Up: storage.Exec(ledgerSchema)}}
+	if err := storage.Migrate(db, migrations); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("台帳のスキーマを作れません: %w", err)
+		return nil, fmt.Errorf("台帳 %s: %w", path, err)
 	}
 	return &Ledger{Path: path, db: db}, nil
 }
