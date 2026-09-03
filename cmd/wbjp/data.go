@@ -23,6 +23,7 @@ func newDataCmd() *cobra.Command {
 		Use:   "data",
 		Short: "足データの取得と確認",
 	}
+	cmd.AddCommand(newDataSyncCmd())
 	cmd.AddCommand(newDataCheckCmd())
 	cmd.AddCommand(newDataStatusCmd())
 	return cmd
