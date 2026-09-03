@@ -155,7 +155,7 @@ func threadName(title string) string {
 func postMessage(webhookURL, content, newThreadName, threadID string, mayRetry bool) (createdThreadID string, err error) {
 	u, err := url.Parse(webhookURL)
 	if err != nil {
-		return "", fmt.Errorf("Webhook URL を解釈できません: %w", err)
+		return "", fmt.Errorf("通知先の Webhook URL を解釈できません: %w", err)
 	}
 	q := u.Query()
 	if threadID != "" {
@@ -213,7 +213,7 @@ func postMessage(webhookURL, content, newThreadName, threadID string, mayRetry b
 		ChannelID string `json:"channel_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
-		return "", fmt.Errorf("Discord の応答からスレッド ID を読めません: %w", err)
+		return "", fmt.Errorf("通知先 Discord の応答からスレッド ID を読めません: %w", err)
 	}
 	return msg.ChannelID, nil
 }
