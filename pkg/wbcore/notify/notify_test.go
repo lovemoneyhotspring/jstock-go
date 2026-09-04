@@ -277,6 +277,7 @@ func TestAlertSkipsWhenNotConfigured(t *testing.T) {
 	t.Setenv(BotTokenEnvVar, "")
 	t.Setenv(AlertChannelEnvVar, "")
 	t.Setenv(ReportChannelEnvVar, "")
+	t.Setenv(archiveDirEnvVar, t.TempDir())
 	if Alert("障害", "詳細", nil) {
 		t.Error("未設定なのに送ったことになっている")
 	}
