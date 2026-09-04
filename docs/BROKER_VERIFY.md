@@ -12,6 +12,9 @@
 | `CLMShinyouTategyokuList` | 信用建玉の一覧・返済する玉の指定 | [pkg/wbcore/broker/tachibana_trade.go](../pkg/wbcore/broker/tachibana_trade.go) |
 | `CLMKabuNewOrder`（信用） | 信用新規・返済の発注 | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
 | `CLMStkGetIssueMstKabu` | 売買単位 | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
+| `CLMKabuNewOrder`（逆指値・通常＋逆指値） | ストップの発注（`OrderRequest.WithStop`） | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
+| `CLMKabuCorrectOrder` | 逆指値の条件の訂正（トレーリング） | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
+| `CLMOrderList` の逆指値項目（`sOrderGyakusasi*` / `sOrderTriggerType`） | 発火したかの照会 | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
 
 残高・現物建玉（`CLMZanKaiSummary` / `CLMGenbutuKabuList`）も**未検証**。Go への移植時に
 項目名を取り違えていた（`aCLMKabuZan` / `sGenkinZandaka` などは実在しない）ので、
@@ -105,7 +108,20 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin
 2. `close` が返済として通る（現物売りになっていない。手数料と受渡が信用のものか）
 3. `verify` が「持ち越しなし」で終わる（＝ `close` の数量が建玉と一致した）
 
+```bash
+# 5. 逆指値（デモ環境で。信用返済での逆指値はリファレンスに例文が無いので必ず実機で）
+#    a. 現物 1 単元を買い、売りの逆指値（条件価格は現在値の −3%、発火後は成行）を置く
+#    b. CLMOrderList で sOrderGyakusasiOrderType=1 / sOrderTriggerType=0 で返ることを確かめる
+#    c. CorrectStop で条件価格を変え、一覧に反映されることを確かめる
+#    d. 取消できることを確かめる
+#    e. 信用建玉に対して返済の逆指値（建玉指定つき）が受け付けられるか確かめる
+#    f. 発火後に CorrectStop が拒否されること（sResultCode ≠ 0）を確かめる
+```
+
 ## 既知の制約
+
+- **逆指値は発火後に条件を訂正できない**（通常の値段訂正になる）。期日は最長 10 営業日。
+  逆指値の値段は値幅制限内・呼値単位で、銘柄・市場ごとに受付停止があり得る（エラーコード一覧）
 
 - **`CLMOrderList` は当日（＋繰越）分しか返らない。** 前日以前の注文は照会できないので、
   積立の `UnrecordedFills` が捕まえられるのは当日の再実行までとなる

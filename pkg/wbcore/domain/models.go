@@ -269,6 +269,16 @@ func MakeClientOrderID(seedKey, symbol string, side Side, quantity decimal.Decim
 }
 
 // OrderRequest は発注リクエスト。
+// StopSpec は逆指値の指定。Trigger（条件価格）に触れるまで注文は市場に出ない。
+// 発火後は Price が nil なら成行、あれば指値。
+//
+// 立花証券 e支店 API では sGyakusasiZyouken / sGyakusasiPrice にあたり、
+// 未発火の間は訂正で条件を変えられる（トレーリングはこれを定期的に行う）。
+type StopSpec struct {
+	Trigger decimal.Decimal
+	Price   *decimal.Decimal
+}
+
 type OrderRequest struct {
 	ClientOrderID string
 	Symbol        string
@@ -279,6 +289,29 @@ type OrderRequest struct {
 	TaxType       TaxAccountType
 	Reason        string
 	Trade         TradeType
+	// Stop があれば逆指値。OrderType が MARKET なら「逆指値だけ」（発火まで板に出ない）、
+	// LIMIT なら「通常＋逆指値」（指値で板に出し、発火したら Stop の値段に切り替わる）。
+	Stop *StopSpec
+}
+
+// WithStop は逆指値を付ける。条件価格は正、発火後の値段は nil（成行）か正。
+func (r OrderRequest) WithStop(trigger decimal.Decimal, price *decimal.Decimal) (OrderRequest, error) {
+	if !r.OrderType.IsPlaceable() {
+		return OrderRequest{}, fmt.Errorf("%s に逆指値は付けられない", r.OrderType)
+	}
+	if trigger.LessThanOrEqual(decimal.Zero) {
+		return OrderRequest{}, fmt.Errorf("逆指値の条件価格は正の数: %s", trigger)
+	}
+	if price != nil && price.LessThanOrEqual(decimal.Zero) {
+		return OrderRequest{}, fmt.Errorf("逆指値の値段は正の数: %s", price)
+	}
+	r.Stop = &StopSpec{Trigger: trigger, Price: price}
+	return r, nil
+}
+
+// IsStopOnly は「逆指値だけ」（発火するまで板に出ない注文）か。
+func (r OrderRequest) IsStopOnly() bool {
+	return r.Stop != nil && r.OrderType != OrderTypeLimit
 }
 
 func NewOrderRequest(clientOrderID, symbol string, side Side, orderType OrderType, qty decimal.Decimal, limitPrice *decimal.Decimal, taxType TaxAccountType, reason string, trade TradeType) (OrderRequest, error) {
@@ -351,6 +384,10 @@ type Order struct {
 	AvgFillPrice   *decimal.Decimal
 	CreatedAt      *time.Time
 	Trade          TradeType
+	// Stop は逆指値の条件（無ければ nil）。StopTriggered は発火済みか
+	// （発火後は条件を訂正できず、通常の注文として扱う）。
+	Stop          *StopSpec
+	StopTriggered bool
 }
 
 func (o Order) RemainingQuantity() decimal.Decimal {

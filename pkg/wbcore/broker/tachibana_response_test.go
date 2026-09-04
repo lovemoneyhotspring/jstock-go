@@ -191,6 +191,60 @@ func TestToOrderFromDetailUsesOwnFieldNames(t *testing.T) {
 	}
 }
 
+// 逆指値の項目を読む。一覧は sOrder* の接頭辞付き、トリガータイプ 0 が未発火。
+func TestToOrderReadsStop(t *testing.T) {
+	row := map[string]any{
+		fieldListIssue:             "7203",
+		fieldSideKubun:             "1", // 売
+		fieldTradeKubun:            "4", // 信用返済
+		fieldListQty:               "100",
+		fieldListFilledQty:         "0",
+		fieldOrderStatusCode:       "16", // 逆指注文（未約定）
+		fieldPriceKubun:            "1",
+		"sOrderGyakusasiOrderType": "1",
+		"sOrderGyakusasiZyouken":   "2400",
+		"sOrderGyakusasiKubun":     "1",
+		"sOrderGyakusasiPrice":     "2380",
+		"sOrderTriggerType":        "0",
+	}
+	order, err := toOrder(row, listFields, "12345", "20260903", "")
+	if err != nil {
+		t.Fatalf("注文として読めません: %v", err)
+	}
+	if order.Stop == nil || !order.Stop.Trigger.Equal(dec("2400")) ||
+		order.Stop.Price == nil || !order.Stop.Price.Equal(dec("2380")) {
+		t.Fatalf("逆指値が読めていない: %+v", order.Stop)
+	}
+	if order.StopTriggered {
+		t.Error("未発火なのに発火済みになっている")
+	}
+	if !order.Status.IsOpen() {
+		t.Errorf("逆指注文（未約定）が板に残っている扱いでない: %s", order.Status)
+	}
+
+	// 発火後の成行（値段区分 0）
+	row["sOrderGyakusasiKubun"] = "0"
+	row["sOrderGyakusasiPrice"] = "0"
+	row["sOrderTriggerType"] = "1"
+	order, err = toOrder(row, listFields, "12345", "20260903", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.Stop == nil || order.Stop.Price != nil || !order.StopTriggered {
+		t.Errorf("発火済み・成行の逆指値が読めていない: %+v / %v", order.Stop, order.StopTriggered)
+	}
+
+	// 逆指値の無い行には付けない
+	delete(row, "sOrderGyakusasiOrderType")
+	order, err = toOrder(row, listFields, "12345", "20260903", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.Stop != nil {
+		t.Errorf("逆指値の無い注文に条件が付いている: %+v", order.Stop)
+	}
+}
+
 // 解釈できない売買区分の行は落とす（買いとして通さない）。
 func TestToOrderRejectsUnknownSide(t *testing.T) {
 	row := map[string]any{fieldSideKubun: "5", fieldTradeKubun: "0"} // 現渡

@@ -45,6 +45,90 @@ func TestOrderPayloadFields(t *testing.T) {
 	}
 }
 
+// 逆指値だけの注文は種別 1 で通常の値段が "*"、通常＋逆指値は種別 2 で通常の指値を持つ。
+// 発火後の値段は成行なら 0。
+func TestOrderPayloadStop(t *testing.T) {
+	b := &TachibanaBroker{creds: testCreds()}
+	base := domain.OrderRequest{
+		ClientOrderID: "stop-1", Symbol: "7203", Side: domain.SideSell,
+		OrderType: domain.OrderTypeMarket, Quantity: dec("100"),
+		TaxType: domain.TaxAccountSpecific, Trade: domain.TradeTypeCash,
+	}
+	stopOnly, err := base.WithStop(dec("2400"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := b.orderPayload(stopOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{
+		"sGyakusasiOrderType": "1", "sGyakusasiZyouken": "2400", "sGyakusasiPrice": "0", "sOrderPrice": "*",
+	} {
+		if params[key] != want {
+			t.Errorf("逆指値だけ: %s = %v, want %v", key, params[key], want)
+		}
+	}
+
+	limit := dec("2600")
+	after := dec("2380")
+	combined := base
+	combined.OrderType, combined.LimitPrice = domain.OrderTypeLimit, &limit
+	combined, err = combined.WithStop(dec("2400"), &after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err = b.orderPayload(combined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{
+		"sGyakusasiOrderType": "2", "sGyakusasiZyouken": "2400", "sGyakusasiPrice": "2380", "sOrderPrice": "2600",
+	} {
+		if params[key] != want {
+			t.Errorf("通常＋逆指値: %s = %v, want %v", key, params[key], want)
+		}
+	}
+
+	// 逆指値の無い注文は従来どおりの固定値
+	params, err = b.orderPayload(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["sGyakusasiOrderType"] != "0" || params["sGyakusasiZyouken"] != "0" || params["sGyakusasiPrice"] != "*" {
+		t.Errorf("逆指値なしの固定値が変わっている: %v / %v / %v",
+			params["sGyakusasiOrderType"], params["sGyakusasiZyouken"], params["sGyakusasiPrice"])
+	}
+}
+
+// 逆指値の訂正は条件価格と発火後の値段だけを変え、他は "*"（変更なし）。
+func TestCorrectStopPayload(t *testing.T) {
+	params, err := correctStopPayload("9000015", "20260903", domain.StopSpec{Trigger: dec("2450")}, "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{
+		"sOrderNumber": "9000015", "sEigyouDay": "20260903",
+		"sCondition": "*", "sOrderPrice": "*", "sOrderSuryou": "*", "sOrderExpireDay": "*",
+		"sGyakusasiZyouken": "2450", "sGyakusasiPrice": "0", "sSecondPassword": "pw",
+	} {
+		if params[key] != want {
+			t.Errorf("%s = %v, want %v", key, params[key], want)
+		}
+	}
+	after := dec("2430")
+	params, err = correctStopPayload("9000015", "20260903", domain.StopSpec{Trigger: dec("2450"), Price: &after}, "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["sGyakusasiPrice"] != "2430" {
+		t.Errorf("発火後の指値 = %v, want 2430", params["sGyakusasiPrice"])
+	}
+	if _, err := correctStopPayload("1", "20260903", domain.StopSpec{}, "pw"); err == nil {
+		t.Error("条件価格 0 の訂正を通している")
+	}
+}
+
 // 成行は価格 0。指値なのに価格が無ければ発注しない。
 func TestOrderPayloadMarketAndMissingLimit(t *testing.T) {
 	b := &TachibanaBroker{creds: testCreds()}

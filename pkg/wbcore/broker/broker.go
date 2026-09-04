@@ -23,6 +23,13 @@ type Broker interface {
 	PositionsBySymbol() (map[string]domain.Position, error)
 }
 
+// StopCorrector は置いた逆指値の条件を後から変えられるブローカー。
+// トレーリングは「逆指値を置いて、定期的にここで条件を引き上げる」形で作る。
+// 発火済みの逆指値は訂正できない（立花証券のリファレンス）。
+type StopCorrector interface {
+	CorrectStop(clientOrderID string, brokerOrderID *string, stop domain.StopSpec) error
+}
+
 // PositionsBySymbolHelper は建玉一覧を銘柄コードごとのマップ（同一銘柄の加重平均取得単価と数量合算）にまとめる。
 func PositionsBySymbolHelper(positions []domain.Position) map[string]domain.Position {
 	merged := make(map[string]domain.Position)

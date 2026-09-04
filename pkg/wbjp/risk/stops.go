@@ -13,8 +13,11 @@ import (
 
 // Stop は 1 建玉ぶんのストップ。
 //
-// 逆指値はブローカーに置かない（日本株 API が非対応）。ストップ価格を
-// ローカルに持ち、足が更新されるたびに評価して決済注文を組み立てる。
+// ストップ価格をローカルに持ち、足が更新されるたびに評価して決済注文を組み立てる。
+// 立花証券 e支店 API は逆指値を受け付ける（domain.OrderRequest.WithStop /
+// broker.StopCorrector）が、wbjp はまだブローカーに置いていない。置く場合は
+// 期日が最長 10 営業日なので、run のたびに「今のストップ価格で逆指値が立っているか」を
+// 突き合わせて置き直す形になる。
 type Stop struct {
 	Symbol      string
 	StopPrice   decimal.Decimal

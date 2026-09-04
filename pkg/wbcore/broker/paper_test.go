@@ -167,6 +167,75 @@ func TestPaperBrokerExpiresOnlyTradedSymbols(t *testing.T) {
 	}
 }
 
+// 逆指値は条件に触れるまで約定せず、触れたら発火した値段で成行になる。
+// 発火前は条件を訂正でき、発火後はできない。
+func TestPaperBrokerStopOrder(t *testing.T) {
+	pb := NewPaperBroker(decimal.NewFromInt(10_000_000), "intrabar")
+	pb.slippageRate = decimal.Zero
+	pb.Mark(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2500)})
+	buy, _ := domain.NewOrderRequest("b", "7203", domain.SideBuy, domain.OrderTypeMarket,
+		decimal.NewFromInt(100), nil, domain.TaxAccountSpecific, "entry", domain.TradeTypeCash)
+	if _, err := pb.Place(buy); err != nil {
+		t.Fatal(err)
+	}
+	pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2500)}, nil, nil, nil)
+
+	sell, _ := domain.NewOrderRequest("s", "7203", domain.SideSell, domain.OrderTypeMarket,
+		decimal.NewFromInt(100), nil, domain.TaxAccountSpecific, "stop", domain.TradeTypeCash)
+	stop, err := sell.WithStop(decimal.NewFromInt(2400), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pb.Place(stop); err != nil {
+		t.Fatal(err)
+	}
+
+	// 安値が条件に届かない日は何もしない
+	hi, lo := decimal.NewFromInt(2550), decimal.NewFromInt(2450)
+	fills := pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2500)},
+		map[string]decimal.Decimal{"7203": hi}, map[string]decimal.Decimal{"7203": lo}, nil)
+	if len(fills) != 0 {
+		t.Fatalf("条件に触れていないのに約定した: %+v", fills)
+	}
+	// 発火前は条件を引き上げられる
+	if err := pb.CorrectStop("s", nil, domain.StopSpec{Trigger: decimal.NewFromInt(2450)}); err != nil {
+		t.Fatalf("発火前の訂正が拒否された: %v", err)
+	}
+	open, _ := pb.GetOpenOrders()
+	if len(open) != 1 || open[0].Stop == nil || !open[0].Stop.Trigger.Equal(decimal.NewFromInt(2450)) {
+		t.Fatalf("訂正が反映されていない: %+v", open)
+	}
+
+	// 安値が条件に触れた日は条件価格で成行約定
+	lo = decimal.NewFromInt(2440)
+	fills = pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2500)},
+		map[string]decimal.Decimal{"7203": hi}, map[string]decimal.Decimal{"7203": lo}, nil)
+	if len(fills) != 1 || !fills[0].Price.Equal(decimal.NewFromInt(2450)) {
+		t.Fatalf("逆指値の約定 = %+v, want 2450 で 1 件", fills)
+	}
+	if err := pb.CorrectStop("s", nil, domain.StopSpec{Trigger: decimal.NewFromInt(2300)}); err == nil {
+		t.Error("約定済みの逆指値の訂正を通している")
+	}
+
+	// 寄付で条件を割って寄れば寄付の値段（ギャップ分は不利）。別 ID で建て直す
+	buy2, _ := domain.NewOrderRequest("b2", "7203", domain.SideBuy, domain.OrderTypeMarket,
+		decimal.NewFromInt(100), nil, domain.TaxAccountSpecific, "entry", domain.TradeTypeCash)
+	if _, err := pb.Place(buy2); err != nil {
+		t.Fatal(err)
+	}
+	pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2500)}, nil, nil, nil)
+	sell2, _ := domain.NewOrderRequest("s2", "7203", domain.SideSell, domain.OrderTypeMarket,
+		decimal.NewFromInt(100), nil, domain.TaxAccountSpecific, "stop", domain.TradeTypeCash)
+	stop2, _ := sell2.WithStop(decimal.NewFromInt(2400), nil)
+	if _, err := pb.Place(stop2); err != nil {
+		t.Fatal(err)
+	}
+	fills = pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2300)}, nil, nil, nil)
+	if len(fills) != 1 || !fills[0].Price.Equal(decimal.NewFromInt(2300)) {
+		t.Fatalf("ギャップで抜けた逆指値の約定 = %+v, want 寄付 2300", fills)
+	}
+}
+
 // 待機資金の利息は年率を 360 日で日割りする（T-Bill の慣行）。
 func TestPaperBrokerAccrueInterest(t *testing.T) {
 	p := NewPaperBroker(decimal.NewFromInt(3_600_000), "open")

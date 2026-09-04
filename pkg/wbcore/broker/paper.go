@@ -278,6 +278,10 @@ func (p *PaperBroker) Place(req domain.OrderRequest) (*domain.OrderAck, error) {
 		CreatedAt:      &now,
 		Trade:          req.Trade,
 	}
+	if req.Stop != nil {
+		spec := *req.Stop
+		order.Stop = &spec
+	}
 
 	p.orders[order.ClientOrderID] = order
 	return &domain.OrderAck{
@@ -299,6 +303,30 @@ func (p *PaperBroker) Cancel(clientOrderID string, brokerOrderID *string) error 
 		return nil
 	}
 	order.Status = domain.OrderStatusCancelled
+	p.orders[clientOrderID] = order
+	return nil
+}
+
+// CorrectStop は未発火の逆指値の条件を変える（立花証券の CLMKabuCorrectOrder と同じ制約）。
+func (p *PaperBroker) CorrectStop(clientOrderID string, brokerOrderID *string, stop domain.StopSpec) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	order, ok := p.orders[clientOrderID]
+	if !ok {
+		return fmt.Errorf("注文が見つかりません: %s", clientOrderID)
+	}
+	if !order.Status.IsOpen() || order.Stop == nil {
+		return fmt.Errorf("%s: 生きている逆指値ではないので訂正できません", clientOrderID)
+	}
+	if order.StopTriggered {
+		return fmt.Errorf("%s: 逆指値は発火済みなので条件を訂正できません（通常の値段訂正を）", clientOrderID)
+	}
+	if stop.Trigger.LessThanOrEqual(decimal.Zero) {
+		return fmt.Errorf("逆指値の条件価格は正の数: %s", stop.Trigger)
+	}
+	spec := stop
+	order.Stop = &spec
 	p.orders[clientOrderID] = order
 	return nil
 }
@@ -392,8 +420,10 @@ func (p *PaperBroker) Settle(openPrices map[string]decimal.Decimal, highs, lows 
 			low = &l
 		}
 
-		execPrice := p.executionPriceLocked(order, openPrice, high, low)
+		execPrice := p.executionPriceLocked(&order, openPrice, high, low)
 		if execPrice == nil {
+			// 逆指値が発火だけした（発火後の指値が届かない）場合は、その状態を残す
+			p.orders[id] = order
 			continue
 		}
 
@@ -415,14 +445,37 @@ func (p *PaperBroker) Settle(openPrices map[string]decimal.Decimal, highs, lows 
 	return filled
 }
 
-func (p *PaperBroker) executionPriceLocked(order domain.Order, openPrice decimal.Decimal, high, low *decimal.Decimal) *decimal.Decimal {
-	if order.OrderType == domain.OrderTypeMarket {
-		direction := decimal.NewFromInt(1)
-		if order.Side == domain.SideSell {
-			direction = decimal.NewFromInt(-1)
+// executionPriceLocked は約定値。約定しなければ nil。
+//
+// 逆指値（order.Stop）は条件価格に触れるまで板に出ない。触れたら発火済みにして、
+// 成行なら発火した値段（寄付で抜けていれば寄付）に滑りを乗せ、指値なら以後は
+// 通常の指値として扱う。通常＋逆指値は先に通常の指値を見る。
+func (p *PaperBroker) executionPriceLocked(order *domain.Order, openPrice decimal.Decimal, high, low *decimal.Decimal) *decimal.Decimal {
+	if order.Stop != nil && !order.StopTriggered {
+		if order.OrderType == domain.OrderTypeLimit && order.LimitPrice != nil {
+			if price := LimitFillPrice(order.Side, *order.LimitPrice, openPrice, high, low, p.fillModel); price != nil {
+				return price
+			}
 		}
-		slippage := openPrice.Mul(direction.Mul(p.slippageRate))
-		price := openPrice.Add(slippage)
+		at, triggered := StopTriggerPrice(order.Side, order.Stop.Trigger, openPrice, high, low, p.fillModel)
+		if !triggered {
+			return nil
+		}
+		order.StopTriggered = true
+		if order.Stop.Price == nil {
+			order.OrderType = domain.OrderTypeMarket
+			order.LimitPrice = nil
+			price := p.marketFillPrice(order.Side, at)
+			return &price
+		}
+		order.OrderType = domain.OrderTypeLimit
+		limit := *order.Stop.Price
+		order.LimitPrice = &limit
+		return LimitFillPrice(order.Side, limit, at, high, low, p.fillModel)
+	}
+
+	if order.OrderType == domain.OrderTypeMarket {
+		price := p.marketFillPrice(order.Side, openPrice)
 		return &price
 	}
 
@@ -432,6 +485,39 @@ func (p *PaperBroker) executionPriceLocked(order domain.Order, openPrice decimal
 	}
 
 	return LimitFillPrice(order.Side, *limit, openPrice, high, low, p.fillModel)
+}
+
+// marketFillPrice は成行の約定値（基準の値段に滑りを乗せる）。
+func (p *PaperBroker) marketFillPrice(side domain.Side, base decimal.Decimal) decimal.Decimal {
+	direction := decimal.NewFromInt(1)
+	if side == domain.SideSell {
+		direction = decimal.NewFromInt(-1)
+	}
+	return base.Add(base.Mul(direction.Mul(p.slippageRate)))
+}
+
+// StopTriggerPrice は逆指値が発火したかと、発火した値段。
+//
+// 売りの逆指値は値段が条件以下に、買いは条件以上になったら発火する。寄付で既に抜けて
+// いれば寄付の値段で（ギャップで抜けた分は不利になる）、intrabar なら足の高安で条件に
+// 触れた値段で発火する。open モデルは寄付しか見ない（保守的）。
+func StopTriggerPrice(side domain.Side, trigger, openPrice decimal.Decimal, high, low *decimal.Decimal, fillModel string) (decimal.Decimal, bool) {
+	if side == domain.SideSell {
+		if openPrice.LessThanOrEqual(trigger) {
+			return openPrice, true
+		}
+		if fillModel == "intrabar" && low != nil && low.LessThanOrEqual(trigger) {
+			return trigger, true
+		}
+		return decimal.Zero, false
+	}
+	if openPrice.GreaterThanOrEqual(trigger) {
+		return openPrice, true
+	}
+	if fillModel == "intrabar" && high != nil && high.GreaterThanOrEqual(trigger) {
+		return trigger, true
+	}
+	return decimal.Zero, false
 }
 
 func LimitFillPrice(side domain.Side, limit, openPrice decimal.Decimal, high, low *decimal.Decimal, fillModel string) *decimal.Decimal {
