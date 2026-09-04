@@ -12,6 +12,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/fees"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/universe"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
 	"github.com/shopspring/decimal"
@@ -28,6 +29,10 @@ type Quote struct {
 	// Source は取得元。ログと「遅延の気配を使っていないか」の判断に使う。
 	Source  string
 	Delayed bool
+	// PrevClose は取得元が返す当日の基準値段（前日終値）。正なら plan の前日終値より
+	// 優先する——株式分割・併合の日は plan の値（アーカイブの終値）が調整前で、
+	// そのままだと −50% のようなギャップに見えて候補の先頭に来る。
+	PrevClose decimal.Decimal
 }
 
 // Pick は建てる銘柄 1 つ。Side が BUY なら寄付で買う（ロング）、SELL なら売建てる（ショート）。
@@ -129,6 +134,9 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 			continue
 		}
 		prev := decimal.NewFromFloat(c.PrevClose)
+		if quote.PrevClose.GreaterThan(decimal.Zero) {
+			prev = quote.PrevClose
+		}
 		gap := quote.Price.Div(prev).Sub(decimal.NewFromInt(1))
 		// 帯は常に [min, max)。ロングは max = 0（ギャップダウン）、ショートは min = 0.05。
 		if gap.LessThan(f.min) || gap.GreaterThanOrEqual(f.max) {
@@ -214,6 +222,10 @@ type PickOptions struct {
 // まず「1 単元が Budget に収まる」銘柄を順位順に N 個取る（届かない銘柄は次点を繰り上げ）。
 // 次に Weighting で総予算 Budget × N を按分し、単元に切り捨てる。inverse_vol で按分が
 // 小さすぎて 1 単元に届かない銘柄は落ちる（N が減る）。
+//
+// 売建（Side が SELL）は成行で出せる上限（50 単元。空売り価格規制の適用除外の範囲）で
+// 頭打ちにする——超える数量はブローカーが拒否し、その日はその銘柄を建てられずに終わるため。
+// 低位株では予算を使い切れないが、建てないよりよい。
 func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 	if opts.N < 1 {
 		return nil
@@ -235,9 +247,13 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 	weights := Weights(chosen, opts.Weighting)
 	var picks []Pick
 	for i, r := range chosen {
-		quantity := SharesFor(total.Mul(decimal.NewFromFloat(weights[i])), r.Price, lotOf(opts.LotSizes, r.Symbol))
+		lot := lotOf(opts.LotSizes, r.Symbol)
+		quantity := SharesFor(total.Mul(decimal.NewFromFloat(weights[i])), r.Price, lot)
 		if quantity.LessThanOrEqual(decimal.Zero) {
 			continue
+		}
+		if limit := decimal.NewFromInt(int64(broker.ShortSaleMarketLimit)); side == domain.SideSell && quantity.GreaterThan(limit) {
+			quantity = limit.Div(lot).Floor().Mul(lot)
 		}
 		picks = append(picks, Pick{
 			Symbol:    r.Symbol,

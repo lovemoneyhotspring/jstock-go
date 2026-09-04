@@ -59,6 +59,31 @@ func TestRankOrdersByGapAscending(t *testing.T) {
 	}
 }
 
+// 取得元が基準値段（前日終値）を返すなら、plan の前日終値よりそちらでギャップを出す。
+// 株式分割の日は plan の値が調整前で、そのままだと −50% のギャップに見える。
+func TestRankPrefersQuotePrevClose(t *testing.T) {
+	cfg := config.Default().Signal
+	candidates := []universe.Candidate{candidate("1000", 2000, nil)} // アーカイブは分割前の 2000 円
+	split := quote("1000", 990)
+	split.PrevClose = decimal.NewFromInt(1000) // ブローカーの基準値段は分割後の 1000 円
+	ranked := Rank(candidates, map[string]Quote{"1000": split}, cfg)
+	if len(ranked) != 1 {
+		t.Fatalf("順位表 %d 件, want 1", len(ranked))
+	}
+	if !ranked[0].Gap.Equal(decimal.RequireFromString("-0.01")) {
+		t.Errorf("ギャップ = %s, want -0.01（基準値段 1000 円で計算）", ranked[0].Gap)
+	}
+	if !ranked[0].PrevClose.Equal(decimal.NewFromInt(1000)) {
+		t.Errorf("前日終値 = %s, want 1000", ranked[0].PrevClose)
+	}
+	// 基準値段が無ければ plan の値のまま
+	plain := quote("1000", 1980)
+	ranked = Rank(candidates, map[string]Quote{"1000": plain}, cfg)
+	if len(ranked) != 1 || !ranked[0].Gap.Equal(decimal.RequireFromString("-0.01")) {
+		t.Errorf("基準値段が無いのに plan の前日終値を使っていない: %+v", ranked)
+	}
+}
+
 func TestRankSkipsLimitDown(t *testing.T) {
 	cfg := config.Default().Signal
 	// 前日終値 1000 円の制限値幅は ±300 円 → 700 円がストップ安
@@ -169,6 +194,21 @@ func TestPickFromSkipsUnaffordable(t *testing.T) {
 	})
 	if len(picks) != 1 || picks[0].Symbol != "2000" {
 		t.Errorf("予算に届かない銘柄を外していない: %+v", picks)
+	}
+}
+
+// 売建は成行で出せる 50 単元で頭打ち（超える数量はブローカーが拒否する）。買いは切らない。
+func TestPickFromCapsShortAtMarketLimit(t *testing.T) {
+	ranked := []Ranked{{Rank: 1, Symbol: "1000", Code: "10000", PrevClose: decimal.NewFromInt(100), Price: decimal.NewFromInt(108)}}
+	opts := PickOptions{N: 1, Budget: decimal.NewFromInt(670_000), Weighting: "equal", Side: domain.SideSell}
+	picks := PickFrom(ranked, opts)
+	if len(picks) != 1 || !picks[0].Quantity.Equal(decimal.NewFromInt(5000)) {
+		t.Errorf("売建の株数 = %+v, want 5000", picks)
+	}
+	opts.Side = domain.SideBuy
+	picks = PickFrom(ranked, opts)
+	if len(picks) != 1 || !picks[0].Quantity.Equal(decimal.NewFromInt(6200)) {
+		t.Errorf("買いの株数 = %+v, want 6200（上限は売建だけ）", picks)
 	}
 }
 

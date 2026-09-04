@@ -11,25 +11,27 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-var (
-	DefaultCommissionRate = decimal.RequireFromString("0.0011")
-	DefaultSlippageRate   = decimal.RequireFromString("0.001")
-)
+// DefaultSlippageRate は成行の滑り（寄付値に対する比率）。
+var DefaultSlippageRate = decimal.RequireFromString("0.001")
 
 type holding struct {
 	quantity  decimal.Decimal
 	costPrice decimal.Decimal
 }
 
+// PaperBroker は約定を模擬するブローカー（検証と dry-run）。
+//
+// 手数料は立花証券の定額コース（FlatRateTable）: 現物はその日の約定代金の合計で段階が
+// 決まるので、約定のたびに「合計が増えたぶんの差分」を取る（BeginDay で合計を戻す）。
+// 信用は 0 円。発注前の見積り（Preview）とデイトレの検証（daytrade/fees）と同じ表。
 type PaperBroker struct {
-	mu             sync.Mutex
-	initialCash    decimal.Decimal
-	cash           decimal.Decimal
-	commissionRate decimal.Decimal
-	slippageRate   decimal.Decimal
-	currency       string
-	taxType        domain.TaxAccountType
-	fillModel      string // "open" | "intrabar"
+	mu           sync.Mutex
+	initialCash  decimal.Decimal
+	cash         decimal.Decimal
+	slippageRate decimal.Decimal
+	currency     string
+	taxType      domain.TaxAccountType
+	fillModel    string // "open" | "intrabar"
 
 	holdings    map[string]*holding
 	orders      map[string]domain.Order
@@ -37,6 +39,8 @@ type PaperBroker struct {
 	fills       []domain.Fill
 	realizedPnL decimal.Decimal
 	boughtToday map[string]struct{}
+	// cashTradedToday はその日の現物約定代金の合計（定額コースの段階の基準）。
+	cashTradedToday decimal.Decimal
 }
 
 func NewPaperBroker(initialCash decimal.Decimal, fillModel string) *PaperBroker {
@@ -47,18 +51,24 @@ func NewPaperBroker(initialCash decimal.Decimal, fillModel string) *PaperBroker 
 		fillModel = "open"
 	}
 	return &PaperBroker{
-		initialCash:    initialCash,
-		cash:           initialCash,
-		commissionRate: DefaultCommissionRate,
-		slippageRate:   DefaultSlippageRate,
-		currency:       "JPY",
-		taxType:        domain.TaxAccountSpecific,
-		fillModel:      fillModel,
-		holdings:       make(map[string]*holding),
-		orders:         make(map[string]domain.Order),
-		marks:          make(map[string]decimal.Decimal),
-		boughtToday:    make(map[string]struct{}),
+		initialCash:  initialCash,
+		cash:         initialCash,
+		slippageRate: DefaultSlippageRate,
+		currency:     "JPY",
+		taxType:      domain.TaxAccountSpecific,
+		fillModel:    fillModel,
+		holdings:     make(map[string]*holding),
+		orders:       make(map[string]domain.Order),
+		marks:        make(map[string]decimal.Decimal),
+		boughtToday:  make(map[string]struct{}),
 	}
+}
+
+// RealizedPnL は手数料控除後の実現損益の累計。
+func (p *PaperBroker) RealizedPnL() decimal.Decimal {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.realizedPnL
 }
 
 func (p *PaperBroker) Name() string {
@@ -202,7 +212,7 @@ func (p *PaperBroker) Preview(req domain.OrderRequest) (*domain.OrderPreview, er
 	}
 
 	cost := refPrice.Mul(req.Quantity).Round(0)
-	fee := p.commission(cost)
+	fee := p.commission(cost, req.Trade)
 	return &domain.OrderPreview{
 		EstimatedCost: cost,
 		EstimatedFee:  fee,
@@ -245,7 +255,7 @@ func (p *PaperBroker) Place(req domain.OrderRequest) (*domain.OrderAck, error) {
 			return nil, err
 		}
 		cost := refPrice.Mul(req.Quantity).Round(0)
-		fee := p.commission(cost)
+		fee := p.commission(cost, req.Trade)
 		if cost.Add(fee).GreaterThan(p.cash) {
 			return nil, &InsufficientFundsError{
 				Message: fmt.Sprintf("%s: 必要 %s に対し買付余力 %s", req.Symbol, cost.Add(fee), p.cash),
@@ -326,20 +336,36 @@ func roundToUnit(value, unit decimal.Decimal) decimal.Decimal {
 	return value.Div(unit).Round(0).Mul(unit)
 }
 
+// BeginDay は日替わり: 当日買付の記録と、定額コースの当日合計を戻す。
 func (p *PaperBroker) BeginDay() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.boughtToday = make(map[string]struct{})
+	p.cashTradedToday = decimal.Zero
 }
 
+// ExpireOpenOrders は未約定の注文をすべて失効させる（当日限りの注文）。
 func (p *PaperBroker) ExpireOpenOrders() {
+	p.ExpireOpenOrdersFor(nil)
+}
+
+// ExpireOpenOrdersFor は traded にある銘柄の未約定注文だけを失効させる。
+// nil なら全銘柄。その日に立会いの無かった銘柄（休場・売買停止）の注文は
+// 「出したのに約定の機会が無かった」だけなので、次の立会いまで残す。
+func (p *PaperBroker) ExpireOpenOrdersFor(traded map[string]struct{}) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for id, o := range p.orders {
-		if o.Status.IsOpen() {
-			o.Status = domain.OrderStatusExpired
-			p.orders[id] = o
+		if !o.Status.IsOpen() {
+			continue
 		}
+		if traded != nil {
+			if _, ok := traded[o.Symbol]; !ok {
+				continue
+			}
+		}
+		o.Status = domain.OrderStatusExpired
+		p.orders[id] = o
 	}
 }
 
@@ -431,7 +457,7 @@ func LimitFillPrice(side domain.Side, limit, openPrice decimal.Decimal, high, lo
 
 func (p *PaperBroker) executeLocked(order domain.Order, price decimal.Decimal, when *time.Time) (domain.Fill, error) {
 	gross := price.Mul(order.Quantity).Round(0)
-	fee := p.commission(gross)
+	fee := p.commission(gross, order.Trade)
 
 	if order.Side == domain.SideBuy && order.Trade == domain.TradeTypeMarginClose {
 		existing := p.holdings[order.Symbol]
@@ -484,6 +510,9 @@ func (p *PaperBroker) executeLocked(order domain.Order, price decimal.Decimal, w
 		}
 	}
 
+	if isCashTrade(order.Trade) {
+		p.cashTradedToday = p.cashTradedToday.Add(gross)
+	}
 	p.marks[order.Symbol] = price
 	fillTime := clock.NowUTC()
 	if when != nil {
@@ -523,6 +552,15 @@ func (p *PaperBroker) BoughtToday() map[string]struct{} {
 	return out
 }
 
-func (p *PaperBroker) commission(gross decimal.Decimal) decimal.Decimal {
-	return gross.Mul(p.commissionRate).Round(0)
+// commission はこの約定で増える手数料。現物は定額コースの当日合計に対する差分、信用は 0 円。
+func (p *PaperBroker) commission(gross decimal.Decimal, trade domain.TradeType) decimal.Decimal {
+	if !isCashTrade(trade) {
+		return decimal.Zero
+	}
+	return MarginalFlatRateCommission(p.cashTradedToday, gross)
+}
+
+// isCashTrade は現物か（空の取引区分は現物とみなす）。
+func isCashTrade(trade domain.TradeType) bool {
+	return trade == "" || trade == domain.TradeTypeCash
 }

@@ -127,6 +127,43 @@ func TestBuildComputesFeatures(t *testing.T) {
 	}
 }
 
+// 足が 20 本揃わない銘柄（上場間もない）は、バックテストのパネルと同じく母集団に入れない。
+func TestBuildExcludesShortHistory(t *testing.T) {
+	days := fixture.BusinessDays(start, 40)
+	symbols := []fixture.Symbol{
+		{Code: "10000", Name: "大型プライム", Market: "プライム", ProdCat: "011", Mrgn: "2",
+			Base: 1000, Turnover: 5e8, MktCap: 9e11},
+		{Code: "70000", Name: "新規上場", Market: "プライム", ProdCat: "011", Mrgn: "2",
+			Base: 1500, Turnover: 8e8, MktCap: 6e11, ListedOn: days[len(days)-12]}, // 足が 11 本
+	}
+	arch, err := fixture.Build(t.TempDir(), days, symbols)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	rows, err := universe.Build(arch, days[len(days)-1], days[len(days)-2], cfg.Universe, cfg.Margin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byCode := map[string]universe.Candidate{}
+	for _, c := range rows {
+		byCode[c.Code] = c
+	}
+	ipo, ok := byCode["70000"]
+	if !ok {
+		t.Fatal("新規上場の銘柄が候補の一覧に無い（外れた理由を見せるために行は残す）")
+	}
+	if ipo.Eligible || ipo.ShortEligible {
+		t.Errorf("足が 20 本無い銘柄が母集団に入っている: %+v", ipo)
+	}
+	if ipo.TurnoverMed != 0 || ipo.Vol20 != nil {
+		t.Errorf("足りない本数で特徴量を出している: turnover %v / vol %v", ipo.TurnoverMed, ipo.Vol20)
+	}
+	if !byCode["10000"].Eligible {
+		t.Error("足が揃った銘柄まで外れている")
+	}
+}
+
 func TestBuildExcludesEarningsAndAlerts(t *testing.T) {
 	arch, days := buildArchive(t)
 	prevDay := days[len(days)-2]

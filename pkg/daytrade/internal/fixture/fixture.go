@@ -36,6 +36,8 @@ type Symbol struct {
 	GapOn map[string]float64
 	// IntradayOn は日付 → 寄付から引けへのリターン。
 	IntradayOn map[string]float64
+	// ListedOn を与えると、その日より前の足を書かない（上場間もない銘柄の再現）。
+	ListedOn time.Time
 }
 
 // Build は days の営業日ぶんのアーカイブを root に書く。
@@ -63,6 +65,9 @@ func Build(root string, days []time.Time, symbols []Symbol) (*archive.Archive, e
 		prevClose := s.Base
 		for _, day := range days {
 			key := day.Format(dateLayout)
+			if !s.ListedOn.IsZero() && day.Before(s.ListedOn) {
+				continue
+			}
 			open := prevClose * (1 + s.GapOn[key])
 			closePrice := open * (1 + s.IntradayOn[key])
 			high := math.Max(open, closePrice)

@@ -16,20 +16,60 @@ import (
 
 const dayLayout = "2006-01-02"
 
-// Trade は 1 取引（ある日・ある銘柄を寄付で建てて大引で手仕舞う）。
+// FillModel は建値と手仕舞い値の決め方。
+//
+// 順位付け（ギャップ）と株数は 9:00 の価格（日足の寄付）で決まり、ここで決めるのは
+// 「いくらで建って、いくらで手仕舞えたか」だけ。日足しか無ければ寄付と引け（OpenCloseFill）。
+// 分足を入れるときは、9:01 の足や 15:20 の足を返す実装をここに差し替える——順位付けと
+// 日次の集計はそのままでよい。
+type FillModel interface {
+	// Fill は建値・手仕舞い値。ok が偽ならその日その銘柄は建てない（足が無い等）。
+	Fill(r Row) (entry, exit float64, ok bool)
+}
+
+// OpenCloseFill は寄付で建てて引けで手仕舞う（日足だけの近似。滑りなし）。
+type OpenCloseFill struct{}
+
+// Fill は寄付と引け。
+func (OpenCloseFill) Fill(r Row) (float64, float64, bool) {
+	return r.Open, r.Close, r.Open > 0 && r.Close > 0
+}
+
+// Options は検証の指定。ゼロ値は「寄付・引けで約定」。
+type Options struct {
+	Fill FillModel
+}
+
+func (o Options) fill() FillModel {
+	if o.Fill == nil {
+		return OpenCloseFill{}
+	}
+	return o.Fill
+}
+
+// Trade は 1 取引（ある日・ある銘柄を建てて同日に手仕舞う）。
+//
+// 危険信号で縮めた日は金額の列（Shares・Amount・Fees・Gross・PnL）に Scale を掛けてある
+// （Daily と同じ近似。単元の切り捨てはやり直さない）。
 type Trade struct {
 	Date   time.Time
 	Code   string
 	Rank   int
 	Gap    float64
 	Shares float64
-	Open   float64
-	Close  float64
+	// Entry / Exit は建値と手仕舞い値（FillModel が決める。日足なら寄付と引け）。
+	Entry  float64
+	Exit   float64
 	Amount float64
-	Fees   float64
-	Gross  float64
-	PnL    float64
-	// Carried は引けストップ高で返済できず翌寄りに持ち越した（ショートのみ）。
+	// Fees は費用の合計。Commission はそのうち現物の定額手数料（台帳の実現損益には
+	// 含まれないので、資産曲線の判定では足し戻す）。
+	Fees       float64
+	Commission float64
+	Gross      float64
+	PnL        float64
+	Scale      float64
+	// Carried は引けが制限値幅に張り付いて手仕舞えず、翌寄りに持ち越した
+	// （ショートは引けストップ高、ロングは引けストップ安）。
 	Carried bool
 }
 
@@ -41,12 +81,15 @@ type Daily struct {
 	Fees   float64
 	Amount float64
 	N      int
+	// Commission は Fees のうち現物の定額手数料。
+	Commission float64
 	// Scale は危険信号による資金の倍率（0 なら休んだ日）。
 	Scale float64
 	On    bool
 
 	// レッグ別の内訳（simulate_margin のとき）。
 	LongPnL, LongGross, LongFees, LongAmount     float64
+	LongCommission                               float64
 	LongN                                        int
 	LongScale                                    float64
 	ShortPnL, ShortGross, ShortFees, ShortAmount float64
@@ -107,7 +150,6 @@ type Yearly struct {
 type legParams struct {
 	n         int
 	budget    float64
-	capital   float64
 	weighting string
 	// sign は損益の向き（買い +1: C − O、売り −1: O − C）。
 	sign float64
@@ -119,13 +161,22 @@ type legParams struct {
 	descending bool
 	minGap     float64
 	maxGap     float64
+	// maxShares は 1 銘柄の株数の上限（0 で無制限）。成行の信用新規売りは
+	// 空売り価格規制で 50 単元までなので、按分がそれを超える低位株はそこで頭打ち
+	// （selection.PickFrom と同じ）。
+	maxShares float64
+	fill      FillModel
 }
 
 // pickAndPrice はランク付け・按分・価格付け。simulate のロング側の計算を一般化したもの。
 //
 // Python 版が polars の式で 1 度に書いていた部分を、日ごとのループに開いてある。
-// 順序（予算に収まる銘柄を順位順に N 個 → 按分 → 単元切り捨て）は同じ。
+// 順序（予算に収まる銘柄を順位順に N 個 → 按分 → 単元切り捨て）は selection.PickFrom と同じ。
 func pickAndPrice(byDay map[string][]Row, days []time.Time, p legParams) []Trade {
+	fill := p.fill
+	if fill == nil {
+		fill = OpenCloseFill{}
+	}
 	var trades []Trade
 	for _, day := range days {
 		rows := byDay[day.Format(dayLayout)]
@@ -164,33 +215,52 @@ func pickAndPrice(byDay map[string][]Row, days []time.Time, p legParams) []Trade
 			continue
 		}
 
+		// 総予算は 1 注文の予算 × N（selection.PickFrom と同じ）。候補が N に満たない日は
+		// 残った銘柄で総予算を分け合う——等金額でも 1 注文の予算に留めない。
+		// 実運用がそう建てるので、検証も同じ金額にする
+		total := p.budget * float64(p.n)
 		shares := make([]float64, len(pool))
-		if p.weighting == "inverse_vol" {
-			total := 0.0
-			weights := make([]float64, len(pool))
-			for i, s := range pool {
+		weights := make([]float64, len(pool))
+		weightSum := 0.0
+		for i, s := range pool {
+			weights[i] = 1.0
+			if p.weighting == "inverse_vol" {
 				vol := selection.VolFloor
 				if s.row.Vol20 != nil && *s.row.Vol20 > selection.VolFloor {
 					vol = *s.row.Vol20
 				}
 				weights[i] = 1.0 / vol
-				total += weights[i]
 			}
-			for i, s := range pool {
-				shares[i] = math.Floor(p.capital*weights[i]/total/(s.row.Open*100)) * 100
-			}
-		} else {
-			for i, s := range pool {
-				shares[i] = math.Floor(p.budget/(s.row.Open*100)) * 100
+			weightSum += weights[i]
+		}
+		for i, s := range pool {
+			shares[i] = math.Floor(total*weights[i]/weightSum/(s.row.Open*100)) * 100
+			if p.maxShares > 0 && shares[i] > p.maxShares {
+				shares[i] = math.Floor(p.maxShares/100) * 100
 			}
 		}
 
-		// 定額コースは 1 日の合計（買い＋売り = 2 × 代金）で段階が決まるので、
+		// 建値・手仕舞い値は約定モデルが決める。決まらない銘柄は建てない
+		entries := make([]float64, len(pool))
+		exits := make([]float64, len(pool))
+		for i, s := range pool {
+			if shares[i] < 100 {
+				continue
+			}
+			entry, exit, ok := fill.Fill(s.row)
+			if !ok || entry <= 0 || exit <= 0 {
+				shares[i] = 0
+				continue
+			}
+			entries[i], exits[i] = entry, exit
+		}
+
+		// 定額コースは 1 日の合計（買い＋売り）で段階が決まるので、
 		// その日の手数料を約定代金の比で各取引に配る
 		dayTotal := 0.0
-		for i, s := range pool {
+		for i := range pool {
 			if shares[i] >= 100 {
-				dayTotal += 2 * shares[i] * s.row.Open
+				dayTotal += shares[i] * (entries[i] + exits[i])
 			}
 		}
 		dayFee := 0.0
@@ -205,38 +275,50 @@ func pickAndPrice(byDay map[string][]Row, days []time.Time, p legParams) []Trade
 				continue // 按分が 1 単元に届かない銘柄は落ちる（N が減る）
 			}
 			rank++
-			amount := shares[i] * s.row.Open
-			fee := amount * p.extraCostBP / 1e4
+			amount := shares[i] * entries[i]
+			extra := amount * p.extraCostBP / 1e4
+			commission := 0.0
 			if dayTotal > 0 {
-				fee += dayFee * amount / dayTotal * 2
+				commission = dayFee * shares[i] * (entries[i] + exits[i]) / dayTotal
 			}
-			gross := shares[i] * p.sign * (s.row.Close - s.row.Open)
+			gross := shares[i] * p.sign * (exits[i] - entries[i])
+			fee := extra + commission
 			trades = append(trades, Trade{
 				Date: s.row.Date, Code: s.row.Code, Rank: rank, Gap: s.row.Gap,
-				Shares: shares[i], Open: s.row.Open, Close: s.row.Close,
-				Amount: amount, Fees: fee, Gross: gross, PnL: gross - fee,
+				Shares: shares[i], Entry: entries[i], Exit: exits[i],
+				Amount: amount, Fees: fee, Commission: commission,
+				Gross: gross, PnL: gross - fee, Scale: 1,
 			})
 		}
 	}
 	return trades
 }
 
-// applyCarry は引けがストップ高の売建を「翌営業日の寄付で返済した」ことにする。
+// applyCarry は引けが制限値幅に張り付いて手仕舞えなかった取引を「翌営業日の寄付で
+// 手仕舞った」ことにする。
 //
-// 買い気配に張り付いて返済買いが約定しないため。損益は penalty の割合だけ翌寄りに
-// 置き換える（1 で全額、0 で無視）——実際に約定しない割合は日足からは分からない。
-func applyCarry(trades []Trade, byKey map[string]Row, penalty float64) []Trade {
+// ショート（sign −1）は引けストップ高——買い気配に張り付いて返済買いが約定しない。
+// ロング（sign +1）は引けストップ安——売り気配に張り付いて売りが約定しない。
+// 損益は penalty の割合だけ翌寄りに置き換える（1 で全額、0 で無視）——実際に
+// 約定しない割合は日足からは分からない。
+func applyCarry(trades []Trade, byKey map[string]Row, sign, penalty float64) []Trade {
 	for i := range trades {
 		row, ok := byKey[trades[i].Date.Format(dayLayout)+"|"+trades[i].Code]
 		if !ok || row.NextOpen == nil {
 			continue
 		}
-		// 浮動小数の丸めで上限をわずかに下回ることがあるので 1e-6 の余裕を持つ
-		if row.Close < row.LimitHigh-1e-6 {
+		// 浮動小数の丸めで制限値幅をわずかに外すことがあるので 1e-6 の余裕を持つ
+		pinned := false
+		if sign < 0 {
+			pinned = row.Close >= row.LimitHigh-1e-6
+		} else {
+			pinned = row.Close <= row.LimitLow+1e-6
+		}
+		if !pinned {
 			continue
 		}
 		trades[i].Carried = true
-		trades[i].Gross += penalty * trades[i].Shares * (row.Close - *row.NextOpen)
+		trades[i].Gross += penalty * trades[i].Shares * sign * (*row.NextOpen - trades[i].Exit)
 		trades[i].PnL = trades[i].Gross - trades[i].Fees
 	}
 	return trades
@@ -256,8 +338,54 @@ func dailyFromTrades(trades []Trade, days []time.Time) map[string]*Daily {
 		d.PnL += t.PnL
 		d.Gross += t.Gross
 		d.Fees += t.Fees
+		d.Commission += t.Commission
 		d.Amount += t.Amount
 		d.N++
+	}
+	return out
+}
+
+// ledgerPnL は台帳の実現損益に当たる値（約定単価の差 × 数量）。現物の定額手数料は
+// 台帳に載らないので足し戻す。資産曲線ゲートは実運用でこの定義を見る。
+func ledgerPnL(pnl, commission float64) float64 { return pnl + commission }
+
+// recentWindow は資産曲線ゲートの入力（前日までの直近 days 日の実現損益）。
+//
+// 実運用（cmd/daytrade の recentPnL）と同じ規則: 縮めた日はその倍率で、止めた日は 0 で
+// 数える。窓に建てた日が 1 日も無ければ nil——12 月を休んだ直後の 1 月に「損益 0 ≤ 0」で
+// 縮めてしまわないため（実運用は建てが無ければ判定しない）。
+func recentWindow(pnl, scales []float64, traded []bool, i, days int) *float64 {
+	if days <= 0 || i < days {
+		return nil
+	}
+	total := 0.0
+	any := false
+	for j := i - days; j < i; j++ {
+		total += pnl[j] * scales[j]
+		any = any || traded[j]
+	}
+	if !any {
+		return nil
+	}
+	return &total
+}
+
+// scaleTrades は日ごとの倍率を取引に掛け、倍率 0 の日の取引を落とす。
+func scaleTrades(trades []Trade, scale map[string]float64) []Trade {
+	out := trades[:0]
+	for _, t := range trades {
+		s := scale[t.Date.Format(dayLayout)]
+		if s <= 0 {
+			continue
+		}
+		t.Scale = s
+		t.Shares *= s
+		t.Amount *= s
+		t.Fees *= s
+		t.Commission *= s
+		t.Gross *= s
+		t.PnL *= s
+		out = append(out, t)
 	}
 	return out
 }
@@ -291,52 +419,68 @@ func groupByDay(panel *Panel, keep func(Row) bool) map[string][]Row {
 	return out
 }
 
-// Simulate はパネルに規則を当て、資金固定で日次損益を出す。
+// Simulate はパネルに規則を当て、資金固定で日次損益を出す（寄付・引けで約定）。
 //
 // 危険信号は日次損益に後から掛ける: 止めた日は 0。実運用の open と同じ判定
 // （regime.Evaluate）を日ごとに呼ぶ。
 func Simulate(panel *Panel, cfg config.Config, signals *Inputs) (*Result, error) {
+	return SimulateWith(panel, cfg, signals, Options{})
+}
+
+// SimulateWith は約定モデルを指定して検証する。
+func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options) (*Result, error) {
 	n := cfg.Capital.Positions()
 	if n == 0 {
 		return nil, fmt.Errorf("max_capital が 0 のため検証できません（買わない設定）")
 	}
 	budget, _ := cfg.Capital.BudgetPerOrder().Float64()
 	capital, _ := cfg.Capital.MaxCapital.Float64()
+	carryPenalty, _ := cfg.Margin.CarryPenalty.Float64()
 
-	longRows := groupByDay(panel, func(r Row) bool {
-		if !r.Eligible {
-			return false
-		}
-		// 寄付がストップ安以下なら買わない。実運用（signal.skip_limit_down）と同じ条件
-		if cfg.Signal.SkipLimitDown && r.Open <= math.Max(r.LimitLow, 1.0) {
-			return false
-		}
-		return true
-	})
+	longRows := groupByDay(panel, longKeep(cfg))
 	minGap, _ := cfg.Signal.MinGap.Float64()
 	maxGap, _ := cfg.Signal.MaxGap.Float64()
 	trades := pickAndPrice(longRows, panel.Days, legParams{
-		n: n, budget: budget, capital: capital, weighting: cfg.Capital.Weighting,
-		sign: 1, commission: true, minGap: minGap, maxGap: maxGap,
+		n: n, budget: budget, weighting: cfg.Capital.Weighting,
+		sign: 1, commission: true, minGap: minGap, maxGap: maxGap, fill: opts.fill(),
 	})
+	trades = applyCarry(trades, rowsByKey(panel), 1, carryPenalty)
 
 	daily := dailyFromTrades(trades, panel.Days)
 	series, err := applyRegime(daily, panel, cfg, signals)
 	if err != nil {
 		return nil, err
 	}
-	// 止めた日の取引は結果から落とす（実運用ではその日は建てていない）
-	on := map[string]bool{}
+	// 縮めた日は取引もその倍率にし、止めた日の取引は落とす（実運用ではその日は建てていない）
+	scale := map[string]float64{}
 	for _, d := range series {
-		on[d.Date.Format(dayLayout)] = d.On
+		scale[d.Date.Format(dayLayout)] = d.Scale
 	}
-	kept := trades[:0]
-	for _, t := range trades {
-		if on[t.Date.Format(dayLayout)] {
-			kept = append(kept, t)
+	trades = scaleTrades(trades, scale)
+	return &Result{Daily: series, Trades: trades, Summary: summarize(series, capital, legAll)}, nil
+}
+
+// longKeep はロングの母集団: eligible で、寄付がストップ安以下でない
+// （実運用の signal.skip_limit_down と同じ条件）。
+func longKeep(cfg config.Config) func(Row) bool {
+	return func(r Row) bool {
+		if !r.Eligible {
+			return false
 		}
+		if cfg.Signal.SkipLimitDown && r.Open <= math.Max(r.LimitLow, 1.0) {
+			return false
+		}
+		return true
 	}
-	return &Result{Daily: series, Trades: kept, Summary: summarize(series, capital, legAll)}, nil
+}
+
+// rowsByKey は (日付|銘柄) → 行。張り付きの判定で翌寄りを引くのに使う。
+func rowsByKey(panel *Panel) map[string]Row {
+	byKey := make(map[string]Row, len(panel.Rows))
+	for _, r := range panel.Rows {
+		byKey[r.Date.Format(dayLayout)+"|"+r.Code] = r
+	}
+	return byKey
 }
 
 // Inputs は危険信号の材料（バックテスト用に日付で引ける形）。
@@ -367,18 +511,11 @@ func applyRegime(daily map[string]*Daily, panel *Panel, cfg config.Config, signa
 	out := make([]Daily, 0, len(panel.Days))
 	pnl := make([]float64, 0, len(panel.Days))
 	scales := make([]float64, 0, len(panel.Days))
+	traded := make([]bool, 0, len(panel.Days))
 	for i, day := range panel.Days {
 		key := day.Format(dayLayout)
 		d := daily[key]
-		var recent *float64
-		if r.EquityCurveDays > 0 && i >= r.EquityCurveDays {
-			// 前日までの実現損益（縮めた日はその倍率で、止めた日は 0 で数える＝実運用と同じ）
-			total := 0.0
-			for j := i - r.EquityCurveDays; j < i; j++ {
-				total += pnl[j] * scales[j]
-			}
-			recent = &total
-		}
+		recent := recentWindow(pnl, scales, traded, i, r.EquityCurveDays)
 		verdict := regime.Evaluate(r, regime.Signals{
 			Day:       day,
 			IVPrev:    signals.lookup(signalsIV(signals), key),
@@ -392,8 +529,9 @@ func applyRegime(daily map[string]*Daily, panel *Panel, cfg config.Config, signa
 		if verdict.Trade {
 			scale = verdict.Scale
 		}
-		pnl = append(pnl, d.PnL)
+		pnl = append(pnl, ledgerPnL(d.PnL, d.Commission))
 		scales = append(scales, scale)
+		traded = append(traded, scale > 0 && d.N > 0)
 
 		scaled := *d
 		scaled.Scale = scale
@@ -401,6 +539,7 @@ func applyRegime(daily map[string]*Daily, panel *Panel, cfg config.Config, signa
 		scaled.PnL *= scale
 		scaled.Gross *= scale
 		scaled.Fees *= scale
+		scaled.Commission *= scale
 		scaled.Amount *= scale
 		if !scaled.On {
 			scaled.N = 0
@@ -480,10 +619,12 @@ func summarize(daily []Daily, capital float64, which leg) Summary {
 	tradedDays, wins := 0, 0
 	amount, fee := 0.0, 0.0
 	positions := 0
-	monthly := map[string]*struct {
-		pnl  float64
-		days int
-	}{}
+	type month struct {
+		pnl    float64
+		days   int
+		onDays int
+	}
+	monthly := map[string]*month{}
 	var months []string
 	for i, d := range daily {
 		p, a, f, n := which.pick(d)
@@ -503,27 +644,28 @@ func summarize(daily []Daily, capital float64, which leg) Summary {
 		key := d.Date.Format("2006-01")
 		m, ok := monthly[key]
 		if !ok {
-			m = &struct {
-				pnl  float64
-				days int
-			}{}
+			m = &month{}
 			monthly[key] = m
 			months = append(months, key)
 		}
 		m.pnl += p
 		m.days++
+		if d.On {
+			m.onDays++
+		}
 	}
 	total, mean := sum(pnl), meanOf(pnl)
 	sharpe := 0.0
 	if std := stdev(pnl); std > 0 {
 		sharpe = mean / std * math.Sqrt(TradingDays)
 	}
-	// 月次は「15 営業日以上ある月」だけ（期間の端の半端な月を混ぜない）
+	// 月次は「15 営業日以上ある月」だけ（期間の端の半端な月を混ぜない）。
+	// 丸ごと休んだ月（skip_months）は損益 0 の負け月として数えない
 	var monthlyPnL []float64
 	monthlyWins := 0
 	slices.Sort(months)
 	for _, key := range months {
-		if monthly[key].days < 15 {
+		if monthly[key].days < 15 || monthly[key].onDays == 0 {
 			continue
 		}
 		monthlyPnL = append(monthlyPnL, monthly[key].pnl)

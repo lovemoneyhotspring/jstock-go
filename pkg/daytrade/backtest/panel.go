@@ -167,7 +167,8 @@ func buildPanelQuery(src panelSources, start, end time.Time, cfg config.Config) 
 WITH bars AS (
   SELECT "Date" AS d, CAST("Code" AS VARCHAR) AS code,
          TRY_CAST("O" AS DOUBLE) AS o, TRY_CAST("C" AS DOUBLE) AS c,
-         TRY_CAST("Va" AS DOUBLE) AS va, TRY_CAST("AdjFactor" AS DOUBLE) AS af,
+         TRY_CAST("Va" AS DOUBLE) AS va,
+         coalesce(nullif(TRY_CAST("AdjFactor" AS DOUBLE), 0), 1) AS af,
          TRY_CAST("MktCap" AS DOUBLE) AS cap
   FROM %s
   WHERE "Date" <= %s AND TRY_CAST("O" AS DOUBLE) > 0 AND TRY_CAST("C" AS DOUBLE) > 0
@@ -175,11 +176,15 @@ WITH bars AS (
 days AS (
   SELECT d, row_number() OVER (ORDER BY d) AS di FROM (SELECT DISTINCT d FROM bars)
 ),
+-- 分割・併合の日（AdjFactor ≠ 1）は前日終値を調整前のまま使わない。前夜の plan は
+-- その日の係数を知り得ないので、その日は建てない（prev_close を NULL にして外す）。
+-- 日次リターン（ボラ）と翌寄り（張り付きの返済値）は係数で同じ水準に揃える
+-- （J-Quants の AdjFactor は権利落ち日の行に入り、前日終値 × 係数 が比較できる値）。
 lagged AS (
   SELECT b.*,
          CASE WHEN b.af = 1 THEN lag(b.c) OVER w END AS prev_close,
-         lead(b.o) OVER w AS next_open,
-         b.c / lag(b.c) OVER w - 1 AS ret,
+         lead(b.o) OVER w / lead(b.af) OVER w AS next_open,
+         b.c / (lag(b.c) OVER w * b.af) - 1 AS ret,
          lag(b.cap) OVER w AS mkt_cap
   FROM bars b
   WINDOW w AS (PARTITION BY b.code ORDER BY b.d)

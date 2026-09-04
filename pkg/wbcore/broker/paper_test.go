@@ -86,6 +86,87 @@ func TestPaperBroker_Lifecycle(t *testing.T) {
 	}
 }
 
+// 手数料は定額コース: 現物はその日の合計で段階が決まり、信用は 0 円。
+func TestPaperBrokerFlatRateCommission(t *testing.T) {
+	pb := NewPaperBroker(decimal.NewFromInt(10_000_000), "open")
+	pb.Mark(map[string]decimal.Decimal{"7203": decimal.NewFromInt(1990), "9984": decimal.NewFromInt(2000)})
+	pb.BeginDay()
+
+	place := func(id, sym string, qty int64, trade domain.TradeType) {
+		t.Helper()
+		req, err := domain.NewOrderRequest(id, sym, domain.SideBuy, domain.OrderTypeMarket,
+			decimal.NewFromInt(qty), nil, domain.TaxAccountSpecific, "test", trade)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pb.Place(req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 滑りを 0 にして代金を読みやすくする
+	pb.slippageRate = decimal.Zero
+
+	// 1 件目: 199,000 円 → 20 万円まで 176 円
+	place("b1", "7203", 100, domain.TradeTypeCash)
+	fills := pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(1990)}, nil, nil, nil)
+	if len(fills) != 1 || !fills[0].Fee.Equal(decimal.NewFromInt(176)) {
+		t.Fatalf("1 件目の手数料 = %+v, want 176", fills)
+	}
+	// 2 件目: 合計 399,000 円 → 50 万円まで 253 円。増えるのは差分の 77 円
+	place("b2", "9984", 100, domain.TradeTypeCash)
+	fills = pb.Settle(map[string]decimal.Decimal{"9984": decimal.NewFromInt(2000)}, nil, nil, nil)
+	if len(fills) != 1 || !fills[0].Fee.Equal(decimal.NewFromInt(77)) {
+		t.Fatalf("2 件目の手数料 = %+v, want 77（合計で段階が上がった差分）", fills)
+	}
+	// 信用は 0 円
+	place("m1", "7203", 100, domain.TradeTypeMarginOpen)
+	fills = pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(1990)}, nil, nil, nil)
+	if len(fills) != 1 || !fills[0].Fee.IsZero() {
+		t.Fatalf("信用の手数料 = %+v, want 0", fills)
+	}
+	// 日が変わると合計は戻る
+	pb.BeginDay()
+	place("b3", "7203", 100, domain.TradeTypeCash)
+	fills = pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(1990)}, nil, nil, nil)
+	if len(fills) != 1 || !fills[0].Fee.Equal(decimal.NewFromInt(176)) {
+		t.Fatalf("翌日の 1 件目の手数料 = %+v, want 176", fills)
+	}
+}
+
+// 立会いの無かった銘柄の注文は失効させず、次の立会いで約定させる。
+func TestPaperBrokerExpiresOnlyTradedSymbols(t *testing.T) {
+	pb := NewPaperBroker(decimal.NewFromInt(10_000_000), "open")
+	pb.Mark(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2000), "SPY": decimal.NewFromInt(500)})
+	for _, sym := range []string{"7203", "SPY"} {
+		req, _ := domain.NewOrderRequest("o-"+sym, sym, domain.SideBuy, domain.OrderTypeMarket,
+			decimal.NewFromInt(100), nil, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+		if _, err := pb.Place(req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 米国だけが立ち会った日: SPY の注文は失効、7203 の注文は残る
+	pb.ExpireOpenOrdersFor(map[string]struct{}{"SPY": {}})
+	open, _ := pb.GetOpenOrders()
+	if len(open) != 1 || open[0].Symbol != "7203" {
+		t.Fatalf("残る注文 = %+v, want 7203 だけ", open)
+	}
+	// 次の東証の立会いで約定する
+	fills := pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2000)}, nil, nil, nil)
+	if len(fills) != 1 || fills[0].Symbol != "7203" {
+		t.Fatalf("次の立会いで約定していない: %+v", fills)
+	}
+	// nil なら全部失効
+	req, _ := domain.NewOrderRequest("o-2", "7203", domain.SideSell, domain.OrderTypeMarket,
+		decimal.NewFromInt(100), nil, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+	if _, err := pb.Place(req); err != nil {
+		t.Fatal(err)
+	}
+	pb.ExpireOpenOrders()
+	if open, _ := pb.GetOpenOrders(); len(open) != 0 {
+		t.Errorf("全銘柄の失効で注文が残っている: %+v", open)
+	}
+}
+
 // 待機資金の利息は年率を 360 日で日割りする（T-Bill の慣行）。
 func TestPaperBrokerAccrueInterest(t *testing.T) {
 	p := NewPaperBroker(decimal.NewFromInt(3_600_000), "open")
