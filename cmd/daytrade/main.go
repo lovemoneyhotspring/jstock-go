@@ -39,6 +39,7 @@ func main() {
 	rootCmd.AddCommand(newHistoryCmd())
 	rootCmd.AddCommand(newEvaluateCmd())
 	rootCmd.AddCommand(newReviewCmd())
+	rootCmd.AddCommand(newTradesCmd())
 	rootCmd.AddCommand(newStatusCmd())
 	rootCmd.AddCommand(newQuotesCmd())
 	rootCmd.AddCommand(newBacktestCmd())

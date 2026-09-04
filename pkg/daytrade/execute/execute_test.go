@@ -107,9 +107,11 @@ func richBalance() domain.Balance {
 	return domain.Balance{BuyingPower: decimal.NewFromInt(10_000_000), MarginBuyingPower: &margin}
 }
 
+// statusOf は台帳に入った注文を引く。引く日は **env.Day**——固定の day を見ると、
+// 判定日を今日にずらす試験（todayEnv）が「今日 ≠ day」の日に落ちる。
 func statusOf(t *testing.T, env Env, symbol string) ledger.Order {
 	t.Helper()
-	entries, err := env.Ledger.EntriesOn(day)
+	entries, err := env.Ledger.EntriesOn(env.Day)
 	if err != nil {
 		t.Fatal(err)
 	}
