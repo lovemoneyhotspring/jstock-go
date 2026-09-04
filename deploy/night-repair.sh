@@ -27,7 +27,7 @@ REPORT_DIR="$HOME_DIR/state/reports"
 REPORT="$REPORT_DIR/night-repair-$TODAY.md"
 mkdir -p "$REPORT_DIR"
 
-# .env の中身（WBJP_ALERT_WEBHOOK_URL など）を環境変数に載せる。cron は
+# .env の中身（WBJP_DISCORD_BOT_TOKEN・チャンネル ID など）を環境変数に載せる。cron は
 # ログインシェルを通らないので、ここで読まないと通知先が分からない。
 if [ -f "$HOME_DIR/.env" ]; then
   set -a

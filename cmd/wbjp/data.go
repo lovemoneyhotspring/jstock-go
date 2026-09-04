@@ -87,7 +87,7 @@ func newDataCheckCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&shouldNotify, "notify", false,
-		"問題があれば "+notify.WebhookEnvVar+" に通知する")
+		"問題があれば Discord（"+notify.AlertChannelEnvVar+"）に通知する")
 	return cmd
 }
 

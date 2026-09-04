@@ -93,6 +93,7 @@ func newCheckCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&date, "date", "", "確認する日（YYYY-MM-DD）。既定は今日")
 	cmd.Flags().IntVar(&days, "days", 30, "欠けを探す範囲（日）")
-	cmd.Flags().BoolVar(&doNotify, "notify", false, "欠けがあれば WBJP_ALERT_WEBHOOK_URL に通知する")
+	cmd.Flags().BoolVar(&doNotify, "notify", false,
+		"欠けがあれば Discord（"+notify.AlertChannelEnvVar+"）に通知する")
 	return cmd
 }

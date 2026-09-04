@@ -126,9 +126,20 @@ crontab -l | grep jstock
 
 21:00 の行（`deploy/daily-report.sh`）だけは他と前提が違う。回す前に 2 つ要る。
 
-1. **通知先**。Discord のサーバー設定 → 連携サービス → ウェブフック で URL を作り、
-   `.env` に `WBJP_ALERT_WEBHOOK_URL=…` を入れる（`jquants check --notify` などの
-   異常通知も同じ URL に流れる）。
+1. **通知先**。Discord へは **Bot の REST API** で送る（Incoming Webhook は使わない。
+   Webhook は通常のテキストチャンネルでスレッドを作れず、投稿が平積みになるため）。
+   Developer Portal で Bot を作り、サーバーに「チャンネルを見る」「メッセージを送信」
+   「公開スレッドの作成」「スレッドでメッセージを送信」の権限で招待して、`.env` に
+   `WBJP_DISCORD_BOT_TOKEN=…` と送り先のチャンネル ID を入れる。
+
+   | 変数 | 送るもの |
+   |---|---|
+   | `WBJP_ALERT_CHANNEL_ID` | 異常（`jquants check --notify`、`daytrade close` の失敗など） |
+   | `WBJP_REPORT_CHANNEL_ID` | 21:00 の日次レポート。無ければ `WBJP_ALERT_CHANNEL_ID` に流れる |
+
+   送るたびに新しいスレッドを作り、本文はその中に入る（1 通知 1 スレッド）。本文が
+   2000 字を超えるときは分割して同じスレッドに連投する。チャンネル ID は Discord の
+   設定で開発者モードを有効にすると、チャンネルの右クリックからコピーできる。
 2. **Claude Code の認証**。cron は `claude` を非対話で回すので、その cron を持つ
    ユーザーで一度 `claude` にログインしておく（認証は `~/.claude` に入る）。
 
@@ -175,13 +186,13 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
 
 - **1 回きりの cron を作らない。** 失敗すると次の機会（翌日・翌月）までバックアップや
   取り込みの無い状態が続くため、どのジョブも「何度叩いても同じ（冪等）」に作り、
-  頻度を上げて失敗を次の実行で自動回復させる。失敗自体は `WBJP_ALERT_WEBHOOK_URL` に通知される
+  頻度を上げて失敗を次の実行で自動回復させる。失敗自体は Discord（`WBJP_ALERT_CHANNEL_ID`）に通知される
   - `accum backup` は毎時（37 分）。同日分は上書きなので世代は 1 日 1 つのまま。
     1 回失敗しても 1 時間後に取り直し、失敗が続けば毎時通知が来る
   - 月次の `jquants backfill` は 2〜5 日の 4 回。成功していれば 2 回目以降は
     更新された一括ファイル（過誤訂正、月末数日の取り漏れ）だけを取り直す
 - 平日 20:00 の `jquants check --notify` は欠けの監視。当日ぶん（16:30〜18:00 公開）が
-  取れていなければ `WBJP_ALERT_WEBHOOK_URL` に通知する（未設定ならログのみ）
+  取れていなければ Discord（`WBJP_ALERT_CHANNEL_ID`）に通知する（未設定ならログのみ）
 
 - `accum backup` は `state/` の全 SQLite（積立台帳 `accum-prod.db` とスイング売買の記録
   `wbjp-prod.db`）を `state/backup/<名前>-YYYYMMDD.db` に複製する（各 30 世代、SQLite の
