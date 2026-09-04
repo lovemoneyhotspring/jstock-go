@@ -148,13 +148,18 @@ func runMarginBacktest(cfg dtconfig.Config, start, end time.Time, fetcher usmark
 }
 
 // printTrades は直近 30 件の取引。全部出すと端末が流れるだけなので末尾に絞る。
+// 縮めた日は株数・損益にその倍率を掛けた値（日次の集計と同じ）。
 func printTrades(trades []dtbacktest.Trade) {
 	fmt.Println("\n直近の取引")
-	fmt.Printf("  %-11s %-7s %8s %9s %9s %9s %12s\n", "日付", "銘柄", "ギャップ", "株数", "始値", "終値", "損益")
+	fmt.Printf("  %-11s %-7s %8s %9s %9s %9s %12s %5s %s\n", "日付", "銘柄", "ギャップ", "株数", "建値", "手仕舞", "損益", "倍率", "")
 	from := max(0, len(trades)-30)
 	for _, t := range trades[from:] {
-		fmt.Printf("  %-11s %-7s %8s %9s %9s %9s %12s\n",
+		note := ""
+		if t.Carried {
+			note = "張り付き→翌寄り"
+		}
+		fmt.Printf("  %-11s %-7s %8s %9s %9s %9s %12s %5.2f %s\n",
 			t.Date.Format(DateLayout), t.Code, pct(t.Gap), yen(t.Shares),
-			yen(t.Open), yen(t.Close), yen(t.PnL))
+			yen(t.Entry), yen(t.Exit), yen(t.PnL), t.Scale, note)
 	}
 }

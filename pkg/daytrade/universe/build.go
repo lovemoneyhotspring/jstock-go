@@ -118,25 +118,33 @@ func loadFeatures(arch *archive.Archive, prevDay time.Time, cfg config.Universe)
 	defer db.Close()
 
 	// TRY_CAST なのは保存形が全列文字列で、欠測が空文字で入りうるため。
+	//
+	// 売買代金の中央値とボラは、足が所定の本数（turnover_days / VolDays）揃っている銘柄だけ
+	// 出す（足りなければ NULL → 母集団に入らない）。バックテストのパネルと同じ条件——
+	// 上場間もない銘柄を、検証では外しているのに実運用だけ候補に入れないため。
+	// 日次リターンは分割・併合の日（AdjFactor ≠ 1）を係数で揃える。
 	query := fmt.Sprintf(`
 WITH bars AS (
   SELECT "Date" AS d, CAST("Code" AS VARCHAR) AS code,
          TRY_CAST("C" AS DOUBLE) AS c, TRY_CAST("Va" AS DOUBLE) AS va,
+         coalesce(nullif(TRY_CAST("AdjFactor" AS DOUBLE), 0), 1) AS af,
          TRY_CAST("MktCap" AS DOUBLE) AS cap
   FROM %s
   WHERE "Date" <= %s AND TRY_CAST("C" AS DOUBLE) > 0
 ),
 ranked AS (
-  SELECT *, c / lag(c) OVER (PARTITION BY code ORDER BY d) - 1 AS ret,
+  SELECT *, c / (lag(c) OVER (PARTITION BY code ORDER BY d) * af) - 1 AS ret,
          row_number() OVER (PARTITION BY code ORDER BY d DESC) AS rn
   FROM bars
 )
 SELECT code,
        max(d) AS last_date,
        arg_max(c, d) AS prev_close,
-       median(va) FILTER (WHERE rn <= %d) AS turnover_med,
+       CASE WHEN count(va) FILTER (WHERE rn <= %[3]d) = %[3]d
+            THEN median(va) FILTER (WHERE rn <= %[3]d) END AS turnover_med,
        arg_max(cap, d) AS mkt_cap,
-       stddev_samp(ret) FILTER (WHERE rn <= %d) AS vol20
+       CASE WHEN count(ret) FILTER (WHERE rn <= %[4]d) = %[4]d
+            THEN stddev_samp(ret) FILTER (WHERE rn <= %[4]d) END AS vol20
 FROM ranked
 GROUP BY code`, source, archsql.Lit(prevDay), cfg.TurnoverDays, VolDays)
 

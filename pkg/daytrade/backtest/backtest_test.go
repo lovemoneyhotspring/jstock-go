@@ -1,6 +1,7 @@
 package backtest_test
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -130,6 +131,166 @@ func TestSimulateProfitsFromGapDown(t *testing.T) {
 	}
 	if result.Summary.RoundTripBP <= 0 {
 		t.Errorf("往復手数料 = %v bp, want > 0", result.Summary.RoundTripBP)
+	}
+}
+
+// gapFill は約定モデルの差し替えの確認用: 建値を寄付より 1% 高く（滑り）、手仕舞いは引け。
+type gapFill struct{}
+
+func (gapFill) Fill(r backtest.Row) (float64, float64, bool) { return r.Open * 1.01, r.Close, true }
+
+func TestSimulateWithFillModel(t *testing.T) {
+	days := fixture.BusinessDays(start, 60)
+	arch := buildArchive(t, days)
+	cfg := baseConfig()
+	panel, err := backtest.LoadPanel(arch, days[30], days[len(days)-1], cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := backtest.Simulate(panel, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slipped, err := backtest.SimulateWith(panel, cfg, nil, backtest.Options{Fill: gapFill{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slipped.Summary.TotalPnL >= base.Summary.TotalPnL {
+		t.Errorf("滑りを入れたのに損益が減らない: %v >= %v", slipped.Summary.TotalPnL, base.Summary.TotalPnL)
+	}
+	if len(slipped.Trades) != len(base.Trades) {
+		t.Errorf("約定モデルで銘柄の選び方が変わった: %d != %d", len(slipped.Trades), len(base.Trades))
+	}
+	for i, tr := range slipped.Trades {
+		if tr.Entry <= base.Trades[i].Entry || tr.Exit != base.Trades[i].Exit {
+			t.Errorf("建値・手仕舞い値が約定モデルの値になっていない: %+v", tr)
+		}
+	}
+}
+
+func TestSimulateCarriesLongPinnedAtLimitDown(t *testing.T) {
+	days := fixture.BusinessDays(start, 60)
+	pinned := days[len(days)-5]
+	next := days[len(days)-4]
+	// 前日終値 ≈ 1000 円 → 制限値幅 ±300。寄付 −3%、引けまでに −29% で引けが 688 円 ≤ 700 円（ストップ安）。
+	// 翌日はさらに −5% で寄る
+	symbols := []fixture.Symbol{
+		{Code: "10000", Name: "張り付き", Market: "プライム", ProdCat: "011", Mrgn: "2",
+			Base: 1000, Turnover: 5e8, MktCap: 9e11,
+			GapOn:      map[string]float64{pinned.Format(layout): -0.03, next.Format(layout): -0.05},
+			IntradayOn: map[string]float64{pinned.Format(layout): -0.29}},
+		{Code: "20000", Name: "動かない", Market: "プライム", ProdCat: "011", Mrgn: "2",
+			Base: 2000, Turnover: 4e8, MktCap: 8e11},
+		{Code: "30000", Name: "小型", Market: "プライム", ProdCat: "011", Mrgn: "2",
+			Base: 300, Turnover: 2e8, MktCap: 1e10},
+	}
+	arch, err := fixture.Build(t.TempDir(), days, symbols)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Signal.SkipLimitDown = false // 寄付はストップ安ではないが、念のため判定を切る
+	result, err := backtest.Run(arch, cfg, days[30], days[len(days)-1], nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var carried *backtest.Trade
+	for i := range result.Trades {
+		if result.Trades[i].Date.Equal(pinned) {
+			carried = &result.Trades[i]
+		}
+	}
+	if carried == nil {
+		t.Fatal("張り付きの日の取引が無い")
+	}
+	if !carried.Carried {
+		t.Fatalf("引けストップ安のロングが持ち越しになっていない: %+v", *carried)
+	}
+	// 翌寄り（引け × 0.95）で売った損益 = 株数 × (翌寄り − 建値) − 手数料。
+	// fixture は値段を 0.1 円に丸めるので、その 1 刻みぶんの差は許す
+	nextOpen := carried.Exit * 0.95
+	want := carried.Shares*(nextOpen-carried.Entry) - carried.Fees
+	if diff := math.Abs(carried.PnL - want); diff > carried.Shares*0.1 {
+		t.Errorf("持ち越しの損益 = %v, want ≈ %v", carried.PnL, want)
+	}
+	if carried.PnL >= carried.Shares*(carried.Exit-carried.Entry) {
+		t.Errorf("翌寄りの下落が損益に載っていない: %v", carried.PnL)
+	}
+}
+
+func TestSimulateEquityCurveDoesNotShrinkAfterUntradedWindow(t *testing.T) {
+	// 1〜2 月を休み、3 月から建てる。休み明けの窓は「建てていない」ので縮めない
+	days := fixture.BusinessDays(start, 60) // 1/5 〜 3 月末
+	arch := buildArchive(t, days)
+	cfg := baseConfig()
+	cfg.Regime.SkipMonths = []int{1, 2}
+	cfg.Regime.EquityCurveDays = 20
+	cfg.Regime.EquityCurveScale = decimal.RequireFromString("0.5")
+	result, err := backtest.Run(arch, cfg, days[0], days[len(days)-1], nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var march []backtest.Daily
+	for _, d := range result.Daily {
+		if d.Date.Month() == 3 {
+			march = append(march, d)
+		}
+	}
+	if len(march) == 0 {
+		t.Fatal("3 月の日が無い")
+	}
+	if march[0].Scale != 1 {
+		t.Errorf("休み明け初日の倍率 = %v, want 1（建てていない窓で縮めない）", march[0].Scale)
+	}
+}
+
+func TestSimulateMarginCapsShortAtMarketLimit(t *testing.T) {
+	days := fixture.BusinessDays(start, 60)
+	gapUp := map[string]float64{}
+	fade := map[string]float64{}
+	for _, day := range days[len(days)-10:] {
+		gapUp[day.Format(layout)] = 0.08
+		fade[day.Format(layout)] = -0.02
+	}
+	symbols := []fixture.Symbol{
+		// 100 円の低位株: 67 万円で 6,700 株 → 50 単元（5,000 株）を超えるので成行では出せない
+		{Code: "10000", Name: "低位ギャップ上げ", Market: "プライム", ProdCat: "011", Mrgn: "2",
+			Base: 100, Turnover: 5e8, MktCap: 9e11, GapOn: gapUp, IntradayOn: fade},
+		{Code: "20000", Name: "ギャップ上げ", Market: "プライム", ProdCat: "011", Mrgn: "2",
+			Base: 2000, Turnover: 4e8, MktCap: 8e11, GapOn: gapUp, IntradayOn: fade},
+		{Code: "30000", Name: "動かない", Market: "プライム", ProdCat: "011", Mrgn: "2",
+			Base: 1500, Turnover: 3e8, MktCap: 7e11},
+	}
+	arch, err := fixture.Build(t.TempDir(), days, symbols)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Margin.Enabled = true
+	cfg.Margin.MaxCapital = decimal.NewFromInt(2_000_000)
+	cfg.Margin.OrderBudget = decimal.NewFromInt(670_000)
+	cfg.Margin.Weighting = "equal"
+	result, err := backtest.RunMargin(arch, cfg, days[30], days[len(days)-1], nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.ShortTrades) == 0 {
+		t.Fatal("ショートの取引が無い")
+	}
+	cheap := 0
+	for _, tr := range result.ShortTrades {
+		if tr.Shares > 5000 {
+			t.Errorf("株数が 50 単元を超えている: %+v", tr)
+		}
+		if tr.Code == "10000" {
+			cheap++
+			if tr.Shares != 5000 {
+				t.Errorf("低位株の売建が 50 単元で頭打ちになっていない: %+v", tr)
+			}
+		}
+	}
+	if cheap == 0 {
+		t.Error("低位株の売建を建てていない（上限で切って建てるのが正しい）")
 	}
 }
 

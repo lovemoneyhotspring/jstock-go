@@ -162,12 +162,14 @@ func RunBacktest(
 		closePrices := make(map[string]decimal.Decimal)
 		highs := make(map[string]decimal.Decimal)
 		lows := make(map[string]decimal.Decimal)
+		traded := make(map[string]struct{})
 		for sym := range allBars {
 			if b, ok := barByDate[sym][today]; ok {
 				openPrices[sym] = b.Open
 				closePrices[sym] = b.Close
 				highs[sym] = b.High
 				lows[sym] = b.Low
+				traded[sym] = struct{}{}
 			}
 		}
 
@@ -189,6 +191,7 @@ func RunBacktest(
 		//    intrabar はその足の高安でも指値を約定させる（楽観的な第 2 の見立て）。
 		pb.Mark(openPrices)
 		pb.BeginDay()
+		realizedBefore := pb.RealizedPnL()
 		var fills []domain.Fill
 		if opts.FillModel == "intrabar" {
 			fills = pb.Settle(openPrices, highs, lows, nil)
@@ -196,7 +199,10 @@ func RunBacktest(
 			fills = pb.Settle(openPrices, nil, nil, nil)
 		}
 		allFills = append(allFills, fills...)
-		pb.ExpireOpenOrders()
+		// 日付の軸は全銘柄の和集合なので、ベンチマークだけが立ち会った日（東証の休場日）が
+		// 混ざりうる。その日に足の無い銘柄の注文は失効させず、次の立会いで約定させる
+		pb.ExpireOpenOrdersFor(traded)
+		realizedToday := pb.RealizedPnL().Sub(realizedBefore)
 
 		// 4. 当日の終値でマーク
 		pb.Mark(closePrices)
@@ -286,6 +292,10 @@ func RunBacktest(
 		}
 
 		// 8. リコンサイル
+		//
+		// ここで出す注文は翌営業日の寄付で約定する。当日の寄付で買った銘柄を翌日に売るのは
+		// 差金決済にならないので、当日買付の銘柄は渡さない（渡すと手仕舞いが常に 1 日遅れる）。
+		// 差金決済の判定そのもの（BlocksSameDaySale）はライブと同じく有効のまま。
 		openOrders, _ := pb.GetOpenOrders()
 		plan, err := Reconcile(targets, posMap, openOrders, closePrices, lotSizes,
 			ReconcileSettings{
@@ -294,12 +304,12 @@ func RunBacktest(
 				TaxType:           domain.TaxAccountSpecific,
 				BlocksSameDaySale: true,
 			},
-			pb.BoughtToday(), today)
+			nil, today)
 		if err != nil {
 			continue
 		}
 
-		// 9. リスク検査と発注
+		// 9. リスク検査と発注。当日の実現損益は寄付の約定から出す（日次の損失上限を効かせる）
 		riskCtx := risk.RiskContext{
 			Equity:           equity,
 			Balance:          *bal,
@@ -307,7 +317,7 @@ func RunBacktest(
 			BasePrices:       closePrices,
 			PendingValue:     make(map[string]decimal.Decimal),
 			OrdersToday:      0,
-			RealizedPnLToday: decimal.Zero,
+			RealizedPnLToday: realizedToday,
 		}
 
 		for _, res := range plan.Orders {

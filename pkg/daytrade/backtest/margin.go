@@ -2,10 +2,10 @@ package backtest
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/regime"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/shopspring/decimal"
 )
 
@@ -20,6 +20,11 @@ import (
 // のではなく、基準資金で選んだ結果の損益を後から掛け増す近似——既存の equity_curve_scale
 // によるロングの縮小と同じ手法。
 func SimulateMargin(panel *Panel, cfg config.Config, signals *Inputs) (*MarginResult, error) {
+	return SimulateMarginWith(panel, cfg, signals, Options{})
+}
+
+// SimulateMarginWith は約定モデルを指定して SimulateMargin を行う。
+func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options) (*MarginResult, error) {
 	if !cfg.Margin.Enabled {
 		return nil, fmt.Errorf("margin.enabled が false です（jp_gap_fade と同じ結果になるので Simulate を使う）")
 	}
@@ -46,20 +51,14 @@ func SimulateMargin(panel *Panel, cfg config.Config, signals *Inputs) (*MarginRe
 	longMaxGap, _ := cfg.Signal.MaxGap.Float64()
 	shortMinGap, _ := cfg.Margin.MinGap.Float64()
 	shortMaxGap, _ := cfg.Margin.MaxGap.Float64()
+	fill := opts.fill()
+	byKey := rowsByKey(panel)
 
-	longRows := groupByDay(panel, func(r Row) bool {
-		if !r.Eligible {
-			return false
-		}
-		if cfg.Signal.SkipLimitDown && r.Open <= math.Max(r.LimitLow, 1.0) {
-			return false
-		}
-		return true
-	})
+	longRows := groupByDay(panel, longKeep(cfg))
 	longParams := legParams{
-		n: nLong, budget: longBudget, capital: longCapital,
+		n: nLong, budget: longBudget,
 		weighting: cfg.Capital.Weighting, sign: 1,
-		minGap: longMinGap, maxGap: longMaxGap,
+		minGap: longMinGap, maxGap: longMaxGap, fill: fill,
 		// 信用買い（日計り）なら手数料 0 円。金利・滑りは long_extra_cost_bp で見る
 		commission: !cfg.Margin.LongViaMargin,
 	}
@@ -67,6 +66,7 @@ func SimulateMargin(panel *Panel, cfg config.Config, signals *Inputs) (*MarginRe
 		longParams.extraCostBP = longExtra
 	}
 	longTrades := pickAndPrice(longRows, panel.Days, longParams)
+	longTrades = applyCarry(longTrades, byKey, 1, carryPenalty)
 
 	// ショートの母集団はロングと別（[margin] の segments / 除外。前夜の plan と同じ条件）
 	shortRows := groupByDay(panel, func(r Row) bool {
@@ -79,17 +79,16 @@ func SimulateMargin(panel *Panel, cfg config.Config, signals *Inputs) (*MarginRe
 		return true
 	})
 	shortTrades := pickAndPrice(shortRows, panel.Days, legParams{
-		n: nShort, budget: shortBudget, capital: shortCapital,
+		n: nShort, budget: shortBudget,
 		weighting: cfg.Margin.Weighting, sign: -1, descending: true,
 		extraCostBP: shortExtra,
 		commission:  false, // 立花証券の信用取引は手数料 0 円
 		minGap:      shortMinGap, maxGap: shortMaxGap,
+		// 成行の新規売りは 50 単元まで（空売り価格規制）。実運用の selection も同じ上限で切る
+		maxShares: float64(broker.ShortSaleMarketLimit),
+		fill:      fill,
 	})
-	byKey := map[string]Row{}
-	for _, r := range panel.Rows {
-		byKey[r.Date.Format(dayLayout)+"|"+r.Code] = r
-	}
-	shortTrades = applyCarry(shortTrades, byKey, carryPenalty)
+	shortTrades = applyCarry(shortTrades, byKey, -1, carryPenalty)
 
 	longDaily := dailyFromTrades(longTrades, panel.Days)
 	shortDaily := dailyFromTrades(shortTrades, panel.Days)
@@ -102,8 +101,8 @@ func SimulateMargin(panel *Panel, cfg config.Config, signals *Inputs) (*MarginRe
 		longScale[key] = d.LongScale
 		shortMultiplier[key] = d.ShortMultiplier
 	}
-	longTrades = keepTrades(longTrades, longScale)
-	shortTrades = keepTrades(shortTrades, shortMultiplier)
+	longTrades = scaleTrades(longTrades, longScale)
+	shortTrades = scaleTrades(shortTrades, shortMultiplier)
 
 	return &MarginResult{
 		Daily:        combined,
@@ -113,16 +112,6 @@ func SimulateMargin(panel *Panel, cfg config.Config, signals *Inputs) (*MarginRe
 		LongSummary:  summarize(combined, longCapital, legLong),
 		ShortSummary: summarize(combined, shortCapital, legShort),
 	}, nil
-}
-
-func keepTrades(trades []Trade, scale map[string]float64) []Trade {
-	out := trades[:0]
-	for _, t := range trades {
-		if scale[t.Date.Format(dayLayout)] > 0 {
-			out = append(out, t)
-		}
-	}
-	return out
 }
 
 // applyRegimeSeesaw は日ごとに regime.Evaluate を呼び、ロングの資産曲線ゲートに応じて
@@ -141,19 +130,13 @@ func applyRegimeSeesaw(longDaily, shortDaily map[string]*Daily, panel *Panel, cf
 	out := make([]Daily, 0, len(panel.Days))
 	longPnL := make([]float64, 0, len(panel.Days))
 	longScales := make([]float64, 0, len(panel.Days))
+	longTraded := make([]bool, 0, len(panel.Days))
 	for i, day := range panel.Days {
 		key := day.Format(dayLayout)
 		long := longDaily[key]
 		short := shortDaily[key]
 
-		var recent *float64
-		if r.EquityCurveDays > 0 && i >= r.EquityCurveDays {
-			total := 0.0
-			for j := i - r.EquityCurveDays; j < i; j++ {
-				total += longPnL[j] * longScales[j]
-			}
-			recent = &total
-		}
+		recent := recentWindow(longPnL, longScales, longTraded, i, r.EquityCurveDays)
 		verdict := regime.Evaluate(r, regime.Signals{
 			Day:       day,
 			IVPrev:    signals.lookup(signalsIV(signals), key),
@@ -183,8 +166,9 @@ func applyRegimeSeesaw(longDaily, shortDaily map[string]*Daily, panel *Panel, cf
 		default:
 			shortMul = multiplierNormal
 		}
-		longPnL = append(longPnL, long.PnL)
+		longPnL = append(longPnL, ledgerPnL(long.PnL, long.Commission))
 		longScales = append(longScales, longScale)
+		longTraded = append(longTraded, longScale > 0 && long.N > 0)
 
 		d := Daily{
 			Date:            day,
@@ -193,6 +177,7 @@ func applyRegimeSeesaw(longDaily, shortDaily map[string]*Daily, panel *Panel, cf
 			LongPnL:         long.PnL * longScale,
 			LongGross:       long.Gross * longScale,
 			LongFees:        long.Fees * longScale,
+			LongCommission:  long.Commission * longScale,
 			LongAmount:      long.Amount * longScale,
 			ShortPnL:        short.PnL * shortMul,
 			ShortGross:      short.Gross * shortMul,
@@ -208,6 +193,7 @@ func applyRegimeSeesaw(longDaily, shortDaily map[string]*Daily, panel *Panel, cf
 		d.PnL = d.LongPnL + d.ShortPnL
 		d.Gross = d.LongGross + d.ShortGross
 		d.Fees = d.LongFees + d.ShortFees
+		d.Commission = d.LongCommission
 		d.Amount = d.LongAmount + d.ShortAmount
 		d.N = d.LongN + d.ShortN
 		d.On = longScale > 0 || shortMul > 0

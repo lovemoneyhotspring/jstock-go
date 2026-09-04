@@ -82,8 +82,9 @@ type Margin struct {
 	// 弱い日限定は Sharpe が高いが稼働が 1/3 に減るので既定は常時 1.0。
 	MultiplierNormal   decimal.Decimal `toml:"multiplier_normal"`
 	MultiplierLongWeak decimal.Decimal `toml:"multiplier_long_weak"`
-	// CarryPenalty は検証のみ: 引けストップ高で返済できなかった取引を「翌営業日の
-	// 寄付で返済」として計上する係数（1 で全額、0 で無視）。
+	// CarryPenalty は検証のみ: 引けが制限値幅に張り付いて手仕舞えなかった取引
+	// （売建の引けストップ高、買建の引けストップ安）を「翌営業日の寄付で手仕舞い」
+	// として計上する係数（1 で全額、0 で無視）。ロングだけの検証（Simulate）でも使う。
 	CarryPenalty decimal.Decimal `toml:"carry_penalty"`
 	// LongShrink はロング側の資産曲線による縮小を効かせるか。false なら合図は
 	// ショートのシーソーにだけ使い、ロングは縮めない。

@@ -129,7 +129,11 @@ func (t *Tachibana) Fetch(symbols []string) (map[string]selection.Quote, error) 
 		if price.LessThanOrEqual(decimal.Zero) {
 			continue
 		}
-		found[symbol] = selection.Quote{Symbol: symbol, Price: price, At: row.At, Source: t.Name()}
+		// 基準値段（前日終値）も渡す。分割・併合の日はアーカイブの終値と食い違う
+		found[symbol] = selection.Quote{
+			Symbol: symbol, Price: price, At: row.At, Source: t.Name(),
+			PrevClose: row.PrevClose,
+		}
 	}
 	return found, nil
 }
