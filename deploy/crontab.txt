@@ -55,13 +55,21 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=3GiB GOGC=400
 # 積立: 増額した日は本当に安かったか（倍率の帯ごと。対照群は倍率 1.0 の日）。週 1 で足りる
 35 20 * * 5     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/accum-eval.lock $WBJP_BIN/accum evaluate >> state/logs/accum-evaluate.log 2>&1
 
-# --- 日次レポート（Discord）----------------------------------------------------
-# 21:00: その日の運用を daily-report サブエージェント（.claude/agents/daily-report.md）に
-# 振り返らせ、Discord（WBJP_REPORT_CHANNEL_ID。無ければ WBJP_ALERT_CHANNEL_ID）に
-# Bot の API で流す。1 レポート 1 スレッド。
-# 上の evaluate 群（20:20〜20:35）と plan（20:30）が出揃ってから回す。
-# 読むだけで、config も発注も触らない（docs/FEEDBACK.md「自動化するときの線引き」）
-0 21 * * 1-5    cd $WBJP_HOME && flock -n /tmp/daily-report.lock $WBJP_HOME/deploy/daily-report.sh >> state/logs/daily-report.log 2>&1
+# --- レポート（Discord）--------------------------------------------------------
+# 日次・週次・月次はどれも deploy/report.sh が生成と配達をする。Discord
+# （WBJP_REPORT_CHANNEL_ID。無ければ WBJP_ALERT_CHANNEL_ID）に Bot の API で流し、
+# 1 レポート 1 スレッドになる。読むだけで、config も発注も触らない
+# （docs/FEEDBACK.md「自動化するときの線引き」）。ロックは 3 つで共有する
+# ——同時に走ると claude の負荷とダイジェストの汚れが重なるため。
+#
+# 21:00（平日）: その日の運用（.claude/agents/daily-report.md）。
+# 上の evaluate 群（20:20〜20:35）と plan（20:30）が出揃ってから回す
+0 21 * * 1-5    cd $WBJP_HOME && flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh daily   >> state/logs/report-daily.log   2>&1
+# 21:30（金）: その週（月〜金）の傾向（.claude/agents/periodic-report.md）。
+# 同じ日の日次（21:00）が終わってから
+30 21 * * 5     cd $WBJP_HOME && flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh weekly  >> state/logs/report-weekly.log  2>&1
+# 毎月 1 日 22:00: 前月まるごと。曜日を問わない（前月の記録は出揃っている）
+0 22 1 * *      cd $WBJP_HOME && flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh monthly >> state/logs/report-monthly.log 2>&1
 
 # --- 夜間自己修復（Claude Code）------------------------------------------------
 # 6:00: 前夜からの実行ログに異常があれば、night-repair サブエージェント

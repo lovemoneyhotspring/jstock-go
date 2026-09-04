@@ -13,11 +13,28 @@
 | 3 | この文書の JSONL——再現に要る全部 | `state/logs/<app>-<env>.jsonl` |
 
 これとは別に、**Discord に投稿したものの控え**が `state/notify/<日付>.jsonl` に残る
-（1 投稿 1 行、**30 日**）。送れなかったものも `ok: false` と理由付きで残るので、
+（1 投稿 1 行、**45 日**）。送れなかったものも `ok: false` と理由付きで残るので、
 「昨日の異常通知は何だった？」「レポートは届いたか」に Discord を開かずに答えられる。
 項目は `at` / `kind`（`alert` / `report`）/ `title` / `body` / `channel_id` /
-`thread_id` / `ok` / `error`。日次レポートの本文は `state/reports/daily-<日付>.md`
-にも残る（同じく 30 日）。
+`thread_id` / `ok` / `error`。レポートの本文は `state/reports/`（日次 45 日・
+週次 180 日・月次は消さない）。
+
+**どの置き場も日付でファイルが分かれている**ので、期間を指定すればその範囲の
+ファイルだけを開く。全部読まずに済む構造が、記録が増えても壊れないための前提:
+
+| 置き場 | 1 ファイルの単位 | 期間で絞る方法 |
+|---|---|---|
+| `state/digest/<env>-<日付>.jsonl` | 1 日 | ファイル名（`prod-2026-09-{01..30}.jsonl`） |
+| `state/notify/<日付>.jsonl` | 1 日 | ファイル名。Go からは `notify.ReadArchive(from, to)` |
+| `state/logs/<app>-<env>.jsonl.<日付>` | 1 日（退避後） | ファイル名。当日分だけ接尾辞なし |
+| `state/<app>/history/<種類>/*.parquet` | 1 実行（名前の先頭 10 文字が判定日） | `history.Store.Files(kind, Range)` が**開く前に**名前で選ぶ。SQL なら `WHERE day BETWEEN …` |
+| `state/reports/*.md` | 1 レポート | ファイル名 |
+
+```console
+# 期間を絞る（必要な日のファイルしか開かない）
+jq -c 'select(.anomalies)' state/digest/prod-2026-09-{01..07}.jsonl
+bin/daytrade review --from 2026-09-01 --to 2026-09-07 --json
+```
 
 ```console
 # 昨日の異常通知

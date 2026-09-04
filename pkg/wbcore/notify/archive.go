@@ -19,11 +19,15 @@ import (
 // 残す——配達に失敗したものこそ後から拾いたい。
 //
 // 置き場は state/notify/<YYYY-MM-DD>.jsonl（1 投稿 1 行、UTC の日付で 1 ファイル）。
-// ログ（90 日）より短い 30 日で消す。日次レポートの本文そのものは
-// state/reports/daily-<日付>.md にも残る（deploy/daily-report.sh が書く）。
+// 日付でファイルが分かれるので、期間を絞れば必要な日だけ開く（ReadArchive）。
+// 日次レポートの本文そのものは state/reports/daily-<日付>.md にも残る
+// （deploy/report.sh が書く）。
 
 // ArchiveRetainDays は控えを残す日数。
-const ArchiveRetainDays = 30
+//
+// 45 日なのは、毎月 1 日の月次レポートが**前月まるごと**（最大 31 日ぶん）の
+// 通知を読み返せるようにするため。30 日だと月初の通知が先に消える。
+const ArchiveRetainDays = 45
 
 // 控えの種類。
 const (

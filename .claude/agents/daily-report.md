@@ -51,7 +51,7 @@ jq -c 'select(.anomalies)' state/digest/prod-<日付>.jsonl
 `crontab -l` を見る**。人が手で叩いた実行も同じようにダイジェストに残るので、
 予定表に無い＝異常、ではない。crontab で無効なら「手動実行と思われる」と書く。
 
-呼び出し元（`deploy/daily-report.sh`）が渡してくる**写し**を読むこと。生の
+呼び出し元（`deploy/report.sh daily`）が渡してくる**写し**を読むこと。生の
 `state/digest/<env>-<日付>.jsonl` には、あなたがこれから叩く `review` /
 `evaluate` の行が混ざる——自分の足跡を運用実績として数えてはいけない。
 

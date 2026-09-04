@@ -103,25 +103,38 @@ accum evaluate --json | jq '.summary'
 
 ---
 
-## 4. 日次レポート（Discord）
+## 4. レポート（Discord）
 
-上の 3 層を**毎営業日 21:00 に AI に読ませ**、稼働・異常・判断の妥当性・気づき・改善案を
+上の 3 層を**定期的に AI に読ませ**、稼働・異常・判断の妥当性・気づき・改善案を
 Discord に流す。人が毎日 `jq` を叩かなくても、崩れたときに気づけるようにするための仕組み。
+
+日次・週次・月次の 3 つがある。日次は「今日どう動いたか」、週次と月次は**傾向**
+（数字が伸びているか、選定が効き続けているか、同じ異常を繰り返していないか）を見る。
+
+| 種類 | いつ | 対象 |
+|---|---|---|
+| 日次 | 平日 21:00 | その日 |
+| 週次 | 金 21:30 | その週の月〜金。前週と比べる |
+| 月次 | 毎月 1 日 22:00 | 前月まるごと。直近数か月の推移と、検証との乖離も見る |
 
 | 部品 | 役割 |
 |---|---|
-| `.claude/agents/daily-report.md` | サブエージェントの定義。**何をどの順で読むか**と、やってはいけないこと |
-| `deploy/daily-report.sh` | 起動と配達。`claude -p --agent daily-report` を回し、標準出力を Discord に流す |
-| `cmd/discord-post` | Webhook に POST する。2000 文字で分割する（Discord の上限）。実体は `pkg/wbcore/notify` |
-| cron | `0 21 * * 1-5`（`deploy/crontab.txt`）。evaluate 群と plan が出揃ってから |
+| `.claude/agents/daily-report.md` | 日次のサブエージェント。**何をどの順で読むか**と、やってはいけないこと |
+| `.claude/agents/periodic-report.md` | 週次・月次のサブエージェント。期間で絞って読む |
+| `deploy/report.sh <daily\|weekly\|monthly>` | 起動と配達。期間に応じたサブエージェントを回し、標準出力を Discord に流す |
+| `cmd/discord-post` | Discord の Bot API で送る。スレッドを作り、2000 文字で分割して連投する。実体は `pkg/wbcore/notify` |
+| cron | 日次 `0 21 * * 1-5` / 週次 `30 21 * * 5` / 月次 `0 22 1 * *`（`deploy/crontab.txt`）。日次は evaluate 群と plan が出揃ってから |
 
 ```console
 # 手で回す（送らずに中身だけ見る）
-DRY_RUN=1 deploy/daily-report.sh
-DRY_RUN=1 deploy/daily-report.sh 2026-09-02   # 日付を指定
+DRY_RUN=1 deploy/report.sh daily
+DRY_RUN=1 deploy/report.sh daily 2026-09-02   # 日付を指定
+DRY_RUN=1 deploy/report.sh weekly            # その週（月〜金）
+DRY_RUN=1 deploy/report.sh monthly 2026-08   # その月
 ```
 
-本文は送信の成否によらず `state/reports/daily-<日付>.md` に残る。
+本文は送信の成否によらず `state/reports/`（`daily-<日付>.md` / `weekly-<開始日>.md` /
+`monthly-<YYYY-MM>.md`）に残る。Discord に流したものの控えは `state/notify/<日付>.jsonl`（45 日）。
 
 **生成と配達を分けてある。** モデルに「送る」ことまで任せると、送り忘れた日が
 黙って消える。レポートを作るのは AI、Discord に届けるのは決め打ちのスクリプト。
