@@ -119,6 +119,10 @@ var EvaluationSchema = []history.Column{
 	// traded / filled_quantity / actual_pnl は台帳の本発注の実績。
 	{Name: "traded", Type: history.TypeBool},
 	{Name: "filled_quantity", Type: history.TypeFloat64},
+	// actual_entry / actual_exit は実際の約定単価（建て／手仕舞い）。日足の始値・終値とは
+	// 別物で、滑りと執行の巧拙はこの差に出る。手仕舞い前なら actual_exit は null。
+	{Name: "actual_entry", Type: history.TypeFloat64},
+	{Name: "actual_exit", Type: history.TypeFloat64},
 	{Name: "actual_pnl", Type: history.TypeFloat64},
 }
 
@@ -267,10 +271,13 @@ func RowsFromFrame(frame history.Frame) (rows []RankingRow, runID string) {
 	return rows, runID
 }
 
-// actual は台帳の本発注から (銘柄, 脚) → (約定数量, 実現損益)。
+// actual は台帳の本発注から (銘柄, 脚) → (約定数量, 約定単価, 実現損益)。
 type actual struct {
 	filled float64
-	pnl    *float64
+	// entry / exit は約定単価（建て／手仕舞い）。手仕舞い前なら exit は nil。
+	entry *float64
+	exit  *float64
+	pnl   *float64
 }
 
 func actualsOf(orders []dtledger.Order) map[string]actual {
@@ -294,13 +301,21 @@ func actualsOf(orders []dtledger.Order) map[string]actual {
 			continue
 		}
 		a := actual{filled: filled}
-		if exit, ok := exits[key]; ok && exit.AvgFillPrice != nil && entry.AvgFillPrice != nil {
-			buy, sell := *entry.AvgFillPrice, *exit.AvgFillPrice
-			if entry.Side != domain.SideBuy {
-				buy, sell = *exit.AvgFillPrice, *entry.AvgFillPrice
+		if entry.AvgFillPrice != nil {
+			price, _ := entry.AvgFillPrice.Float64()
+			a.entry = &price
+		}
+		if exit, ok := exits[key]; ok && exit.AvgFillPrice != nil {
+			price, _ := exit.AvgFillPrice.Float64()
+			a.exit = &price
+			if entry.AvgFillPrice != nil {
+				buy, sell := *entry.AvgFillPrice, *exit.AvgFillPrice
+				if entry.Side != domain.SideBuy {
+					buy, sell = *exit.AvgFillPrice, *entry.AvgFillPrice
+				}
+				pnl, _ := sell.Sub(buy).Mul(exit.FilledQuantity).Float64()
+				a.pnl = &pnl
 			}
-			pnl, _ := sell.Sub(buy).Mul(exit.FilledQuantity).Float64()
-			a.pnl = &pnl
 		}
 		out[key] = a
 	}
@@ -407,10 +422,13 @@ func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg confi
 		if a, ok := actuals[r.Symbol+"|"+leg]; ok {
 			row["traded"] = true
 			row["filled_quantity"] = a.filled
+			row["actual_entry"] = floatOrNil(a.entry)
+			row["actual_exit"] = floatOrNil(a.exit)
 			row["actual_pnl"] = floatOrNil(a.pnl)
 		} else {
 			row["traded"] = false
 			row["filled_quantity"] = nil
+			row["actual_entry"], row["actual_exit"] = nil, nil
 			row["actual_pnl"] = nil
 		}
 		rows = append(rows, row)

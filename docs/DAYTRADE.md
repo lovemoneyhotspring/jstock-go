@@ -230,7 +230,7 @@ jquants query "SELECT * FROM read_parquet('state/daytrade/history/ranking/*.parq
 
 `state/` はホスト固有なので、`state/daytrade/history/` も台帳と同じく別ホストへ同期する（`docs/DEPLOY.md`）。
 
-## 候補の結果と選定の妥当性（`evaluate` / `review`）
+## 候補の結果と選定の妥当性（`evaluate` / `review` / `trades`）
 
 建てなかった候補（次点、順位表の残り）がその日どう動いたかを追えないと、選定が妥当か
 分からない。`daytrade evaluate` は大引後に朝の順位表の**全行**へ当日の日足を当て、
@@ -251,6 +251,27 @@ daytrade evaluate --date 2026-09-02 --config-dir config/daytrade_margin
 daytrade review                                                       # 直近 20 日
 daytrade review --from 2026-09-01 --csv /tmp/review.csv
 ```
+
+`daytrade trades` は**建てた 1 銘柄ずつの明細**。レポート（日次・週次・月次）が
+「何を、いくらで建てて、いくらで手仕舞い、なぜ勝った（負けた）か」を書けるように、
+1 行 1 取引で並べる。
+
+```bash
+daytrade trades --config-dir config/daytrade_margin              # 直近 20 営業日
+daytrade trades --from 2026-09-01 --to 2026-09-30 --json         # 期間を指定（AI・パイプ用）
+daytrade trades --side SELL --csv /tmp/short.csv                 # 脚で絞って書き出す
+```
+
+- 1 行 = 銘柄名・株数・**建値**・**手仕舞い値**・ギャップ・net bp・円損益。建値と手仕舞い値は
+  台帳の**約定単価**があればそれ（`priced = 実`）、無ければ日足の始値・終値（`想定`）。
+  日足の値（`bar_open` / `bar_close`）も残すので、その差が**執行の乖離**になる
+- `cause` は勝敗の主因の 2×2。その日その脚の**候補全体の平均**と同じ向きなら「地合い」、
+  逆なら「選定」。**選定勝ちが選定負けを上回っているか**が順位付けの価値で、
+  地合いの勝ちは相場に乗っただけ（規則の証拠にならない）
+- 合計には勝率のほかに、**ペイオフ**（平均利益 ÷ 平均損失）、**1 取引の期待値**、
+  **利益の集中**（上位 1 件・3 件で稼ぎの何割か）、**執行の乖離**、張り付きの件数が出る。
+  勝率だけでは判断できない——勝率 33% でもペイオフ 2.0 なら期待値は正で、
+  逆に 1 件で稼ぎの 8 割なら、その 1 件が再現しない前提で読む
 
 `review` は日 × 脚ごとに「選んだ N の平均 net bp」「次点の平均」「候補全体の平均」と想定損益・
 実現損益を並べ、期間の合計に「picked が勝った日」「picked が all を上回った日」の割合を出す。
