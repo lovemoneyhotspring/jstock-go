@@ -13,7 +13,7 @@
 #     プロンプト（.claude/agents/night-repair.md）で禁じてある。
 #     deploy/build.sh・crontab の実行はツールレベルでも禁止（--disallowedTools）。
 #     このスクリプト自身はそれらを一切行わない
-#   - 生成（claude）と配達（discord-post）を分ける。daily-report.sh と同じ理由
+#   - 生成（claude）と配達（discord-post）を分ける。report.sh と同じ理由
 #   - 本文は state/reports/ に必ず残す。Discord に届かなくても後から読める
 
 set -uo pipefail
@@ -117,7 +117,7 @@ fi
 
 "$POST_BIN" --title "夜間自己修復 $TODAY" < "$REPORT"
 
-# 30 日より古い控えを消す（daily-report.sh と同じ約束）
-find "$REPORT_DIR" -maxdepth 1 -type f -mtime +30 \
+# 45 日より古い控えを消す（report.sh と同じ約束）
+find "$REPORT_DIR" -maxdepth 1 -type f -mtime +45 \
   \( -name 'night-repair-*.md' -o -name 'night-repair-*.err' \) \
   -delete 2>/dev/null || :

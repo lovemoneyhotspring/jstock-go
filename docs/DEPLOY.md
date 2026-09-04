@@ -124,7 +124,7 @@ crontab -l | grep jstock
 
 ### 日次レポート（Discord）
 
-21:00 の行（`deploy/daily-report.sh`）だけは他と前提が違う。回す前に 2 つ要る。
+レポートの行（`deploy/report.sh`）だけは他と前提が違う。回す前に 2 つ要る。
 
 1. **通知先**。Discord へは **Bot の REST API** で送る（Incoming Webhook は使わない。
    Webhook は通常のテキストチャンネルでスレッドを作れず、投稿が平積みになるため）。
@@ -146,23 +146,32 @@ crontab -l | grep jstock
    本文に `@名前` と書いても Discord は通知しない——ID でないと届かない。
    分割された 2 通目以降には付けない（1 投稿につき通知は 1 回）。
 
-   送ったものは **`state/notify/<日付>.jsonl` に 30 日ぶん控えが残る**。送れなかった
+   送ったものは **`state/notify/<日付>.jsonl` に 45 日ぶん控えが残る**。送れなかった
    ものも理由付きで残るので、「昨日の異常通知は何だった？」に Discord を開かずに
-   答えられる。日次レポートの本文は `state/reports/daily-<日付>.md` にも残り、
-   こちらも 30 日で消える（`deploy/daily-report.sh` が消す）。
+   答えられる。45 日なのは、毎月 1 日の月次レポートが前月まるごとを読み返せるようにするため。
 2. **Claude Code の認証**。cron は `claude` を非対話で回すので、その cron を持つ
    ユーザーで一度 `claude` にログインしておく（認証は `~/.claude` に入る）。
 
 ```bash
 # 送らずに中身だけ確認する
-DRY_RUN=1 /home/abobo/jstock-go/deploy/daily-report.sh
+DRY_RUN=1 /home/abobo/jstock-go/deploy/report.sh daily
 
 # 配達だけ試す（Discord に 1 通届けば経路は通っている）
 echo 'テスト' | bin/discord-post
 ```
 
-中身は `state/reports/daily-<日付>.md` に残る。仕組みは
-[FEEDBACK.md](FEEDBACK.md)「4. 日次レポート（Discord）」。
+### レポートの種類
+
+| 種類 | いつ | 対象 | 本文の残り先 | 保持 |
+|---|---|---|---|---|
+| 日次 | 平日 21:00 | その日 | `state/reports/daily-<日付>.md` | 45 日 |
+| 週次 | 金 21:30 | その週の月〜金 | `state/reports/weekly-<開始日>.md` | 180 日 |
+| 月次 | 毎月 1 日 22:00 | 前月まるごと | `state/reports/monthly-<YYYY-MM>.md` | 消さない |
+
+日次は `.claude/agents/daily-report.md`、週次・月次は `.claude/agents/periodic-report.md`
+が「何をどの順で読むか」を決める。週次・月次は**日次レポートの .md に依存しない**
+——追記専用の履歴（Parquet）とダイジェストを期間で読むので、日次の保持期間より
+長い範囲でも振り返れる。仕組みは [FEEDBACK.md](FEEDBACK.md)「4. レポート（Discord）」。
 
 ### cron を入れる前の検証
 
