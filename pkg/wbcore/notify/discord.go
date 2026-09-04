@@ -155,28 +155,29 @@ func PostMessage(channelID, content string) error {
 }
 
 // PostThread は channelID に新しいスレッドを作り、本文をその中に送る。
+// 返すのは投稿先のスレッド ID——続きを PostMessage で足せる。
 //
 // 本文が 1 通の上限を超えるときは分割して連投する（すべて同じスレッド）。
-// 送り先が既にスレッドなら、新しく作らずそこへ追記する。
-func PostThread(channelID, title, body string) error {
+// 送り先が既にスレッドなら、新しく作らずそこへ追記する（その ID をそのまま返す）。
+func PostThread(channelID, title, body string) (threadID string, err error) {
 	pages := pagesOf(body)
 	if len(pages) == 0 {
-		return fmt.Errorf("本文が空です")
+		return "", fmt.Errorf("本文が空です")
 	}
 
 	kind, err := ChannelType(channelID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	target := channelID
 	start := 0
 	if !isThreadChannel(kind) {
-		threadID, posted, err := createThread(channelID, kind, threadName(title), pages[0])
+		id, posted, err := createThread(channelID, kind, threadName(title), pages[0])
 		if err != nil {
-			return err
+			return "", err
 		}
-		target = threadID
+		target = id
 		if posted {
 			start = 1 // フォーラムは 1 ページ目をスレッド作成で送っている
 		}
@@ -184,11 +185,11 @@ func PostThread(channelID, title, body string) error {
 
 	for i := start; i < len(pages); i++ {
 		if err := PostMessage(target, pages[i]); err != nil {
-			return fmt.Errorf("%d/%d ページ目を送れません: %w", i+1, len(pages), err)
+			return target, fmt.Errorf("%d/%d ページ目を送れません: %w", i+1, len(pages), err)
 		}
 		if i < len(pages)-1 {
 			time.Sleep(betweenPages)
 		}
 	}
-	return nil
+	return target, nil
 }
