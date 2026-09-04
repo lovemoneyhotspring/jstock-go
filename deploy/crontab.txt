@@ -33,7 +33,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=3GiB GOGC=400
 13,43 * * * *   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/jquants.lock   $WBJP_BIN/jquants sync                         >> state/logs/jquants-sync.log     2>&1
 # 月初に一括ダウンロードで取りこぼしを埋める（更新分だけ取る）
 50 3 2-5 * *    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/jquants.lock   $WBJP_BIN/jquants backfill                     >> state/logs/jquants-backfill.log 2>&1
-# 営業日ごとの欠けを監視（WBJP_ALERT_WEBHOOK_URL があれば通知）
+# 営業日ごとの欠けを監視（WBJP_ALERT_CHANNEL_ID があれば Discord に通知）
 0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM                          $WBJP_BIN/jquants check --notify                   >> state/logs/jquants-check.log    2>&1
 # スイング売買の銘柄の日足を J-Quants アーカイブから揃える（wbjp screen / backtest の材料）
 5 19 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-data.lock $WBJP_BIN/wbjp data sync --config-dir config               >> state/logs/wbjp-data-sync.log   2>&1
@@ -57,7 +57,8 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=3GiB GOGC=400
 
 # --- 日次レポート（Discord）----------------------------------------------------
 # 21:00: その日の運用を daily-report サブエージェント（.claude/agents/daily-report.md）に
-# 振り返らせ、Discord の Incoming Webhook（WBJP_ALERT_WEBHOOK_URL）に流す。
+# 振り返らせ、Discord（WBJP_REPORT_CHANNEL_ID。無ければ WBJP_ALERT_CHANNEL_ID）に
+# Bot の API で流す。1 レポート 1 スレッド。
 # 上の evaluate 群（20:20〜20:35）と plan（20:30）が出揃ってから回す。
 # 読むだけで、config も発注も触らない（docs/FEEDBACK.md「自動化するときの線引き」）
 0 21 * * 1-5    cd $WBJP_HOME && flock -n /tmp/daily-report.lock $WBJP_HOME/deploy/daily-report.sh >> state/logs/daily-report.log 2>&1
