@@ -99,19 +99,30 @@ func PostDocument(body, title string) (ok bool, err error) {
 		return false, fmt.Errorf("本文が空です")
 	}
 	channelID := ReportChannelID()
-	if reason := missingConfig(channelID, ReportChannelEnvVar); reason != "" {
-		return false, fmt.Errorf("送り先が未設定です（%s）", reason)
-	}
 	if title != "" {
 		body = fmt.Sprintf("**%s**\n%s", title, body)
 	} else {
 		// 見出しが無ければ本文の 1 行目をスレッド名にする（"wbjp" だけの名前で並ばないように）
 		title = firstLine(body)
 	}
+	rec := Record{Kind: KindReport, Title: title, Body: body, ChannelID: channelID}
 
-	if _, err := PostThread(channelID, title, body); err != nil {
+	if reason := missingConfig(channelID, ReportChannelEnvVar); reason != "" {
+		err := fmt.Errorf("送り先が未設定です（%s）", reason)
+		rec.Error = err.Error()
+		archive(rec)
 		return false, err
 	}
+
+	threadID, err := PostThread(channelID, title, body)
+	rec.ThreadID = threadID
+	if err != nil {
+		rec.Error = err.Error()
+		archive(rec)
+		return false, err
+	}
+	rec.OK = true
+	archive(rec)
 	return true, nil
 }
 
