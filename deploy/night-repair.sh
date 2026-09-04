@@ -116,3 +116,8 @@ if [ "${DRY_RUN:-}" = "1" ]; then
 fi
 
 "$POST_BIN" --title "夜間自己修復 $TODAY" < "$REPORT"
+
+# 30 日より古い控えを消す（daily-report.sh と同じ約束）
+find "$REPORT_DIR" -maxdepth 1 -type f -mtime +30 \
+  \( -name 'night-repair-*.md' -o -name 'night-repair-*.err' \) \
+  -delete 2>/dev/null || :

@@ -88,6 +88,17 @@ jq -c 'select(.run_id == "<run_id>" and .routine != true)' state/logs/daytrade-p
 `code` の一覧は `docs/LOGGING.md`。分類には `event`（文言が変わる）ではなく `code` を使う。
 **`jq` を通さずに `cat` で JSONL を丸ごと読まない**（1 日 数 MB ある）。
 
+### 過去に Discord へ流したもの（「昨日は何を通知した？」に答えるとき）
+
+`state/notify/<日付>.jsonl` に 30 日ぶんの控えがある（1 投稿 1 行）。
+`kind` は `alert`（異常）と `report`（日次レポート）、`ok: false` は届かなかったもの。
+
+```bash
+jq -c 'select(.kind == "alert")' state/notify/<日付>.jsonl
+```
+
+過去の日次レポートの本文そのものは `state/reports/daily-<日付>.md`（同じく 30 日）。
+
 ## 出力
 
 標準出力に**レポート本文だけ**を書く。前置き（「調べました」など）も、末尾の感想も要らない。

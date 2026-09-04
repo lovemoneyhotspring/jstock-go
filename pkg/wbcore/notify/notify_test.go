@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeDiscord は Discord の REST API の受け皿。
@@ -107,6 +110,9 @@ func (f *fakeDiscord) start(t *testing.T) *fakeDiscord {
 	t.Setenv(BotTokenEnvVar, "test-token")
 	t.Setenv(AlertChannelEnvVar, "alert-ch")
 	t.Setenv(ReportChannelEnvVar, "report-ch")
+	t.Setenv(MentionEnvVar, "")
+	// 控えは試験ごとの一時ディレクトリへ（本物の state/notify を汚さない）
+	t.Setenv(archiveDirEnvVar, t.TempDir())
 	return f
 }
 
@@ -332,6 +338,162 @@ func TestPostDocumentSurfacesDiscordError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "50013") || !strings.Contains(err.Error(), "403") {
 		t.Errorf("エラーに状態コードと code が無い: %v", err)
+	}
+}
+
+// 呼びかけ（メンション）は 1 通目の先頭にだけ付く。ページごとに付けると
+// 1 投稿で何度も通知が飛ぶ。
+func TestMentionOnFirstPageOnly(t *testing.T) {
+	f := (&fakeDiscord{}).start(t)
+	t.Setenv(MentionEnvVar, "837861747271794751")
+
+	long := strings.Repeat("う\n", 1500)
+	if ok, err := PostDocument(long, "日次レポート"); err != nil || !ok {
+		t.Fatal(err)
+	}
+	pages := f.contents(f.threads[0].ID)
+	if len(pages) < 2 {
+		t.Fatalf("ページ数 = %d, want 2 以上", len(pages))
+	}
+	if !strings.HasPrefix(pages[0], "<@837861747271794751>\n") {
+		t.Errorf("1 通目に呼びかけが無い: %.30q", pages[0])
+	}
+	for i, p := range pages[1:] {
+		if strings.Contains(p, "<@") {
+			t.Errorf("%d ページ目にも呼びかけが付いている", i+2)
+		}
+	}
+
+	// Alert も同じ
+	f.threads, f.messages = nil, nil
+	if !Alert("障害", "詳細", nil) {
+		t.Fatal("Alert が失敗")
+	}
+	body := f.contents(f.threads[0].ID)
+	if len(body) != 1 || !strings.HasPrefix(body[0], "<@837861747271794751>\n[wbjp] 障害") {
+		t.Errorf("Alert の本文 = %v", body)
+	}
+}
+
+// 呼びかけは複数指定でき、<@...> の形で書いてあればそのまま使う。未設定なら付かない。
+func TestMentionPrefixForms(t *testing.T) {
+	t.Setenv(MentionEnvVar, "")
+	if got := mentionPrefix(); got != "" {
+		t.Errorf("未設定 = %q, want 空", got)
+	}
+	t.Setenv(MentionEnvVar, " 111 , <@222> ,, ")
+	if got := mentionPrefix(); got != "<@111> <@222>\n" {
+		t.Errorf("複数指定 = %q", got)
+	}
+}
+
+// 送ったものは state/notify に控えが残る（送れなかったものも理由付きで）。
+func TestArchiveKeepsSentAndFailed(t *testing.T) {
+	f := (&fakeDiscord{}).start(t)
+
+	if !Alert("障害A", "詳細A", nil) {
+		t.Fatal("Alert が失敗")
+	}
+	if ok, err := PostDocument("レポート本文", "日次レポート"); err != nil || !ok {
+		t.Fatal(err)
+	}
+
+	records, err := ReadArchive("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("控えの件数 = %d, want 2", len(records))
+	}
+	alert, report := records[0], records[1]
+	if alert.Kind != KindAlert || alert.Title != "障害A" || !alert.OK || alert.ThreadID == "" {
+		t.Errorf("異常通知の控え = %+v", alert)
+	}
+	if !strings.Contains(alert.Body, "詳細A") {
+		t.Errorf("控えに本文が無い: %q", alert.Body)
+	}
+	if report.Kind != KindReport || report.ChannelID != "report-ch" || !report.OK {
+		t.Errorf("レポートの控え = %+v", report)
+	}
+	if report.At.IsZero() {
+		t.Error("控えに時刻が無い")
+	}
+
+	// 送れなかったものも残る
+	f.fail = func(method, path string) (int, int, bool) { return http.StatusForbidden, 50013, true }
+	if Alert("障害B", "詳細B", nil) {
+		t.Fatal("送れないのに成功している")
+	}
+	records, _ = ReadArchive("", "")
+	last := records[len(records)-1]
+	if last.Title != "障害B" || last.OK || !strings.Contains(last.Error, "50013") {
+		t.Errorf("失敗の控え = %+v", last)
+	}
+}
+
+// 送り先が未設定でも控えは残る（設定を直したあとに何を送り損ねたか分かる）。
+func TestArchiveKeepsSkipped(t *testing.T) {
+	t.Setenv(BotTokenEnvVar, "")
+	t.Setenv(AlertChannelEnvVar, "")
+	t.Setenv(ReportChannelEnvVar, "")
+	t.Setenv(archiveDirEnvVar, t.TempDir())
+
+	if Alert("障害", "詳細", nil) {
+		t.Fatal("未設定なのに送ったことになっている")
+	}
+	records, err := ReadArchive("", "")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("控え = %v (err=%v)", records, err)
+	}
+	if records[0].OK || !strings.Contains(records[0].Error, "未設定") {
+		t.Errorf("未設定の控え = %+v", records[0])
+	}
+}
+
+// 保持日数を過ぎた控えは消える。日付として読めない名前は触らない。
+func TestPruneArchiveRemovesOldOnly(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	old := now.AddDate(0, 0, -ArchiveRetainDays-1).Format(archiveDayLayout)
+	keep := now.AddDate(0, 0, -ArchiveRetainDays+1).Format(archiveDayLayout)
+	for _, name := range []string{old + ".jsonl", keep + ".jsonl", "メモ.jsonl", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pruneArchive(dir, now)
+
+	for name, want := range map[string]bool{
+		old + ".jsonl": false, keep + ".jsonl": true, "メモ.jsonl": true, "notes.txt": true,
+	} {
+		_, err := os.Stat(filepath.Join(dir, name))
+		if got := err == nil; got != want {
+			t.Errorf("%s が残っている = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// 期間で絞って読める。
+func TestReadArchiveFiltersByDay(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(archiveDirEnvVar, dir)
+	notifyDir := filepath.Join(dir, "notify")
+	if err := os.MkdirAll(notifyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, day := range []string{"2026-09-01", "2026-09-02", "2026-09-03"} {
+		line := fmt.Sprintf(`{"at":"%sT00:00:00Z","kind":"alert","title":"%s"}`+"\n", day, day)
+		// 壊れた行を混ぜても他が読めること
+		if err := os.WriteFile(filepath.Join(notifyDir, day+".jsonl"), []byte("こわれた行\n"+line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := ReadArchive("2026-09-02", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Title != "2026-09-02" || got[1].Title != "2026-09-03" {
+		t.Errorf("絞り込み = %+v", got)
 	}
 }
 

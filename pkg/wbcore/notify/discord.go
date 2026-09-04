@@ -170,6 +170,9 @@ func PostThread(channelID, title, body string) (threadID string, err error) {
 		return "", err
 	}
 
+	// 呼びかけは 1 通目だけ。ページごとに付けると 1 投稿で何度も通知が飛ぶ
+	pages[0] = mentionPrefix() + pages[0]
+
 	target := channelID
 	start := 0
 	if !isThreadChannel(kind) {

@@ -87,3 +87,10 @@ if [ "${DRY_RUN:-}" = "1" ]; then
 fi
 
 "$POST_BIN" < "$REPORT"
+
+# 30 日より古い控えを消す（Discord に投稿したものの控えは state/notify にも
+# 同じ日数だけ残る）。日付ではなく更新時刻で判断するので、後から手で開いた
+# ファイルは残る
+find "$REPORT_DIR" -maxdepth 1 -type f -mtime +30 \
+  \( -name 'daily-*.md' -o -name 'daily-*.err' -o -name 'digest-*.snapshot.jsonl' \) \
+  -delete 2>/dev/null || :

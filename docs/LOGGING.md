@@ -12,6 +12,21 @@
 | 2 | **判断・実行品質の履歴**——追記専用の Parquet。列で絞って読める | `state/<app>/history/<種類>/` |
 | 3 | この文書の JSONL——再現に要る全部 | `state/logs/<app>-<env>.jsonl` |
 
+これとは別に、**Discord に投稿したものの控え**が `state/notify/<日付>.jsonl` に残る
+（1 投稿 1 行、**30 日**）。送れなかったものも `ok: false` と理由付きで残るので、
+「昨日の異常通知は何だった？」「レポートは届いたか」に Discord を開かずに答えられる。
+項目は `at` / `kind`（`alert` / `report`）/ `title` / `body` / `channel_id` /
+`thread_id` / `ok` / `error`。日次レポートの本文は `state/reports/daily-<日付>.md`
+にも残る（同じく 30 日）。
+
+```console
+# 昨日の異常通知
+jq 'select(.kind == "alert")' state/notify/2026-09-04.jsonl
+
+# 届かなかったものだけ
+jq 'select(.ok == false)' state/notify/*.jsonl
+```
+
 ```console
 # まず今日の全実行（数十 KB）。異常のあった実行だけ run_id を拾う
 jq 'select(.anomalies)' state/digest/prod-2026-09-03.jsonl

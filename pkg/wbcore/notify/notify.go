@@ -17,6 +17,7 @@ package notify
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 )
@@ -29,9 +30,38 @@ const (
 	// ReportChannelEnvVar は日次レポートを出すチャンネルの ID。
 	// 未設定なら AlertChannelEnvVar に流す（同じ場所にまとめる）。
 	ReportChannelEnvVar = "WBJP_REPORT_CHANNEL_ID"
+	// MentionEnvVar は投稿のたびに呼びかける相手のユーザー ID（カンマ区切りで複数可）。
+	// 異常も日次レポートも見落とさないため、**すべての投稿**の先頭に付く。
+	MentionEnvVar = "WBJP_MENTION_USER_ID"
 
 	UserAgent = "wbjp/1.0 (+https://github.com/lovemoneyhotspring/jstock-go)"
 )
+
+// mentionPrefix は本文の先頭に付ける呼びかけ（未設定なら空）。
+//
+// Discord は本文の "@名前" では通知を飛ばさない。ユーザー ID を <@ID> の形で
+// 書いたときだけ相手に届く。設定に <@...> の形で書いてあればそのまま使う。
+func mentionPrefix() string {
+	raw := strings.TrimSpace(os.Getenv(MentionEnvVar))
+	if raw == "" {
+		return ""
+	}
+	var parts []string
+	for _, id := range strings.Split(raw, ",") {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if !strings.HasPrefix(id, "<@") {
+			id = "<@" + id + ">"
+		}
+		parts = append(parts, id)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " ") + "\n"
+}
 
 // BotToken は Discord の Bot トークン（未設定なら空）。
 func BotToken() string { return os.Getenv(BotTokenEnvVar) }
@@ -63,25 +93,35 @@ func missingConfig(channelID string, channelEnv string) string {
 // Alert は運用通知（アラート）を Discord に送る。
 //
 // 呼ぶたびに新しいスレッドを作り、その中に本文を入れる。固定のスレッドを
-// 使い回さないので、通知ごとに読み分けられる。
+// 使い回さないので、通知ごとに読み分けられる。送っても送れなくても
+// state/notify に控えを残す（30 日）。
 func Alert(title, body string, logger *logging.Logger) bool {
-	if reason := missingConfig(AlertChannelID(), AlertChannelEnvVar); reason != "" {
-		if logger != nil {
-			logger.Warn("notify.skipped", fmt.Sprintf("通知先未設定（%s）: %s (本文: %s)", reason, title, body))
-		}
-		return false
-	}
-
 	text := fmt.Sprintf("[wbjp] %s", title)
 	if body != "" {
 		text = fmt.Sprintf("%s\n%s", text, body)
 	}
+	rec := Record{Kind: KindAlert, Title: title, Body: text, ChannelID: AlertChannelID()}
 
-	if _, err := PostThread(AlertChannelID(), title, text); err != nil {
+	if reason := missingConfig(AlertChannelID(), AlertChannelEnvVar); reason != "" {
+		if logger != nil {
+			logger.Warn("notify.skipped", fmt.Sprintf("通知先未設定（%s）: %s (本文: %s)", reason, title, body))
+		}
+		rec.Error = "通知先未設定（" + reason + "）"
+		archive(rec)
+		return false
+	}
+
+	threadID, err := PostThread(AlertChannelID(), title, text)
+	rec.ThreadID = threadID
+	if err != nil {
 		if logger != nil {
 			logger.Error("notify.failed", fmt.Sprintf("通知送信失敗: %v", err))
 		}
+		rec.Error = err.Error()
+		archive(rec)
 		return false
 	}
+	rec.OK = true
+	archive(rec)
 	return true
 }

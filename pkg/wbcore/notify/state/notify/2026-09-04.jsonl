@@ -1,0 +1,12 @@
+{"at":"2026-09-04T14:42:25.734339616Z","kind":"alert","title":"障害","body":"[wbjp] 障害\n詳細","channel_id":"","ok":false,"error":"通知先未設定（WBJP_DISCORD_BOT_TOKEN と WBJP_ALERT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:42:25.734480088Z","kind":"report","title":"見出し","body":"**見出し**\n本文","channel_id":"","ok":false,"error":"送り先が未設定です（WBJP_DISCORD_BOT_TOKEN と WBJP_REPORT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:42:25.734516563Z","kind":"report","title":"見出し","body":"**見出し**\n本文","channel_id":"","ok":false,"error":"送り先が未設定です（WBJP_REPORT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:42:32.690690242Z","kind":"alert","title":"障害","body":"[wbjp] 障害\n詳細","channel_id":"","ok":false,"error":"通知先未設定（WBJP_DISCORD_BOT_TOKEN と WBJP_ALERT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:42:32.690768534Z","kind":"report","title":"見出し","body":"**見出し**\n本文","channel_id":"","ok":false,"error":"送り先が未設定です（WBJP_DISCORD_BOT_TOKEN と WBJP_REPORT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:42:32.690792809Z","kind":"report","title":"見出し","body":"**見出し**\n本文","channel_id":"","ok":false,"error":"送り先が未設定です（WBJP_REPORT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:42:45.42044207Z","kind":"alert","title":"障害","body":"[wbjp] 障害\n詳細","channel_id":"","ok":false,"error":"通知先未設定（WBJP_DISCORD_BOT_TOKEN と WBJP_ALERT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:42:45.420488101Z","kind":"report","title":"見出し","body":"**見出し**\n本文","channel_id":"","ok":false,"error":"送り先が未設定です（WBJP_DISCORD_BOT_TOKEN と WBJP_REPORT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:42:45.420515191Z","kind":"report","title":"見出し","body":"**見出し**\n本文","channel_id":"","ok":false,"error":"送り先が未設定です（WBJP_REPORT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:44:15.339511151Z","kind":"alert","title":"障害","body":"[wbjp] 障害\n詳細","channel_id":"","ok":false,"error":"通知先未設定（WBJP_DISCORD_BOT_TOKEN と WBJP_ALERT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:44:15.339572703Z","kind":"report","title":"見出し","body":"**見出し**\n本文","channel_id":"","ok":false,"error":"送り先が未設定です（WBJP_DISCORD_BOT_TOKEN と WBJP_REPORT_CHANNEL_ID が未設定）"}
+{"at":"2026-09-04T14:44:15.339598723Z","kind":"report","title":"見出し","body":"**見出し**\n本文","channel_id":"","ok":false,"error":"送り先が未設定です（WBJP_REPORT_CHANNEL_ID が未設定）"}
