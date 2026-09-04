@@ -77,7 +77,7 @@ func Alert(title, body string, logger *logging.Logger) bool {
 		text = fmt.Sprintf("%s\n%s", text, body)
 	}
 
-	if err := PostThread(AlertChannelID(), title, text); err != nil {
+	if _, err := PostThread(AlertChannelID(), title, text); err != nil {
 		if logger != nil {
 			logger.Error("notify.failed", fmt.Sprintf("通知送信失敗: %v", err))
 		}

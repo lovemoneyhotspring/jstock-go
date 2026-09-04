@@ -201,14 +201,37 @@ func TestPostDocumentCreatesForumPost(t *testing.T) {
 func TestPostThreadAppendsToExistingThread(t *testing.T) {
 	f := (&fakeDiscord{kinds: map[string]int{"thr-9": 11}}).start(t)
 
-	if err := PostThread("thr-9", "見出し", "本文"); err != nil {
+	id, err := PostThread("thr-9", "見出し", "本文")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if id != "thr-9" {
+		t.Errorf("返ったスレッド ID = %q, want thr-9", id)
 	}
 	if len(f.threads) != 0 {
 		t.Errorf("スレッドの中でスレッドを作っている: %+v", f.threads)
 	}
 	if got := f.contents("thr-9"); len(got) != 1 || got[0] != "本文" {
 		t.Errorf("スレッドへの追記 = %v", got)
+	}
+}
+
+// PostThread が返したスレッド ID に PostMessage で続きを足せる。
+func TestPostThreadReturnsIDForFollowUps(t *testing.T) {
+	f := (&fakeDiscord{}).start(t)
+
+	id, err := PostThread("report-ch", "スレッド送信テスト", "1 通目")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.threads) != 1 || id != f.threads[0].ID {
+		t.Fatalf("返ったスレッド ID = %q, 作られたスレッド = %+v", id, f.threads)
+	}
+	if err := PostMessage(id, "2 通目"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.contents(id); len(got) != 2 || got[0] != "1 通目" || got[1] != "2 通目" {
+		t.Errorf("同じスレッドに 2 通入っていない: %v", got)
 	}
 }
 

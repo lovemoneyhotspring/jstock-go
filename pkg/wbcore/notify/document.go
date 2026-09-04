@@ -109,7 +109,7 @@ func PostDocument(body, title string) (ok bool, err error) {
 		title = firstLine(body)
 	}
 
-	if err := PostThread(channelID, title, body); err != nil {
+	if _, err := PostThread(channelID, title, body); err != nil {
 		return false, err
 	}
 	return true, nil
