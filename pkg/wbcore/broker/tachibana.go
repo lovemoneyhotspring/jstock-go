@@ -40,6 +40,7 @@ const (
 	clmOrderDetail     = "CLMOrderListDetail"
 	clmNewOrder        = "CLMKabuNewOrder"
 	clmCancelOrder     = "CLMKabuCancelOrder"
+	clmCorrectOrder    = "CLMKabuCorrectOrder"
 	clmMarketPrice     = "CLMMfdsGetMarketPrice"
 	clmStockMaster     = "CLMStkGetIssueMstKabu"
 
@@ -507,7 +508,8 @@ func (t *TachibanaBroker) Place(req domain.OrderRequest) (*domain.OrderAck, erro
 // orderPayload は新規注文の電文を組み立てる。
 //
 // 項目は CLMKabuNewOrder の必須項目をすべて埋める（省略すると受付エラーになる）。
-// 逆指値は使わないので固定値、返済のときだけ建玉の指定を足す。
+// 逆指値（req.Stop）は sGyakusasiOrderType 1（逆指値だけ。sOrderPrice は "*"）か
+// 2（通常＋逆指値。sOrderPrice に通常の指値）。返済のときは建玉の指定を足す。
 func (t *TachibanaBroker) orderPayload(req domain.OrderRequest) (map[string]any, error) {
 	if !req.OrderType.IsPlaceable() {
 		return nil, fmt.Errorf("発注できない注文種別です: %s", req.OrderType)
@@ -543,6 +545,25 @@ func (t *TachibanaBroker) orderPayload(req domain.OrderRequest) (map[string]any,
 		tatebiType = "1" // 建日を個別指定する
 	}
 
+	// 逆指値。条件価格は正、発火後の値段は 0 が成行
+	stopType, stopTrigger, stopPrice := "0", "0", "*"
+	if req.Stop != nil {
+		if req.Stop.Trigger.LessThanOrEqual(decimal.Zero) {
+			return nil, fmt.Errorf("%s: 逆指値の条件価格がありません", req.Symbol)
+		}
+		stopTrigger = req.Stop.Trigger.String()
+		stopPrice = "0"
+		if req.Stop.Price != nil {
+			stopPrice = req.Stop.Price.String()
+		}
+		if req.IsStopOnly() {
+			stopType = "1"
+			price = "*" // 逆指値だけの注文に通常の値段は無い
+		} else {
+			stopType = "2"
+		}
+	}
+
 	params := map[string]any{
 		"sZyoutoekiKazeiC":          taxCodeOf(req.TaxType),
 		"sIssueCode":                req.Symbol,
@@ -553,9 +574,9 @@ func (t *TachibanaBroker) orderPayload(req domain.OrderRequest) (map[string]any,
 		"sOrderSuryou":              req.Quantity.String(),
 		"sGenkinShinyouKubun":       tradeKubun,
 		"sOrderExpireDay":           "0", // 当日限り
-		"sGyakusasiOrderType":       "0",
-		"sGyakusasiZyouken":         "0",
-		"sGyakusasiPrice":           "*",
+		"sGyakusasiOrderType":       stopType,
+		"sGyakusasiZyouken":         stopTrigger,
+		"sGyakusasiPrice":           stopPrice,
 		"sTatebiType":               tatebiType,
 		"sTategyokuZyoutoekiKazeiC": "*",
 		"sSecondPassword":           t.creds.OrderPassword,
@@ -571,7 +592,9 @@ func (t *TachibanaBroker) orderPayload(req domain.OrderRequest) (map[string]any,
 	return params, nil
 }
 
-func (t *TachibanaBroker) Cancel(clientOrderID string, brokerOrderID *string) error {
+// orderNumberOf は取消・訂正に使う立花証券の注文番号と営業日。
+// broker_order_id が無ければ発注時に覚えた対応表から引く。
+func (t *TachibanaBroker) orderNumberOf(clientOrderID string, brokerOrderID *string, purpose string) (number, day string, err error) {
 	var raw string
 	if brokerOrderID != nil {
 		raw = *brokerOrderID
@@ -581,8 +604,16 @@ func (t *TachibanaBroker) Cancel(clientOrderID string, brokerOrderID *string) er
 	}
 	number, day, ok := splitBrokerOrderID(raw)
 	if !ok {
-		return fmt.Errorf(
-			"client_order_id=%q の立花証券の注文番号が分からないため取消できません", clientOrderID)
+		return "", "", fmt.Errorf(
+			"client_order_id=%q の立花証券の注文番号が分からないため%sできません", clientOrderID, purpose)
+	}
+	return number, day, nil
+}
+
+func (t *TachibanaBroker) Cancel(clientOrderID string, brokerOrderID *string) error {
+	number, day, err := t.orderNumberOf(clientOrderID, brokerOrderID, "取消")
+	if err != nil {
+		return err
 	}
 
 	params := map[string]any{
@@ -603,4 +634,57 @@ func (t *TachibanaBroker) Cancel(clientOrderID string, brokerOrderID *string) er
 	}
 
 	return nil
+}
+
+// CorrectStop は未発火の逆指値の条件価格と発火後の値段を訂正する（CLMKabuCorrectOrder）。
+//
+// トレーリングはこれを定期的に呼んで条件を引き上げる。発火した後は条件を訂正できない
+// （リファレンスの注意書き）ので、その場合はブローカーが拒否を返す。数量・期日・
+// 通常の値段は変えない（"*"）。
+func (t *TachibanaBroker) CorrectStop(clientOrderID string, brokerOrderID *string, stop domain.StopSpec) error {
+	number, day, err := t.orderNumberOf(clientOrderID, brokerOrderID, "訂正")
+	if err != nil {
+		return err
+	}
+	params, err := correctStopPayload(number, day, stop, t.creds.OrderPassword)
+	if err != nil {
+		return err
+	}
+
+	res, err := t.postRequest(clmCorrectOrder, params)
+	if err != nil {
+		return err
+	}
+
+	resCode, _ := res["sResultCode"].(string)
+	if resCode != "0" {
+		resText, _ := res["sResultText"].(string)
+		return fmt.Errorf("立花訂正拒否 [%s]: %s", resCode, resText)
+	}
+	return nil
+}
+
+// correctStopPayload は逆指値の訂正電文。変えない項目は "*"。
+func correctStopPayload(number, day string, stop domain.StopSpec, password string) (map[string]any, error) {
+	if stop.Trigger.LessThanOrEqual(decimal.Zero) {
+		return nil, fmt.Errorf("逆指値の条件価格は正の数: %s", stop.Trigger)
+	}
+	price := "0" // 発火後は成行
+	if stop.Price != nil {
+		if stop.Price.LessThanOrEqual(decimal.Zero) {
+			return nil, fmt.Errorf("逆指値の値段は正の数: %s", stop.Price)
+		}
+		price = stop.Price.String()
+	}
+	return map[string]any{
+		"sOrderNumber":      number,
+		"sEigyouDay":        day,
+		"sCondition":        "*",
+		"sOrderPrice":       "*",
+		"sOrderSuryou":      "*",
+		"sOrderExpireDay":   "*",
+		"sGyakusasiZyouken": stop.Trigger.String(),
+		"sGyakusasiPrice":   price,
+		"sSecondPassword":   password,
+	}, nil
 }

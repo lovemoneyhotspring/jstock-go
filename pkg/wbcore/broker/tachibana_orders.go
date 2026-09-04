@@ -68,16 +68,28 @@ type orderFields struct {
 	quantity  string
 	filledQty string
 	fillPrice string
+	// 逆指値の項目。一覧は sOrder* の接頭辞付き、単品照会は無し
+	stopType    string
+	stopTrigger string
+	stopKubun   string
+	stopPrice   string
+	triggerType string
 }
 
 var (
 	listFields = orderFields{
 		issue: fieldListIssue, quantity: fieldListQty,
 		filledQty: fieldListFilledQty, fillPrice: fieldListFillPrice,
+		stopType: "sOrderGyakusasiOrderType", stopTrigger: "sOrderGyakusasiZyouken",
+		stopKubun: "sOrderGyakusasiKubun", stopPrice: "sOrderGyakusasiPrice",
+		triggerType: "sOrderTriggerType",
 	}
 	detailFields = orderFields{
 		issue: fieldDetailIssue, quantity: fieldListQty,
 		filledQty: fieldDetailFilledQty, fillPrice: fieldDetailFillPrice,
+		stopType: "sGyakusasiOrderType", stopTrigger: "sGyakusasiZyouken",
+		stopKubun: "sGyakusasiKubun", stopPrice: "sGyakusasiPrice",
+		triggerType: "sTriggerType",
 	}
 )
 
@@ -127,6 +139,19 @@ func toOrder(row map[string]any, f orderFields, number, day, clientOrderID strin
 	}
 	if at, ok := parseJSTDateTime(field(row, fieldOrderDateTime)); ok {
 		order.CreatedAt = &at
+	}
+	// 逆指値（1）・通常＋逆指値（2）。値段区分 1 が指値、0 が成行。
+	// トリガータイプは 0 が未トリガーで、それ以外は発火済み
+	if stopType := field(row, f.stopType); stopType == "1" || stopType == "2" {
+		spec := domain.StopSpec{Trigger: fieldDecimal(row, f.stopTrigger)}
+		if field(row, f.stopKubun) == "1" {
+			if price := fieldDecimal(row, f.stopPrice); price.IsPositive() {
+				spec.Price = &price
+			}
+		}
+		order.Stop = &spec
+		trigger := field(row, f.triggerType)
+		order.StopTriggered = trigger != "" && trigger != "0"
 	}
 	return order, nil
 }
