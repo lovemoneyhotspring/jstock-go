@@ -305,7 +305,11 @@ CSV の列名は API と同じ（`Date,Time,Code,O,H,L,C,Vo,Va`）。値は CSV 
 4. **`Archive` をそのまま再利用。** `Upsert` / `Read` / `Dates` / `Gaps` / `sync` / `backfill` / 台帳は分割の単位を意識しない（`Endpoint.partOf` が月か日かを吸収する）。日足の端点の挙動は変えていない（`TestMonthSplitStillMerges`）。
    - ひとつだけ違うのは `BulkMonths`: 日分割では**常に空**を返す。一括ファイルが月次か日次かリファレンスに無く、日次なら「1 日ぶんしか無いのに月全体を取得済み」と誤判定してしまう。空にすると候補が増えるだけで、`due()` が台帳を見るので二重取得にはならない。
 5. **有効化は環境変数 `JQUANTS_MINUTE_BARS=1`。** アドオンは有料で、契約前に日次の `sync` に載せると毎日 403 を叩きに行くだけになる。`StandardEndpoints` とは別の `AddonEndpoints` に置き、`ActiveEndpoints()` が環境変数を見て混ぜる。名前を指定した手動の取り込み（`jquants backfill --only equities_bars_minute`）は環境変数によらず動く。
-6. `available_at` は日足と同じ 16:30 を仮置き。実機で確かめる。
+6. **日次は API の `date=`**（他の端点と同じ `Plan()` の経路）。一括は初回の `backfill` だけに使う。
+   2026-09-05 に実機で確認: 1 日 47 万行を 1 日あたり**約 1.6 分**で取り込む（`SettleDays = 2` なので
+   訂正に備えて 2 日ぶん取り直す）。設計時は「一括の日次ファイルを優先する」と書いたが、
+   `live/` の日次ファイルは当月ぶんしか無く、経路を分けるほどの差が無いので API に寄せた。
+   `available_at` は日足と同じ 16:30 を仮置き。
 7. **検証への繋ぎ込みは `daytrade/backtest` の `FillModel`**（未実装）。順位付け（ギャップ）と株数は日足の寄付のまま、
    建値・手仕舞い値だけを分足から返す実装を足す（`SimulateWith` / `SimulateMarginWith` に渡す）。
    先に測るのは、9:01・9:04・9:07 の約定価格と寄付の差、15:20 の価格と引けの差、張り付き銘柄が 15:20〜15:30 に
