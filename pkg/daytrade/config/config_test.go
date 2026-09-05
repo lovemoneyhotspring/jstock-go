@@ -146,6 +146,54 @@ func TestExtendsOverlaysBase(t *testing.T) {
 	}
 }
 
+func TestExtendsAcceptsAbsolutePath(t *testing.T) {
+	// extends に絶対パスを書いたとき、configDir の下に連結されてはいけない。
+	// filepath.Join(configDir, "/tmp/base") は <configDir>/tmp/base になる。
+	root := t.TempDir()
+	base := filepath.Join(root, "base")
+	child := filepath.Join(root, "child")
+	for dir, body := range map[string]string{
+		base:  "[capital]\nmax_capital = 1000000\norder_budget = 500000\n",
+		child: "extends = \"" + base + "\"\n[capital]\norder_budget = 250000\n",
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, Filename), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := Load(child)
+	if err != nil {
+		t.Fatalf("絶対パスの extends が読めない: %v", err)
+	}
+	if !cfg.Capital.MaxCapital.Equal(decimal.NewFromInt(1_000_000)) {
+		t.Errorf("土台の値が効いていない: %s", cfg.Capital.MaxCapital)
+	}
+	if !cfg.Capital.OrderBudget.Equal(decimal.NewFromInt(250_000)) {
+		t.Errorf("子の値で上書きされていない: %s", cfg.Capital.OrderBudget)
+	}
+}
+
+func TestExtendsRejectsCycleViaAbsolutePath(t *testing.T) {
+	// 絶対パスでも循環は弾く（相対と同じ visited で見ている）
+	root := t.TempDir()
+	a := filepath.Join(root, "a")
+	b := filepath.Join(root, "b")
+	for dir, other := range map[string]string{a: b, b: a} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := "extends = \"" + other + "\"\n"
+		if err := os.WriteFile(filepath.Join(dir, Filename), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Load(a); err == nil {
+		t.Error("絶対パスの循環する extends がエラーにならない")
+	}
+}
+
 func TestExtendsRejectsCycle(t *testing.T) {
 	root := t.TempDir()
 	a := filepath.Join(root, "a")
