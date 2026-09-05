@@ -194,6 +194,8 @@ func runOpen(opts openOptions) error {
 		"quotes_requested": len(symbols),
 		"quotes_received":  len(received),
 		"quotes_usable":    len(quotes),
+		// signal.skip_opened で外した「既に寄っていた」銘柄の数（設定が偽なら null）
+		"quotes_opened": nil,
 	}
 	finish := func(outcome string, extra map[string]any) {
 		row := map[string]any{}
@@ -260,15 +262,30 @@ func runOpen(opts openOptions) error {
 			"→ ロングは縮めず、ショートを建てる合図にする")
 	}
 
-	ranking := selection.Rank(eligible, quotes, cfg.Signal)
+	// signal.skip_opened: 9:01 の時点で既に寄っている銘柄を候補から外す。
+	// 順位付けの直前に気配そのものを落とすので、ロング・ショートの両方に効く
+	// （市場ギャップと危険信号は落とす前の気配で見る——候補全体の分布が変わるため）
+	rankQuotes := quotes
+	if cfg.Signal.SkipOpened {
+		kept, dropped := dtquotes.DropOpened(quotes)
+		rankQuotes = kept
+		summary["quotes_opened"] = int64(len(dropped))
+		fmt.Printf("既に寄っている %d 銘柄を候補から外しました（signal.skip_opened。残り %d）\n",
+			len(dropped), len(rankQuotes))
+		logInfo("daytrade.quotes", "既に寄っている銘柄を除外", map[string]any{
+			"opened": len(dropped), "opened_sample": sample(dropped), "remaining": len(rankQuotes),
+		})
+	}
+
+	ranking := selection.Rank(eligible, rankQuotes, cfg.Signal)
 	picks := selection.PickFrom(ranking, selection.PickOptions{
 		N: n, Budget: budget, Weighting: weighting, Side: domain.SideBuy,
 	})
 	longPicks := len(picks)
 	frames := []history.Frame{dthistory.RankingFrame(ranking, picks, "BUY", n, budget)}
 	summary["n"], summary["budget"], summary["weighting"], summary["weak"] = n, budget, weighting, weak
-	printPicks(picks, len(quotes), p, watchOnly, "")
-	logRanking(day, "BUY", ranking, picks, n, budget, verdict.Scale, weighting, len(quotes))
+	printPicks(picks, len(rankQuotes), p, watchOnly, "")
+	logRanking(day, "BUY", ranking, picks, n, budget, verdict.Scale, weighting, len(rankQuotes))
 
 	// ショートの脚（[margin]）: 貸借銘柄 × ギャップ上位を売建てる。資金はシーソー
 	shortMultiplier := decimal.Zero
@@ -281,7 +298,7 @@ func runOpen(opts openOptions) error {
 	if shortMultiplier.GreaterThan(decimal.Zero) {
 		shortN := cfg.Margin.Positions()
 		shortBudget := cfg.Margin.BudgetPerOrder().Mul(shortMultiplier).Round(0)
-		shortRanking := selection.RankShort(shortUniverse, quotes, cfg.Margin)
+		shortRanking := selection.RankShort(shortUniverse, rankQuotes, cfg.Margin)
 		shortPicks := selection.PickFrom(shortRanking, selection.PickOptions{
 			N: shortN, Budget: shortBudget, Weighting: cfg.Margin.Weighting, Side: domain.SideSell,
 		})
@@ -291,12 +308,12 @@ func runOpen(opts openOptions) error {
 		}
 		fmt.Printf("ショート: %sの倍率 %s × 1 注文 %s 円 = %s 円  対象 %d 銘柄\n",
 			label, shortMultiplier.String(), yen(cfg.Margin.BudgetPerOrder()), yen(shortBudget), len(shortUniverse))
-		printPicks(shortPicks, len(quotes), p, false, "寄付の売建（信用）")
+		printPicks(shortPicks, len(rankQuotes), p, false, "寄付の売建（信用）")
 		frames = append(frames, dthistory.RankingFrame(shortRanking, shortPicks, "SELL", shortN, shortBudget))
 		summary["short_n"] = shortN
 		summary["short_budget"] = shortBudget
 		summary["short_multiplier"] = shortMultiplier
-		logRanking(day, "SELL", shortRanking, shortPicks, shortN, shortBudget, verdict.Scale, cfg.Margin.Weighting, len(quotes))
+		logRanking(day, "SELL", shortRanking, shortPicks, shortN, shortBudget, verdict.Scale, cfg.Margin.Weighting, len(rankQuotes))
 		picks = append(picks, shortPicks...)
 	} else if cfg.Margin.Enabled && !watchOnly {
 		fmt.Println("ショート: この日は建てない（倍率 0）")

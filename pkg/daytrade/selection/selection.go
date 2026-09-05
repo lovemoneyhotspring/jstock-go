@@ -33,6 +33,10 @@ type Quote struct {
 	// 優先する——株式分割・併合の日は plan の値（アーカイブの終値）が調整前で、
 	// そのままだと −50% のようなギャップに見えて候補の先頭に来る。
 	PrevClose decimal.Decimal
+	// Opened は**もう寄っている**（時価問合の始値が入っている）。偽なら Price は
+	// 寄り前の気配値で、成行はこれから始まる板寄せで約定する。
+	// signal.skip_opened の判定に使う（daytrade/quotes.DropOpened）。
+	Opened bool
 }
 
 // Pick は建てる銘柄 1 つ。Side が BUY なら寄付で買う（ロング）、SELL なら売建てる（ショート）。

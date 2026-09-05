@@ -222,3 +222,33 @@ func TestLatestPerDayKeepsLastRun(t *testing.T) {
 }
 
 func dec(v int64) decimal.Decimal { return decimal.NewFromInt(v) }
+
+func TestEvaluateAddsMiddayWhenMinuteBarsExist(t *testing.T) {
+	rows := bars()
+	// 950 で寄って 11:30 に 975（+2.63%）、引けは 1000
+	bar := rows["10000"]
+	bar.Midday = f(975)
+	rows["10000"] = bar
+
+	result := evaluate.Evaluate(ranking(), "run-1", rows, baseConfig(), nil, evaluate.SourceQuotes)
+	byCode := map[string]map[string]any{}
+	for _, row := range result.Rows {
+		byCode[row["code"].(string)] = row
+	}
+	picked := byCode["10000"]
+	if picked["midday"] != 975.0 {
+		t.Errorf("midday = %v, want 975", picked["midday"])
+	}
+	gross := picked["midday_gross_bp"].(float64)
+	if gross < 262 || gross > 264 {
+		t.Errorf("midday_gross_bp = %v, want ≈ 263", gross)
+	}
+	// 費用は引けまで持ったときと同じ引き方
+	if net, cost := picked["midday_net_bp"].(float64), picked["cost_bp"].(float64); net != gross-cost {
+		t.Errorf("midday_net_bp = %v, want %v", net, gross-cost)
+	}
+	// 分足の無い銘柄は null のまま
+	if v := byCode["20000"]["midday"]; v != nil {
+		t.Errorf("分足の無い銘柄の midday = %v, want null", v)
+	}
+}

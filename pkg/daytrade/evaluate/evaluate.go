@@ -53,6 +53,8 @@ type Bar struct {
 	// ULFlag / LLFlag は J-Quants のストップ高／安フラグ。
 	ULFlag *bool
 	LLFlag *bool
+	// Midday は前場引け（11:30 までの最後の約定値）。分足のアドオンがある日だけ。
+	Midday *float64
 }
 
 // RankingRow は順位表の 1 行（history から読んだものも、作り直したものも同じ形）。
@@ -108,6 +110,13 @@ var EvaluationSchema = []history.Column{
 	{Name: "gross_bp", Type: history.TypeFloat64},
 	{Name: "cost_bp", Type: history.TypeFloat64},
 	{Name: "net_bp", Type: history.TypeFloat64},
+	// midday は前場引け（11:30 までの最後の約定値。分足がある日だけ）、
+	// midday_* はそこで手仕舞ったときの損益。ロングの利益は前場で出尽くし、
+	// 前倒しすると MaxDD が半分になる（研究ノート 2026-09-jp-gap-minute の発見 2）——
+	// 既定の出口は 15:20 のまま、毎日この差を測って効きが続くかを見る。
+	{Name: "midday", Type: history.TypeFloat64},
+	{Name: "midday_gross_bp", Type: history.TypeFloat64},
+	{Name: "midday_net_bp", Type: history.TypeFloat64},
 	// hypo_* は「建てていたら」の株数と円損益。
 	{Name: "hypo_quantity", Type: history.TypeFloat64},
 	{Name: "hypo_pnl", Type: history.TypeFloat64},
@@ -176,8 +185,63 @@ WHERE "Date" = %s AND TRY_CAST("O" AS DOUBLE) > 0 AND TRY_CAST("C" AS DOUBLE) > 
 		}
 		out[code] = bar
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 前場引けは分足（アドオン）から。取れない日は nil のまま——評価は日足だけで成り立つ
+	midday, err := MiddayFor(arch, day)
+	if err != nil {
+		return nil, err
+	}
+	for code, value := range midday {
+		if bar, ok := out[code]; ok {
+			v := value
+			bar.Midday = &v
+			out[code] = bar
+		}
+	}
+	return out, nil
+}
+
+// MiddayFor はその日の前場引け（11:30 までの最後の約定値）。
+//
+// 分足のアドオンが無い日・取り込んでいない日は空を返す（エラーにしない）。
+func MiddayFor(arch *archive.Archive, day time.Time) (map[string]float64, error) {
+	source, ok := archsql.Source(arch, universe.EPMinute, day, day)
+	if !ok {
+		return map[string]float64{}, nil
+	}
+	db, err := archsql.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	query := fmt.Sprintf(`
+SELECT CAST("Code" AS VARCHAR) AS code, arg_max("C", "Time") AS midday
+FROM %s
+WHERE "Date" = %s AND "Time" <= '%s'
+GROUP BY 1`, source, archsql.Lit(day), MorningClose)
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("分足の読み出しに失敗しました: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var code string
+		var value sql.NullFloat64
+		if err := rows.Scan(&code, &value); err != nil {
+			return nil, err
+		}
+		if value.Valid && value.Float64 > 0 {
+			out[code] = value.Float64
+		}
+	}
 	return out, rows.Err()
 }
+
+// MorningClose は前場の引け（この足に前場の板寄せが入る）。
+const MorningClose = "11:30"
 
 func hasColumn(db *sql.DB, source, column string) bool {
 	var n int
@@ -373,7 +437,8 @@ func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg confi
 			"budget":         r.Budget,
 		}
 		for _, name := range []string{"open", "high", "low", "close", "gap_open", "ret_oc",
-			"gross_bp", "cost_bp", "net_bp", "hypo_quantity", "hypo_pnl"} {
+			"gross_bp", "cost_bp", "net_bp", "hypo_quantity", "hypo_pnl",
+			"midday", "midday_gross_bp", "midday_net_bp"} {
 			row[name] = nil
 		}
 		row["ul_flag"], row["ll_flag"] = nil, nil
@@ -414,6 +479,13 @@ func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg confi
 			// 浮動小数の丸めで制限値幅をわずかに外すことがあるので余裕を持たせる
 			row["limit_up_close"] = bar.Close >= highF-1e-6
 			row["limit_down_close"] = bar.Close <= lowF+1e-6
+			// 前場引けで手仕舞っていたら（出口を前倒しする案の材料）
+			if bar.Midday != nil && *bar.Midday > 0 {
+				middayGross := sign * (*bar.Midday/bar.Open - 1) * 1e4
+				row["midday"] = *bar.Midday
+				row["midday_gross_bp"] = middayGross
+				row["midday_net_bp"] = middayGross - cost
+			}
 		}
 		leg := "long"
 		if r.Side == "SELL" {

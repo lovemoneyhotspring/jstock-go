@@ -3,6 +3,7 @@ package universe
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/archsql"
@@ -17,8 +18,12 @@ var (
 	EPFins         = archive.MustEndpoint("fins_summary")
 	EPEarningsDate = archive.MustEndpoint("fins_earnings_date")
 	EPMarginAlert  = archive.MustEndpoint("markets_margin_alert")
+	EPMarginInt    = archive.MustEndpoint("markets_margin_interest")
 	EPOptions225   = archive.MustEndpoint("derivatives_bars_daily_options_225")
 	EPTopix        = archive.MustEndpoint("indices_bars_daily_topix")
+	// EPMinute は分足（アドオン。1 日 1 ファイル、履歴は 2 年）。母集団の判定には
+	// 使わない——検証の約定モデル（backtest.MinuteBars）と評価の前場引けだけが読む。
+	EPMinute = archive.MustEndpoint("equities_bars_minute")
 )
 
 // feature は 1 銘柄ぶんの、足から作った特徴量（前日までの情報だけ）。
@@ -64,6 +69,12 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 	if err != nil {
 		return nil, err
 	}
+	// 信用倍率は**記録だけ**（母集団の条件には使わない）。効きが 2 年に偏っていて
+	// 10 年では再現しないため（研究ノート 2026-09-jp-gap-minute の発見 6）
+	marginRatio, err := loadMarginRatio(arch, day)
+	if err != nil {
+		return nil, err
+	}
 
 	// 分位は「株式かつ流動性の下限を満たす全銘柄」で切る（研究と同じ）
 	minTurnover, _ := cfg.MinTurnover.Float64()
@@ -89,6 +100,7 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 			Alert:       alert[f.code],
 			JsfStop:     jsfStop[f.code],
 			Shortable:   m.shortable,
+			MarginRatio: marginRatio[f.code],
 		})
 		caps = append(caps, f.mktCap)
 		mask = append(mask, f.turnoverMed >= minTurnover)
@@ -249,6 +261,56 @@ func loadMaster(arch *archive.Archive, day, prevDay time.Time) (map[string]maste
 	return out, nil
 }
 
+// loadMarginRatio は信用倍率（買残 ÷ 売残）。週末残高（markets/margin-interest）の、
+// 判定日までに公表済みの最新 1 本から作る。
+//
+// 週末（金）の残高は第 2 営業日（火）16:30 に公表されるので、判定日 D の朝に使えるのは
+// 「D の 5 日以上前の Date」——これは研究と同じ切り方。売残が 0（貸借でない銘柄など）は nil。
+//
+// **選定には使わない。** 信用買いが積み上がった銘柄のギャップダウンは戻りが弱い
+// （2 年で最上位 5 分位が +13 bp / 最下位 +35 bp）が、10 年では 2021・2022 年が悪化する。
+// 効きが続くかを evaluate の蓄積で見るために、候補の属性として残すだけ。
+func loadMarginRatio(arch *archive.Archive, day time.Time) (map[string]*float64, error) {
+	cutoff := day.AddDate(0, 0, -5)
+	frame, err := arch.ReadWhere(EPMarginInt, archive.ReadOptions{
+		Start:   cutoff.AddDate(0, 0, -40),
+		End:     cutoff,
+		Columns: []string{"Code", "LongVol", "ShrtVol"},
+	})
+	if err != nil || frame == nil {
+		return map[string]*float64{}, err
+	}
+	limit := cutoff.Format(archsql.DateLayout)
+	type entry struct {
+		date  string
+		ratio *float64
+	}
+	latest := make(map[string]entry, frame.Height())
+	for i := range frame.Rows {
+		date := text(frame.Get(i, "Date"))
+		code := text(frame.Get(i, "Code"))
+		if code == "" || date == "" || date > limit {
+			continue
+		}
+		if prev, ok := latest[code]; ok && prev.date >= date {
+			continue
+		}
+		long, okLong := parseFloat(text(frame.Get(i, "LongVol")))
+		short, okShort := parseFloat(text(frame.Get(i, "ShrtVol")))
+		row := entry{date: date}
+		if okLong && okShort && short > 0 {
+			ratio := long / short
+			row.ratio = &ratio
+		}
+		latest[code] = row
+	}
+	out := make(map[string]*float64, len(latest))
+	for code, e := range latest {
+		out[code] = e.ratio
+	}
+	return out, nil
+}
+
 // loadEarningsPrev は前営業日の**引け後**に決算短信を開示した銘柄。
 func loadEarningsPrev(arch *archive.Archive, prevDay time.Time) (map[string]bool, error) {
 	frame, err := arch.ReadWhere(EPFins, archive.ReadOptions{
@@ -321,6 +383,18 @@ func loadMarginAlert(arch *archive.Archive, prevDay time.Time) (alert, jsfStop m
 		}
 	}
 	return alert, jsfStop, nil
+}
+
+// parseFloat は保存形（全列文字列）の数値。空・読めない値は ok=false。
+func parseFloat(raw string) (float64, bool) {
+	if raw == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 func text(v *string) string {

@@ -41,13 +41,18 @@ func Source(arch *archive.Archive, ep archive.Endpoint, start, end time.Time) (e
 	return "read_parquet([" + strings.Join(quoted, ", ") + "], union_by_name=true)", true
 }
 
-// monthInRange は "YYYY-MM" が期間に掛かるか。ゼロ値の端は無指定。
+// monthInRange は保存単位（月分割の "YYYY-MM"、日分割の "YYYY-MM-DD"）が期間に
+// 掛かるか。ゼロ値の端は無指定。分足のように 1 日 1 ファイルの端点もここを通る。
 func monthInRange(month string, start, end time.Time) bool {
 	first, err := time.Parse("2006-01", month)
-	if err != nil {
-		return false
-	}
 	last := first.AddDate(0, 1, -1)
+	if err != nil {
+		day, dayErr := time.Parse(DateLayout, month)
+		if dayErr != nil {
+			return false
+		}
+		first, last = day, day
+	}
 	if !start.IsZero() && last.Before(truncate(start)) {
 		return false
 	}

@@ -68,6 +68,10 @@ var PlanSchema = []history.Column{
 	{Name: "shortable", Type: history.TypeBool},
 	{Name: "eligible", Type: history.TypeBool},
 	{Name: "short_eligible", Type: history.TypeBool},
+	// margin_ratio は信用倍率（買残 ÷ 売残、週末残高の最新）。**記録だけ**で
+	// 母集団の条件には入っていない。evaluation と (day, symbol) で突き合わせて
+	// 効きが続くかを見るための列（研究ノート 2026-09-jp-gap-minute の発見 6）。
+	{Name: "margin_ratio", Type: history.TypeFloat64},
 }
 
 // PlanMetaSchema は plan 1 回の要約。
@@ -93,6 +97,10 @@ var QuotesSchema = []history.Column{
 	{Name: "delayed", Type: history.TypeBool},
 	// usable は鮮度の検査を通り、順位付けに使えた気配か。
 	{Name: "usable", Type: history.TypeBool},
+	// opened は受け取った時点で**もう寄っていた**（時価問合の始値が入っていた）。
+	// signal.skip_opened を使うかどうかに関係なく毎日記録する——「9:01 に何割が
+	// 寄っていたか」は後から取り直せない（docs/OPENING_DATA.md 原則 6）。
+	{Name: "opened", Type: history.TypeBool},
 	{Name: "prev_close", Type: history.TypeFloat64},
 	{Name: "gap", Type: history.TypeFloat64},
 }
@@ -125,6 +133,9 @@ var OpenRunSchema = []history.Column{
 	{Name: "quotes_requested", Type: history.TypeInt64},
 	{Name: "quotes_received", Type: history.TypeInt64},
 	{Name: "quotes_usable", Type: history.TypeInt64},
+	// quotes_opened は signal.skip_opened で外した「既に寄っていた」銘柄の数
+	// （設定が偽なら null）。
+	{Name: "quotes_opened", Type: history.TypeInt64},
 	{Name: "trade", Type: history.TypeBool},
 	{Name: "reasons", Type: history.TypeString},
 	{Name: "scale", Type: history.TypeFloat64},
@@ -164,6 +175,7 @@ func PlanFrames(p plan.Plan) (frame, meta history.Frame) {
 			"earn_prev": c.EarnPrev, "disc_today": c.DiscToday, "alert": c.Alert,
 			"jsf_stop": c.JsfStop, "shortable": c.Shortable,
 			"eligible": c.Eligible, "short_eligible": c.ShortEligible,
+			"margin_ratio": floatOrNil(c.MarginRatio),
 		})
 	}
 	prevDay, _ := time.Parse(plan.DateLayout, p.Meta.PrevDay)
@@ -198,7 +210,7 @@ func QuotesFrame(received map[string]selection.Quote, usable map[string]selectio
 		row := map[string]any{
 			"symbol": symbol, "price": price,
 			"quote_at": clock.EnsureUTC(q.At), "source": q.Source, "delayed": q.Delayed,
-			"usable": isUsable, "prev_close": nil, "gap": nil,
+			"usable": isUsable, "opened": q.Opened, "prev_close": nil, "gap": nil,
 		}
 		if prev, ok := prevClose[symbol]; ok && prev > 0 {
 			row["prev_close"] = prev

@@ -84,3 +84,20 @@ func TestNewRejectsUnknownSource(t *testing.T) {
 		t.Errorf("csv を組み立てられない: %v", err)
 	}
 }
+
+func TestDropOpened(t *testing.T) {
+	got, dropped := DropOpened(map[string]selection.Quote{
+		"1000": {Symbol: "1000", Price: decimal.NewFromInt(950), Opened: true},
+		"2000": {Symbol: "2000", Price: decimal.NewFromInt(970)},
+		"3000": {Symbol: "3000", Price: decimal.NewFromInt(980), Opened: true},
+	})
+	if len(got) != 1 {
+		t.Fatalf("残った気配 %d 件（%v）, want 1", len(got), got)
+	}
+	if _, ok := got["2000"]; !ok {
+		t.Error("まだ寄っていない銘柄が残っていない")
+	}
+	if len(dropped) != 2 || dropped[0] != "1000" || dropped[1] != "3000" {
+		t.Errorf("外した銘柄 = %v, want [1000 3000]", dropped)
+	}
+}

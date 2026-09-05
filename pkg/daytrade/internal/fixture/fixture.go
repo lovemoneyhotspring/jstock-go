@@ -8,6 +8,7 @@ package fixture
 import (
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
@@ -128,6 +129,50 @@ func AddEarningsDate(arch *archive.Archive, code string, pubDate, schDate time.T
 		"SchDate": ptr(schDate.Format(dateLayout)),
 	})
 	_, err := arch.Upsert(archive.MustEndpoint("fins_earnings_date"), frame)
+	return err
+}
+
+// MinuteBar は分足 1 本（試験用。四本値は同じ値、出来高は 100 株）。
+type MinuteBar struct {
+	// Time は足の**開始**時刻（"09:00"）。09:00 の足に寄付の板寄せが入る。
+	Time  string
+	Price float64
+}
+
+// AddMinuteBars は 1 日ぶんの分足を足す（銘柄 → その日の足）。約定の無い分は行が
+// 無い（疎）という実物の性質をそのまま再現できるよう、渡した足だけを書く。
+//
+// **1 日 = 1 回**で全銘柄を渡すこと。分足は日分割の端点で、Upsert がその日の
+// ファイルを丸ごと差し替えるので、同じ日に 2 度呼ぶと前の呼び出しが消える
+// （実物の取り込みも「date= の 1 日ぶん」が単位）。
+func AddMinuteBars(arch *archive.Archive, day time.Time, byCode map[string][]MinuteBar) error {
+	frame := &archive.Frame{Columns: []string{"Date", "Code", "Time", "O", "H", "L", "C", "Vo", "Va"}}
+	codes := make([]string, 0, len(byCode))
+	for code := range byCode {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	for _, code := range codes {
+		for _, b := range byCode[code] {
+			frame.AppendRow(map[string]*string{
+				"Date": ptr(day.Format(dateLayout)), "Code": ptr(code), "Time": ptr(b.Time),
+				"O": num(b.Price), "H": num(b.Price), "L": num(b.Price), "C": num(b.Price),
+				"Vo": ptr("100"), "Va": num(b.Price * 100),
+			})
+		}
+	}
+	_, err := arch.Upsert(archive.MustEndpoint("equities_bars_minute"), frame)
+	return err
+}
+
+// AddMarginInterest は週末の信用残高を足す（信用倍率 = long ÷ short の記録の確認用）。
+func AddMarginInterest(arch *archive.Archive, code string, date time.Time, long, short float64) error {
+	frame := &archive.Frame{Columns: []string{"Date", "Code", "LongVol", "ShrtVol"}}
+	frame.AppendRow(map[string]*string{
+		"Date": ptr(date.Format(dateLayout)), "Code": ptr(code),
+		"LongVol": num(long), "ShrtVol": num(short),
+	})
+	_, err := arch.Upsert(archive.MustEndpoint("markets_margin_interest"), frame)
 	return err
 }
 

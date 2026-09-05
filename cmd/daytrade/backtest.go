@@ -12,11 +12,16 @@ import (
 )
 
 func newBacktestCmd() *cobra.Command {
-	var sinceFlag, untilFlag string
+	var sinceFlag, untilFlag, fillEntryFlag, fillExitFlag string
 	var tradesFlag bool
 	cmd := &cobra.Command{
 		Use:   "backtest",
 		Short: "アーカイブで同じ規則を検証する（資金固定・100 株単位・段階手数料）",
+		Long: "アーカイブで同じ規則を検証する（資金固定・100 株単位・段階手数料）。\n\n" +
+			"既定は日足の寄付で建てて引けで手仕舞う。--fill-entry / --fill-exit に時刻を\n" +
+			"渡すと分足の約定値（その時刻以降の最初の約定）で建値・手仕舞い値を出す——\n" +
+			"実運用の 9:01 / 15:20 の成行に近い。分足の履歴は 2 年なので、それより前の日は\n" +
+			"日足の寄付・引けのまま（どこからが分足かは出力の 1 行目に出る）。",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
@@ -35,10 +40,11 @@ func newBacktestCmd() *cobra.Command {
 			if cfg.Regime.UsSkipHigh != nil {
 				fetcher = usmarket.NewFredFetcher()
 			}
+			build := minuteOptions(cfg, start, end, fillEntryFlag, fillExitFlag)
 			if cfg.Margin.Enabled {
-				return runMarginBacktest(cfg, start, end, fetcher, cache, tradesFlag)
+				return runMarginBacktest(cfg, start, end, fetcher, cache, tradesFlag, build)
 			}
-			result, err := dtbacktest.Run(openArchive(), cfg, start, end, fetcher, cache)
+			result, err := dtbacktest.RunWith(openArchive(), cfg, start, end, fetcher, cache, build)
 			if err != nil {
 				return err
 			}
@@ -49,7 +55,38 @@ func newBacktestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sinceFlag, "since", "2017-01-01", "開始日")
 	cmd.Flags().StringVar(&untilFlag, "until", "", "終了日（既定は最新）")
 	cmd.Flags().BoolVar(&tradesFlag, "trades", false, "個別の取引も出す")
+	cmd.Flags().StringVar(&fillEntryFlag, "fill-entry", "",
+		"建値を分足で取る時刻（HH:MM。例 09:01。空なら日足の寄付）")
+	cmd.Flags().StringVar(&fillExitFlag, "fill-exit", "",
+		"手仕舞い値を分足で取る時刻（HH:MM。例 15:20。空なら日足の引け）")
 	return cmd
+}
+
+// minuteOptions は分足の約定モデルを作る関数を返す（要らなければ nil）。
+//
+// 分足を読むのは「時刻を指定したとき」と「signal.skip_opened が真のとき」だけ。
+// どちらでもなければアーカイブに分足が無くても検証は今までどおり動く。
+func minuteOptions(cfg dtconfig.Config, start, end time.Time, entryAt, exitAt string) dtbacktest.OptionsFor {
+	if entryAt == "" && exitAt == "" && !cfg.Signal.SkipOpened {
+		return nil
+	}
+	return func(panel *dtbacktest.Panel) (dtbacktest.Options, error) {
+		minute, err := dtbacktest.LoadMinuteBars(openArchive(), start, end, entryAt, exitAt,
+			dtbacktest.PanelCodes(panel))
+		if err != nil {
+			return dtbacktest.Options{}, err
+		}
+		fmt.Println(minute.Describe())
+		if cfg.Signal.SkipOpened {
+			fmt.Printf("signal.skip_opened: 09:00 に寄った銘柄を候補から外す（分足のある %d 日だけ判定）\n",
+				minute.Days())
+		}
+		opts := dtbacktest.Options{Opened: minute.Opened}
+		if entryAt != "" || exitAt != "" {
+			opts.Fill = minute
+		}
+		return opts, nil
+	}
 }
 
 func printBacktest(cfg dtconfig.Config, result *dtbacktest.Result, start, end time.Time, showTrades bool) {
@@ -75,8 +112,8 @@ func printBacktest(cfg dtconfig.Config, result *dtbacktest.Result, start, end ti
 	}
 }
 
-func runMarginBacktest(cfg dtconfig.Config, start, end time.Time, fetcher usmarket.Fetcher, cache string, showTrades bool) error {
-	result, err := dtbacktest.RunMargin(openArchive(), cfg, start, end, fetcher, cache)
+func runMarginBacktest(cfg dtconfig.Config, start, end time.Time, fetcher usmarket.Fetcher, cache string, showTrades bool, build dtbacktest.OptionsFor) error {
+	result, err := dtbacktest.RunMarginWith(openArchive(), cfg, start, end, fetcher, cache, build)
 	if err != nil {
 		return err
 	}
