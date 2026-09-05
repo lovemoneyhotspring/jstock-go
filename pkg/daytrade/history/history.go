@@ -146,6 +146,11 @@ var OpenRunSchema = []history.Column{
 	{Name: "recent_pnl", Type: history.TypeFloat64},
 	{Name: "us_ret_bp", Type: history.TypeFloat64},
 	{Name: "vix", Type: history.TypeFloat64},
+	// shock は予期せぬ急落の日（regime.shock_market_gap / shock_us_ret）。倍率を 1 のままにして
+	// 記録だけ溜めることができる（研究ノート 2026-09-jp-shock-days）。
+	{Name: "shock", Type: history.TypeBool},
+	// spill は margin.spill_to_long でロングに回したショートの余り（円。回さなかった日は null）。
+	{Name: "spill", Type: history.TypeFloat64},
 	{Name: "n", Type: history.TypeInt64},
 	{Name: "budget", Type: history.TypeFloat64},
 	{Name: "weighting", Type: history.TypeString},

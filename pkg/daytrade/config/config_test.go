@@ -180,8 +180,19 @@ func TestMarginConfigMatchesBaseLongRules(t *testing.T) {
 	if fmt.Sprint(base.Signal) != fmt.Sprint(margin.Signal) {
 		t.Errorf("[signal] がずれている:\n base   %+v\n margin %+v", base.Signal, margin.Signal)
 	}
-	if fmt.Sprint(base.Regime) != fmt.Sprint(margin.Regime) {
-		t.Errorf("[regime] がずれている:\n base   %+v\n margin %+v", base.Regime, margin.Regime)
+	// [regime] はショック日の倍率だけ子が上書きする（信用買いなら建玉を増やせるため）。
+	// それ以外の項目は土台と同じでなければならない
+	baseRegime, marginRegime := base.Regime, margin.Regime
+	baseRegime.ShockLongScale, baseRegime.ShockShortScale = decimal.Zero, decimal.Zero
+	marginRegime.ShockLongScale, marginRegime.ShockShortScale = decimal.Zero, decimal.Zero
+	if fmt.Sprint(baseRegime) != fmt.Sprint(marginRegime) {
+		t.Errorf("[regime] がずれている（ショック倍率以外）:\n base   %+v\n margin %+v", baseRegime, marginRegime)
+	}
+	if !margin.Regime.ShockLongScale.Equal(decimal.RequireFromString("1.5")) || !margin.Regime.ShockShortScale.IsZero() {
+		t.Errorf("子のショック倍率が 1.5 / 0 でない: %+v", margin.Regime)
+	}
+	if !base.Regime.ShockLongScale.Equal(decimal.NewFromInt(1)) || !base.Regime.ShockShortScale.Equal(decimal.NewFromInt(1)) {
+		t.Errorf("土台（現物）のショック倍率は 1 / 1（記録のみ）のはず: %+v", base.Regime)
 	}
 	if !margin.Margin.Enabled || !margin.Capital.MaxCapital.Equal(decimal.NewFromInt(3_000_000)) {
 		t.Errorf("子の上書きが効いていない: %+v", margin.Capital)

@@ -219,6 +219,9 @@ type PickOptions struct {
 	LotSizes map[string]decimal.Decimal
 	// Side は建てる向き。
 	Side domain.Side
+	// MaxAmount は 1 銘柄の金額の上限（候補が N に満たない日に総予算を 1 銘柄に寄せない）。
+	// ゼロなら上限なし＝総予算 Budget × N を按分する（既定）。
+	MaxAmount decimal.Decimal
 }
 
 // Pick は順位表の上位 N 銘柄を選び、株数を決める。
@@ -252,7 +255,11 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 	var picks []Pick
 	for i, r := range chosen {
 		lot := lotOf(opts.LotSizes, r.Symbol)
-		quantity := SharesFor(total.Mul(decimal.NewFromFloat(weights[i])), r.Price, lot)
+		amount := total.Mul(decimal.NewFromFloat(weights[i]))
+		if opts.MaxAmount.GreaterThan(decimal.Zero) && amount.GreaterThan(opts.MaxAmount) {
+			amount = opts.MaxAmount
+		}
+		quantity := SharesFor(amount, r.Price, lot)
 		if quantity.LessThanOrEqual(decimal.Zero) {
 			continue
 		}
@@ -279,6 +286,28 @@ func lotOf(lots map[string]decimal.Decimal, symbol string) decimal.Decimal {
 		return lot
 	}
 	return marketrules.DefaultLotSize
+}
+
+// SpillInto はショートの余り spill をロングに回したときの銘柄数と 1 注文の予算。
+//
+// n / budget はその日のロングの銘柄数と 1 注文の予算（縮小やショックの倍率を掛けた後）、
+// baseBudget は倍率を掛ける前の 1 注文の予算（capital.order_budget から決まる値）。
+// 銘柄数は (baseBudget × n + spill) ÷ baseBudget を切り捨てて、元の n 以上・maxN 以下に
+// 収める（検証の simulateMarginSpill と同じ式）。総予算 budget × n + spill をその銘柄数で割った
+// ものが新しい 1 注文の予算。
+func SpillInto(n int, budget, baseBudget, spill decimal.Decimal, maxN int) (int, decimal.Decimal) {
+	if spill.LessThanOrEqual(decimal.Zero) || n < 1 || baseBudget.LessThanOrEqual(decimal.Zero) {
+		return n, budget
+	}
+	total := budget.Mul(decimal.NewFromInt(int64(n))).Add(spill)
+	nDay := int(baseBudget.Mul(decimal.NewFromInt(int64(n))).Add(spill).Div(baseBudget).Floor().IntPart())
+	if nDay < n {
+		nDay = n
+	}
+	if maxN > 0 && nDay > maxN {
+		nDay = maxN
+	}
+	return nDay, total.Div(decimal.NewFromInt(int64(nDay))).Floor()
 }
 
 // ThresholdPrice は「寄付がこの値未満なら候補」の閾値（前日終値 × (1 + maxGap)）。

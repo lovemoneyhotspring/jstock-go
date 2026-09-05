@@ -89,6 +89,19 @@ type Margin struct {
 	// LongShrink はロング側の資産曲線による縮小を効かせるか。false なら合図は
 	// ショートのシーソーにだけ使い、ロングは縮めない。
 	LongShrink bool `toml:"long_shrink"`
+	// MaxOrder は 1 注文の金額の上限（円）。0 なら上限なし＝候補が N に満たない日は残った
+	// 銘柄で総予算（OrderBudget × N）を分け合う（ロングと同じ。selection.PickFrom の既定）。
+	//
+	// ショートは候補が中央値 2 銘柄/日で N3 が埋まらず、候補 1 銘柄の日は 200 万円が
+	// 1 銘柄に乗る。10 年の最悪 20 取引のうち 13 件がこの「全額 1 銘柄」の日で、
+	// ショートの尻尾の実体はこれ（研究ノート 2026-09-jp-shock-days）。
+	MaxOrder decimal.Decimal `toml:"max_order"`
+	// SpillToLong が真なら、ショートで使わなかった資金（候補が無い日の全額、MaxOrder で
+	// 頭打ちにした残り）をその日のロングに回す。ロングの銘柄数はその分だけ増え
+	// （総予算 ÷ order_budget、capital.max_positions が上限）、長短の合計は変わらない
+	// ので保証金の枠も変わらない。ショートは候補が中央値 1 銘柄/日で、10 年の 33% の日は
+	// 候補 0（研究ノート 2026-09-jp-shock-days）。
+	SpillToLong bool `toml:"spill_to_long"`
 	// ExtraCostBP はショートの往復コスト（bp）。信用手数料 0 円 + 貸株料 + 滑り。
 	ExtraCostBP decimal.Decimal `toml:"extra_cost_bp"`
 	// LongViaMargin はロング側も信用買い（日計り）で建てる。手数料 0 円になり、
@@ -160,6 +173,22 @@ type Regime struct {
 	UsSkipHigh *decimal.Decimal `toml:"us_skip_high"`
 	// UsVixOverride は VIX がこれを超えていれば米国のゲートを無視する。
 	UsVixOverride decimal.Decimal `toml:"us_vix_override"`
+
+	// --- ショック日（予期せぬ急落）のサイズ変更 ---
+	//
+	// 予定された経済イベント（FOMC・日銀・雇用統計・選挙）には効きが無く、予定できない
+	// ショック（前夜の VIX の跳ね・S&P の急落・9:00 の市場ギャップ）だけが効く。ショック日は
+	// この戦略の最良の日で（市場ギャップ ≤ −2% の日は +7.8 万/日、t = 6.2、勝率 78%、IS/OOS 一致）、
+	// 効くのはロング脚だけ（ショートの勝率は 16〜26%）。研究ノート 2026-09-jp-shock-days。
+	//
+	// ShockMarketGap は 9:00 の市場ギャップ（候補の中央値）がこれ以下ならショック日。nil で見ない。
+	ShockMarketGap *decimal.Decimal `toml:"shock_market_gap"`
+	// ShockUsRet は前夜の S&P500 の終値リターンがこれ以下ならショック日。nil で見ない。
+	ShockUsRet *decimal.Decimal `toml:"shock_us_ret"`
+	// ShockLongScale / ShockShortScale はショック日にロング／ショートの資金に掛ける倍率。
+	// 既定 1（記録だけして変えない）。資産曲線の縮小とは掛け算で重なる。
+	ShockLongScale  decimal.Decimal `toml:"shock_long_scale"`
+	ShockShortScale decimal.Decimal `toml:"shock_short_scale"`
 }
 
 // Execution は発注の振る舞い（[execution]）。
@@ -246,6 +275,8 @@ func Default() Config {
 			EquityCurveScale: decimal.RequireFromString("0.5"),
 			UsSkipLow:        decimal.Zero,
 			UsVixOverride:    decimal.NewFromInt(24),
+			ShockLongScale:   decimal.NewFromInt(1),
+			ShockShortScale:  decimal.NewFromInt(1),
 		},
 		Execution: Execution{
 			Broker:         "tachibana",
@@ -275,6 +306,7 @@ func Default() Config {
 			MultiplierLongWeak:   decimal.NewFromInt(1),
 			CarryPenalty:         decimal.NewFromInt(1),
 			LongShrink:           true,
+			MaxOrder:             decimal.Zero,
 			ExtraCostBP:          decimal.NewFromInt(5),
 			LongViaMargin:        false,
 			LongExtraCostBP:      decimal.NewFromInt(5),
@@ -445,6 +477,15 @@ func (c Config) Validate() error {
 	if c.Regime.DriftDays < 0 || c.Regime.EquityCurveDays < 0 {
 		return fmt.Errorf("regime.drift_days / equity_curve_days は 0 以上")
 	}
+	if c.Regime.ShockLongScale.IsNegative() || c.Regime.ShockShortScale.IsNegative() {
+		return fmt.Errorf("regime.shock_long_scale / shock_short_scale は 0 以上")
+	}
+	if c.Regime.ShockMarketGap != nil && c.Regime.ShockMarketGap.GreaterThanOrEqual(decimal.Zero) {
+		return fmt.Errorf("regime.shock_market_gap は負の値（急落の市場ギャップ）")
+	}
+	if c.Regime.ShockUsRet != nil && c.Regime.ShockUsRet.GreaterThanOrEqual(decimal.Zero) {
+		return fmt.Errorf("regime.shock_us_ret は負の値（前夜の急落）")
+	}
 	if _, _, _, _, err := c.Execution.Window("entry"); err != nil {
 		return err
 	}
@@ -462,6 +503,9 @@ func (c Config) Validate() error {
 	}
 	if c.Margin.OrderBudget.LessThanOrEqual(decimal.Zero) {
 		return fmt.Errorf("margin.order_budget は正の値")
+	}
+	if c.Margin.MaxOrder.IsNegative() {
+		return fmt.Errorf("margin.max_order は 0 以上（0 は上限なし）")
 	}
 	if err := validateGap(c.Margin.MinGap, "margin.min_gap"); err != nil {
 		return err

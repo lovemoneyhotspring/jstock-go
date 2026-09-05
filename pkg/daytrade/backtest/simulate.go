@@ -170,6 +170,8 @@ type legParams struct {
 	// （selection.PickFrom と同じ）。
 	maxShares float64
 	fill      FillModel
+	// maxAmount は 1 銘柄の金額の上限（0 で無制限。selection.PickOptions.MaxAmount）。
+	maxAmount float64
 }
 
 // pickAndPrice はランク付け・按分・価格付け。simulate のロング側の計算を一般化したもの。
@@ -177,123 +179,133 @@ type legParams struct {
 // Python 版が polars の式で 1 度に書いていた部分を、日ごとのループに開いてある。
 // 順序（予算に収まる銘柄を順位順に N 個 → 按分 → 単元切り捨て）は selection.PickFrom と同じ。
 func pickAndPrice(byDay map[string][]Row, days []time.Time, p legParams) []Trade {
+	var trades []Trade
+	for _, day := range days {
+		trades = append(trades, pickDay(byDay[day.Format(dayLayout)], p, p.n, p.budget*float64(p.n))...)
+	}
+	return trades
+}
+
+// pickDay は 1 日ぶんの選定と価格付け。n は銘柄数、total はその日の総予算
+// （既定は budget × n。ショートの余りをロングに回す日はそれより大きい——margin.spill_to_long）。
+func pickDay(rows []Row, p legParams, n int, total float64) []Trade {
 	fill := p.fill
 	if fill == nil {
 		fill = OpenCloseFill{}
 	}
 	var trades []Trade
-	for _, day := range days {
-		rows := byDay[day.Format(dayLayout)]
-		if len(rows) == 0 {
+	if len(rows) == 0 {
+		return nil
+	}
+	// 条件に合う銘柄をギャップ順に並べる（selection.Rank と同じ帯 [min, max)）
+	type scored struct {
+		row Row
+	}
+	var pool []scored
+	for _, r := range rows {
+		if r.Gap < p.minGap || r.Gap >= p.maxGap {
 			continue
 		}
-		// 条件に合う銘柄をギャップ順に並べる（selection.Rank と同じ帯 [min, max)）
-		type scored struct {
-			row Row
+		// 予算で 1 単元も買えない銘柄は順位から外す（次点が繰り上がる）
+		if math.Floor(p.budget/(r.Open*100))*100 < 100 {
+			continue
 		}
-		var pool []scored
-		for _, r := range rows {
-			if r.Gap < p.minGap || r.Gap >= p.maxGap {
-				continue
+		pool = append(pool, scored{r})
+	}
+	sort.SliceStable(pool, func(i, j int) bool {
+		a, b := pool[i].row, pool[j].row
+		if a.Gap != b.Gap {
+			if p.descending {
+				return a.Gap > b.Gap
 			}
-			// 予算で 1 単元も買えない銘柄は順位から外す（次点が繰り上がる）
-			if math.Floor(p.budget/(r.Open*100))*100 < 100 {
-				continue
-			}
-			pool = append(pool, scored{r})
+			return a.Gap < b.Gap
 		}
-		sort.SliceStable(pool, func(i, j int) bool {
-			a, b := pool[i].row, pool[j].row
-			if a.Gap != b.Gap {
-				if p.descending {
-					return a.Gap > b.Gap
-				}
-				return a.Gap < b.Gap
+		return a.Code < b.Code
+	})
+	if len(pool) > n {
+		pool = pool[:n]
+	}
+	if len(pool) == 0 {
+		return nil
+	}
+
+	// 総予算は 1 注文の予算 × N（selection.PickFrom と同じ）。候補が N に満たない日は
+	// 残った銘柄で総予算を分け合う——等金額でも 1 注文の予算に留めない。
+	// 実運用がそう建てるので、検証も同じ金額にする
+	shares := make([]float64, len(pool))
+	weights := make([]float64, len(pool))
+	weightSum := 0.0
+	for i, s := range pool {
+		weights[i] = 1.0
+		if p.weighting == "inverse_vol" {
+			vol := selection.VolFloor
+			if s.row.Vol20 != nil && *s.row.Vol20 > selection.VolFloor {
+				vol = *s.row.Vol20
 			}
-			return a.Code < b.Code
+			weights[i] = 1.0 / vol
+		}
+		weightSum += weights[i]
+	}
+	for i, s := range pool {
+		amount := total * weights[i] / weightSum
+		if p.maxAmount > 0 && amount > p.maxAmount {
+			amount = p.maxAmount
+		}
+		shares[i] = math.Floor(amount/(s.row.Open*100)) * 100
+		if p.maxShares > 0 && shares[i] > p.maxShares {
+			shares[i] = math.Floor(p.maxShares/100) * 100
+		}
+	}
+
+	// 建値・手仕舞い値は約定モデルが決める。決まらない銘柄は建てない
+	entries := make([]float64, len(pool))
+	exits := make([]float64, len(pool))
+	for i, s := range pool {
+		if shares[i] < 100 {
+			continue
+		}
+		entry, exit, ok := fill.Fill(s.row)
+		if !ok || entry <= 0 || exit <= 0 {
+			shares[i] = 0
+			continue
+		}
+		entries[i], exits[i] = entry, exit
+	}
+
+	// 定額コースは 1 日の合計（買い＋売り）で段階が決まるので、
+	// その日の手数料を約定代金の比で各取引に配る
+	dayTotal := 0.0
+	for i := range pool {
+		if shares[i] >= 100 {
+			dayTotal += shares[i] * (entries[i] + exits[i])
+		}
+	}
+	dayFee := 0.0
+	if p.commission && dayTotal > 0 {
+		f, _ := fees.Commission(decimal.NewFromFloat(dayTotal)).Float64()
+		dayFee = f
+	}
+
+	rank := 0
+	for i, s := range pool {
+		if shares[i] < 100 {
+			continue // 按分が 1 単元に届かない銘柄は落ちる（N が減る）
+		}
+		rank++
+		amount := shares[i] * entries[i]
+		extra := amount * p.extraCostBP / 1e4
+		commission := 0.0
+		if dayTotal > 0 {
+			commission = dayFee * shares[i] * (entries[i] + exits[i]) / dayTotal
+		}
+		gross := shares[i] * p.sign * (exits[i] - entries[i])
+		fee := extra + commission
+		trades = append(trades, Trade{
+			Date: s.row.Date, Code: s.row.Code, Rank: rank, Gap: s.row.Gap,
+			Shares: shares[i], Entry: entries[i], Exit: exits[i],
+			Amount: amount, Fees: fee, Commission: commission,
+			Gross: gross, PnL: gross - fee, Scale: 1,
 		})
-		if len(pool) > p.n {
-			pool = pool[:p.n]
-		}
-		if len(pool) == 0 {
-			continue
-		}
-
-		// 総予算は 1 注文の予算 × N（selection.PickFrom と同じ）。候補が N に満たない日は
-		// 残った銘柄で総予算を分け合う——等金額でも 1 注文の予算に留めない。
-		// 実運用がそう建てるので、検証も同じ金額にする
-		total := p.budget * float64(p.n)
-		shares := make([]float64, len(pool))
-		weights := make([]float64, len(pool))
-		weightSum := 0.0
-		for i, s := range pool {
-			weights[i] = 1.0
-			if p.weighting == "inverse_vol" {
-				vol := selection.VolFloor
-				if s.row.Vol20 != nil && *s.row.Vol20 > selection.VolFloor {
-					vol = *s.row.Vol20
-				}
-				weights[i] = 1.0 / vol
-			}
-			weightSum += weights[i]
-		}
-		for i, s := range pool {
-			shares[i] = math.Floor(total*weights[i]/weightSum/(s.row.Open*100)) * 100
-			if p.maxShares > 0 && shares[i] > p.maxShares {
-				shares[i] = math.Floor(p.maxShares/100) * 100
-			}
-		}
-
-		// 建値・手仕舞い値は約定モデルが決める。決まらない銘柄は建てない
-		entries := make([]float64, len(pool))
-		exits := make([]float64, len(pool))
-		for i, s := range pool {
-			if shares[i] < 100 {
-				continue
-			}
-			entry, exit, ok := fill.Fill(s.row)
-			if !ok || entry <= 0 || exit <= 0 {
-				shares[i] = 0
-				continue
-			}
-			entries[i], exits[i] = entry, exit
-		}
-
-		// 定額コースは 1 日の合計（買い＋売り）で段階が決まるので、
-		// その日の手数料を約定代金の比で各取引に配る
-		dayTotal := 0.0
-		for i := range pool {
-			if shares[i] >= 100 {
-				dayTotal += shares[i] * (entries[i] + exits[i])
-			}
-		}
-		dayFee := 0.0
-		if p.commission && dayTotal > 0 {
-			f, _ := fees.Commission(decimal.NewFromFloat(dayTotal)).Float64()
-			dayFee = f
-		}
-
-		rank := 0
-		for i, s := range pool {
-			if shares[i] < 100 {
-				continue // 按分が 1 単元に届かない銘柄は落ちる（N が減る）
-			}
-			rank++
-			amount := shares[i] * entries[i]
-			extra := amount * p.extraCostBP / 1e4
-			commission := 0.0
-			if dayTotal > 0 {
-				commission = dayFee * shares[i] * (entries[i] + exits[i]) / dayTotal
-			}
-			gross := shares[i] * p.sign * (exits[i] - entries[i])
-			fee := extra + commission
-			trades = append(trades, Trade{
-				Date: s.row.Date, Code: s.row.Code, Rank: rank, Gap: s.row.Gap,
-				Shares: shares[i], Entry: entries[i], Exit: exits[i],
-				Amount: amount, Fees: fee, Commission: commission,
-				Gross: gross, PnL: gross - fee, Scale: 1,
-			})
-		}
 	}
 	return trades
 }
@@ -547,7 +559,7 @@ func applyRegime(daily map[string]*Daily, panel *Panel, cfg config.Config, signa
 		})
 		scale := 0.0
 		if verdict.Trade {
-			scale = verdict.Scale
+			scale = verdict.Scale * verdict.ShockLong
 		}
 		pnl = append(pnl, ledgerPnL(d.PnL, d.Commission))
 		scales = append(scales, scale)
