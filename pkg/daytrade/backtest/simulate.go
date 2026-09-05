@@ -35,9 +35,13 @@ func (OpenCloseFill) Fill(r Row) (float64, float64, bool) {
 	return r.Open, r.Close, r.Open > 0 && r.Close > 0
 }
 
-// Options は検証の指定。ゼロ値は「寄付・引けで約定」。
+// Options は検証の指定。ゼロ値は「寄付・引けで約定」「寄付の遅れは見ない」。
 type Options struct {
 	Fill FillModel
+	// Opened は「その日 09:00 の板寄せで寄ったか」。known が偽なら判定しない
+	// （分足の無い期間）。signal.skip_opened を検証で再現するために渡す
+	// （MinuteBars.Opened がそのまま入る）。nil なら設定が真でも絞らない。
+	Opened func(day time.Time, code string) (opened, known bool)
 }
 
 func (o Options) fill() FillModel {
@@ -437,7 +441,7 @@ func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options
 	capital, _ := cfg.Capital.MaxCapital.Float64()
 	carryPenalty, _ := cfg.Margin.CarryPenalty.Float64()
 
-	longRows := groupByDay(panel, longKeep(cfg))
+	longRows := groupByDay(panel, longKeep(cfg, opts))
 	minGap, _ := cfg.Signal.MinGap.Float64()
 	maxGap, _ := cfg.Signal.MaxGap.Float64()
 	trades := pickAndPrice(longRows, panel.Days, legParams{
@@ -462,7 +466,8 @@ func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options
 
 // longKeep はロングの母集団: eligible で、寄付がストップ安以下でない
 // （実運用の signal.skip_limit_down と同じ条件）。
-func longKeep(cfg config.Config) func(Row) bool {
+func longKeep(cfg config.Config, opts Options) func(Row) bool {
+	skipOpened := openedFilter(cfg, opts)
 	return func(r Row) bool {
 		if !r.Eligible {
 			return false
@@ -470,7 +475,22 @@ func longKeep(cfg config.Config) func(Row) bool {
 		if cfg.Signal.SkipLimitDown && r.Open <= math.Max(r.LimitLow, 1.0) {
 			return false
 		}
-		return true
+		return !skipOpened(r)
+	}
+}
+
+// openedFilter は「9:01 の時点で既に寄っている銘柄を外す」（signal.skip_opened）。
+//
+// 実運用は気配（時価問合の始値が入っているか）で判定し、検証は分足の最初の約定で
+// 判定する。分足の無い日は判定しない——10 年の検証をこの設定で止めないため。
+// 脚は問わない（実運用は気配そのものを落とすので、ロングにもショートにも効く）。
+func openedFilter(cfg config.Config, opts Options) func(Row) bool {
+	if !cfg.Signal.SkipOpened || opts.Opened == nil {
+		return func(Row) bool { return false }
+	}
+	return func(r Row) bool {
+		opened, known := opts.Opened(r.Date, r.Code)
+		return known && opened
 	}
 }
 

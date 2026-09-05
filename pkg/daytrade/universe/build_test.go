@@ -316,3 +316,42 @@ func TestCloseChangedOn(t *testing.T) {
 		t.Errorf("引け時刻の変更日が違う: %s", universe.CloseChangedOn)
 	}
 }
+
+func TestBuildRecordsMarginRatio(t *testing.T) {
+	arch, days := buildArchive(t)
+	day, prevDay := days[len(days)-1], days[len(days)-2]
+	// 判定日の 5 日以上前に公表された週末残高だけを見る。近すぎる週（未公表）は使わない
+	if err := fixture.AddMarginInterest(arch, "10000", day.AddDate(0, 0, -12), 900, 300); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.AddMarginInterest(arch, "10000", day.AddDate(0, 0, -5), 400, 200); err != nil {
+		t.Fatal(err)
+	}
+	// 売残 0 の銘柄は倍率を出さない（nil）
+	if err := fixture.AddMarginInterest(arch, "20000", day.AddDate(0, 0, -5), 500, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := universe.Build(arch, day, prevDay, config.Default().Universe, config.Default().Margin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]universe.Candidate{}
+	for _, c := range rows {
+		found[c.Code] = c
+	}
+	got := found["10000"].MarginRatio
+	if got == nil || *got != 2 {
+		t.Errorf("10000 の信用倍率 = %v, want 2（400 ÷ 200 の最新週）", got)
+	}
+	if got := found["20000"].MarginRatio; got != nil {
+		t.Errorf("売残 0 の銘柄の信用倍率 = %v, want nil", got)
+	}
+	if got := found["30000"].MarginRatio; got != nil {
+		t.Errorf("残高の無い銘柄の信用倍率 = %v, want nil", got)
+	}
+	// 記録するだけで母集団の条件には入っていない
+	if !found["10000"].Eligible {
+		t.Error("信用倍率が母集団の条件に入ってしまっている")
+	}
+}

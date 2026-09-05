@@ -97,7 +97,9 @@ daytrade history book --date 2026-09-08 --csv /tmp/book.csv
 `data/jquants/equities_bars_minute/<YYYY-MM-DD>.parquet` に入っている。1 日 47 万行・4,182 銘柄・
 4.7MB、09:00〜15:30。設計と運用は `docs/JQUANTS_ARCHIVE.md`「分足（アドオン）」。
 
-ここから答えられる問いは次のとおり。**まだどれも測っていない**——段階 3。
+ここから答えられる問いは次のとおり。**2026-09-05 に測った**——結果は
+[research/2026-09-jp-gap-minute.md](research/2026-09-jp-gap-minute.md)（利益は特別気配で寄付が遅れる銘柄に集中、
+出口は引けより 15:20、損切りは全滅、信用倍率は 2 年では効くが 10 年では再現しない）。
 
 | 問い | 分足で答えられること |
 |---|---|
@@ -164,3 +166,14 @@ daytrade history book --date 2026-09-08 --csv /tmp/book.csv
 - 2026-09-05: **段階 2（分足）を実装し、過去 2 年ぶんを取り込んだ**。2024-09〜2026-09 の
   約 500 営業日・2.3GB。日次更新の cron はまだコメントアウト（開けないと今日以降が溜まらない）。
   `FillModel` への繋ぎ込み（段階 3）は未実装
+- 2026-09-05: **段階 3 の最初の検証**を行った（`docs/research/2026-09-jp-gap-minute.md`）。
+  最重要の発見は「利益源の銘柄は 9:01 にまだ寄っていない」こと。実機で `pDPP` が寄り前に特別気配の
+  気配値を返すか（上の「実機で確かめること」3）が、発注経路を開ける前の必須の確認になった
+- 2026-09-05: 検証で分かったことを実装に落とした。
+  - `daytrade backtest --fill-entry / --fill-exit`: 分足の約定値（その時刻以降の最初の約定）で
+    建値・手仕舞い値を出す（`backtest.MinuteBars`）。分足の無い日は日足の寄付・引けに落ちるので
+    10 年の検証は止まらない
+  - `signal.skip_opened`: 9:01 に既に寄っている銘柄を候補から外す（**既定 false**。`pDPP` の実機確認まで開けない）。
+    設定に関わらず `history/quotes` の `opened` 列に毎日記録する
+  - `history/evaluation` に `midday` / `midday_gross_bp` / `midday_net_bp`（前場引けで手仕舞っていたら）
+  - `history/plan` に `margin_ratio`（信用倍率。**記録だけ**で母集団の条件には入れない）

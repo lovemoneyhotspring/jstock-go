@@ -53,28 +53,54 @@ func SignalsFor(arch *archive.Archive, cfg config.Config, panel *Panel, us usmar
 	return inputs, nil
 }
 
+// OptionsFor は組み上がったパネルを見て約定モデルを作る（RunWith に渡す）。
+//
+// パネルを作った後でないと「どの銘柄の分足が要るか」が決まらないので、
+// Options を値ではなく関数で受ける。nil なら既定（寄付・引けで約定）。
+type OptionsFor func(*Panel) (Options, error)
+
 // Run はアーカイブ（＋米国市場のキャッシュ）から検証する。
 func Run(arch *archive.Archive, cfg config.Config, start, end time.Time, us usmarket.Fetcher, cachePath string) (*Result, error) {
-	panel, err := LoadPanel(arch, start, end, cfg)
+	return RunWith(arch, cfg, start, end, us, cachePath, nil)
+}
+
+// RunWith は約定モデルを指定して Run する。
+func RunWith(arch *archive.Archive, cfg config.Config, start, end time.Time, us usmarket.Fetcher, cachePath string, build OptionsFor) (*Result, error) {
+	panel, signals, opts, err := prepare(arch, cfg, start, end, us, cachePath, build)
 	if err != nil {
 		return nil, err
 	}
-	signals, err := SignalsFor(arch, cfg, panel, us, cachePath)
-	if err != nil {
-		return nil, err
-	}
-	return Simulate(panel, cfg, signals)
+	return SimulateWith(panel, cfg, signals, opts)
 }
 
 // RunMargin は Run のロング＋ショート版。
 func RunMargin(arch *archive.Archive, cfg config.Config, start, end time.Time, us usmarket.Fetcher, cachePath string) (*MarginResult, error) {
-	panel, err := LoadPanel(arch, start, end, cfg)
+	return RunMarginWith(arch, cfg, start, end, us, cachePath, nil)
+}
+
+// RunMarginWith は約定モデルを指定して RunMargin する。
+func RunMarginWith(arch *archive.Archive, cfg config.Config, start, end time.Time, us usmarket.Fetcher, cachePath string, build OptionsFor) (*MarginResult, error) {
+	panel, signals, opts, err := prepare(arch, cfg, start, end, us, cachePath, build)
 	if err != nil {
 		return nil, err
+	}
+	return SimulateMarginWith(panel, cfg, signals, opts)
+}
+
+func prepare(arch *archive.Archive, cfg config.Config, start, end time.Time, us usmarket.Fetcher, cachePath string, build OptionsFor) (*Panel, *Inputs, Options, error) {
+	panel, err := LoadPanel(arch, start, end, cfg)
+	if err != nil {
+		return nil, nil, Options{}, err
 	}
 	signals, err := SignalsFor(arch, cfg, panel, us, cachePath)
 	if err != nil {
-		return nil, err
+		return nil, nil, Options{}, err
 	}
-	return SimulateMargin(panel, cfg, signals)
+	var opts Options
+	if build != nil {
+		if opts, err = build(panel); err != nil {
+			return nil, nil, Options{}, err
+		}
+	}
+	return panel, signals, opts, nil
 }

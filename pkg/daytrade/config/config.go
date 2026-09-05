@@ -123,6 +123,17 @@ type Signal struct {
 	// SkipLimitDown は 9:00 の気配がストップ安の銘柄は買わない
 	// （売り殺到の板では引けの売りが約定せず持ち越しになる。勝率 9%）。
 	SkipLimitDown bool `toml:"skip_limit_down"`
+	// SkipOpened は 9:01 の時点で**既に寄っている**銘柄を候補から外す。
+	// ロング・ショートの**両方**に効く（気配そのものを落とすため）。
+	//
+	// 利益源は特別気配で寄りが遅れる銘柄で、9:00 にすんなり寄る銘柄には戻りが無い
+	// （2 年で長短合わせて −13 万円）。しかも寄っている銘柄を 9:01 に成行で買うと
+	// 最初の 1 分の反発ぶん平均 +27 bp 高く買う（研究ノート 2026-09-jp-gap-minute の発見 1）。
+	//
+	// **既定は false。** 真にしてよいのは「寄り前の時価問合（pDPP）が特別気配の
+	// 気配値を返す」ことを実機で確かめてから——返らないなら利益源の銘柄はギャップ 0 と
+	// 見えて候補に載らず、これを真にすると候補が 1 つも残らない（毎日 no_picks になる）。
+	SkipOpened bool `toml:"skip_opened"`
 }
 
 // Regime は危険信号（[regime]）。詳細と検証は daytrade/regime と研究ノート。
@@ -225,6 +236,7 @@ func Default() Config {
 			MaxGap:        decimal.Zero,
 			MinGap:        decimal.NewFromInt(-1),
 			SkipLimitDown: true,
+			SkipOpened:    false,
 		},
 		Regime: Regime{
 			IVGate:           decimal.Zero,

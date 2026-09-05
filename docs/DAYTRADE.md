@@ -117,6 +117,23 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 [OPENING_DATA.md](OPENING_DATA.md)。`daytrade quotes --raw --columns "..."` が時価問合の応答を
 解釈せずに出すので、板の列名の確認はここから始める。
 
+**寄り前に `pDPP` が何を返すかで戦略の成否が決まる。** 分足で測ると、建てた銘柄のうち 09:00 に
+寄らない（特別気配で遅れる）ものがロング 72%・ショート 94% あり、**利益はそこに集中している**
+——09:00 にすんなり寄る銘柄だけで回すと 2 年で −13 万円（[research/2026-09-jp-gap-minute.md](research/2026-09-jp-gap-minute.md)）。
+9:01 の時点でその銘柄はまだ寄っていないので、`pDPP` が前日終値のままならギャップ 0 と見えて
+候補に載らない。特別気配の気配値が入るなら、そのギャップで順位を付けて成行を出せば板寄せで約定する。
+**実機で確かめるまで発注経路を開けない**（[OPENING_DATA.md](OPENING_DATA.md)「実機で確かめること」3）。
+
+### 既に寄っている銘柄を外す（`signal.skip_opened`）
+
+真にすると、9:01 の気配で**始値が入っている**銘柄（＝もう寄った）をロング・ショートの両方の
+候補から落とす。利益が無い群を外すのと、最初の 1 分の反発ぶんの不利な約定（ロング +27 bp・
+ショート −146 bp）を避けるのが狙いで、分足の検証では合算 492 万 → 529 万（2 年、9:01 建て・15:20 手仕舞い）。
+
+**既定は false。** 上の `pDPP` を実機で確かめるまでは真にしない——気配値が返らない場合、
+候補が 1 つも残らず毎日 `no_picks` になる。設定に関わらず、受け取った気配が寄っていたかは
+`history/quotes` の `opened` 列に毎日記録する（後から取り直せないため）。
+
 ## 設定（`daytrade.toml`）
 
 | 節 | 項目 | 意味 |
@@ -132,6 +149,7 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 | | `exclude_earnings_prev` / `exclude_earnings_today` / `exclude_margin_alert` | 除外条件 |
 | `[signal]` | `max_gap` / `min_gap` | ギャップの範囲。既定は「負なら全部」 |
 | | `skip_limit_down` | 気配がストップ安の銘柄は買わない（既定 true） |
+| | `skip_opened` | 9:01 に**既に寄っている**銘柄を候補から外す（ロング・ショート両方。既定 false。下記） |
 | `[regime]` | `iv_gate` | 0 で常時。18 で高ボラ局面だけ（DD 半分、稼働 5 割） |
 | | `skip_months` | 取引しない月。既定の設定は `[12]` |
 | | `drift_days` / `drift_gate` / `drift_gap_override` | 市場の日中ドリフトのゲート（下記）。既定は無効 |
@@ -168,6 +186,8 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 ```bash
 daytrade backtest --since 2017-01-01          # 設定どおり（資金固定・100 株単位・段階手数料）
 daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
+# 分足の約定値で（実運用の 9:01 の成行・15:20 の成行に近い）
+daytrade backtest --since 2024-11-05 --fill-entry 09:01 --fill-exit 15:20
 ```
 
 前夜の `plan` と同じ式（`daytrade.universe.eligible_expr`）と 9:00 と同じ順位付け
@@ -178,8 +198,15 @@ daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
 
 - **約定モデル**（`FillModel`）: 順位付けと株数は日足の寄付で決め、建値・手仕舞い値だけを差し替えられる。
   既定は寄付で建てて引けで手仕舞う（`OpenCloseFill`、滑りなし）。実運用は 9:01 の成行と 15:20 の成行なので
-  寄付・引けとはずれる。分足が入ったら 9:01 の足・15:20 の足を返す実装をここに差し込み、日足の検証には
-  測った滑りを bp で入れる（分足の履歴は 2 年しか無く、10 年の検証の置き換えにはならない）
+  寄付・引けとはずれる。`--fill-entry` / `--fill-exit` に時刻を渡すと**分足**（`backtest.MinuteBars`）で
+  「その時刻以降の最初の約定」を建値・手仕舞い値にする。分足の履歴は 2 年しか無いので、
+  **分足の無い日は日足の寄付・引けにそのまま落ちる**（10 年の検証はこの指定でも止まらない。
+  どこからが分足かは出力の 1 行目に出る）。板が無いのでスプレッドの半分は見ていない。
+  分足での検証は [research/2026-09-jp-gap-minute.md](research/2026-09-jp-gap-minute.md)——
+  引けの板寄せは両脚に逆風（15:20 のほうが良い）で、今の日足の検証は保守的
+- **既に寄っている銘柄**（`signal.skip_opened`）: 実運用は気配（始値が入っているか）で、検証は
+  分足の最初の約定が 09:00 かで判定する。**分足の無い日は判定しない**——設定を真にしても
+  10 年の検証の挙動が期間の前半で変わらないようにするため
 - **資産曲線ゲートの窓**: 実運用（`recentPnL`）と同じく、台帳の定義（約定単価の差 × 数量。現物の手数料は含まない）で、
   止めた日は 0、縮めた日はその倍率で数える。窓に建てた日が 1 日も無ければ判定しない（12 月を休んだ直後の 1 月に
   「損益 0 ≤ 0」で縮めない）
@@ -212,9 +239,9 @@ daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
 
 | 種類 | 1 行 | いつ |
 |---|---|---|
-| `plan` | 母集団の 1 銘柄（`eligible` / `short_eligible` と除外理由の列ごと） | `plan` のたび |
+| `plan` | 母集団の 1 銘柄（`eligible` / `short_eligible` と除外理由の列ごと。`margin_ratio` は記録だけ） | `plan` のたび |
 | `plan_meta` | `plan` 1 回の要約（件数・IV・ドリフト） | `plan` のたび |
-| `quotes` | 9:00 に受け取った気配 1 銘柄。`usable`（鮮度の検査を通った）と `gap` 付き | `open` が気配を取ったとき |
+| `quotes` | 9:00 に受け取った気配 1 銘柄。`usable`（鮮度の検査を通った）・`opened`（もう寄っていた）・`gap` 付き | `open` が気配を取ったとき |
 | `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount` | `open` が順位を付けたとき |
 | `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数 | `open` が判断まで進んだとき |
 | `book` | 板・気配 1 銘柄 × 1 観測時刻（`slot` = JST の HHMM）。時価問合の応答をそのまま（値は文字列） | `snap` のたび（1 日 10 回。[OPENING_DATA.md](OPENING_DATA.md)） |
@@ -274,6 +301,11 @@ daytrade history book --date 2026-09-08 --csv /tmp/book.csv
   建て方向で見た bp）、`cost_bp`（滑り・貸株料等の見込み）、`net_bp`、`hypo_quantity` / `hypo_pnl`
   （選んだ銘柄は記録の株数、それ以外は予算で買える株数）、`limit_up_close` / `limit_down_close`
   （売建の持ち越しリスク）、`traded` / `actual_pnl`（台帳の本発注の約定）
+- `midday` / `midday_gross_bp` / `midday_net_bp` は**前場引け**（11:30 までの最後の約定値）で
+  手仕舞っていたら。ロングの利益は前場で出尽くし、10:30〜11:25 に前倒しすると利益 −6〜10% で
+  MaxDD が半分になる（2 年の検証。[research/2026-09-jp-gap-minute.md](research/2026-09-jp-gap-minute.md)
+  の発見 2）。**既定の出口は 15:20 のまま**で、効きが続くかを毎日ここで測る。分足の
+  アドオンが無い日は null
 - `quotes` の日は `gap`（9:00 の気配）と `gap_open`（実際の始値）の差で、気配の当たり具合も見える
 
 ```bash

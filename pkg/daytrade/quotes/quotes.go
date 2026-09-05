@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -87,7 +88,11 @@ func (c *CSV) Fetch(symbols []string) (map[string]selection.Quote, error) {
 				at = clock.EnsureUTC(parsed)
 			}
 		}
-		found[symbol] = selection.Quote{Symbol: symbol, Price: price, At: at, Source: c.Name()}
+		// opened 列があれば「もう寄っている」として読む（dry-run で skip_opened を試すため）
+		opened := parseBool(field(record, index, "opened"))
+		found[symbol] = selection.Quote{
+			Symbol: symbol, Price: price, At: at, Source: c.Name(), Opened: opened,
+		}
 	}
 	return found, nil
 }
@@ -122,8 +127,9 @@ func (t *Tachibana) Fetch(symbols []string) (map[string]selection.Quote, error) 
 	found := make(map[string]selection.Quote, len(rows))
 	for symbol, row := range rows {
 		// 寄付後は始値を使う。まだ寄っていなければ現在値（気配値）
+		opened := row.Open.GreaterThan(decimal.Zero)
 		price := row.Open
-		if price.LessThanOrEqual(decimal.Zero) {
+		if !opened {
 			price = row.Last
 		}
 		if price.LessThanOrEqual(decimal.Zero) {
@@ -132,7 +138,7 @@ func (t *Tachibana) Fetch(symbols []string) (map[string]selection.Quote, error) 
 		// 基準値段（前日終値）も渡す。分割・併合の日はアーカイブの終値と食い違う
 		found[symbol] = selection.Quote{
 			Symbol: symbol, Price: price, At: row.At, Source: t.Name(),
-			PrevClose: row.PrevClose,
+			PrevClose: row.PrevClose, Opened: opened,
 		}
 	}
 	return found, nil
@@ -182,12 +188,41 @@ func Fresh(received map[string]selection.Quote, maxAgeSeconds int, now time.Time
 	return kept, stale, delayed
 }
 
+// DropOpened は**もう寄っている**銘柄の気配を落とす（signal.skip_opened）。
+//
+// 9:01 の時点で利益源の銘柄はまだ寄っていない（特別気配）。既に寄った銘柄は
+// その日の戻りが無いうえ、最初の 1 分の反発ぶんだけ不利な値で約定する
+// （研究ノート 2026-09-jp-gap-minute の発見 1）。ロング・ショートの区別なく落とす。
+//
+// 落とした銘柄は dropped に入れて返す（何件外したかを記録に残すため）。
+func DropOpened(quotes map[string]selection.Quote) (kept map[string]selection.Quote, dropped []string) {
+	kept = make(map[string]selection.Quote, len(quotes))
+	for symbol, q := range quotes {
+		if q.Opened {
+			dropped = append(dropped, symbol)
+			continue
+		}
+		kept[symbol] = q
+	}
+	sort.Strings(dropped)
+	return kept, dropped
+}
+
 func field(record []string, index map[string]int, name string) string {
 	i, ok := index[name]
 	if !ok || i >= len(record) {
 		return ""
 	}
 	return strings.TrimSpace(record[i])
+}
+
+// parseBool は CSV の真偽（true / 1 / yes）。空や読めない値は偽。
+func parseBool(text string) bool {
+	switch strings.ToLower(text) {
+	case "1", "true", "yes", "y":
+		return true
+	}
+	return false
 }
 
 func parsePrice(text string) (decimal.Decimal, bool) {

@@ -54,7 +54,7 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 	fill := opts.fill()
 	byKey := rowsByKey(panel)
 
-	longRows := groupByDay(panel, longKeep(cfg))
+	longRows := groupByDay(panel, longKeep(cfg, opts))
 	longParams := legParams{
 		n: nLong, budget: longBudget,
 		weighting: cfg.Capital.Weighting, sign: 1,
@@ -69,6 +69,7 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 	longTrades = applyCarry(longTrades, byKey, 1, carryPenalty)
 
 	// ショートの母集団はロングと別（[margin] の segments / 除外。前夜の plan と同じ条件）
+	skipOpened := openedFilter(cfg, opts)
 	shortRows := groupByDay(panel, func(r Row) bool {
 		if !r.ShortEligible {
 			return false
@@ -76,7 +77,7 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 		if cfg.Margin.SkipLimitUp && r.Open >= r.LimitHigh {
 			return false
 		}
-		return true
+		return !skipOpened(r)
 	})
 	shortTrades := pickAndPrice(shortRows, panel.Days, legParams{
 		n: nShort, budget: shortBudget,
