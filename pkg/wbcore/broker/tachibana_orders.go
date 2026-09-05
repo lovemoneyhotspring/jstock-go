@@ -2,7 +2,6 @@ package broker
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -184,7 +183,8 @@ func (t *TachibanaBroker) orderList(status string) ([]domain.Order, error) {
 			t.clientOrderIDFor(number))
 		if err != nil {
 			// 1 行読めないだけで一覧全体を落とさない。ただし黙らせない
-			fmt.Fprintf(os.Stderr, "[warn] 注文一覧の 1 行を解釈できません（%s）: %v\n", number, err)
+			t.logWarn("broker.order_row_unreadable", "注文一覧の 1 行を解釈できません",
+				map[string]any{"order_number": number, "error": err.Error()})
 			continue
 		}
 		orders = append(orders, order)
@@ -209,8 +209,8 @@ func (t *TachibanaBroker) GetOrderHistory(start, end time.Time) ([]domain.Order,
 	startDay := start.In(jst()).Format("2006-01-02")
 	todayDay := today.Format("2006-01-02")
 	if startDay < todayDay {
-		fmt.Fprintf(os.Stderr,
-			"[warn] 立花証券の注文一覧は当日分のみ。%s 以前の注文は突合できません\n", todayDay)
+		t.logWarn("broker.history_today_only", "立花証券の注文一覧は当日分のみ。前日以前の注文は突合できません",
+			map[string]any{"start": startDay, "today": todayDay})
 	}
 	if end.In(jst()).Format("2006-01-02") < todayDay {
 		return nil, nil
@@ -276,7 +276,7 @@ func (t *TachibanaBroker) LotSizes(symbols []string) map[string]decimal.Decimal 
 	out := make(map[string]decimal.Decimal, len(symbols))
 	master, err := t.lotMaster()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warn] 売買単位のマスタを取得できません: %v\n", err)
+		t.logWarn("broker.lot_master_failed", "売買単位のマスタを取得できません", map[string]any{"error": err.Error()})
 		return out
 	}
 	for _, symbol := range symbols {

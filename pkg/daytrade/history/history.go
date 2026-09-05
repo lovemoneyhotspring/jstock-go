@@ -162,6 +162,13 @@ var OpenRunSchema = []history.Column{
 	// orders は台帳に書いた注文の数（dry-run を含む）、failures は通らなかった数。
 	{Name: "orders", Type: history.TypeInt64},
 	{Name: "failures", Type: history.TypeInt64},
+	// already_long / already_short はこの実行の前に（同じ日の前の実行で）建てていた数。
+	// 再実行は N − これ だけを建てる。0 なら初回
+	{Name: "already_long", Type: history.TypeInt64},
+	{Name: "already_short", Type: history.TypeInt64},
+	// deadline はこの実行の締め切り（JST、HH:MM:SS）。elapsed_ms は開始からの所要
+	{Name: "deadline", Type: history.TypeString},
+	{Name: "elapsed_ms", Type: history.TypeInt64},
 }
 
 // StoreFor はこの環境の履歴ストア。

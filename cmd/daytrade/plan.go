@@ -41,6 +41,7 @@ func newPlanCmd() *cobra.Command {
 				return crash("候補の作成", "daytrade.crash", err)
 			}
 			printPlan(p, cfg)
+			warmUsmarket(cfg, day)
 			return nil
 		},
 	}

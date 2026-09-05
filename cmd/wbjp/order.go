@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
 	"github.com/spf13/cobra"
 )
@@ -15,7 +14,7 @@ func connectBroker() (broker.Broker, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cli.ConnectBroker(setCfg.Execution.Broker, appSettings)
+	return run.ConnectBroker(setCfg.Execution.Broker, appSettings)
 }
 
 func newOrderCmd() *cobra.Command {

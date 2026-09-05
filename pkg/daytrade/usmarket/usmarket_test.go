@@ -107,3 +107,46 @@ func TestDefaultCachePath(t *testing.T) {
 		t.Errorf("キャッシュの置き場 = %s", got)
 	}
 }
+
+// TestLatestBeforeCachedSkipsFetchWhenCacheHasYesterday は、キャッシュに day−1 があれば取りに行かないこと。
+func TestLatestBeforeCachedSkipsFetchWhenCacheHasYesterday(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "us.json")
+	source := newStub()
+	// 前夜の温め: 9/4 の判断に要る 9/3 まで取る
+	s, src, err := LatestBeforeCached(source, cache, day("2026-09-04"))
+	if err != nil || s == nil || src != SourceFetched || !s.Date.Equal(day("2026-09-03")) {
+		t.Fatalf("初回: %+v %s %v", s, src, err)
+	}
+	calls := source.calls
+	// 朝: キャッシュに 9/3 があるので取りに行かない
+	s, src, err = LatestBeforeCached(source, cache, day("2026-09-04"))
+	if err != nil || s == nil || src != SourceCache || !s.Date.Equal(day("2026-09-03")) {
+		t.Fatalf("2 回目: %+v %s %v", s, src, err)
+	}
+	if source.calls != calls {
+		t.Errorf("キャッシュがあるのに取りに行った: %d → %d", calls, source.calls)
+	}
+}
+
+// TestLatestBeforeCachedFallsBackToCache は、取りに行って失敗したらキャッシュの最新で代用し、
+// エラーも返すこと（ログには残す。判断は止めない）。
+func TestLatestBeforeCachedFallsBackToCache(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "us.json")
+	if _, _, err := LatestBeforeCached(newStub(), cache, day("2026-09-04")); err != nil {
+		t.Fatal(err)
+	}
+	// 翌日の朝、取得元が落ちている。キャッシュの 9/3 で代用する
+	broken := &stub{closes: map[string]map[string]float64{}}
+	s, src, err := LatestBeforeCached(broken, cache, day("2026-09-05"))
+	if err == nil {
+		t.Error("取得失敗がエラーで伝わらない")
+	}
+	if s == nil || src != SourceCacheFallback || !s.Date.Equal(day("2026-09-03")) {
+		t.Fatalf("代用が効いていない: %+v %s", s, src)
+	}
+	// キャッシュも無ければ nil
+	s, _, err = LatestBeforeCached(broken, filepath.Join(t.TempDir(), "none.json"), day("2026-09-05"))
+	if err == nil || s != nil {
+		t.Errorf("キャッシュ無し: %+v %v", s, err)
+	}
+}

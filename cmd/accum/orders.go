@@ -9,7 +9,6 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/execute"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/spf13/cobra"
 )
@@ -121,5 +120,5 @@ func checkOpenOrders(cfg *accumcfg.AccumConfig, led *ledger.Ledger) error {
 
 // connectBroker は設定の発注先に繋ぐ。本番口座でなければ紙のブローカーで済ませる。
 func connectBroker(cfg *accumcfg.AccumConfig) (broker.Broker, error) {
-	return cli.ConnectBroker(cfg.Execution.Broker, appSettings)
+	return run.ConnectBroker(cfg.Execution.Broker, appSettings)
 }

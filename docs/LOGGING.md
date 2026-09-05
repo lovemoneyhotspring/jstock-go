@@ -132,13 +132,15 @@ jq 'select(.run_id == "abc123" and .routine != true)' state/logs/daytrade-prod.j
 
 | `code` | いつ | 主な項目 |
 |---|---|---|
-| `daytrade.config` | 実行の冒頭（plan / open / close） | `phase`, `day`, `live`, `enabled`, `max_capital`, `positions`（N）, `budget_per_order`, `segments`, `min_turnover`, `max_gap`, `skip_months`, `iv_gate`, `drift_gate`, `equity_curve_days`, `us_skip`, `quote_source`, `entry_window` / `exit_window`, `max_quote_age`, `kill_switch`, `watch_only`, `state_dir`, `data_dir` |
+| `daytrade.config` | 実行の冒頭（plan / open / close） | `phase`, `day`, `live`, `enabled`, `max_capital`, `positions`（N）, `budget_per_order`, `segments`, `min_turnover`, `max_gap`, `skip_months`, `iv_gate`, `drift_gate`, `equity_curve_days`, `us_skip`, `quote_source`, `entry_window` / `exit_window`, `max_quote_age`, `kill_switch`, `watch_only`, `state_dir`, `data_dir`, `deadline`（この実行の締め切り、JST）, `max_run_seconds` |
+| `daytrade.resume` | 同じ日の前の回が建てた建玉があり、残りの枚数だけ建て直す | `long`, `short`（建てた数）, `remaining_long`, `remaining_short`, `symbols`（建てた銘柄。候補から外す） |
 | `daytrade.plan` | 前夜に候補を作った | `day`, `prev_day`, `candidates`（全銘柄）, `eligible`（対象）, `positions`, `budget`, `iv_prev`, `path` |
-| `daytrade.quotes` | 気配を取った／使えない気配を除外した | `source`, `requested`, `received`, `missing`, `missing_sample`（取れなかった銘柄、最大 20） / `stale`, `stale_sample`, `delayed`, `delayed_sample`, `max_age_sec`, `oldest` |
+| `daytrade.quotes` | 気配を取った／使えない気配を除外した | `source`, `requested`, `received`, `missing`, `missing_sample`（取れなかった銘柄、最大 20）, `elapsed_ms` / `stale`, `stale_sample`（`銘柄@時刻 年齢秒`）, `delayed`, `delayed_sample`, `future`（時刻が 1 分以上先の気配の数。寄り前に前日の時刻が返る罠の観測用）, `future_sample`, `max_age_sec` |
 | `daytrade.regime` | 危険信号を評価した（毎朝） | `day`, `trade`, `reasons`, `month`, `iv_prev`, `drift_bp`, `market_gap_bp`, `recent_pnl`, `us_ret_bp`, `vix` |
 | `daytrade.ranking` | ギャップ順の順位表（N と次点 5 件） | `day`, `n`, `budget`, `scale`, `weighting`, `quotes`, `rows`（`rank`, `symbol`, `gap`, `price`, `vol`, `quantity`, `picked`） |
 | `daytrade.pick` | 買う銘柄を決めた（1 件ごと） | `day`, `symbol`, `code_`（J-Quants の 5 桁）, `rank`, `gap`, `prev_close`, `price`, `quantity`, `amount` |
-| `daytrade.order` | 注文にした結果（1 件ごと。買いも売りも） | `day`, `symbol`, `side`, `client_order_id`, `quantity`, `price`, `amount`, `live`, `outcome`（`発注` / `dry-run` / `見送り …` / `失敗 …`） |
+| `daytrade.order` | 注文にした結果（1 件ごと。買いも売りも） | `day`, `symbol`, `side`, `client_order_id`, `quantity`, `price`, `amount`, `live`, `outcome`（`発注` / `dry-run` / `見送り 余力不足 …` / `見送り 締め切り …` / `見送り 余力を照会できない …` / `失敗 …`） |
+| `daytrade.balance_failed` | 余力を照会できず、その銘柄だけ見送った（実行は止めない。次の銘柄へ進む） | `symbol`, `trade`, `error` |
 | `daytrade.carry` | verify が売れ残り（持ち越し）を見つけた（通知も送る） | `day`, `positions`（銘柄と株数） |
 | `daytrade.fill` | close / verify が注文をブローカーに照会した | `symbol`, `client_order_id`, `broker_order_id`, `before` / `after`（状態）, `quantity`, `filled`, `avg_fill_price`。照会できなければ warning で `after` が null |
 | `daytrade.reconcile` | close / verify が台帳と食い違う建玉をブローカーに見つけた（通知も送る）／建玉を照会できなかった | `held`, `symbol` / `error` |
@@ -147,14 +149,27 @@ jq 'select(.run_id == "abc123" and .routine != true)' state/logs/daytrade-prod.j
 | `daytrade.pending_unresolved` | 当日の注文一覧を照会できず判定を持ち越した。open は発注しない（次の cron で再判定） | `error` |
 | `daytrade.skip` | 何もしなかった | `reason`（`disabled` / `holiday` / `window` / `regime` / `already` / `no_quotes` / `no_picks` / `no_capital` / `no_buys` / `nothing_to_sell`）と付随項目 |
 | `daytrade.pnl_incomplete` | 資産曲線の評価で、売りの約定単価が確定していない日を除いた | `days` |
-| `daytrade.iv_missing` / `daytrade.us_missing` | 前日の IV／前夜の米国市場を取れず、そのゲート無しで進んだ | `prev_day` / `error` |
-| `daytrade.run` | 実行の終了 | `phase`（`open` / `close`）, `live`, `reason`, `n`, `budget`, `picks` / `sells`, `failures` |
+| `daytrade.iv_missing` / `daytrade.us_missing` | 前日の IV／前夜の米国市場を取れず、そのゲート無しで進んだ | `prev_day` / `error`, `source` |
+| `daytrade.us_session` / `daytrade.us_warm` | 前夜の米国市場を読んだ（open）／前夜にキャッシュを温めた（plan）。`source` = `cache`（キャッシュに前日ぶんがあり取りに行かず）/ `fetched` / `cache_fallback`（取れずキャッシュの最新で代用） | `source`, `session` |
+| `daytrade.run` | 実行の終了 | `phase`（`open` / `close`）, `live`, `reason`, `n`, `budget`, `picks` / `sells`, `failures`, `already_long` / `already_short`, `elapsed_ms`, `deadline` |
 | `daytrade.evaluate` | 大引後に候補の全行へ日足を当てた（`docs/DAYTRADE.md`「候補の結果と選定の妥当性」） | `day`, `source`（`quotes` / `archive_open`）, `rows`, `picked`, `traded`, `path`, `summary`（脚 × 群の件数・平均 net bp・勝率・想定損益） |
 | `daytrade.snap` | 板・気配をそのまま履歴に残した（`docs/OPENING_DATA.md`）。発注はしない | `day`, `slot`（JST の HHMM）, `scope`, `requested`, `rows`, `path` |
 | `daytrade.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception`（トレースバック） |
 
-ブローカーとのやり取り（送ったペイロード・応答）は、各ブローカー実装が `event` で残す（`発注します` など。`code` 無し）。
 気配が取れなかった銘柄は `daytrade.quotes` の `missing_sample` に残る。
+
+### 立花証券の電文（`broker.*`。daytrade / wbjp / accum で共通）
+
+立花への電文は **1 本 1 行**で残る。パラメータ本体は残さない（発注パスワードが入る）。
+「9:01:12 に CLMKabuNewOrder を送って 28 秒待った」を後から追うための行。
+
+| `code` | いつ | 主な項目 |
+|---|---|---|
+| `broker.request` | 電文を送って応答を読めた（ログインも） | `clm`（電文の種類）, `iface`（`request` / `price` / `master` / `auth`）, `p_no`, `symbol`, `elapsed_ms`, `timeout_ms`, `http_status`, `p_errno`, `result_code`, `result_text`, `order_number` |
+| `broker.request_failed` | 通信エラー・HTTP エラー・JSON でない応答・締め切りで送らなかった（warning） | 同上＋ `error`, `body`（応答本文の先頭 300 文字。メンテ画面等の切り分け） |
+| `broker.retry` | 照会を送り直す（通信エラーで 1 度、セッション失効で 1 度）。新規注文は送り直さない | `clm`, `stage`（`login` / `send`）, `error` / `p_errno`, `backoff_ms` |
+| `broker.order_number_missing` | 発注は受理されたのに注文番号が無い（以後照会・取消できない。error） | `client_order_id`, `symbol` |
+| `broker.order_row_unreadable` / `broker.history_today_only` / `broker.lot_master_failed` | 注文一覧の 1 行を解釈できない／前日以前の注文は照会できない／売買単位のマスタを取れない（warning） | `order_number`, `error` / `start`, `today` / `error` |
 
 ### スイング売買（`wbjp`）
 

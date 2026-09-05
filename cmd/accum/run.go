@@ -84,7 +84,7 @@ func runAccumulation(liveFlag, yesFlag, ignoreWindowFlag, noSyncFlag bool) error
 	var b broker.Broker
 	if !canLive {
 		b = broker.NewPaperBroker(decimal.Zero, "open")
-	} else if b, err = cli.ConnectBroker(cfg.Execution.Broker, appSettings); err != nil {
+	} else if b, err = run.ConnectBroker(cfg.Execution.Broker, appSettings); err != nil {
 		return err
 	}
 

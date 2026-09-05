@@ -144,7 +144,7 @@ func connectBroker(cfg dtconfig.Config) (broker.Broker, error) {
 	if cfg.Execution.Broker != "tachibana" {
 		return nil, fmt.Errorf("未知の broker: %q（デイトレは tachibana のみ）", cfg.Execution.Broker)
 	}
-	return cli.ConnectBroker(cfg.Execution.Broker, appSettings)
+	return run.ConnectBroker(cfg.Execution.Broker, appSettings)
 }
 
 // confirmLive は本番発注の前に人に確かめる（部品は wbcore/cli）。

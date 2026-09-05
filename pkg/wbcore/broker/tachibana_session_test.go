@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
@@ -34,6 +35,8 @@ type fakeTachibana struct {
 	clmIDs    []string
 	failNext  int // 次の n 電文に p_errno を返す
 	failErrno string
+	// failHTTPNext は次の n 電文を HTTP 500 で返す（通信エラーの模型）。
+	failHTTPNext int
 }
 
 func newFakeTachibana(t *testing.T, pub *rsa.PublicKey) *fakeTachibana {
@@ -71,6 +74,12 @@ func (f *fakeTachibana) handle(w http.ResponseWriter, r *http.Request) {
 	pNo, _ := req["p_no"].(float64)
 	f.pNos = append(f.pNos, int(pNo))
 	f.clmIDs = append(f.clmIDs, text(req["sCLMID"]))
+	if f.failHTTPNext > 0 {
+		f.failHTTPNext--
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("<html>maintenance</html>"))
+		return
+	}
 	if f.failNext > 0 {
 		f.failNext--
 		_ = json.NewEncoder(w).Encode(map[string]any{"p_errno": f.failErrno, "p_err": "session expired"})
@@ -188,5 +197,85 @@ func TestLoginRejectsUndecodableURL(t *testing.T) {
 	b := newSessionTestBroker(t, fake, keyPath, dir)
 	if _, err := b.postRequest(clmBalanceSummary, nil); err == nil {
 		t.Fatal("復号できない仮想URL でログインが通ってはいけない")
+	}
+}
+
+// TestQueryIsResentOnceOnHTTPError は、照会が通信エラー（HTTP 500）になったら 1 度だけ送り直すこと。
+func TestQueryIsResentOnceOnHTTPError(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, pub := writeTestKey(t, dir)
+	fake := newFakeTachibana(t, pub)
+	b := newSessionTestBroker(t, fake, keyPath, dir)
+
+	fake.failHTTPNext = 1
+	if _, err := b.postRequest(clmOrderList, map[string]any{}); err != nil {
+		t.Fatalf("1 度の通信エラーで諦めた: %v", err)
+	}
+	if got := len(fake.clmIDs); got != 2 {
+		t.Fatalf("送信回数 %d, want 2（失敗 1 ＋ 再送 1）", got)
+	}
+
+	// 2 度続けて失敗したら諦める（無限に粘らない）
+	fake.failHTTPNext = 2
+	if _, err := b.postRequest(clmOrderList, map[string]any{}); err == nil {
+		t.Fatal("2 度目の失敗で諦めていない")
+	}
+	if got := len(fake.clmIDs); got != 4 {
+		t.Fatalf("送信回数 %d, want 4", got)
+	}
+}
+
+// TestNewOrderIsNotResentOnHTTPError は、新規注文は通信エラーでも送り直さないこと
+// （届いていた場合に二重発注になる）。
+func TestNewOrderIsNotResentOnHTTPError(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, pub := writeTestKey(t, dir)
+	fake := newFakeTachibana(t, pub)
+	b := newSessionTestBroker(t, fake, keyPath, dir)
+
+	fake.failHTTPNext = 1
+	_, err := b.postRequest(clmNewOrder, map[string]any{"sIssueCode": "7203"})
+	if err == nil {
+		t.Fatal("HTTP 500 が成功になった")
+	}
+	var deadline *ErrDeadline
+	if errors.As(err, &deadline) {
+		t.Fatalf("通信エラーが締め切りとして返った: %v", err)
+	}
+	if got := len(fake.clmIDs); got != 1 {
+		t.Fatalf("新規注文の送信回数 %d, want 1（送り直してはいけない）", got)
+	}
+}
+
+// TestDeadlinePreventsSending は、締め切りを過ぎていれば電文を送らずに ErrDeadline を返すこと。
+func TestDeadlinePreventsSending(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, pub := writeTestKey(t, dir)
+	fake := newFakeTachibana(t, pub)
+	b := newSessionTestBroker(t, fake, keyPath, dir)
+
+	// まず 1 本通してセッションを作る
+	if _, err := b.postRequest(clmOrderList, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	sent := len(fake.clmIDs)
+
+	b.SetDeadline(time.Now().Add(-time.Second))
+	_, err := b.postRequest(clmNewOrder, map[string]any{"sIssueCode": "7203"})
+	var deadline *ErrDeadline
+	if !errors.As(err, &deadline) {
+		t.Fatalf("ErrDeadline ではない: %v", err)
+	}
+	if len(fake.clmIDs) != sent {
+		t.Fatal("締め切り後に電文が送られた")
+	}
+	if _, err := b.MarketPricesRaw([]string{"7203"}, ""); err == nil {
+		t.Fatal("締め切り後の時価問合が成功した")
+	}
+
+	// 解除すれば送れる
+	b.SetDeadline(time.Time{})
+	if _, err := b.postRequest(clmOrderList, map[string]any{}); err != nil {
+		t.Fatalf("解除後に送れない: %v", err)
 	}
 }

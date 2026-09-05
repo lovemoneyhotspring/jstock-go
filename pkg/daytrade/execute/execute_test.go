@@ -23,6 +23,7 @@ type stubBroker struct {
 	positions  []domain.Position
 	posErr     error
 	balance    domain.Balance
+	balanceErr error
 	placed     []domain.OrderRequest
 	history    []domain.Order // 当日の注文一覧
 	historyErr error
@@ -31,6 +32,9 @@ type stubBroker struct {
 func (s *stubBroker) Name() string      { return "stub" }
 func (s *stubBroker) AccountID() string { return "stub" }
 func (s *stubBroker) GetBalance() (*domain.Balance, error) {
+	if s.balanceErr != nil {
+		return nil, s.balanceErr
+	}
 	b := s.balance
 	return &b, nil
 }
@@ -214,6 +218,98 @@ func TestPlacePicksInsufficientFunds(t *testing.T) {
 	_, failures, _ := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
 	if len(failures) != 1 || len(b.placed) != 0 {
 		t.Errorf("余力不足で送っている: failures=%v placed=%d", failures, len(b.placed))
+	}
+}
+
+// TestPlacePicksBalanceFailureSkipsOnlyThatPick は、余力を照会できなくても実行ごと止めず、
+// その銘柄だけ見送って次へ進むこと（止めると残りの銘柄がその日二度と建たない）。
+func TestPlacePicksBalanceFailureSkipsOnlyThatPick(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &stubBroker{balanceErr: errors.New("timeout")}
+	picks := []selection.Pick{pick("7203", domain.SideBuy), pick("9984", domain.SideBuy)}
+	orders, failures, err := PlacePicks(env, b, picks)
+	if err != nil {
+		t.Fatalf("余力照会の失敗で実行が止まった: %v", err)
+	}
+	if orders != 0 || len(failures) != 2 || len(b.placed) != 0 {
+		t.Fatalf("orders=%d failures=%v placed=%d", orders, failures, len(b.placed))
+	}
+	// 復旧すれば同じ判断で建てられる（台帳に何も残していない）
+	b.balanceErr, b.balance = nil, richBalance()
+	if orders, _, _ = PlacePicks(env, b, picks); orders != 2 {
+		t.Errorf("復旧後に建てられない: orders=%d", orders)
+	}
+}
+
+// TestPlacePicksStopsAtDeadline は、締め切りを過ぎたら新しい注文を送らず「締め切り」として
+// 見送ること。送らなかった分は台帳に残らないので、次の回が建て直せる。
+func TestPlacePicksStopsAtDeadline(t *testing.T) {
+	env, _ := newEnv(t)
+	env.Deadline = time.Now().Add(-time.Second)
+	b := &stubBroker{balance: richBalance()}
+	orders, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if err != nil || orders != 0 || len(b.placed) != 0 {
+		t.Fatalf("締め切り後に送った: orders=%d placed=%d err=%v", orders, len(b.placed), err)
+	}
+	if len(failures) != 1 || !strings.Contains(failures[0], "締め切り") {
+		t.Errorf("見送りの理由が締め切りになっていない: %v", failures)
+	}
+	if entries, _ := env.Ledger.EntriesOn(env.Day); len(entries) != 0 {
+		t.Errorf("送っていない注文が台帳に残った: %+v", entries)
+	}
+	// dry-run は締め切りに縛られない（判断の記録は残す）
+	if orders, _, _ = PlacePicks(env, nil, []selection.Pick{pick("7203", domain.SideBuy)}); orders != 1 {
+		t.Errorf("dry-run が締め切りで止まった: orders=%d", orders)
+	}
+}
+
+// TestPlaceRecordedDeadlineFromBrokerIsUnsent は、ブローカーが「締め切りで送らなかった」と
+// 返したら PENDING ではなく UNSENT にすること（送っていないので照会で判定する必要が無い）。
+func TestPlaceRecordedDeadlineFromBrokerIsUnsent(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	b.place = func(req domain.OrderRequest) (*domain.OrderAck, error) {
+		return nil, &broker.ErrDeadline{CLMID: "CLMKabuNewOrder", Deadline: time.Now()}
+	}
+	_, failures, _ := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if len(failures) != 1 {
+		t.Fatalf("failures=%v", failures)
+	}
+	if o := statusOf(t, env, "7203"); o.Status != string(domain.OrderStatusUnsent) {
+		t.Errorf("締め切りの未送信が UNSENT になっていない: %s", o.Status)
+	}
+	// 次の回は種を変えて送れる
+	b.place = nil
+	if orders, _, _ := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)}); orders != 1 {
+		t.Errorf("未送信の後に建てられない: orders=%d", orders)
+	}
+}
+
+// TestPlacedTodayCountsLiveEntriesOnly は、建玉の数に dry-run と拒否・失効を数えないこと。
+func TestPlacedTodayCountsLiveEntriesOnly(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	if _, _, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy), pick("9984", domain.SideSell)}); err != nil {
+		t.Fatal(err)
+	}
+	b.place = func(req domain.OrderRequest) (*domain.OrderAck, error) {
+		return nil, &broker.OrderRejectedError{Message: "x"}
+	}
+	_, _, _ = PlacePicks(env, b, []selection.Pick{pick("6758", domain.SideBuy)})
+	_, _, _ = PlacePicks(env, nil, []selection.Pick{pick("8306", domain.SideBuy)})
+
+	placed, err := PlacedToday(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if placed.Long != 1 || placed.Short != 1 || placed.Total() != 2 {
+		t.Errorf("long=%d short=%d", placed.Long, placed.Short)
+	}
+	if placed.Symbols["7203"] != domain.SideBuy || placed.Symbols["9984"] != domain.SideSell {
+		t.Errorf("symbols=%v", placed.Symbols)
+	}
+	if _, ok := placed.Symbols["6758"]; ok {
+		t.Error("拒否された銘柄が建玉に数えられた")
 	}
 }
 

@@ -82,10 +82,16 @@ func runOpen(opts openOptions) error {
 		return err
 	}
 	watchOnly := cfg.Capital.Positions() == 0
+	// 締め切り: 時間帯の終わり（live のとき）と開始 + max_run_seconds の早い方。
+	// 過ぎたら新しい電文は送らず、送信中は打ち切る。遅い日に 1 回がロックを握り続けて
+	// 次の cron まで潰さないため（送れなかった分は次の回が残りの枚数として建て直す）
+	started := now
+	deadline := cfg.Execution.RunDeadline("entry", now, opts.live && !opts.ignoreWindow, jst)
 	logConfig(cfg, "open", map[string]any{
 		"day": day.Format(DateLayout), "live": opts.live,
 		"allow_delayed": opts.allowDelayed, "quote_override": opts.quoteSource,
-		"watch_only": watchOnly,
+		"watch_only": watchOnly, "deadline": deadlineText(deadline),
+		"max_run_seconds": cfg.Execution.MaxRunSeconds,
 	})
 	if watchOnly {
 		fmt.Println("資金 0（max_capital = 0）: スクリーニングと候補の表示だけ行い、買いません")
@@ -127,12 +133,16 @@ func runOpen(opts openOptions) error {
 		}
 	}()
 
-	env := execute.Env{Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout, RetryWait: execute.DefaultRetryWait}
+	env := execute.Env{
+		Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout,
+		RetryWait: execute.DefaultRetryWait, Deadline: deadline,
+	}
 	var b broker.Broker
 	if allowed {
 		if b, err = connectBroker(cfg); err != nil {
 			return err
 		}
+		broker.SetDeadline(b, deadline)
 		// 前回の実行で送信結果が分からなかった注文があれば、ここで判定して台帳を直す。
 		// 届いていなければ UNSENT になり、下の「発注済み」には数えない（種を変えて送り直す）
 		if err := resolvePending(env, b); err != nil {
@@ -144,21 +154,30 @@ func runOpen(opts openOptions) error {
 			return err
 		}
 	}
-	// 生きている／約定した建玉があれば今日は終わり。拒否・失効だけなら送り直す
-	entries, err := led.EntriesOn(day)
+	// 生きている／約定した建玉の数。再実行は「N − これ」だけを建てる——1 回目が途中で
+	// 落ちても（通信エラー・締め切り）、次の cron が残りを埋める。拒否・失効は数えない
+	placed, err := execute.PlacedToday(env)
 	if err != nil {
 		return err
 	}
-	var already int
-	for _, o := range entries {
-		if !o.IsDryRun() && !o.IsDead() {
-			already++
-		}
+	remainingLong, remainingShort := cfg.Capital.Positions()-placed.Long, 0
+	if cfg.Margin.Enabled && !watchOnly {
+		remainingShort = cfg.Margin.Positions() - placed.Short
 	}
-	if already > 0 {
-		fmt.Printf("今日の建玉は発注済み（%d 件、冪等）。何もしません\n", already)
-		logInfo("daytrade.skip", "発注済み", map[string]any{"reason": "already", "orders": already})
-		return nil
+	if placed.Total() > 0 {
+		if remainingLong <= 0 && remainingShort <= 0 {
+			fmt.Printf("今日の建玉は発注済み（ロング %d / ショート %d 件、冪等）。何もしません\n", placed.Long, placed.Short)
+			logInfo("daytrade.skip", "発注済み", map[string]any{
+				"reason": "already", "orders": placed.Total(), "long": placed.Long, "short": placed.Short})
+			return nil
+		}
+		fmt.Printf("今日は既にロング %d / ショート %d 件を建てています。残り（ロング %d / ショート %d）だけ建てます\n",
+			placed.Long, placed.Short, max(remainingLong, 0), max(remainingShort, 0))
+		logInfo("daytrade.resume", "建玉の残りを建て直す", map[string]any{
+			"long": placed.Long, "short": placed.Short,
+			"remaining_long": max(remainingLong, 0), "remaining_short": max(remainingShort, 0),
+			"symbols": sortedKeys(placed.Symbols),
+		})
 	}
 
 	eligible := p.Eligible()
@@ -169,7 +188,7 @@ func runOpen(opts openOptions) error {
 		symbols = mergeSymbols(symbols, p.Symbols(shortUniverse))
 	}
 
-	received, err := fetchQuotes(cfg, symbols, opts.quoteSource, opts.quoteFile)
+	received, err := fetchQuotes(cfg, symbols, opts.quoteSource, opts.quoteFile, deadline)
 	if err != nil {
 		fmt.Println(err)
 		logError("daytrade.skip", "気配が取れず寄付の買いを見送り", map[string]any{"reason": "no_quotes", "error": err.Error()})
@@ -178,10 +197,15 @@ func runOpen(opts openOptions) error {
 		return nil
 	}
 	quotes, stale, delayed := dtquotes.Fresh(received, cfg.Execution.MaxQuoteAge, now, opts.allowDelayed)
-	if len(stale) > 0 || len(delayed) > 0 {
+	// 気配の時刻（tDPP:T）には今日の日付を当てている。寄り前の銘柄で前日の時刻が返ると
+	// 「今日の 15:30」＝未来として鮮度の検査を素通りする。実機で確かめるまで、除外した
+	// 銘柄の時刻と年齢、未来の時刻を持つ銘柄の数を残す（docs/OPENING_DATA.md「実機で確かめること」）
+	future := dtquotes.FutureStamped(received, now, futureSlack)
+	if len(stale) > 0 || len(delayed) > 0 || len(future) > 0 {
 		logWarn("daytrade.quotes", "使えない気配を除外", map[string]any{
-			"stale": len(stale), "stale_sample": sample(stale),
+			"stale": len(stale), "stale_sample": dtquotes.DescribeAges(received, sample(stale), now),
 			"delayed": len(delayed), "delayed_sample": sample(delayed),
+			"future": len(future), "future_sample": dtquotes.DescribeAges(received, sample(future), now),
 			"max_age_sec": cfg.Execution.MaxQuoteAge,
 		})
 	}
@@ -197,7 +221,10 @@ func runOpen(opts openOptions) error {
 		// signal.skip_opened で外した「既に寄っていた」銘柄の数（設定が偽なら null）
 		"quotes_opened": nil,
 		// margin.spill_to_long でロングに回したショートの余り（円。回さなかった日は null）
-		"spill": nil,
+		"spill":         nil,
+		"already_long":  placed.Long,
+		"already_short": placed.Short,
+		"deadline":      deadlineText(deadline),
 	}
 	finish := func(outcome string, extra map[string]any) {
 		row := map[string]any{}
@@ -208,6 +235,7 @@ func runOpen(opts openOptions) error {
 			row[k] = v
 		}
 		row["outcome"] = outcome
+		row["elapsed_ms"] = clock.NowUTC().Sub(started).Milliseconds()
 		appendHistory(dthistory.KindOpenRun, dthistory.OpenRunFrame(row), day)
 	}
 
@@ -247,7 +275,7 @@ func runOpen(opts openOptions) error {
 	}
 
 	// 様子見モードでは「買うとしたら」の上位を目安の予算で見せる
-	n := cfg.Capital.Positions()
+	n := max(remainingLong, 0)
 	budget := cfg.Capital.BudgetPerOrder()
 	weighting := cfg.Capital.Weighting
 	if watchOnly {
@@ -276,6 +304,10 @@ func runOpen(opts openOptions) error {
 	// 順位付けの直前に気配そのものを落とすので、ロング・ショートの両方に効く
 	// （市場ギャップと危険信号は落とす前の気配で見る——候補全体の分布が変わるため）
 	rankQuotes := quotes
+	if len(placed.Symbols) > 0 {
+		// 同じ日に建てた銘柄は重ねて建てない（再実行は残りの枚数を別の銘柄で埋める）
+		rankQuotes = dtquotes.DropSymbols(rankQuotes, placed.Symbols)
+	}
 	if cfg.Signal.SkipOpened {
 		kept, dropped := dtquotes.DropOpened(quotes)
 		rankQuotes = kept
@@ -305,8 +337,8 @@ func runOpen(opts openOptions) error {
 		shortN       int
 		shortBudget  decimal.Decimal
 	)
-	if shortMultiplier.GreaterThan(decimal.Zero) {
-		shortN = cfg.Margin.Positions()
+	if shortMultiplier.GreaterThan(decimal.Zero) && remainingShort > 0 {
+		shortN = remainingShort
 		shortBudget = cfg.Margin.BudgetPerOrder().Mul(shortMultiplier).Round(0)
 		shortRanking = selection.RankShort(shortUniverse, rankQuotes, cfg.Margin)
 		shortPicks = selection.PickFrom(shortRanking, selection.PickOptions{
@@ -355,6 +387,8 @@ func runOpen(opts openOptions) error {
 		summary["short_multiplier"] = shortMultiplier
 		logRanking(day, "SELL", shortRanking, shortPicks, shortN, shortBudget, verdict.Scale, cfg.Margin.Weighting, len(rankQuotes))
 		picks = append(picks, shortPicks...)
+	} else if cfg.Margin.Enabled && !watchOnly && remainingShort <= 0 && placed.Short > 0 {
+		fmt.Printf("ショート: 発注済み（%d 件）\n", placed.Short)
 	} else if cfg.Margin.Enabled && !watchOnly {
 		fmt.Println("ショート: この日は建てない（倍率 0）")
 	}
@@ -405,6 +439,8 @@ func runOpen(opts openOptions) error {
 		"phase": "open", "live": allowed, "reason": reason,
 		"n": n, "budget": budget.String(), "scale": verdict.Scale,
 		"picks": len(picks), "failures": len(failures),
+		"already_long": placed.Long, "already_short": placed.Short,
+		"elapsed_ms": clock.NowUTC().Sub(started).Milliseconds(), "deadline": deadlineText(deadline),
 	})
 	digest.Note(map[string]any{
 		"phase": "open", "live": allowed, "picks": len(picks), "failures": len(failures),
@@ -427,12 +463,16 @@ func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap
 		}
 		signals.RecentPnL = recent
 	}
-	if cfg.Regime.UsSkipHigh != nil {
-		session, err := usmarketLatest(day)
+	if usmarketNeeded(cfg) {
+		// 前夜の plan が温めたキャッシュを先に見る。取りに行くときも 1 本 8 秒まで——
+		// 寄付の判断に FRED の遅さを持ち込まない（取れなければゲートは効かせない）
+		session, source, err := usmarketLatest(day, usFetchTimeout)
 		if err != nil {
 			// 取得元の障害で寄付の判断を止めない
-			logWarn("daytrade.us_missing", "米国市場の取得に失敗", map[string]any{"error": err.Error()})
-		} else if session != nil {
+			logWarn("daytrade.us_missing", "米国市場の取得に失敗", map[string]any{"error": err.Error(), "source": source})
+		}
+		if session != nil {
+			logInfo("daytrade.us_session", "前夜の米国市場", map[string]any{"source": source, "session": session.Describe()})
 			signals.UsRet = &session.SpxRet
 			// VIX は FRED の公開が S&P500 より 1 日遅れることがある。取れていない日に
 			// 0 を渡すと「VIX が低い」と読まれるので、無いものは無いままにする
@@ -559,8 +599,31 @@ func truncate(text string, limit int) string {
 	return string(runes[:limit])
 }
 
-// fetchQuotes は設定（または上書き）の取得元から気配を取る。
-func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOverride string) (map[string]selection.Quote, error) {
+// usFetchTimeout は寄付の判断で FRED を待つ上限（1 リクエスト）。
+const usFetchTimeout = 8 * time.Second
+
+// futureSlack は気配の時刻が「未来」とみなす余裕（時計のずれぶん）。
+const futureSlack = time.Minute
+
+// deadlineText は締め切りの JST 表記（無ければ空）。
+func deadlineText(deadline time.Time) string {
+	if deadline.IsZero() {
+		return ""
+	}
+	return clock.ToZone(deadline, jst).Format("15:04:05")
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	return keys
+}
+
+// fetchQuotes は設定（または上書き）の取得元から気配を取る。deadline は立花の電文の締め切り。
+func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOverride string, deadline time.Time) (map[string]selection.Quote, error) {
 	name := cfg.Execution.QuoteSource
 	if sourceOverride != "" {
 		name = sourceOverride
@@ -572,11 +635,14 @@ func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOver
 	source, err := dtquotes.New(name, dtquotes.Params{
 		Env: appSettings.Env, Dotenv: appSettings.DotenvMap,
 		StateDir: appSettings.StateDir, QuoteFile: file,
+		Logger: run, Deadline: deadline,
 	})
 	if err != nil {
 		return nil, err
 	}
+	started := clock.NowUTC()
 	found, err := source.Fetch(symbols)
+	elapsed := clock.NowUTC().Sub(started).Milliseconds()
 	if err != nil {
 		return nil, err
 	}
@@ -588,7 +654,7 @@ func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOver
 	}
 	logInfo("daytrade.quotes", "気配を取得", map[string]any{
 		"source": name, "requested": len(symbols), "received": len(found),
-		"missing": len(missing), "missing_sample": sample(missing),
+		"missing": len(missing), "missing_sample": sample(missing), "elapsed_ms": elapsed,
 	})
 	return found, nil
 }

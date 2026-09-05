@@ -63,7 +63,35 @@ func recentPnL(cfg dtconfig.Config, day time.Time, led *dtledger.Ledger) (*float
 	return &total, nil
 }
 
-// usmarketLatest は前夜の米国セッション（S&P500・VIX）。
-func usmarketLatest(day time.Time) (*usmarket.Session, error) {
-	return usmarket.LatestBefore(usmarket.NewFredFetcher(), day)
+// usmarketLatest は前夜の米国セッション（S&P500・VIX）。キャッシュ（data/daytrade/us.json）を
+// 先に見て、無い日だけ FRED へ取りに行く。source は cache / fetched / cache_fallback。
+//
+// timeout は FRED 1 リクエストの待ち時間。寄付の判断（open）は短く、前夜の温め直し（plan）は長く。
+func usmarketLatest(day time.Time, timeout time.Duration) (*usmarket.Session, string, error) {
+	return usmarket.LatestBeforeCached(usmarket.NewFredFetcherWithTimeout(timeout),
+		usmarket.DefaultCachePath(appSettings.DataDir), day)
+}
+
+// usmarketNeeded は米国の信号を使う設定か（休むゲートかショック日の判定のどちらか）。
+func usmarketNeeded(cfg dtconfig.Config) bool {
+	return cfg.Regime.UsSkipHigh != nil || cfg.Regime.ShockUsRet != nil
+}
+
+// warmUsmarket は前夜に米国のキャッシュを温める（open が 9:01 に FRED を待たないため）。
+// 失敗しても plan は成功——朝に取りに行く手が残っている。
+func warmUsmarket(cfg dtconfig.Config, day time.Time) {
+	if !usmarketNeeded(cfg) {
+		return
+	}
+	session, source, err := usmarketLatest(day, 15*time.Second)
+	fields := map[string]any{"day": day.Format(DateLayout), "source": source}
+	if err != nil {
+		fields["error"] = err.Error()
+		logWarn("daytrade.us_warm", "米国市場のキャッシュを温められない（朝に取りに行く）", fields)
+		return
+	}
+	if session != nil {
+		fields["session"] = session.Describe()
+	}
+	logInfo("daytrade.us_warm", "米国市場のキャッシュを温めた", fields)
 }

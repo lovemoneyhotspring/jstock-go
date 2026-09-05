@@ -1,6 +1,7 @@
 // Package usmarket は前夜の米国市場（S&P500・VIX）。寄付前に分かる危険信号の材料。
 //
-// 米国の引けは 6:00 JST。9:00 の open が取りに行く（20:30 の plan には無い）。
+// 米国の引けは 6:00 JST。20:30 の plan がキャッシュを温め、9:00 の open はキャッシュに前日ぶんが
+// 無いときだけ取りに行く（LatestBeforeCached。寄付の判断に FRED の遅さを持ち込まない）。
 // 取得元は FRED（SP500 / VIXCLS の日次終値）。取れなければ nil を返し、ゲートは効かない。
 // バックテスト用に data/daytrade/us.json へ溜める（取得元から取り直せるので data 側）。
 package usmarket
@@ -42,9 +43,13 @@ type Fetcher interface {
 // FredFetcher は FRED（wbcore/data）から終値を取る。
 type FredFetcher struct{ Provider *data.FREDProvider }
 
-// NewFredFetcher は既定のタイムアウトで取得元を作る。
-func NewFredFetcher() *FredFetcher {
-	return &FredFetcher{Provider: data.NewFREDProvider(15 * time.Second)}
+// NewFredFetcher は既定のタイムアウト（15 秒）で取得元を作る。
+func NewFredFetcher() *FredFetcher { return NewFredFetcherWithTimeout(15 * time.Second) }
+
+// NewFredFetcherWithTimeout は 1 リクエストの待ち時間を指定して取得元を作る。
+// 寄付の判断（9:01）では短く、前夜の温め直しでは長く。
+func NewFredFetcherWithTimeout(timeout time.Duration) *FredFetcher {
+	return &FredFetcher{Provider: data.NewFREDProvider(timeout)}
 }
 
 // Closes は FRED の系列 ID（SP500 / VIXCLS）の日付 → 終値。
@@ -139,6 +144,83 @@ func LatestBefore(f Fetcher, day time.Time) (*Session, error) {
 		}
 	}
 	return nil, nil
+}
+
+// 取得元の呼び方（LatestBeforeCached の source）。
+const (
+	// SourceCache はキャッシュに day−1 のセッションがあり、取りに行かなかった。
+	SourceCache = "cache"
+	// SourceFetched は取りに行って取れた（キャッシュも更新した）。
+	SourceFetched = "fetched"
+	// SourceCacheFallback は取りに行って失敗し、キャッシュの最新（day−1 より古い）で代用した。
+	SourceCacheFallback = "cache_fallback"
+)
+
+// LatestBeforeCached は LatestBefore のキャッシュ付き。寄付の判断はこちらを使う。
+//
+// 9:01 に FRED へ取りに行くと、遅い日は待ち時間 × 2 本を寄付の判断に上乗せする。そこで
+//
+//  1. キャッシュに day−1 のセッションがあればそれを返す（それより新しいものは無い）
+//  2. 無ければ取りに行き、取れたらキャッシュに足して返す
+//  3. 取れなければキャッシュの最新（day−1 以前）で代用し、エラーも返す（呼び出し側がログに）
+//
+// 前夜の plan が同じ関数で温めておくと、朝は 1 で済むか、2 でも新しい日だけ足す。
+// FRED の SP500 は翌営業日に更新されるので、朝の時点で day−1 が無いのは普通——
+// その場合は取りに行く（出ていれば拾い、出ていなければ day−2 で判断する）。
+func LatestBeforeCached(f Fetcher, cachePath string, day time.Time) (*Session, string, error) {
+	limit := day.AddDate(0, 0, -1)
+	cached, _ := readCache(cachePath)
+	if s := latestAtOrBefore(SessionsFrom(cached), limit); s != nil && s.Date.Equal(limit) {
+		return s, SourceCache, nil
+	}
+	rows, err := download(f, day.AddDate(0, 0, -14), limit)
+	if err != nil {
+		if s := latestAtOrBefore(SessionsFrom(cached), limit); s != nil {
+			return s, SourceCacheFallback, err
+		}
+		return nil, "", err
+	}
+	merged := mergeCloses(cached, rows)
+	writeCache(cachePath, merged)
+	return latestAtOrBefore(SessionsFrom(merged), limit), SourceFetched, nil
+}
+
+// latestAtOrBefore は limit 以前で最新のセッション。無ければ nil。
+func latestAtOrBefore(sessions []Session, limit time.Time) *Session {
+	for i := len(sessions) - 1; i >= 0; i-- {
+		if !sessions[i].Date.After(limit) {
+			s := sessions[i]
+			return &s
+		}
+	}
+	return nil
+}
+
+// mergeCloses は 2 つの終値の並びを日付で重ね、日付順にする（新しい方が勝つ）。
+func mergeCloses(old, fresh []closes) []closes {
+	byDate := make(map[string]closes, len(old)+len(fresh))
+	for _, r := range old {
+		byDate[r.Date] = r
+	}
+	for _, r := range fresh {
+		byDate[r.Date] = r
+	}
+	out := make([]closes, 0, len(byDate))
+	for _, r := range byDate {
+		out = append(out, r)
+	}
+	slices.SortFunc(out, func(a, b closes) int { return cmpString(a.Date, b.Date) })
+	return out
+}
+
+func cmpString(a, b string) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
 }
 
 // AsOf は東証の日付ごとに、前日以前の最新の米国セッションを当てる（バックテスト用）。

@@ -150,13 +150,25 @@ type Params struct {
 	Dotenv    map[string]string
 	StateDir  string
 	QuoteFile string
+	// Logger は立花の電文の記録先（nil なら stderr に警告だけ）。
+	Logger broker.Logger
+	// Deadline は立花の電文の締め切り（ゼロ値なら無し）。過ぎたら送らない。
+	Deadline time.Time
 }
 
 // New は設定の名前から取得元を組み立てる。
 func New(name string, params Params) (Source, error) {
 	switch name {
 	case "tachibana":
-		return Connect(params.Env, params.Dotenv, params.StateDir)
+		t, err := Connect(params.Env, params.Dotenv, params.StateDir)
+		if err != nil {
+			return nil, err
+		}
+		if params.Logger != nil {
+			t.Broker.SetLogger(params.Logger)
+		}
+		t.Broker.SetDeadline(params.Deadline)
+		return t, nil
 	case "csv":
 		if params.QuoteFile == "" {
 			return nil, fmt.Errorf(`quote_source = "csv" には quote_file が必要です`)
@@ -206,6 +218,49 @@ func DropOpened(quotes map[string]selection.Quote) (kept map[string]selection.Qu
 	}
 	sort.Strings(dropped)
 	return kept, dropped
+}
+
+// DropSymbols は指定の銘柄の気配を落とす（同じ日に既に建てた銘柄を候補から外す）。
+func DropSymbols[V any](quotes map[string]selection.Quote, drop map[string]V) map[string]selection.Quote {
+	kept := make(map[string]selection.Quote, len(quotes))
+	for symbol, q := range quotes {
+		if _, skip := drop[symbol]; skip {
+			continue
+		}
+		kept[symbol] = q
+	}
+	return kept
+}
+
+// FutureStamped は時刻が now より slack を超えて先にある気配の銘柄（昇順）。
+//
+// 立花の現在値時刻（tDPP:T）には今日の日付を当てている。寄り前の銘柄で前日の時刻が
+// 返ると未来の時刻になり、鮮度の検査（Fresh）を素通りする。落とすかどうかは実機で
+// 確かめてから決めるので、ここでは数えて残すだけ。
+func FutureStamped(quotes map[string]selection.Quote, now time.Time, slack time.Duration) []string {
+	var out []string
+	for symbol, q := range quotes {
+		if q.At.After(now.Add(slack)) {
+			out = append(out, symbol)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// DescribeAges は銘柄ごとに「銘柄@時刻(JST) 年齢秒」の 1 行を作る（ログの見本用）。
+// 年齢が負なら時刻が未来。
+func DescribeAges(quotes map[string]selection.Quote, symbols []string, now time.Time) []string {
+	out := make([]string, 0, len(symbols))
+	for _, symbol := range symbols {
+		q, ok := quotes[symbol]
+		if !ok {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s@%s %.0fs", symbol,
+			clock.ToZone(q.At, clock.Tokyo).Format("15:04:05"), now.Sub(q.At).Seconds()))
+	}
+	return out
 }
 
 func field(record []string, index map[string]int, name string) string {

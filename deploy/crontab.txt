@@ -5,7 +5,8 @@
 # 方針（docs/DEPLOY.md）:
 #   - 固定間隔で叩き続ける。時間帯の判定は各コマンドの中で完結する
 #   - 開始の分は互いにずらす（J-Quants のレート制限と、同じファイルへの同時書き込みを避ける）
-#   - flock -n で同じジョブの重なりを防ぐ
+#   - flock -n で同じジョブの重なりを防ぐ。発注経路（daytrade snap / open / close / verify）は
+#     deploy/with-lock.sh 経由——ロックを取れずに見送った回もログに残す
 #   - --live が無い行は判断と記録だけで注文を出さない（dry-run）
 #   - 実行の要約は state/digest/<env>-<日付>.jsonl に 1 行ずつ溜まる（docs/FEEDBACK.md）
 #
@@ -69,9 +70,11 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 資格情報が無いと 1 日 10 回、接続失敗のログが溜まるだけになる。発注経路（下のブロック）とは
 # 別で、snap は板を読むだけなので**実機検証を待たずに開けてよい**——むしろ発注を開けるまでの
 # 期間がそのまま観測期間になる。1 日遅らせれば 1 日ぶん永久に欠ける
-#30,45,55,59 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin >> state/logs/daytrade-snap.log 2>&1
-#0,2,5,10 9 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin >> state/logs/daytrade-snap.log 2>&1
-#0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin >> state/logs/daytrade-snap.log 2>&1
+# snap は待たない（wait 0）。open / close が握っていれば見送る（発注が優先）。snap 自身は
+# book.max_run_seconds（50 秒）で切れるので、9:00 の snap が 9:01 の open を長く塞ぐことはない
+#30,45,55,59 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+#0,2,5,10 9 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+#0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 
 # --- 判断の妥当性（改善ループ。docs/FEEDBACK.md）---------------------------------
 # スイング: スクリーニングの結果に 20 営業日後の終値を当てる。採用・次点・圏外を比べる
@@ -106,12 +109,18 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 0 6 * * *       cd $WBJP_HOME && flock -n /tmp/night-repair.lock $WBJP_HOME/deploy/night-repair.sh >> state/logs/night-repair.log 2>&1
 
 # --- 発注経路（立花証券の認証情報を入れたら有効化。まず --live 無しで数日回す）-------------
-# 9:01・9:04・9:07: 気配でギャップ下位 N（ロング）／上位（ショート）を寄付で建てる
-#1,4,7 9 * * 1-5     cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes >> state/logs/daytrade-open.log   2>&1
+# ロックは deploy/with-lock.sh で取る（取れずに見送った回もログに残る。flock -n は無言で消える）。
+# open / close は 30 秒までロックを待つ——snap が握っていても少し待てば取れる。
+# 1 回の実行は execution.max_run_seconds（150 秒）と時間帯の終わりで切れるので、前の回が
+# 遅くても次の回は始められる。送れなかった分は次の回が「残りの枚数」として建て直す
+#
+# 9:01・9:04・9:07・9:10・9:13: 気配でギャップ下位 N（ロング）／上位（ショート）を寄付で建てる。
+# 窓は 9:15 まで。前の回が全部建てていれば以降は何もしない（冪等）
+#1,4,7,10,13 9 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
 # 15:20・15:24・15:28: 当日建てた分を返済（1 回目で済めば以降は何もしない）
-#20,24,28 15 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin --live --yes >> state/logs/daytrade-close.log  2>&1
+#20,24,28 15 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-close.log $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin --live --yes
 # 15:40: 返済が全部約定したかを照会し、持ち越しを通知
-#40 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin             >> state/logs/daytrade-verify.log 2>&1
+#40 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-verify.log $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin
 # スイング売買（日足・大引け後 1 回で足りるが、固定間隔でも無害）
 #*/20 * * * *        cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  $WBJP_BIN/wbjp  run --config-dir config --live --yes >> state/logs/wbjp-run.log  2>&1
 # 積立（発注時間帯 14:00〜15:00 の外では自動でスキップ）

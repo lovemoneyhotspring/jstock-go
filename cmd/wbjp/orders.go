@@ -5,7 +5,6 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
 	"github.com/spf13/cobra"
 )
@@ -20,7 +19,7 @@ func newOrdersCmd() *cobra.Command {
 				return err
 			}
 
-			b, err := cli.ConnectBroker(setCfg.Execution.Broker, appSettings)
+			b, err := run.ConnectBroker(setCfg.Execution.Broker, appSettings)
 			if err != nil {
 				return err
 			}
@@ -63,7 +62,7 @@ func newCancelCmd() *cobra.Command {
 				return err
 			}
 
-			b, err := cli.ConnectBroker(setCfg.Execution.Broker, appSettings)
+			b, err := run.ConnectBroker(setCfg.Execution.Broker, appSettings)
 			if err != nil {
 				return err
 			}
