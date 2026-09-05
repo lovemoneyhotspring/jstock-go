@@ -26,8 +26,9 @@ func newStatusCmd() *cobra.Command {
 			tz := clock.MustZone(appSettings.Timezone)
 			fmt.Printf("蓄積の状況（%s）\n", jquantsDir)
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "端点\t月数\t最古\t最新\t最終取得\t一括")
-			for _, ep := range archive.StandardEndpoints {
+			// 「ファイル」は月分割なら月数、日分割（分足）なら日数
+			fmt.Fprintln(w, "端点\tファイル\t最古\t最新\t最終取得\t一括")
+			for _, ep := range archive.ActiveEndpoints() {
 				// 台帳の件数ではなく Parquet の実体を数える（実データの有無が知りたい）
 				months := s.ingestor.Archive.Months(ep)
 				oldest, latest := "", ""

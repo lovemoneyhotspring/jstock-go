@@ -19,6 +19,8 @@
 package history
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/plan"
@@ -37,7 +39,16 @@ const (
 	KindRanking    = "ranking"
 	KindOpenRun    = "open_run"
 	KindEvaluation = "evaluation"
+	KindBook       = "book"
 )
+
+// BookFixedColumns は板の記録の先頭に必ず付く列。この後ろに時価問合の応答の列が続く。
+var BookFixedColumns = []history.Column{
+	// slot は観測の時刻帯（JST の HHMM）。同じ日の複数回を並べるための鍵。
+	{Name: "slot", Type: history.TypeString},
+	{Name: "symbol", Type: history.TypeString},
+	{Name: "observed_at", Type: history.TypeTimestamp},
+}
 
 // PlanSchema は母集団 1 銘柄の列。
 var PlanSchema = []history.Column{
@@ -196,6 +207,66 @@ func QuotesFrame(received map[string]selection.Quote, usable map[string]selectio
 		rows = append(rows, row)
 	}
 	return history.NewFrame(QuotesSchema, rows)
+}
+
+// BookFrame は時価問合の応答をそのまま表にする（1 行 = 1 銘柄 × 1 観測時刻）。
+//
+// 列は**応答のキーから作り、値はすべて文字列**にする。J-Quants アーカイブと同じ流儀で、
+// 解釈は読むときに回す（`docs/JQUANTS_ARCHIVE.md` の「生のまま残す」）。立花が返す列が
+// 増えても、設定に列名を足すだけでこの関数は直さずに済む——10 年ぶんの記録の途中で
+// 列が増減しても、追記専用の Parquet を union_by_name で読めば全部繋がる。
+//
+// sIssueCode（銘柄コード）だけは symbol として先頭に立てる。突き合わせの鍵なので、
+// 応答の並びに関係なく同じ場所にある方がよい。
+func BookFrame(rows []map[string]any, slot string, observedAt time.Time) history.Frame {
+	names := map[string]struct{}{}
+	for _, row := range rows {
+		for name := range row {
+			names[name] = struct{}{}
+		}
+	}
+	extra := make([]string, 0, len(names))
+	for name := range names {
+		extra = append(extra, name)
+	}
+	sortStrings(extra)
+
+	columns := make([]history.Column, 0, len(BookFixedColumns)+len(extra))
+	columns = append(columns, BookFixedColumns...)
+	for _, name := range extra {
+		columns = append(columns, history.Column{Name: name, Type: history.TypeString})
+	}
+
+	at := clock.EnsureUTC(observedAt)
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		record := map[string]any{
+			"slot": slot, "symbol": bookText(row["sIssueCode"]), "observed_at": at,
+		}
+		for _, name := range extra {
+			value, ok := row[name]
+			if !ok {
+				record[name] = nil
+				continue
+			}
+			record[name] = bookText(value)
+		}
+		out = append(out, record)
+	}
+	return history.NewFrame(columns, out)
+}
+
+// bookText は応答の値を文字列にする。空・"*"（値無し）は nil にして、
+// 「取れなかった」と「0 だった」を後から見分けられるようにする。
+func bookText(value any) any {
+	if value == nil {
+		return nil
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" || text == "*" || text == "<nil>" {
+		return nil
+	}
+	return text
 }
 
 // RankingFrame は順位表の全行に、選ばれた銘柄の株数・金額を付ける。

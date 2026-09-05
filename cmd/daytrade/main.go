@@ -42,6 +42,7 @@ func main() {
 	rootCmd.AddCommand(newTradesCmd())
 	rootCmd.AddCommand(newStatusCmd())
 	rootCmd.AddCommand(newQuotesCmd())
+	rootCmd.AddCommand(newSnapCmd())
 	rootCmd.AddCommand(newBacktestCmd())
 	rootCmd.AddCommand(cli.NewPendingCmd("daytrade", appSettings.DaytradeDBPath))
 

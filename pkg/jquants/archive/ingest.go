@@ -210,26 +210,44 @@ func (i *Ingestor) backfillOne(ep Endpoint, key, target, stamp string, keepRaw b
 			return fmt.Errorf("生ファイルを保存できません %s: %w", raw, err)
 		}
 	}
-	frame, err := CSVToFrame(payload, ep)
-	if err != nil {
-		return err
-	}
-	changed, err := i.Archive.Upsert(ep, frame)
-	if err != nil {
-		return err
+	rows, changed := 0, 0
+	if ep.Split == SplitDay {
+		// 一括の月次ファイルは 1 か月 960 万行あり、丸ごと Frame に載せると 3.8GB になる。
+		// 日付順に並んでいるので、日ごとに区切って書けば常駐は 1 日ぶんで済む
+		err = CSVToFramesByDay(payload, ep, func(f *Frame) error {
+			n, err := i.Archive.Upsert(ep, f)
+			if err != nil {
+				return err
+			}
+			rows += f.Height()
+			changed += n
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	} else {
+		frame, err := CSVToFrame(payload, ep)
+		if err != nil {
+			return err
+		}
+		if changed, err = i.Archive.Upsert(ep, frame); err != nil {
+			return err
+		}
+		rows = frame.Height()
 	}
 	// 一括は LastModified を digest に入れ、変わらなければ次回飛ばす
 	if err := i.Ledger.Record(IngestRecord{
 		Endpoint: ep.Path, Target: target, Source: "bulk",
-		Rows: frame.Height(), Changed: changed, Digest: stamp, RunID: i.RunID,
+		Rows: rows, Changed: changed, Digest: stamp, RunID: i.RunID,
 	}); err != nil {
 		return err
 	}
 	i.info("jquants.ingest", fmt.Sprintf("一括取り込み %s %s", ep.Path, target), map[string]any{
 		"endpoint": ep.Path, "target": target, "source": "bulk",
-		"rows": frame.Height(), "changed": changed,
+		"rows": rows, "changed": changed,
 	})
-	into.Ingests = append(into.Ingests, Ingest{ep.Path, target, "bulk", frame.Height(), changed})
+	into.Ingests = append(into.Ingests, Ingest{ep.Path, target, "bulk", rows, changed})
 	return nil
 }
 
@@ -277,7 +295,7 @@ func (i *Ingestor) Plan(now time.Time, lookbackDays int) ([]Job, error) {
 	now = now.UTC()
 	today := truncateDay(now.In(clock.Tokyo))
 	var jobs []Job
-	for _, ep := range StandardEndpoints {
+	for _, ep := range ActiveEndpoints() {
 		switch ep.Mode {
 		case ModeAll:
 			target := today.Format(dateLayout)
@@ -327,14 +345,14 @@ func (i *Ingestor) Plan(now time.Time, lookbackDays int) ([]Job, error) {
 			backfilling := lookbackDays >= 0
 			covered := map[string]bool{}
 			if backfilling {
-				covered, err = i.BulkMonths(ep)
+				covered, err = i.BulkCoverage(ep)
 				if err != nil {
 					return nil, err
 				}
 			}
 			for _, day := range days {
 				// 一括で取り込み済みの月を日付で叩き直さない
-				if backfilling && covered[day.Format("2006-01")] {
+				if backfilling && covers(covered, day) {
 					continue
 				}
 				target := day.Format(dateLayout)
@@ -438,25 +456,37 @@ func (i *Ingestor) try(result *SyncResult, ep Endpoint, target string, params ma
 
 // -- 確認 ---------------------------------------------------------------
 
-// BulkMonths は一括ダウンロードで取り込み済みの月（YYYY-MM）。
+// BulkCoverage は一括ダウンロードで取り込み済みの範囲。
 //
-// 一括の月ファイルはその月の全営業日を含むので、この月に属する日は日次の
-// 取り込み記録が無くても「取得済み」とみなす。遡り（--days）と欠け判定が、
-// 一括で埋まった 10 年ぶんを日付で叩き直すのを防ぐ。
-func (i *Ingestor) BulkMonths(ep Endpoint) (map[string]bool, error) {
+// J-Quants の一括は**過去が月次、当月が日次**で配られる（実機で確認、2026-09）:
+//
+//	equities/bars/minute/historical/2026/equities_bars_minute_202608.csv.gz   月次
+//	equities/bars/minute/live/equities_bars_minute_20260904.csv.gz            日次
+//
+// 月次ファイルはその月の全営業日を含むので "2026-08"（月）を、日次ファイルは
+// "2026-09-04"（日）を返す。日次ファイルを月として扱うと「1 日ぶんしか無いのに
+// 月全体が取得済み」になり、当月の欠けを検出できなくなる。
+//
+// これで遡り（--days）と欠け判定は、一括で埋まったぶんを日付で叩き直さずに済む。
+func (i *Ingestor) BulkCoverage(ep Endpoint) (map[string]bool, error) {
 	targets, err := i.Ledger.Targets(ep)
 	if err != nil {
 		return nil, err
 	}
-	months := map[string]bool{}
+	covered := map[string]bool{}
 	for _, target := range targets {
 		if len(target) > 5 && target[:5] == "bulk:" {
-			if m := monthIn(target); m != "" {
-				months[m] = true
+			if c := coverageIn(target); c != "" {
+				covered[c] = true
 			}
 		}
 	}
-	return months, nil
+	return covered, nil
+}
+
+// covers は一括で取り込み済みの範囲に day が入っているか（月ファイルでも日ファイルでも）。
+func covers(covered map[string]bool, day time.Time) bool {
+	return covered[day.Format("2006-01")] || covered[day.Format(dateLayout)]
 }
 
 // Gaps は期間内の営業日のうち、取れているはずなのに無い日。
@@ -491,7 +521,7 @@ func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]tim
 	for _, t := range targets {
 		fetched[t] = true
 	}
-	covered, err := i.BulkMonths(ep)
+	covered, err := i.BulkCoverage(ep)
 	if err != nil {
 		return nil, err
 	}
@@ -507,7 +537,7 @@ func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]tim
 	var missing []time.Time
 	for _, d := range days {
 		iso := d.Format(dateLayout)
-		if have[iso] || fetched[iso] || covered[d.Format("2006-01")] {
+		if have[iso] || fetched[iso] || covers(covered, d) {
 			continue
 		}
 		if now.Before(ep.AvailableAt.On(d, clock.Tokyo).UTC()) {
@@ -539,12 +569,29 @@ func weekdays(start, end time.Time) []time.Time {
 var monthPattern = regexp.MustCompile(`(20\d{2})(\d{2})`)
 
 // monthIn は "…_202501.csv.gz" から "2025-01" を取り出す。無ければ空文字。
+// 日次ファイル（"…_20250107.csv.gz"）でもその月を返す（Backfill の since 比較用）。
 func monthIn(key string) string {
 	m := monthPattern.FindStringSubmatch(filepath.Base(key))
 	if m == nil {
 		return ""
 	}
 	return m[1] + "-" + m[2]
+}
+
+// coveragePattern は一括ファイル名の日付。月次は 6 桁（202608）、日次は 8 桁（20260904）。
+var coveragePattern = regexp.MustCompile(`_(20\d{2})(\d{2})(\d{2})?\.`)
+
+// coverageIn は一括ファイル 1 つが覆う範囲。月次なら "2026-08"、日次なら "2026-09-04"。
+// 読み取れなければ空文字。
+func coverageIn(key string) string {
+	m := coveragePattern.FindStringSubmatch(filepath.Base(key))
+	if m == nil {
+		return ""
+	}
+	if m[3] == "" {
+		return m[1] + "-" + m[2]
+	}
+	return m[1] + "-" + m[2] + "-" + m[3]
 }
 
 func asString(v any) string {

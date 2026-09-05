@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Archive は data/jquants/ の読み書き。1 端点 = 1 ディレクトリ、1 月 = 1 ファイル。
+// Archive は data/jquants/ の読み書き。1 端点 = 1 ディレクトリ、1 月（分足は 1 日）= 1 ファイル。
 type Archive struct {
 	Root string
 }
@@ -36,12 +36,13 @@ func (a *Archive) Directory(ep Endpoint) string {
 	return filepath.Join(a.Root, ep.Name())
 }
 
-// PathFor は端点 × 月（YYYY-MM）の Parquet の場所。
+// PathFor は端点 × 月（YYYY-MM）／日（YYYY-MM-DD）の Parquet の場所。
 func (a *Archive) PathFor(ep Endpoint, month string) string {
 	return filepath.Join(a.Directory(ep), month+".parquet")
 }
 
-// Months は保存済みの月（YYYY-MM）。Parquet の実体を走査する。
+// Months は保存済みのファイル名（月分割なら YYYY-MM、日分割なら YYYY-MM-DD）。
+// Parquet の実体を走査する。
 func (a *Archive) Months(ep Endpoint) []string {
 	entries, err := os.ReadDir(a.Directory(ep))
 	if err != nil {
@@ -171,14 +172,15 @@ func (a *Archive) ReadWhere(ep Endpoint, opt ReadOptions) (*Frame, error) {
 	return concatDiagonal(frames...), nil
 }
 
-// monthsIn は期間に重なる月ファイル（YYYY-MM）を昇順で返す。
+// monthsIn は期間に重なるファイル（月分割なら YYYY-MM、日分割なら YYYY-MM-DD）を
+// 昇順で返す。どちらも辞書順が日付順なので、同じ比較で絞れる。
 func (a *Archive) monthsIn(ep Endpoint, start, end time.Time) []string {
 	var wanted []string
 	for _, m := range a.Months(ep) {
-		if !start.IsZero() && m < start.Format("2006-01") {
+		if !start.IsZero() && m < ep.partOfTime(start) {
 			continue
 		}
-		if !end.IsZero() && m > end.Format("2006-01") {
+		if !end.IsZero() && m > ep.partOfTime(end) {
 			continue
 		}
 		wanted = append(wanted, m)
@@ -283,21 +285,25 @@ func (a *Archive) Upsert(ep Endpoint, f *Frame) (int, error) {
 	if len(missing) > 0 {
 		return 0, fmt.Errorf("%s の行に鍵の列がありません: %v", ep.Path, missing)
 	}
-	// 月ごとに分ける。日付が取れない行は落とす（どの月に置くか決まらない）
-	byMonth := map[string]*Frame{}
+	// ファイルごとに分ける（月分割なら月、日分割なら日）。
+	// 日付が取れない行は落とす（どのファイルに置くか決まらない）
+	byPart := map[string]*Frame{}
 	var order []string
 	dateIdx := f.col(ep.DateColumn)
 	for _, row := range f.Rows {
 		v := cell(row, dateIdx)
-		if v == nil || len(*v) < 7 {
+		if v == nil {
 			continue
 		}
-		month := (*v)[:7]
-		part, ok := byMonth[month]
+		name := ep.partOf(*v)
+		if name == "" {
+			continue
+		}
+		part, ok := byPart[name]
 		if !ok {
 			part = &Frame{Columns: append([]string(nil), f.Columns...)}
-			byMonth[month] = part
-			order = append(order, month)
+			byPart[name] = part
+			order = append(order, name)
 		}
 		part.Rows = append(part.Rows, row)
 	}
@@ -307,8 +313,8 @@ func (a *Archive) Upsert(ep Endpoint, f *Frame) (int, error) {
 	}
 	defer unlock()
 	changed := 0
-	for _, month := range order {
-		n, err := a.upsertMonth(ep, month, byMonth[month])
+	for _, name := range order {
+		n, err := a.upsertPart(ep, name, byPart[name])
 		if err != nil {
 			return changed, err
 		}
@@ -337,29 +343,34 @@ func (a *Archive) lock(ep Endpoint) (func(), error) {
 	}, nil
 }
 
-func (a *Archive) upsertMonth(ep Endpoint, month string, new *Frame) (int, error) {
-	path := a.PathFor(ep, month)
+// upsertPart は 1 ファイルぶんを書く。part は月分割なら "YYYY-MM"、日分割なら "YYYY-MM-DD"。
+//
+// 月分割は既存を読んで鍵で後勝ちに合流する（速報→確報、過誤訂正がこれで片付く）。
+// 日分割は**既存を読まずに丸ごと差し替える**——取得の単位（date= の 1 日ぶん）と
+// ファイルの単位が一致するので、新しく取ったものが常にその日の全体になる。
+// 分足は月 2,400 万行あり、毎日読み直して書き戻すと月末ほど重くなる。
+func (a *Archive) upsertPart(ep Endpoint, part string, new *Frame) (int, error) {
+	path := a.PathFor(ep, part)
 	new = dedupeLast(new, ep.Key)
-	var merged *Frame
-	changed := 0
-	if _, err := os.Stat(path); err == nil {
-		old, err := readParquet(path)
-		if err != nil {
-			return 0, err
+	merged := new
+	changed := new.Height()
+	if ep.Split != SplitDay {
+		if _, err := os.Stat(path); err == nil {
+			old, err := readParquet(path)
+			if err != nil {
+				return 0, err
+			}
+			merged = concatDiagonal(old, new)
+			changed = countChanged(old, new, ep.Key)
 		}
-		merged = concatDiagonal(old, new)
-		changed = countChanged(old, new, ep.Key)
-	} else {
-		merged = new
-		changed = new.Height()
+		merged = dedupeLast(merged, ep.Key)
 	}
-	merged = dedupeLast(merged, ep.Key)
 	sortByKey(merged, ep.Key)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return 0, fmt.Errorf("保存先を作れません %s: %w", filepath.Dir(path), err)
 	}
 	tmp := path + ".tmp"
-	if err := writeParquet(tmp, merged, ep.dateColumnSet()); err != nil {
+	if err := writeParquet(tmp, merged, ep.columnKinds()); err != nil {
 		return 0, err
 	}
 	if err := os.Rename(tmp, path); err != nil {

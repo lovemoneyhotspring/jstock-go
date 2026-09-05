@@ -105,8 +105,37 @@ type MarketPrice struct {
 //
 // 寄付後は始値（pDOP）、寄り前は現在値（pDPP）が気配になる。どちらを使うかは
 // 呼び出し側（daytrade/quotes）の判断なので、ここでは両方そのまま返す。
-// 1 リクエスト 120 銘柄までなので、それを超える分は分割して送る。
 func (t *TachibanaBroker) MarketPrices(symbols []string) (map[string]MarketPrice, error) {
+	rows, err := t.MarketPricesRaw(symbols, MarketPriceColumns)
+	if err != nil {
+		return nil, err
+	}
+	found := make(map[string]MarketPrice, len(rows))
+	for _, row := range rows {
+		symbol := strings.TrimSpace(fmt.Sprint(row["sIssueCode"]))
+		if symbol == "" || symbol == "<nil>" {
+			continue
+		}
+		found[symbol] = MarketPrice{
+			Symbol:    symbol,
+			Open:      priceDecimal(row["pDOP"]),
+			Last:      priceDecimal(row["pDPP"]),
+			PrevClose: priceDecimal(row["pPRP"]),
+			At:        priceTime(row["tDPP:T"]),
+		}
+	}
+	return found, nil
+}
+
+// MarketPricesRaw は時価問合の応答を**そのまま**返す（1 要素 = 1 銘柄）。
+//
+// 板の列を増やすときに「その列名が実際に何を返すか」を確かめる口。解釈を挟まないので、
+// 仕様書に無い列も、値が空（"*"）で返る列も、そのまま見える。columns が空なら
+// MarketPriceColumns。1 リクエスト 120 銘柄までなので、それを超える分は分割して送る。
+func (t *TachibanaBroker) MarketPricesRaw(symbols []string, columns string) ([]map[string]any, error) {
+	if strings.TrimSpace(columns) == "" {
+		columns = MarketPriceColumns
+	}
 	wanted := make([]string, 0, len(symbols))
 	seen := map[string]struct{}{}
 	for _, s := range symbols {
@@ -121,7 +150,7 @@ func (t *TachibanaBroker) MarketPrices(symbols []string) (map[string]MarketPrice
 		wanted = append(wanted, s)
 	}
 
-	found := make(map[string]MarketPrice, len(wanted))
+	found := make([]map[string]any, 0, len(wanted))
 	for start := 0; start < len(wanted); start += MarketPriceBatch {
 		end := min(start+MarketPriceBatch, len(wanted))
 		batch := wanted[start:end]
@@ -132,7 +161,7 @@ func (t *TachibanaBroker) MarketPrices(symbols []string) (map[string]MarketPrice
 		}
 		res, err := t.postPriceRequest(clmMarketPrice, map[string]any{
 			"sTargetIssueCode": strings.Join(batch, ","),
-			"sTargetColumn":    MarketPriceColumns,
+			"sTargetColumn":    columns,
 		})
 		if err != nil {
 			return nil, &BrokerError{Message: fmt.Sprintf("立花証券の時価取得に失敗しました: %v", err)}
@@ -143,17 +172,7 @@ func (t *TachibanaBroker) MarketPrices(symbols []string) (map[string]MarketPrice
 			if !ok {
 				continue
 			}
-			symbol := strings.TrimSpace(fmt.Sprint(row["sIssueCode"]))
-			if symbol == "" || symbol == "<nil>" {
-				continue
-			}
-			found[symbol] = MarketPrice{
-				Symbol:    symbol,
-				Open:      priceDecimal(row["pDOP"]),
-				Last:      priceDecimal(row["pDPP"]),
-				PrevClose: priceDecimal(row["pPRP"]),
-				At:        priceTime(row["tDPP:T"]),
-			}
+			found = append(found, row)
 		}
 	}
 	return found, nil

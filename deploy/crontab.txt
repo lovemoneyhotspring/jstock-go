@@ -21,39 +21,64 @@ WBJP_HOME=/home/abobo/jstock-go
 WBJP_BIN=/home/abobo/jstock-go/bin
 
 # --- データ ------------------------------------------------------------------
-# J-Quants のメモリ（docs/JQUANTS_ARCHIVE.md「メモリ」）:
-#   JQUANTS_READ_BUDGET_MB … 1 回の読み出しが Frame に載せていい量。超えたら
+# メモリの上限（docs/JQUANTS_ARCHIVE.md「メモリ」）。このマシンの実メモリは 11GiB。
+# **J-Quants のアーカイブか DuckDB を触るコマンドには全部渡す**——3 つは効く層が違う:
+#   JQUANTS_READ_BUDGET_MB … 1 回の読み出しが Go の Frame に載せていい量。超えたら
 #                            OOM で殺される代わりに、何を絞れば通るかを書いたエラーで止まる
 #   GOMEMLIMIT             … Go のヒープの上限（soft）。ここに近づくと GC が先に頑張る
 #   GOGC                   … 上限に余裕があるうちは GC を控える（=速い）。GOMEMLIMIT が天井を守る
+#   WBJP_DUCKDB_MEMORY_LIMIT … DuckDB の上限。**Go のヒープの外**なので上の 3 つが届かない。
+#                            渡さないとシステムメモリの 80%（9.3GiB）になる。daytrade backtest
+#                            （10 年のパネル）は実測 6.5GB で、ここが唯一の柵。超えたら
+#                            DuckDB は一時ファイルにスピルするだけで落ちない
 # `env $JQ_MEM` で渡す。$JQ_MEM を直に置くと、展開後の "A=1" は代入ではなく
 # コマンド名として扱われてしまう（sh は代入プレフィックスを展開前に決める）
-JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=3GiB GOGC=400
+JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_LIMIT=3GB
 # J-Quants: 台帳とカレンダーを見て必要な端点・日付だけ取る（冪等）。16:30〜の更新を 30 分刻みで拾う
 13,43 * * * *   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/jquants.lock   $WBJP_BIN/jquants sync                         >> state/logs/jquants-sync.log     2>&1
 # 月初に一括ダウンロードで取りこぼしを埋める（更新分だけ取る）
 50 3 2-5 * *    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/jquants.lock   $WBJP_BIN/jquants backfill                     >> state/logs/jquants-backfill.log 2>&1
-# 営業日ごとの欠けを監視（WBJP_ALERT_CHANNEL_ID があれば Discord に通知）
-0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM                          $WBJP_BIN/jquants check --notify                   >> state/logs/jquants-check.log    2>&1
+# 分足（有料アドオン。docs/JQUANTS_ARCHIVE.md「分足（アドオン）」）。契約済みで、過去 2 年ぶんは
+# 2026-09-05 に取り込み済み。**履歴は 2 年**しかないので、この行を止めると窓が前から欠けていく。
+# 1 日 47 万行・4.7MB。JQUANTS_MINUTE_BARS が無いと ActiveEndpoints に載らない（sync が何もしない）
+25 17 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_MINUTE_BARS=1 flock -n /tmp/jquants.lock $WBJP_BIN/jquants sync --only equities_bars_minute >> state/logs/jquants-minute.log 2>&1
+# 営業日ごとの欠けを監視（WBJP_ALERT_CHANNEL_ID があれば Discord に通知）。
+# 分足も見るので JQUANTS_MINUTE_BARS が要る（無いと ActiveEndpoints に載らず、欠けても黙る）
+0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_MINUTE_BARS=1    $WBJP_BIN/jquants check --notify                   >> state/logs/jquants-check.log    2>&1
 # スイング売買の銘柄の日足を J-Quants アーカイブから揃える（wbjp screen / backtest の材料）
-5 19 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-data.lock $WBJP_BIN/wbjp data sync --config-dir config               >> state/logs/wbjp-data-sync.log   2>&1
-10 19 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod                              $WBJP_BIN/wbjp data check --config-dir config --notify     >> state/logs/wbjp-data-check.log  2>&1
+5 19 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/wbjp-data.lock $WBJP_BIN/wbjp data sync --config-dir config               >> state/logs/wbjp-data-sync.log   2>&1
+10 19 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM                  $WBJP_BIN/wbjp data check --config-dir config --notify     >> state/logs/wbjp-data-check.log  2>&1
 # 積立の銘柄と判定用指数（J-Quants / FRED）
-15 19 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/accum-data.lock $WBJP_BIN/accum sync                                      >> state/logs/accum-sync.log       2>&1
+15 19 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/accum-data.lock $WBJP_BIN/accum sync                                      >> state/logs/accum-sync.log       2>&1
 
 # --- 銘柄選定（デイトレ）----------------------------------------------------------
 # 前夜 20:30: 翌営業日の母集団を state/daytrade/plan-<日付>.parquet に保存（ロング＋ショート）
-30 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock  $WBJP_BIN/daytrade plan --config-dir config/daytrade_margin >> state/logs/daytrade-plan.log    2>&1
+30 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade plan --config-dir config/daytrade_margin >> state/logs/daytrade-plan.log    2>&1
 # 20:20（日足の取り込み後、plan の前）: 朝の候補（選んだ銘柄も次点も）に当日の日足を当てて結果を履歴に残す。
 # 9:00 の順位表が無い日は plan × 始値で順位を作り直して評価する。妥当性の確認は `daytrade review`
-20 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
+20 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
+
+# --- 板・気配の記録（docs/OPENING_DATA.md）----------------------------------------
+# 発注しない。今の選定はギャップ 1 変数しか見ておらず、「どんな気配なら勝率が上がるか」に
+# 答えるデータが無い。板は過去に遡れない（J-Quants の分足にもティックにも板も無い）ので、
+# 発注経路を開ける前から溜め始める。1 日止めれば 1 日ぶん永久に欠ける。
+# ロックは open / close と**共有**する。時価問合のレート制限（4 回/秒）はプロセス内なので、
+# 同時に走ると発注側が弾かれうる。取れなければ snap は何もせずに終わる（発注が優先）。
+#
+# **開けるのは .env に TACHIBANA_* を入れてから**（`wbjp credentials check` が通ってから）。
+# 資格情報が無いと 1 日 10 回、接続失敗のログが溜まるだけになる。発注経路（下のブロック）とは
+# 別で、snap は板を読むだけなので**実機検証を待たずに開けてよい**——むしろ発注を開けるまでの
+# 期間がそのまま観測期間になる。1 日遅らせれば 1 日ぶん永久に欠ける
+#30,45,55,59 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin >> state/logs/daytrade-snap.log 2>&1
+#0,2,5,10 9 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin >> state/logs/daytrade-snap.log 2>&1
+#0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin >> state/logs/daytrade-snap.log 2>&1
 
 # --- 判断の妥当性（改善ループ。docs/FEEDBACK.md）---------------------------------
 # スイング: スクリーニングの結果に 20 営業日後の終値を当てる。採用・次点・圏外を比べる
 #（`wbjp review` で日別に並ぶ）。日足の取り込み後に回す
-25 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-eval.lock  $WBJP_BIN/wbjp  evaluate --config-dir config >> state/logs/wbjp-evaluate.log  2>&1
+25 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/wbjp-eval.lock  $WBJP_BIN/wbjp  evaluate --config-dir config >> state/logs/wbjp-evaluate.log  2>&1
 # 積立: 増額した日は本当に安かったか（倍率の帯ごと。対照群は倍率 1.0 の日）。週 1 で足りる
-35 20 * * 5     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/accum-eval.lock $WBJP_BIN/accum evaluate >> state/logs/accum-evaluate.log 2>&1
+35 20 * * 5     cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/accum-eval.lock $WBJP_BIN/accum evaluate >> state/logs/accum-evaluate.log 2>&1
 
 # --- レポート（Discord）--------------------------------------------------------
 # 日次・週次・月次はどれも deploy/report.sh が生成と配達をする。Discord
@@ -82,7 +107,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=3GiB GOGC=400
 
 # --- 発注経路（立花証券の認証情報を入れたら有効化。まず --live 無しで数日回す）-------------
 # 9:01・9:04・9:07: 気配でギャップ下位 N（ロング）／上位（ショート）を寄付で建てる
-#1,4,7 9 * * 1-5     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes >> state/logs/daytrade-open.log   2>&1
+#1,4,7 9 * * 1-5     cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes >> state/logs/daytrade-open.log   2>&1
 # 15:20・15:24・15:28: 当日建てた分を返済（1 回目で済めば以降は何もしない）
 #20,24,28 15 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin --live --yes >> state/logs/daytrade-close.log  2>&1
 # 15:40: 返済が全部約定したかを照会し、持ち越しを通知

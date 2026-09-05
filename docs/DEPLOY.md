@@ -113,14 +113,44 @@ crontab の内容は [`deploy/crontab.txt`](../deploy/crontab.txt) に置いて�
 発注経路の行は立花証券の認証情報を入れるまでコメントアウトしてあり、データ取得・監視・
 前夜の候補作成（`daytrade plan`）だけが回る。
 
+crontab には**暗号資産の他ジョブと rcguard が同居している**（合わせて 190 行超）。
+`grep -v` で jstock-go の行を落とす形だと、コメント行や `WBJP_HOME=` の定義が取りこぼされて
+二重に入る。**ブロックごと差し替える**のが確実:
+
 ```bash
-# 既存の crontab から旧デプロイ（/home/abobo/webull/wbjp）の行を除き、deploy/crontab.txt を足す
-(crontab -l | grep -v 'webull/wbjp'; cat /home/abobo/jstock-go/deploy/crontab.txt) | crontab -
-crontab -l | grep jstock
+# 1. 必ずバックアップを取る
+mkdir -p state/backup/crontab
+crontab -l > "state/backup/crontab/crontab-$(date +%Y%m%d-%H%M%S).txt"
+
+# 2. jstock-go ブロックの範囲を確かめる（先頭は deploy/crontab.txt の 1 行目、
+#    末尾は rcguard の "# >>> rcguard" の直前）
+BK=$(ls -t state/backup/crontab/*.txt | head -1)
+grep -n '^# wbjp（/home/abobo/jstock-go）の cron' "$BK"   # → 開始行
+grep -n '# >>> rcguard' "$BK"                              # → rcguard の開始行
+
+# 3. 前後を残して真ん中を差し替える（下の 62 / 158 は 2. で調べた値に置き換える）
+{ sed -n '1,62p' "$BK"; cat deploy/crontab.txt; echo; sed -n '158,$p' "$BK"; } > /tmp/crontab.new
+
+# 4. 他のジョブが残っているか数えてから入れる
+for p in gmo_coin binance hyliq bitbank rcguard; do
+  printf '%-10s 旧 %2d → 新 %2d\n' "$p" "$(grep -c $p "$BK")" "$(grep -c $p /tmp/crontab.new)"
+done
+crontab /tmp/crontab.new
+crontab -l | grep -cF 'env $JQ_MEM'    # 上限が全行に渡っているか
 ```
+
+戻すときは `crontab state/backup/crontab/<バックアップ>.txt`。
 
 `daytrade open` は 9:01・9:04・9:07 の 3 回呼ぶ（板寄せ直後は気配の約定時刻が前日のままで「古い」と判定されることがあるため、9:00 ちょうどは避ける。気配を取れなかった回の再試行で、台帳に買いがあれば以降は何もしない）。
 `close` は 15:20・15:24・15:28 の 3 回（1 回目で売れていれば 2 回目以降は何もしない。拒否されていれば送り直す）。15:20 の成行はその場の気配で約定し、15:25 以降ならクロージング・オークションで引け値になる。15:40 の `verify` は売りの約定を照会し、売れ残り（ストップ安で板に買いが無い等）があれば持ち越しとして通知する。祝日は `open` が「候補なし／気配なし」で終わるだけで無害。
+
+`daytrade snap`（8:30・8:45・8:55・8:59／9:00・9:02・9:05・9:10／15:00・15:19）は板・気配を記録するだけで
+**発注しない**ので、発注経路を開ける前から回す（板は過去に遡れない。[OPENING_DATA.md](OPENING_DATA.md)）。
+`open` / `close` と**同じ `/tmp/daytrade.lock`** を使う——時価問合のレート制限（4 回/秒）はプロセス内なので、
+同時に走ると発注側が弾かれうる。`flock -n` を取れなければ `snap` は何もせず終わる（発注が優先）。
+`deploy/crontab.txt` では**コメントアウトしてある**——立花証券の資格情報が無い間は接続に失敗して
+終了コード 1 になり、1 日 10 回ぶんのログが溜まるだけだからだ。`.env` に `TACHIBANA_*` を入れて
+`wbjp credentials check` が通ったら、**発注経路の実機検証（`BROKER_VERIFY.md`）を待たずに開けてよい**。
 
 ### 日次レポート（Discord）
 

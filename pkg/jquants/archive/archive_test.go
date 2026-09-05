@@ -384,3 +384,261 @@ func TestMonthIn(t *testing.T) {
 		}
 	}
 }
+
+// minute は分足（アドオン、日分割・型付き）。
+func minute() Endpoint { return MustEndpoint("equities_bars_minute") }
+
+func TestAddonEndpointsAreOptIn(t *testing.T) {
+	// 契約していないと 403 になるので、既定では日次の取り込みに載せない
+	t.Setenv(MinuteBarsEnv, "")
+	for _, ep := range ActiveEndpoints() {
+		if ep.Addon {
+			t.Errorf("環境変数なしでアドオンが有効: %s", ep.Path)
+		}
+	}
+	// それでも名前では引ける（手動の backfill・確認のため）
+	if _, err := LookupEndpoint("equities_bars_minute"); err != nil {
+		t.Errorf("アドオンを名前で引けない: %v", err)
+	}
+	t.Setenv(MinuteBarsEnv, "1")
+	var found bool
+	for _, ep := range ActiveEndpoints() {
+		if ep.Path == "/equities/bars/minute" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("%s=1 でも分足が有効にならない", MinuteBarsEnv)
+	}
+}
+
+func TestPartOf(t *testing.T) {
+	if got := bars().partOf("2026-09-08"); got != "2026-09" {
+		t.Errorf("月分割 = %q, want 2026-09", got)
+	}
+	if got := minute().partOf("2026-09-08"); got != "2026-09-08" {
+		t.Errorf("日分割 = %q, want 2026-09-08", got)
+	}
+	// 日付として読めない値はどのファイルにも置かない
+	if got := minute().partOf("2026-09"); got != "" {
+		t.Errorf("短すぎる日付 = %q, want 空", got)
+	}
+}
+
+func TestDaySplitWritesOneFilePerDay(t *testing.T) {
+	arch := NewArchive(t.TempDir())
+	ep := minute()
+	f := frameOf(t, ep,
+		map[string]any{"Date": "2026-09-07", "Code": "72030", "Time": "09:00", "C": 2500.5, "Vo": 1200},
+		map[string]any{"Date": "2026-09-08", "Code": "72030", "Time": "09:00", "C": 2510.0, "Vo": 900},
+	)
+	if _, err := arch.Upsert(ep, f); err != nil {
+		t.Fatal(err)
+	}
+	parts := arch.Months(ep)
+	if len(parts) != 2 || parts[0] != "2026-09-07" || parts[1] != "2026-09-08" {
+		t.Fatalf("ファイルの分割 = %v, want [2026-09-07 2026-09-08]", parts)
+	}
+}
+
+func TestDaySplitReplacesWholeDay(t *testing.T) {
+	arch := NewArchive(t.TempDir())
+	ep := minute()
+	first := frameOf(t, ep,
+		map[string]any{"Date": "2026-09-08", "Code": "72030", "Time": "09:00", "C": 2500.0},
+		map[string]any{"Date": "2026-09-08", "Code": "72030", "Time": "09:01", "C": 2501.0},
+	)
+	if _, err := arch.Upsert(ep, first); err != nil {
+		t.Fatal(err)
+	}
+	// 取り直しはその日の全体。前の取り込みにしか無かった行は残らない
+	// （取得の単位とファイルの単位が一致するので、新しいものが常にその日の全体）
+	second := frameOf(t, ep,
+		map[string]any{"Date": "2026-09-08", "Code": "72030", "Time": "09:00", "C": 2502.0},
+	)
+	if _, err := arch.Upsert(ep, second); err != nil {
+		t.Fatal(err)
+	}
+	got, err := arch.Scan(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Height() != 1 {
+		t.Fatalf("行数 = %d, want 1（丸ごと差し替え）", got.Height())
+	}
+	if v := got.Rows[0][got.col("C")]; v == nil || *v != "2502" {
+		t.Errorf("差し替え後の値 = %v", v)
+	}
+}
+
+func TestMonthSplitStillMerges(t *testing.T) {
+	// 日足の既存の挙動（鍵で後勝ちに合流。速報→確報が片付く）は変えない
+	arch := NewArchive(t.TempDir())
+	ep := bars()
+	if _, err := arch.Upsert(ep, frameOf(t, ep,
+		map[string]any{"Date": "2026-09-07", "Code": "72030", "Close": "2500"},
+		map[string]any{"Date": "2026-09-08", "Code": "72030", "Close": "2510"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := arch.Upsert(ep, frameOf(t, ep,
+		map[string]any{"Date": "2026-09-08", "Code": "72030", "Close": "2511"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := arch.Scan(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Height() != 2 {
+		t.Fatalf("行数 = %d, want 2（合流して 9/7 が残る）", got.Height())
+	}
+}
+
+func TestTypedColumnsRoundTrip(t *testing.T) {
+	arch := NewArchive(t.TempDir())
+	ep := minute()
+	// API は number、一括 CSV は文字列で来る。どちらも同じ型で書けること
+	if _, err := arch.Upsert(ep, frameOf(t, ep, map[string]any{
+		"Date": "2026-09-08", "Code": "72030", "Time": "09:00",
+		"O": 2500.5, "H": "2505", "L": 2499.25, "C": "2502.75", "Vo": 12000, "Va": "30015000",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	got, err := arch.Scan(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Height() != 1 {
+		t.Fatalf("行数 = %d", got.Height())
+	}
+	// Frame は文字列に戻して返す（DuckDB から読むときは Parquet の型がそのまま効く）
+	for column, want := range map[string]string{
+		"O": "2500.5", "H": "2505", "L": "2499.25", "C": "2502.75",
+		"Vo": "12000", "Va": "30015000", "Date": "2026-09-08", "Time": "09:00",
+	} {
+		v := got.Rows[0][got.col(column)]
+		if v == nil || *v != want {
+			t.Errorf("%s = %v, want %s", column, v, want)
+		}
+	}
+}
+
+func TestTypedColumnsNullOnUnparsable(t *testing.T) {
+	arch := NewArchive(t.TempDir())
+	ep := minute()
+	// 数値に読めない値は NULL。行ごと落とすと「その日に足が無い」と区別できない
+	if _, err := arch.Upsert(ep, frameOf(t, ep, map[string]any{
+		"Date": "2026-09-08", "Code": "72030", "Time": "09:00", "C": "-", "Vo": "",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	got, err := arch.Scan(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Height() != 1 {
+		t.Fatalf("行数 = %d, want 1", got.Height())
+	}
+	if v := got.Rows[0][got.col("C")]; v != nil {
+		t.Errorf("読めない値が NULL でない: %v", *v)
+	}
+}
+
+func TestDaySplitReadRange(t *testing.T) {
+	arch := NewArchive(t.TempDir())
+	ep := minute()
+	for _, day := range []string{"2026-09-07", "2026-09-08", "2026-09-09"} {
+		if _, err := arch.Upsert(ep, frameOf(t, ep, map[string]any{
+			"Date": day, "Code": "72030", "Time": "09:00", "C": 2500.0,
+		})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
+	got, err := arch.Read(ep, start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Height() != 1 {
+		t.Fatalf("期間で絞った行数 = %d, want 1", got.Height())
+	}
+	if v := got.Rows[0][got.col("Date")]; v == nil || *v != "2026-09-08" {
+		t.Errorf("読んだ日付 = %v", v)
+	}
+}
+
+func TestDaySplitDates(t *testing.T) {
+	arch := NewArchive(t.TempDir())
+	ep := minute()
+	for _, day := range []string{"2026-09-07", "2026-09-08"} {
+		if _, err := arch.Upsert(ep, frameOf(t, ep, map[string]any{
+			"Date": day, "Code": "72030", "Time": "09:00", "C": 2500.0,
+		})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 欠け判定（Gaps）が使う。日付列が DATE 型のままでも暦日に戻せること
+	dates, err := arch.Dates(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dates) != 2 {
+		t.Fatalf("日付の数 = %d, want 2", len(dates))
+	}
+	if dates[0].Format("2006-01-02") != "2026-09-07" {
+		t.Errorf("先頭の日付 = %s", dates[0].Format("2006-01-02"))
+	}
+}
+
+func TestCSVToFramesByDaySplitsInOrder(t *testing.T) {
+	ep := minute()
+	csv := "Date,Time,Code,O,H,L,C,Vo,Va\n" +
+		"2026-09-07,09:00,72030,100,101,99,100,10,1000\n" +
+		"2026-09-07,09:01,72030,100,101,99,100,20,2000\n" +
+		"2026-09-08,09:00,72030,200,201,199,200,30,3000\n"
+	var days []string
+	var heights []int
+	if err := CSVToFramesByDay([]byte(csv), ep, func(f *Frame) error {
+		v := f.Rows[0][f.col("Date")]
+		days = append(days, *v)
+		heights = append(heights, f.Height())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(days) != 2 || days[0] != "2026-09-07" || days[1] != "2026-09-08" {
+		t.Fatalf("渡された日 = %v", days)
+	}
+	if heights[0] != 2 || heights[1] != 1 {
+		t.Fatalf("日ごとの行数 = %v", heights)
+	}
+}
+
+func TestCSVToFramesByDayRejectsUnsorted(t *testing.T) {
+	ep := minute()
+	// 日分割の Upsert はその日を丸ごと差し替えるので、同じ日が離れて 2 度届くと
+	// 後の塊が前を消す。黙って欠けるより取り込まずに止める
+	csv := "Date,Time,Code,C\n" +
+		"2026-09-07,09:00,72030,100\n" +
+		"2026-09-08,09:00,72030,200\n" +
+		"2026-09-07,09:01,72030,101\n"
+	err := CSVToFramesByDay([]byte(csv), ep, func(f *Frame) error { return nil })
+	if err == nil {
+		t.Fatal("日付が並んでいない CSV をエラーにしていない")
+	}
+}
+
+func TestCSVToFrameKeepsWholeFile(t *testing.T) {
+	// 月分割の端点（日足）は従来どおり全体を 1 つの Frame で返す
+	ep := bars()
+	csv := "Date,Code,Close\n2026-09-07,72030,100\n2026-09-08,72030,200\n"
+	f, err := CSVToFrame([]byte(csv), ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Height() != 2 {
+		t.Fatalf("行数 = %d, want 2", f.Height())
+	}
+}

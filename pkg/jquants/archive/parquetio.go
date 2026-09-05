@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,18 +28,23 @@ func fromEpochDay(days int32) string {
 }
 
 // buildSchema は列名から Parquet のスキーマを組み立てる。
-// 値はすべて省略可能（NULL あり）で、日付列だけ DATE、他は UTF8 文字列。
+// 値はすべて省略可能（NULL あり）で、型は kinds の指定に従う（既定は UTF8 文字列）。
 // parquet-go の Group は列名の昇順に並ぶので、書き出しの列順もそれに従う。
-func buildSchema(columns []string, dateColumns map[string]bool) (*parquet.Schema, []string) {
+func buildSchema(columns []string, kinds map[string]ColumnKind) (*parquet.Schema, []string) {
 	sorted := append([]string(nil), columns...)
 	sort.Strings(sorted)
 	group := parquet.Group{}
 	for _, name := range sorted {
-		if dateColumns[name] {
+		switch kinds[name] {
+		case KindDate:
 			group[name] = parquet.Optional(parquet.Date())
-			continue
+		case KindInt64:
+			group[name] = parquet.Optional(parquet.Int(64))
+		case KindFloat64:
+			group[name] = parquet.Optional(parquet.Leaf(parquet.DoubleType))
+		default:
+			group[name] = parquet.Optional(parquet.String())
 		}
-		group[name] = parquet.Optional(parquet.String())
 	}
 	return parquet.NewSchema("jquants", group), sorted
 }
@@ -52,8 +58,8 @@ const writeRowBatch = 8192
 //
 // 行は writeRowBatch ずつ書く（バッファを使い回すので、行数が増えても
 // ここのメモリは一定）。
-func writeParquet(path string, f *Frame, dateColumns map[string]bool) error {
-	schema, order := buildSchema(f.Columns, dateColumns)
+func writeParquet(path string, f *Frame, kinds map[string]ColumnKind) error {
+	schema, order := buildSchema(f.Columns, kinds)
 	handle, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("保管庫の Parquet を作成できません %s: %w", path, err)
@@ -75,7 +81,7 @@ func writeParquet(path string, f *Frame, dateColumns map[string]bool) error {
 	for _, row := range f.Rows {
 		values := cells[len(batch)*len(order):][:len(order)]
 		for i, name := range order {
-			values[i] = parquetValue(cell(row, positions[i]), dateColumns[name], i)
+			values[i] = parquetValue(cell(row, positions[i]), kinds[name], i)
 		}
 		batch = append(batch, values)
 		if len(batch) == writeRowBatch {
@@ -100,18 +106,41 @@ func writeParquet(path string, f *Frame, dateColumns map[string]bool) error {
 }
 
 // parquetValue は 1 セルを Parquet の値にする。NULL は定義レベル 0。
-func parquetValue(v *string, isDate bool, column int) parquet.Value {
+//
+// 数値に読めない値（空・"*"・"-" など）は NULL にする。落とすのではなく NULL に
+// するのは、「その列が無い」と「値が無い」を後から見分けるため。
+func parquetValue(v *string, kind ColumnKind, column int) parquet.Value {
+	null := parquet.NullValue().Level(0, 0, column)
 	if v == nil {
-		return parquet.NullValue().Level(0, 0, column)
+		return null
 	}
-	if isDate {
+	switch kind {
+	case KindDate:
 		days, ok := epochDay(*v)
 		if !ok {
-			return parquet.NullValue().Level(0, 0, column)
+			return null
 		}
 		return parquet.Int32Value(days).Level(0, 1, column)
+	case KindInt64:
+		n, err := strconv.ParseInt(strings.TrimSpace(*v), 10, 64)
+		if err != nil {
+			// "1234.0" のように小数点付きで来ることがある（CSV と API で形が違う）
+			f, ferr := strconv.ParseFloat(strings.TrimSpace(*v), 64)
+			if ferr != nil {
+				return null
+			}
+			n = int64(f)
+		}
+		return parquet.Int64Value(n).Level(0, 1, column)
+	case KindFloat64:
+		f, err := strconv.ParseFloat(strings.TrimSpace(*v), 64)
+		if err != nil {
+			return null
+		}
+		return parquet.DoubleValue(f).Level(0, 1, column)
+	default:
+		return parquet.ByteArrayValue([]byte(*v)).Level(0, 1, column)
 	}
-	return parquet.ByteArrayValue([]byte(*v)).Level(0, 1, column)
 }
 
 // scanOptions は Parquet を読むときの絞り込み。ゼロ値で「全列・全行」。
@@ -180,8 +209,9 @@ func (r RowView) Equal(column, want string) bool {
 	if !ok {
 		return false
 	}
-	if v.Kind() == parquet.Int32 {
-		return parquetText(v) == want // 日付は暦日に戻さないと比べられない
+	if v.Kind() != parquet.ByteArray {
+		// 日付は暦日に、数値は見た目の文字列に戻さないと比べられない
+		return cellText(v) == want
 	}
 	return string(v.ByteArray()) == want
 }
@@ -192,8 +222,8 @@ func (r RowView) HasPrefix(column, prefix string) bool {
 	if !ok {
 		return false
 	}
-	if v.Kind() == parquet.Int32 {
-		return strings.HasPrefix(parquetText(v), prefix)
+	if v.Kind() != parquet.ByteArray {
+		return strings.HasPrefix(cellText(v), prefix)
 	}
 	b := v.ByteArray()
 	return len(b) >= len(prefix) && string(b[:len(prefix)]) == prefix
@@ -447,10 +477,7 @@ func parquetText(v parquet.Value) string {
 	if v.IsNull() {
 		return ""
 	}
-	if v.Kind() == parquet.Int32 {
-		return fromEpochDay(v.Int32())
-	}
-	return string(v.ByteArray())
+	return cellText(v)
 }
 
 func isEOF(err error) bool {
@@ -497,10 +524,23 @@ func decodeRow(row parquet.Row, keptIndex []int, width int) Row {
 	return out
 }
 
-// cellText は 1 セルの値を文字列にする（日付は YYYY-MM-DD）。
+// cellText は 1 セルの値を文字列にする。
+//
+// Frame は列に揃えた文字列（[]*string）なので、型付きで書いた列も読むときは
+// 文字列に戻す。INT32 は日付だけに使う（ColumnKind に Int32 は無い）ので暦日に、
+// INT64 / DOUBLE は数値の見た目のまま戻す。DuckDB から直接読むときは
+// Parquet の型がそのまま効くので、この変換は通らない。
 func cellText(v parquet.Value) string {
-	if v.Kind() == parquet.Int32 {
+	switch v.Kind() {
+	case parquet.Int32:
 		return fromEpochDay(v.Int32())
+	case parquet.Int64:
+		return strconv.FormatInt(v.Int64(), 10)
+	case parquet.Double:
+		return strconv.FormatFloat(v.Double(), 'f', -1, 64)
+	case parquet.Float:
+		return strconv.FormatFloat(float64(v.Float()), 'f', -1, 32)
+	default:
+		return string(v.ByteArray())
 	}
-	return string(v.ByteArray())
 }

@@ -12,6 +12,7 @@ package archive
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -44,6 +45,40 @@ func (t TimeOfDay) On(day time.Time, jst *time.Location) time.Time {
 	return time.Date(day.Year(), day.Month(), day.Day(), t.Hour, t.Minute, 0, 0, jst)
 }
 
+// Split はファイルの分割の単位。
+type Split string
+
+const (
+	// SplitMonth は端点 × 月（YYYY-MM）。既定。日足なら月 9 万行で、
+	// 訂正のたびに読み直して書き戻しても一瞬で済む。
+	SplitMonth Split = ""
+	// SplitDay は端点 × 日（YYYY-MM-DD）。取得の単位（date= の 1 日ぶん）と
+	// ファイルの単位が一致するので **append-only**——その日が揃ったら不変で、
+	// 訂正はその日のファイルを丸ごと差し替える。既存ファイルを読み直さない。
+	//
+	// 分足のような行数の多い端点はこちらにする。月 2,400 万行を毎日読んで
+	// unique・sort して書き戻すと、月末ほど重くなってメモリも数 GB 要る。
+	SplitDay Split = "day"
+)
+
+// ColumnKind は Parquet に書くときの列の型。
+//
+// 日足は全列 String で困らない（辞書圧縮が効き、cast は 1,800 万行で 0.15 秒）。
+// 分足は行数が 2 桁多く、読むたびに億単位の文字列→数値変換になるので、
+// 数値の列は数値で書く。API は number で返し、一括 CSV も同じ形に寄せられる。
+type ColumnKind int
+
+const (
+	// KindString は UTF8 文字列。既定。
+	KindString ColumnKind = iota
+	// KindDate は DATE 論理型（1970-01-01 からの日数）。
+	KindDate
+	// KindInt64 は 64 ビット整数。
+	KindInt64
+	// KindFloat64 は倍精度浮動小数。
+	KindFloat64
+)
+
 // Endpoint は蓄積する端点 1 つぶんの定義。
 type Endpoint struct {
 	Path string
@@ -68,6 +103,14 @@ type Endpoint struct {
 	RangeDays int
 	// ExtraDateColumns は日付列以外にも日付として扱う列。
 	ExtraDateColumns []string
+	// Split はファイルの分割の単位（既定は月）。
+	Split Split
+	// ColumnTypes は Parquet に書くときの列の型。書かなかった列は文字列。
+	// 日付列（DateColumn / ExtraDateColumns）は常に DATE で、ここより優先される。
+	ColumnTypes map[string]ColumnKind
+	// Addon は有料アドオンの端点か。契約していないと 403 になるので、
+	// ActiveEndpoints は環境変数で有効にされたものだけを返す。
+	Addon bool
 }
 
 // Name はディレクトリ名。"/equities/bars/daily" → "equities_bars_daily"。
@@ -85,13 +128,42 @@ func (e Endpoint) DateColumns() []string {
 	return out
 }
 
-// dateColumnSet は日付列の集合。Parquet の型付けに使う。
+// dateColumnSet は日付列の集合。日付の正規化に使う。
 func (e Endpoint) dateColumnSet() map[string]bool {
 	set := make(map[string]bool, 1+len(e.ExtraDateColumns))
 	for _, c := range e.DateColumns() {
 		set[c] = true
 	}
 	return set
+}
+
+// columnKinds は Parquet に書くときの列 → 型。日付列は常に DATE。
+func (e Endpoint) columnKinds() map[string]ColumnKind {
+	kinds := make(map[string]ColumnKind, len(e.ColumnTypes)+1+len(e.ExtraDateColumns))
+	for name, kind := range e.ColumnTypes {
+		kinds[name] = kind
+	}
+	for _, name := range e.DateColumns() {
+		kinds[name] = KindDate
+	}
+	return kinds
+}
+
+// partOf は日付（YYYY-MM-DD）が入るファイルの名前。読めなければ空文字。
+func (e Endpoint) partOf(iso string) string {
+	width := 7 // YYYY-MM
+	if e.Split == SplitDay {
+		width = 10 // YYYY-MM-DD
+	}
+	if len(iso) < width {
+		return ""
+	}
+	return iso[:width]
+}
+
+// partOfTime は partOf の time.Time 版。
+func (e Endpoint) partOfTime(t time.Time) string {
+	return e.partOf(t.Format("2006-01-02"))
 }
 
 var (
@@ -203,15 +275,69 @@ var StandardEndpoints = []Endpoint{
 	},
 }
 
+// AddonEndpoints は有料アドオンの端点。契約していないと 403 になるので、
+// StandardEndpoints とは分けて持ち、環境変数で有効にされたものだけを日次の
+// 取り込みに載せる（ActiveEndpoints）。名前を指定した手動の取り込み
+// （`jquants backfill --only equities_bars_minute`）は環境変数によらず引ける。
+var AddonEndpoints = []Endpoint{
+	{
+		// 株価分足（2026-01 追加、Light 以上の月額アドオン）。**履歴は 2 年**しかないので、
+		// 溜め始めた日から手元の履歴が伸びる。設計は docs/JQUANTS_ARCHIVE.md「分足（アドオン）」。
+		// 約定の無い分は行が無い（疎）。Time は "HH:mm" の文字列のまま持ち、
+		// 日時は読み手が Date と Time から組む（派生列は 1,000 万行ぶんの容量を食う）
+		Path: "/equities/bars/minute", Key: []string{"Date", "Code", "Time"}, DateColumn: "Date",
+		Mode: ModeDate, DateParam: "date", AvailableAt: t1630,
+		SettleDays: 2, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		Split: SplitDay,
+		ColumnTypes: map[string]ColumnKind{
+			"O": KindFloat64, "H": KindFloat64, "L": KindFloat64, "C": KindFloat64,
+			"Vo": KindInt64, "Va": KindInt64,
+		},
+		Addon: true,
+	},
+}
+
+// MinuteBarsEnv は分足の取り込みを日次の sync に載せる環境変数。
+// 契約するまでは毎日 403 を叩きに行くだけなので、既定では載せない。
+const MinuteBarsEnv = "JQUANTS_MINUTE_BARS"
+
+// ActiveEndpoints は日次の取り込み（sync / check / status）が回す端点。
+// Standard の全部と、環境変数で有効にされたアドオン。
+func ActiveEndpoints() []Endpoint {
+	out := append([]Endpoint(nil), StandardEndpoints...)
+	for _, ep := range AddonEndpoints {
+		if ep.Path == "/equities/bars/minute" && enabledEnv(MinuteBarsEnv) {
+			out = append(out, ep)
+		}
+	}
+	return out
+}
+
+// enabledEnv は環境変数が「有効」を意味するか（1 / true / yes）。
+func enabledEnv(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// allEndpoints は名前で引ける端点すべて（アドオンを含む）。
+func allEndpoints() []Endpoint {
+	return append(append([]Endpoint(nil), StandardEndpoints...), AddonEndpoints...)
+}
+
 // LookupEndpoint は名前（equities_bars_daily）かパス（/equities/bars/daily）で端点を引く。
+// アドオンの端点も、環境変数の有無によらず引ける（手動の取り込み・確認のため）。
 func LookupEndpoint(nameOrPath string) (Endpoint, error) {
-	for _, ep := range StandardEndpoints {
+	all := allEndpoints()
+	for _, ep := range all {
 		if ep.Name() == nameOrPath || ep.Path == nameOrPath {
 			return ep, nil
 		}
 	}
-	names := make([]string, 0, len(StandardEndpoints))
-	for _, ep := range StandardEndpoints {
+	names := make([]string, 0, len(all))
+	for _, ep := range all {
 		names = append(names, ep.Name())
 	}
 	sort.Strings(names)

@@ -154,3 +154,66 @@ func TestAppendAndReadRoundTrip(t *testing.T) {
 		t.Errorf("往復で値が変わった: %+v", got.Rows[0])
 	}
 }
+
+func TestBookFrame(t *testing.T) {
+	at := time.Date(2026, 9, 8, 0, 30, 0, 0, time.UTC)
+	rows := []map[string]any{
+		{"sIssueCode": "7203", "pDPP": "2500", "pQBP": "2499", "pQBV": "1200"},
+		// 列が銘柄ごとに揃わない応答でも落とさない（pQBV が無く、pDOP が増えている）
+		{"sIssueCode": "9984", "pDPP": "8000", "pQBP": "*", "pDOP": "8010"},
+	}
+	frame := BookFrame(rows, "0855", at)
+	if frame.Height() != 2 {
+		t.Fatalf("行数 = %d", frame.Height())
+	}
+	// 固定列が先頭に立つ（応答の並びに関係なく同じ場所にある）
+	for i, want := range []string{"slot", "symbol", "observed_at"} {
+		if frame.Columns[i].Name != want {
+			t.Errorf("先頭 %d 列目 = %s、期待 %s", i, frame.Columns[i].Name, want)
+		}
+	}
+	// 応答の列は全銘柄の和集合。片方にしか無い列は欠けた側が null
+	for _, name := range []string{"pDOP", "pDPP", "pQBP", "pQBV", "sIssueCode"} {
+		if !frame.Has(name) {
+			t.Errorf("応答の列 %s が無い", name)
+		}
+	}
+	if frame.Rows[0]["symbol"] != "7203" || frame.Rows[0]["slot"] != "0855" {
+		t.Errorf("鍵の列が違う: %+v", frame.Rows[0])
+	}
+	if v, ok := frame.Rows[0]["pDOP"]; !ok || v != nil {
+		t.Errorf("他の銘柄にしか無い列が null でない: %v", v)
+	}
+	// "*"（値無し）は null。「取れなかった」と「0 だった」を後から見分けるため
+	if v := frame.Rows[1]["pQBP"]; v != nil {
+		t.Errorf(`"*" が null でない: %v`, v)
+	}
+	// 値は解釈せず文字列のまま（型付けは読むときに回す）
+	if frame.Rows[1]["pDPP"] != "8000" {
+		t.Errorf("値が文字列でない: %#v", frame.Rows[1]["pDPP"])
+	}
+}
+
+func TestBookFrameRoundTrip(t *testing.T) {
+	store := history.NewStore(t.TempDir())
+	day := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 9, 8, 0, 30, 0, 0, time.UTC)
+	// 列が増えた日と増える前の日が同じ種類に混在しても、どちらも読み戻せる
+	before := BookFrame([]map[string]any{{"sIssueCode": "7203", "pDPP": "2500"}}, "0855", at)
+	after := BookFrame([]map[string]any{{"sIssueCode": "7203", "pDPP": "2510", "pQBV": "900"}}, "0900", at)
+	for _, frame := range []history.Frame{before, after} {
+		if _, err := store.Append(KindBook, frame, day, history.AppendOptions{RunID: "r1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := store.Read(KindBook, history.Range{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Height() != 2 {
+		t.Fatalf("読み戻し %d 行", got.Height())
+	}
+	if !got.Has("pQBV") {
+		t.Error("後から増えた列が読めない")
+	}
+}
