@@ -25,6 +25,7 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 | 09:00〜09:15 | `daytrade open --live --yes` | 候補の気配を取り、ギャップ下位 N 銘柄を成行買い。台帳に記録 | plan + 気配（`execution.quote_source`） |
 | 15:20〜15:30 | `daytrade close --live --yes` | 台帳の当日買いをブローカーに照会し、約定数量を成行売り（15:20 はその場で約定。15:25 以降はクロージング・オークションで引け値） | 台帳 + ブローカー |
 | 15:40 | `daytrade verify` | 今日の売りが全部約定したか照会し、売れ残り（持ち越し）を通知 | 台帳 + ブローカー |
+| 8:30〜9:10 / 15:00・15:19 | `daytrade snap` | 板・気配をそのまま履歴に残す（**発注しない**。[OPENING_DATA.md](OPENING_DATA.md)） | plan + 時価問合 |
 | 随時 | `daytrade status` | 候補と当日の注文 | |
 
 すべて既定は dry-run。`--live` が無ければ判断と記録だけで注文は出さない。本番口座では
@@ -109,6 +110,12 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 |---|---|---|
 | `tachibana` | 立花証券 e支店 API の時価問合（`CLMMfdsGetMarketPrice`）。寄付後は始値、無ければ現在値 | 本命 |
 | `csv` | `symbol,price[,at]` のファイル | 検証・dry-run。別経路で取った気配を流す |
+
+**取っている列は `pDOP,pDPP,tDPP:T,pPRP` の 4 つだけで、板は見ていない。** 選定に使う変数は
+ギャップ 1 つなので、「どんな気配なら勝率が上がるか」は今のデータでは問えない。板は過去に遡れず
+（J-Quants の分足にも無い）、記録を始めた日からしか手に入らない——収集の設計は
+[OPENING_DATA.md](OPENING_DATA.md)。`daytrade quotes --raw --columns "..."` が時価問合の応答を
+解釈せずに出すので、板の列名の確認はここから始める。
 
 ## 設定（`daytrade.toml`）
 
@@ -210,6 +217,7 @@ daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
 | `quotes` | 9:00 に受け取った気配 1 銘柄。`usable`（鮮度の検査を通った）と `gap` 付き | `open` が気配を取ったとき |
 | `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount` | `open` が順位を付けたとき |
 | `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数 | `open` が判断まで進んだとき |
+| `book` | 板・気配 1 銘柄 × 1 観測時刻（`slot` = JST の HHMM）。時価問合の応答をそのまま（値は文字列） | `snap` のたび（1 日 10 回。[OPENING_DATA.md](OPENING_DATA.md)） |
 
 全ファイルに `day`（判定日）・`run_id`（ログと同じ）・`recorded_at`（UTC）が付く。
 「その日の最終判断」は `recorded_at` が最大の `run_id`（`--latest`）。
@@ -229,6 +237,29 @@ jquants query "SELECT * FROM read_parquet('state/daytrade/history/ranking/*.parq
 ```
 
 `state/` はホスト固有なので、`state/daytrade/history/` も台帳と同じく別ホストへ同期する（`docs/DEPLOY.md`）。
+
+## 板・気配の記録（`snap`）
+
+**集めるだけで、選定には使わない。** 今の選定は時価問合の 4 列（`pDOP,pDPP,tDPP:T,pPRP`）から
+ギャップ 1 変数を作っているだけなので、「どんな気配なら勝率が上がるか」に答えるデータが無い。
+板は過去に遡れず、記録を始めた日からしか手に入らない——設計・容量・実機で確かめることは
+[OPENING_DATA.md](OPENING_DATA.md)。
+
+```bash
+daytrade snap                        # 今この瞬間の板を plan の全銘柄ぶん記録する（cron）
+daytrade snap --symbols 7203,9984    # 疎通確認
+daytrade quotes --raw --columns "pDOP,pDPP,..." 7203   # 応答をそのまま見る（列名の確認）
+daytrade history book --date 2026-09-08 --csv /tmp/book.csv
+```
+
+- 設定は `[book]`（`enabled` / `scope` / `columns`）。`scope = "all"` は plan の**全行**（除外された
+  銘柄も含む ＝ 実質全上場）。母集団の条件を将来変えたくなったとき、条件の外にあった銘柄の
+  板が無いと検証できない
+- **応答に返った列は指定の有無にかかわらず全部記録する**。値は解釈せず文字列のまま
+  （J-Quants アーカイブと同じ「生のまま残す」流儀）。立花が返す列が増えても設定に足すだけで、
+  古いファイルは `union_by_name` でそのまま読める
+- cron は `open` / `close` と**同じロック**を使う。時価問合のレート制限（4 回/秒）はプロセス内なので、
+  同時に走ると発注側が弾かれうる。取れなければ `snap` は何もせず終わる（発注が優先）
 
 ## 候補の結果と選定の妥当性（`evaluate` / `review` / `trades`）
 

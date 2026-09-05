@@ -71,7 +71,7 @@ func newSession(command string, needClient bool) (*session, error) {
 // resolveEndpoints は --only を端点に解決する。空なら全端点。
 func resolveEndpoints(only []string) ([]archive.Endpoint, error) {
 	if len(only) == 0 {
-		return archive.StandardEndpoints, nil
+		return archive.ActiveEndpoints(), nil
 	}
 	out := make([]archive.Endpoint, 0, len(only))
 	for _, name := range only {

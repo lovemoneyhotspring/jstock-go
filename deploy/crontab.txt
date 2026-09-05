@@ -33,6 +33,10 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=3GiB GOGC=400
 13,43 * * * *   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/jquants.lock   $WBJP_BIN/jquants sync                         >> state/logs/jquants-sync.log     2>&1
 # 月初に一括ダウンロードで取りこぼしを埋める（更新分だけ取る）
 50 3 2-5 * *    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/jquants.lock   $WBJP_BIN/jquants backfill                     >> state/logs/jquants-backfill.log 2>&1
+# 分足（有料アドオン。docs/JQUANTS_ARCHIVE.md「分足（アドオン）」）。**履歴は 2 年**しかないので、
+# 契約したら初回に `JQUANTS_MINUTE_BARS=1 jquants backfill --only equities_bars_minute` で遡ってから
+# この行を開ける。未契約のまま開けると毎日 403 を叩きに行くだけになる（既定では ActiveEndpoints に載らない）
+#25 17 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_MINUTE_BARS=1 flock -n /tmp/jquants.lock $WBJP_BIN/jquants sync --only equities_bars_minute >> state/logs/jquants-minute.log 2>&1
 # 営業日ごとの欠けを監視（WBJP_ALERT_CHANNEL_ID があれば Discord に通知）
 0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM                          $WBJP_BIN/jquants check --notify                   >> state/logs/jquants-check.log    2>&1
 # スイング売買の銘柄の日足を J-Quants アーカイブから揃える（wbjp screen / backtest の材料）
@@ -47,6 +51,21 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=3GiB GOGC=400
 # 20:20（日足の取り込み後、plan の前）: 朝の候補（選んだ銘柄も次点も）に当日の日足を当てて結果を履歴に残す。
 # 9:00 の順位表が無い日は plan × 始値で順位を作り直して評価する。妥当性の確認は `daytrade review`
 20 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
+
+# --- 板・気配の記録（docs/OPENING_DATA.md）----------------------------------------
+# 発注しない。今の選定はギャップ 1 変数しか見ておらず、「どんな気配なら勝率が上がるか」に
+# 答えるデータが無い。板は過去に遡れない（J-Quants の分足にもティックにも板も無い）ので、
+# 発注経路を開ける前から溜め始める。1 日止めれば 1 日ぶん永久に欠ける。
+# ロックは open / close と**共有**する。時価問合のレート制限（4 回/秒）はプロセス内なので、
+# 同時に走ると発注側が弾かれうる。取れなければ snap は何もせずに終わる（発注が優先）。
+#
+# **開けるのは .env に TACHIBANA_* を入れてから**（`wbjp credentials check` が通ってから）。
+# 資格情報が無いと 1 日 10 回、接続失敗のログが溜まるだけになる。発注経路（下のブロック）とは
+# 別で、snap は板を読むだけなので**実機検証を待たずに開けてよい**——むしろ発注を開けるまでの
+# 期間がそのまま観測期間になる。1 日遅らせれば 1 日ぶん永久に欠ける
+#30,45,55,59 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin >> state/logs/daytrade-snap.log 2>&1
+#0,2,5,10 9 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin >> state/logs/daytrade-snap.log 2>&1
+#0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin >> state/logs/daytrade-snap.log 2>&1
 
 # --- 判断の妥当性（改善ループ。docs/FEEDBACK.md）---------------------------------
 # スイング: スクリーニングの結果に 20 営業日後の終値を当てる。採用・次点・圏外を比べる

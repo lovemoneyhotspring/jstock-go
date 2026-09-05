@@ -31,7 +31,7 @@ func benchParquet(b *testing.B, rows int) (string, Endpoint) {
 	b.Helper()
 	ep := MustEndpoint("equities_bars_daily")
 	path := filepath.Join(b.TempDir(), "bench.parquet")
-	if err := writeParquet(path, benchFrame(rows), ep.dateColumnSet()); err != nil {
+	if err := writeParquet(path, benchFrame(rows), ep.columnKinds()); err != nil {
 		b.Fatal(err)
 	}
 	return path, ep

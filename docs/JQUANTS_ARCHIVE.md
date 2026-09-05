@@ -261,20 +261,34 @@ cron では `GOMEMLIMIT`（Go のヒープの soft 上限）と `GOGC` も併せ
 | 端点 × 月の Parquet を読み直して書き戻す（`_upsert_month`） | 月 9 万行なので一瞬 | 月 2,400 万行・170MB を毎日読んで `unique`・`sort`・再書き込み。7 秒/日・メモリ数 GB、月末ほど重い |
 | `BarStore`（1 銘柄 1 ファイル、丸ごと書き直し） | 日足専用のスキーマ（`date` 鍵） | 使わない。日足のまま残す |
 
-### 設計
+### 設計（実装済み。2026-09-05）
 
-1. **置き場は 1 営業日 1 ファイル。** `data/jquants/equities_bars_minute/<YYYY-MM-DD>.parquet`。取得の単位（`date=` か一括の 1 日ぶん）とファイルの単位が一致するので **append-only**——その日が揃ったら不変、訂正はその日のファイルを丸ごと差し替える。既存ファイルは読み直さない。
-2. **型を固定して書く。** `Date: Date`, `Time: String`（生のまま）, `Code: String`, `Datetime: Datetime("ms", "Asia/Tokyo")`（`Date`+`Time` から作る派生列。読み手はこれを使う）, `O/H/L/C: Float64`, `Vo/Va: Int64`。API（number）と CSV（文字列）はどちらもこのスキーマに `cast` する。列が増えたら足す・減ったら null（`diagonal`）は日足と同じ。
-3. **ファイル内は `(Code, Datetime)` でソート、行グループ 5〜10 万行。** 1 銘柄の抜き出しは行グループの統計で刈れる（1 日ぶんで数ミリ秒）、ある時刻の全銘柄横断は 1 ファイル読むだけ（0.02 秒）。デイトレの選定のような「日付で横断」がこのプロジェクトの主な読み方なので、銘柄分割ではなく日付分割にする。1 銘柄 1 年ぶんは 245 ファイルを開くが、各ファイルからは数 KB しか読まない。
-4. **`Archive` を拡張して載せる。** `Endpoint` に「分割の単位（月／日）」と「固定スキーマ（あれば `String` にせず `cast`）」を足す。`plan()` / `gaps()` / `sync` / `backfill` / 台帳（`endpoint="/equities/bars/minute"`, `target=日付`）はそのまま再利用する。日足の端点の挙動は変えない。
-5. **日次更新は一括 CSV を優先する。** API の `date=` は全銘柄 100 万行のページングで数百リクエストになりうる（120 回/分）。一括が日次ファイルならそれを取り、月次ファイルしか無ければ当月ぶんを API の `date=` で取る。
-6. `available_at` は日足と同じ 16:30 を仮置きし、実機で確かめる。
-7. **検証への繋ぎ込みは `daytrade/backtest` の `FillModel`。** 順位付け（ギャップ）と株数は日足の寄付のまま、
+1. **置き場は 1 営業日 1 ファイル。** `data/jquants/equities_bars_minute/<YYYY-MM-DD>.parquet`（`Endpoint.Split = SplitDay`）。取得の単位（`date=` か一括の 1 日ぶん）とファイルの単位が一致するので **append-only**——`Archive.upsertPart` は日分割のとき既存を読まず、その日を丸ごと差し替える。訂正も取り直しも同じ経路。
+2. **型を固定して書く。** `Endpoint.ColumnTypes` で `O/H/L/C: Float64`, `Vo/Va: Int64`。`Date` は日付列なので常に `DATE`、`Time` と `Code` は文字列。API（number）と CSV（文字列）はどちらも `Frame` の中では文字列で、`writeParquet` が書くときに型を付ける——**経路の食い違いが起きない**。`Frame` に読み戻すときは文字列に戻る（DuckDB から直接読むときは Parquet の型がそのまま効く）。列が増えたら足す・減ったら null は日足と同じ。
+   - **`Datetime` の派生列は作らないことにした。** 1,000 万行 × 8 バイトの容量を足すわりに、`Date` と `Time` から DuckDB でも Go でも組める。読み手が鍵にするのは `(Date, Code, Time)`。
+3. **ファイル内は鍵 `(Date, Code, Time)` でソート。** 1 銘柄の抜き出しは行グループの統計で刈れ、ある時刻の全銘柄横断は 1 ファイル読むだけ。デイトレの選定のような「日付で横断」がこのプロジェクトの主な読み方なので、銘柄分割ではなく日付分割にする。
+4. **`Archive` をそのまま再利用。** `Upsert` / `Read` / `Dates` / `Gaps` / `sync` / `backfill` / 台帳は分割の単位を意識しない（`Endpoint.partOf` が月か日かを吸収する）。日足の端点の挙動は変えていない（`TestMonthSplitStillMerges`）。
+   - ひとつだけ違うのは `BulkMonths`: 日分割では**常に空**を返す。一括ファイルが月次か日次かリファレンスに無く、日次なら「1 日ぶんしか無いのに月全体を取得済み」と誤判定してしまう。空にすると候補が増えるだけで、`due()` が台帳を見るので二重取得にはならない。
+5. **有効化は環境変数 `JQUANTS_MINUTE_BARS=1`。** アドオンは有料で、契約前に日次の `sync` に載せると毎日 403 を叩きに行くだけになる。`StandardEndpoints` とは別の `AddonEndpoints` に置き、`ActiveEndpoints()` が環境変数を見て混ぜる。名前を指定した手動の取り込み（`jquants backfill --only equities_bars_minute`）は環境変数によらず動く。
+6. `available_at` は日足と同じ 16:30 を仮置き。実機で確かめる。
+7. **検証への繋ぎ込みは `daytrade/backtest` の `FillModel`**（未実装）。順位付け（ギャップ）と株数は日足の寄付のまま、
    建値・手仕舞い値だけを分足から返す実装を足す（`SimulateWith` / `SimulateMarginWith` に渡す）。
    先に測るのは、9:01・9:04・9:07 の約定価格と寄付の差、15:20 の価格と引けの差、張り付き銘柄が 15:20〜15:30 に
    出来ていたか（`carry_penalty` の実測）、日次の損失上限。約定の無い分は行が無いので「その時刻に足が無い」を
-   約定不可として扱う規則、昼休み、2024-11-05 の引け時刻の変更、`Datetime`（JST）とパネルの `Date`（UTC 深夜）の
+   約定不可として扱う規則、昼休み、2024-11-05 の引け時刻の変更、`Time`（JST）とパネルの `Date`（UTC 深夜）の
    鍵合わせに注意する。`Time` が足の開始か終了かは初回取得で確かめる。
+
+```bash
+# 契約したら: まず一括で過去 2 年ぶんを取る（履歴は 2 年しか無い）
+JQUANTS_MINUTE_BARS=1 jquants backfill --only equities_bars_minute
+# 日次に載せる（cron の該当行のコメントを外す。deploy/crontab.txt）
+JQUANTS_MINUTE_BARS=1 jquants sync --only equities_bars_minute
+JQUANTS_MINUTE_BARS=1 jquants status          # ファイル数・最古・最新
+jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/2026-09-08.parquet')
+               WHERE Code = '72030' ORDER BY Time LIMIT 10"
+```
+
+**契約後に測ること**: API の `date=` は 1 日 100 万行のページングになる。`GetAll` が全ページを集めてから `Frame` にするので、ピークで 400MB 前後を見込む（cron は `GOMEMLIMIT=3GiB`）。一括が日次ファイルならそちらが軽い。実測して、重ければ `date=` の取り込みを行数で分割する。
 
 ### ティックを取らない理由
 
@@ -295,5 +309,9 @@ cron では `GOMEMLIMIT`（Go のヒープの soft 上限）と `GOGC` も併せ
 - 2026-09-03: メモリの節約。`Dates()` が全期間を `Frame` に載せていたのをやめ（bars 10 年で 15GB 超 → 数 MB）、
   `ReadWhere`（列の射影・`RowView` での行の絞り込み）を足した。読み出しに上限を入れて、
   超えたら OOM ではなくエラーで止まるようにした。「メモリ」の節を参照。
+- 2026-09-05: 分足（アドオン）の**取り込みを実装**。`Endpoint` に `Split`（月／日）・`ColumnTypes`（型付き Parquet）・
+  `Addon` を足し、`AddonEndpoints` / `ActiveEndpoints()` / `JQUANTS_MINUTE_BARS` で契約前は日次に載せない。
+  日足の端点の挙動は変えていない。**まだ 1 行も取り込んでいない**（アドオン未契約）。
+  `FillModel` への繋ぎ込みは未実装。用途は `docs/OPENING_DATA.md`。
 - 2026-09-03: 分足（アドオン）の設計を追記。実装は未着手。ティックは取らない。
 - 2026-08-31: 実装済み（`wbcore.data.jquants_client` / `wbcore.data.jquants_archive` / `jquants` CLI）。`JQuantsProvider` はアーカイブに揃っていればそこから読み、API から取ったぶんはアーカイブに書く。**実機（Standard）での疎通は未確認**——一括 CSV の列名が API と同じ前提、`HolDiv` の値、確報の反映時刻は初回実行で確かめる。

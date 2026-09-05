@@ -45,7 +45,7 @@ func newCheckCmd() *cobra.Command {
 			fmt.Fprintln(w, "端点\t欠けている営業日")
 			missingTotal := 0
 			var lines []string
-			for _, ep := range archive.StandardEndpoints {
+			for _, ep := range archive.ActiveEndpoints() {
 				if ep.Mode != archive.ModeDate {
 					continue
 				}

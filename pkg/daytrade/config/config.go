@@ -181,6 +181,25 @@ type Config struct {
 	Regime    Regime    `toml:"regime"`
 	Execution Execution `toml:"execution"`
 	Margin    Margin    `toml:"margin"`
+	Book      Book      `toml:"book"`
+}
+
+// Book は板・気配の記録（`daytrade snap`。docs/OPENING_DATA.md）。
+//
+// 集めるだけで、選定には一切使わない。板は過去に遡れない——J-Quants の分足にも
+// ティックにも板は無く、立花のリアルタイムから記録を始めた日からしか手に入らない。
+// 「どんな気配なら勝率が上がるか」に答えられるようになるのは、ここが溜まってから。
+type Book struct {
+	// Enabled が false なら snap は何もしない。
+	Enabled bool `toml:"enabled"`
+	// Columns は時価問合で取りに行く列（sTargetColumn）。空なら始値・現在値・
+	// 現在値時刻・前日終値の 4 つ。**板の列名は実機で確かめてから足す**
+	// （`daytrade quotes --raw --columns "..."`）。応答に返った列は指定の有無に
+	// かかわらず全部記録するので、ここは「何を要求するか」だけ。
+	Columns string `toml:"columns"`
+	// Scope は記録する銘柄。all（前夜の plan の全行 ＝ 全上場）/ universe（母集団だけ）。
+	// 既定は all——母集団の条件を将来変えたくなったとき、記録が無いと検証できない。
+	Scope string `toml:"scope"`
 }
 
 // Default は既定値。TOML に書かれた項目だけが上書きされる。
@@ -224,6 +243,7 @@ func Default() Config {
 			ExitWindow:     []string{"15:20", "15:30"},
 			MaxQuoteAge:    90,
 		},
+		Book: Book{Enabled: true, Scope: "all"},
 		Margin: Margin{
 			Enabled:              false,
 			OrderBudget:          decimal.NewFromInt(670_000),

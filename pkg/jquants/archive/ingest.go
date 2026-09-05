@@ -277,7 +277,7 @@ func (i *Ingestor) Plan(now time.Time, lookbackDays int) ([]Job, error) {
 	now = now.UTC()
 	today := truncateDay(now.In(clock.Tokyo))
 	var jobs []Job
-	for _, ep := range StandardEndpoints {
+	for _, ep := range ActiveEndpoints() {
 		switch ep.Mode {
 		case ModeAll:
 			target := today.Format(dateLayout)
@@ -443,7 +443,15 @@ func (i *Ingestor) try(result *SyncResult, ep Endpoint, target string, params ma
 // 一括の月ファイルはその月の全営業日を含むので、この月に属する日は日次の
 // 取り込み記録が無くても「取得済み」とみなす。遡り（--days）と欠け判定が、
 // 一括で埋まった 10 年ぶんを日付で叩き直すのを防ぐ。
+//
+// 日分割の端点（分足）では常に空を返す。一括ファイルが月次か日次かは
+// リファレンスに書かれておらず、日次なら「1 日ぶんしか無いのに月全体を取得済み」
+// と誤って判定してしまう。空にすると日付で叩き直す候補が増えるだけで、
+// due() が台帳を見るので二重取得にはならない（安全側）。
 func (i *Ingestor) BulkMonths(ep Endpoint) (map[string]bool, error) {
+	if ep.Split == SplitDay {
+		return map[string]bool{}, nil
+	}
 	targets, err := i.Ledger.Targets(ep)
 	if err != nil {
 		return nil, err
