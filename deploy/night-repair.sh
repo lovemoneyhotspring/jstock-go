@@ -42,7 +42,7 @@ export WBJP_ENV="${WBJP_ENV:-prod}"
 export JQUANTS_READ_BUDGET_MB="${JQUANTS_READ_BUDGET_MB:-2048}"
 export GOMEMLIMIT="${GOMEMLIMIT:-4GiB}"
 export GOGC="${GOGC:-400}"
-export WBJP_DUCKDB_MEMORY_LIMIT="${WBJP_DUCKDB_MEMORY_LIMIT:-2GB}"
+export WBJP_DUCKDB_MEMORY_LIMIT="${WBJP_DUCKDB_MEMORY_LIMIT:-3GB}"
 
 # --- 異常の有無を先に判定する（claude を起動する前）--------------------------
 DIGESTS=()

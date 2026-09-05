@@ -33,7 +33,7 @@ WBJP_BIN=/home/abobo/jstock-go/bin
 #                            DuckDB は一時ファイルにスピルするだけで落ちない
 # `env $JQ_MEM` で渡す。$JQ_MEM を直に置くと、展開後の "A=1" は代入ではなく
 # コマンド名として扱われてしまう（sh は代入プレフィックスを展開前に決める）
-JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_LIMIT=2GB
+JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_LIMIT=3GB
 # J-Quants: 台帳とカレンダーを見て必要な端点・日付だけ取る（冪等）。16:30〜の更新を 30 分刻みで拾う
 13,43 * * * *   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/jquants.lock   $WBJP_BIN/jquants sync                         >> state/logs/jquants-sync.log     2>&1
 # 月初に一括ダウンロードで取りこぼしを埋める（更新分だけ取る）

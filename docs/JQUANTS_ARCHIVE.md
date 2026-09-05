@@ -212,7 +212,7 @@ Parquet 上では数十バイトの行が、メモリでは 10〜40 倍に膨ら
 |---|---|---|
 | `JQUANTS_READ_BUDGET_MB` | 2048 | 1 回の読み出しが `Frame` に載せていい量。超えると **OOM で殺される代わりに**、どの端点で何 MB になったか・何を絞れば通るかを書いたエラーで止まる |
 | `GOMEMLIMIT` / `GOGC` | 4GiB / 400 | Go のヒープの soft 上限。余裕があるうちは GC を控えて速く動き、近づいたら GC が先に頑張る |
-| `WBJP_DUCKDB_MEMORY_LIMIT` | 2GB | DuckDB の上限。**Go のヒープの外**なので上の 2 つが届かない。渡さないと DuckDB はシステムメモリの 80%（9.3GiB）を取りに行く |
+| `WBJP_DUCKDB_MEMORY_LIMIT` | 3GB | DuckDB の上限。**Go のヒープの外**なので上の 2 つが届かない。渡さないと DuckDB はシステムメモリの 80%（9.3GiB）を取りに行く |
 
 **実測（2026-09-05、ピーク常駐）**:
 
@@ -221,7 +221,7 @@ Parquet 上では数十バイトの行が、メモリでは 10〜40 倍に膨ら
 | `jquants sync` | 26MB | 毎時 |
 | `jquants backfill`（分足の月次 1 本 = 964 万行） | 643MB | 日ごとに区切って書くため |
 | `daytrade evaluate` / `plan` | 41MB / 139MB | cron の常連 |
-| `daytrade backtest`（10 年） | **3.86GB** | DuckDB 2GB + Go 側 1.6GB |
+| `daytrade backtest`（10 年） | **4.16GB** | DuckDB 3GB + Go 側 1.6GB |
 
 `GOMEMLIMIT` に当たっているコマンドは今のところ無い（最大 643MB で、`GOGC=400` が先に効く）。
 いちばん重いのは `backtest` の DuckDB で、上限を決めるまで唯一の柵が無い状態だった。

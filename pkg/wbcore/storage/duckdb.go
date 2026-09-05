@@ -25,12 +25,14 @@ const (
 	//	上限      プロセス全体のピーク   時間
 	//	無設定    6.56GB                31.8 秒
 	//	4GB       5.95GB                31.6 秒
-	//	2GB       3.86GB                35.0 秒  ← 既定
+	//	3GB       4.16GB                26.9 秒  ← 既定
+	//	2GB       3.86GB                35.0 秒
 	//	1GB       2.61GB                38.8 秒
 	//
 	// Go 側（パネルを構造体に持つ）が約 1.6GB あるので、プロセス全体はこの上限 + 1.6GB
-	// と見ておく。手元で速く回したいときは WBJP_DUCKDB_MEMORY_LIMIT で上げる。
-	DefaultDuckDBMemoryLimit = "2GB"
+	// と見ておく。時間は実行ごとに数秒ぶれるので、上限との関係は「絞るほどスピルして遅くなる」
+	// という傾向として読む。手元で速く回したいときは WBJP_DUCKDB_MEMORY_LIMIT で上げる。
+	DefaultDuckDBMemoryLimit = "3GB"
 )
 
 // memoryLimitPattern は DuckDB が受ける大きさの書式（10GB / 512MiB / 1.5GB）。
