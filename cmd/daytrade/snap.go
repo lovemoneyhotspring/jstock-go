@@ -80,9 +80,18 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string) error {
 	if err != nil {
 		return err
 	}
+	tachibana.Broker.SetLogger(run)
+	// snap は open / close とロックを共有する。遅い日にここで粘ると 9:01 の発注がロックを
+	// 取れずに消えるので、book.max_run_seconds で切る（記録は次の回で足りる。発注が優先）
+	if cfg.Book.MaxRunSeconds > 0 {
+		tachibana.Broker.SetDeadline(now.Add(time.Duration(cfg.Book.MaxRunSeconds) * time.Second))
+	}
 	rows, err := tachibana.Broker.MarketPricesRaw(symbols, columns)
 	if err != nil {
-		logError("daytrade.snap", "板の取得に失敗", map[string]any{"error": err.Error(), "symbols": len(symbols)})
+		logError("daytrade.snap", "板の取得に失敗", map[string]any{
+			"error": err.Error(), "symbols": len(symbols),
+			"elapsed_ms": clock.NowUTC().Sub(now).Milliseconds(), "max_run_seconds": cfg.Book.MaxRunSeconds,
+		})
 		return err
 	}
 
@@ -95,6 +104,7 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string) error {
 	logInfo("daytrade.snap", "板を記録", map[string]any{
 		"day": day.Format(DateLayout), "slot": slot, "scope": source,
 		"requested": len(symbols), "rows": len(rows), "path": path,
+		"elapsed_ms": clock.NowUTC().Sub(now).Milliseconds(),
 	})
 	return nil
 }

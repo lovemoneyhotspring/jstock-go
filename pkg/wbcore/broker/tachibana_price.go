@@ -151,10 +151,24 @@ func (t *TachibanaBroker) MarketPricesRaw(symbols []string, columns string) ([]m
 	}
 
 	found := make([]map[string]any, 0, len(wanted))
+	batches := (len(wanted) + MarketPriceBatch - 1) / MarketPriceBatch
+	started := time.Now()
 	for start := 0; start < len(wanted); start += MarketPriceBatch {
 		end := min(start+MarketPriceBatch, len(wanted))
 		batch := wanted[start:end]
+		index := start/MarketPriceBatch + 1
+		// 失敗したら「何本目で、どの銘柄から」を残す。レート制限か銘柄コードの誤りかを
+		// 後から切り分けるのに要る
+		describe := func(err error) error {
+			return &BrokerError{Message: fmt.Sprintf(
+				"立花証券の時価取得に失敗しました（バッチ %d/%d、%d 銘柄、先頭 %s、開始から %dms）: %v",
+				index, batches, len(batch), batch[0], time.Since(started).Milliseconds(), err)}
+		}
 
+		// 締め切りが過ぎていれば待たずに諦める（次の cron が取り直す）
+		if t.expired() {
+			return nil, describe(&ErrDeadline{CLMID: clmMarketPrice, Deadline: t.deadline})
+		}
 		// 上限に当たったら例外にせず待つ（「制限に当たったので取れませんでした」より良い）
 		if _, err := priceLimiter().Acquire(); err != nil {
 			return nil, &BrokerError{Message: fmt.Sprintf("時価問合の送信待ちに失敗しました: %v", err)}
@@ -164,7 +178,7 @@ func (t *TachibanaBroker) MarketPricesRaw(symbols []string, columns string) ([]m
 			"sTargetColumn":    columns,
 		})
 		if err != nil {
-			return nil, &BrokerError{Message: fmt.Sprintf("立花証券の時価取得に失敗しました: %v", err)}
+			return nil, describe(err)
 		}
 		rows, _ := res["aCLMMfdsMarketPrice"].([]any)
 		for _, raw := range rows {

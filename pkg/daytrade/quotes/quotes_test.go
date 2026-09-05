@@ -101,3 +101,24 @@ func TestDropOpened(t *testing.T) {
 		t.Errorf("外した銘柄 = %v, want [1000 3000]", dropped)
 	}
 }
+
+func TestFutureStampedAndDescribeAges(t *testing.T) {
+	now := time.Date(2026, 9, 4, 0, 1, 0, 0, time.UTC) // 09:01 JST
+	quotes := map[string]selection.Quote{
+		"7203": {Symbol: "7203", At: now.Add(-30 * time.Second)},
+		"9984": {Symbol: "9984", At: now.Add(6*time.Hour + 29*time.Minute)}, // 前日 15:30 を今日と読んだ形
+		"6758": {Symbol: "6758", At: now.Add(30 * time.Second)},             // 時計のずれの範囲
+	}
+	future := FutureStamped(quotes, now, time.Minute)
+	if len(future) != 1 || future[0] != "9984" {
+		t.Fatalf("future=%v", future)
+	}
+	lines := DescribeAges(quotes, []string{"9984", "7203", "none"}, now)
+	if len(lines) != 2 || lines[0] != "9984@15:30:00 -23340s" || lines[1] != "7203@09:00:30 30s" {
+		t.Errorf("lines=%v", lines)
+	}
+	kept := DropSymbols(quotes, map[string]struct{}{"7203": {}})
+	if _, ok := kept["7203"]; ok || len(kept) != 2 {
+		t.Errorf("DropSymbols: %v", kept)
+	}
+}

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -9,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,6 +56,62 @@ const (
 	orderNotFoundCode = "991005"
 )
 
+// 電文 1 本の待ち時間。
+//
+// 発注・照会（sUrlRequest）は 30 秒——受理の応答が遅れているだけの可能性があり、
+// 早く切ると「結果不明」を増やす。時価問合（sUrlPrice）は 10 秒——1 回の open で
+// 10 本以上送るので、1 本 30 秒粘ると寄付の時間帯を食い尽くす。時価は取れなければ
+// 次の cron が取り直せばよい。どちらも SetDeadline の締め切りが近ければそこまで。
+const (
+	requestTimeout = 30 * time.Second
+	priceTimeout   = 10 * time.Second
+	// netRetryBackoff は通信エラーで照会を送り直すまでの間。
+	netRetryBackoff = time.Second
+	// responseSnippet はログに残す応答本文の上限（JSON でない応答＝メンテ画面等の切り分け用）。
+	responseSnippet = 300
+)
+
+// Logger は電文ごとの記録の出口。*cli.Run がこれを満たす。
+//
+// 「9:01:12 に CLMKabuNewOrder を送って 28 秒待った」という事実は、ここに残さないと
+// 後から追えない。nil なら警告だけを stderr に出す。
+type Logger interface {
+	Info(code, msg string, extra ...map[string]any)
+	Warn(code, msg string, extra ...map[string]any)
+	Error(code, msg string, extra ...map[string]any)
+}
+
+// LoggerSetter は電文の記録先を差し替えられるブローカー。
+type LoggerSetter interface {
+	SetLogger(Logger)
+}
+
+// DeadlineSetter は電文の締め切りを持てるブローカー。
+type DeadlineSetter interface {
+	SetDeadline(time.Time)
+}
+
+// SetDeadline は b が締め切りを持てるなら設定する（ペーパー等は何もしない）。
+func SetDeadline(b Broker, deadline time.Time) {
+	if d, ok := b.(DeadlineSetter); ok {
+		d.SetDeadline(deadline)
+	}
+}
+
+// ErrDeadline は締め切りを過ぎていたので**電文を送らなかった**。
+//
+// 送信中に締め切りが来て打ち切った場合はこれではなく通信エラー（届いたか分からない）。
+// 発注でこれが返ったら、その注文は確実に出ていない。
+type ErrDeadline struct {
+	CLMID    string
+	Deadline time.Time
+}
+
+func (e *ErrDeadline) Error() string {
+	return fmt.Sprintf("%s: 締め切り（%s）を過ぎたため送りませんでした",
+		e.CLMID, clock.ToZone(e.Deadline, clock.Tokyo).Format("15:04:05"))
+}
+
 type TachibanaSession struct {
 	PNo        int    `json:"p_no"`
 	URLRequest string `json:"url_request"`
@@ -85,6 +143,80 @@ type TachibanaBroker struct {
 
 	// cashTradedToday は当日の現物約定代金の合計（定額コースの手数料の見積りに使う）。
 	cashTradedToday decimal.Decimal
+
+	// logger は電文ごとの記録先。nil なら警告だけ stderr。
+	logger Logger
+	// deadline はこの接続で送る全電文の締め切り。ゼロ値なら無し。
+	deadline time.Time
+}
+
+// SetLogger は電文の記録先を差し替える。
+func (t *TachibanaBroker) SetLogger(l Logger) { t.logger = l }
+
+// SetDeadline はこの接続で送る全電文の締め切り。
+//
+// 過ぎていれば送らずに ErrDeadline を返し、送信中なら HTTP をそこで打ち切る。
+// 寄付・引けの時間帯の終わり（と 1 回の実行に許す時間）を渡す。ゼロ値で解除。
+func (t *TachibanaBroker) SetDeadline(deadline time.Time) { t.deadline = deadline }
+
+// Deadline は設定された締め切り（ゼロ値なら無し）。
+func (t *TachibanaBroker) Deadline() time.Time { return t.deadline }
+
+// expired は締め切りを過ぎているか。
+func (t *TachibanaBroker) expired() bool {
+	return !t.deadline.IsZero() && !time.Now().Before(t.deadline)
+}
+
+// canWait は d 待っても締め切りに掛からないか。
+func (t *TachibanaBroker) canWait(d time.Duration) bool {
+	return t.deadline.IsZero() || time.Now().Add(d).Before(t.deadline)
+}
+
+// requestContext は 1 電文の context。timeout と締め切りの近い方で切れる。
+// 締め切りを過ぎていれば送らずに ErrDeadline。
+func (t *TachibanaBroker) requestContext(clmID string, timeout time.Duration) (context.Context, context.CancelFunc, error) {
+	if !t.deadline.IsZero() {
+		remaining := time.Until(t.deadline)
+		if remaining <= 0 {
+			return nil, nil, &ErrDeadline{CLMID: clmID, Deadline: t.deadline}
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return ctx, cancel, nil
+}
+
+func (t *TachibanaBroker) logInfo(code, msg string, fields map[string]any) {
+	if t.logger != nil {
+		t.logger.Info(code, msg, fields)
+	}
+}
+
+func (t *TachibanaBroker) logWarn(code, msg string, fields map[string]any) {
+	if t.logger != nil {
+		t.logger.Warn(code, msg, fields)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[warn] %s %v\n", msg, fields)
+}
+
+func (t *TachibanaBroker) logError(code, msg string, fields map[string]any) {
+	if t.logger != nil {
+		t.logger.Error(code, msg, fields)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[error] %s %v\n", msg, fields)
+}
+
+// snippet は応答本文の先頭（ログ用）。
+func snippet(body []byte) string {
+	text := strings.TrimSpace(string(body))
+	if len(text) > responseSnippet {
+		return text[:responseSnippet] + "…"
+	}
+	return text
 }
 
 // rememberNativeOrderID は発注で得た注文番号を控える。
@@ -276,26 +408,55 @@ func (t *TachibanaBroker) login() (*TachibanaSession, error) {
 
 	bodyBytes, _ := json.Marshal(loginPayload)
 	authURL := t.baseURL + "auth/"
-	resp, err := t.httpClient.Post(authURL, "application/json", bytes.NewReader(bodyBytes))
+	ctx, cancel, err := t.requestContext(clmLogin, requestTimeout)
 	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("立花証券ログイン電文の組み立てに失敗しました: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	started := time.Now()
+	resp, err := t.httpClient.Do(req)
+	fields := map[string]any{"clm": clmLogin, "iface": "auth", "elapsed_ms": time.Since(started).Milliseconds()}
+	if err != nil {
+		fields["error"] = err.Error()
+		t.logWarn("broker.request_failed", "立花証券ログイン HTTP エラー", fields)
 		return nil, fmt.Errorf("立花証券ログインHTTPエラー: %w", err)
 	}
 	defer resp.Body.Close()
+	fields["http_status"] = resp.StatusCode
 
 	utf8Reader := transform.NewReader(resp.Body, japanese.ShiftJIS.NewDecoder())
 	respBytes, err := io.ReadAll(utf8Reader)
 	if err != nil {
+		fields["error"] = err.Error()
+		t.logWarn("broker.request_failed", "立花証券ログイン応答読込エラー", fields)
 		return nil, fmt.Errorf("立花証券ログイン応答読込エラー: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		fields["body"] = snippet(respBytes)
+		t.logWarn("broker.request_failed", "立花証券ログインが HTTP エラー", fields)
+		return nil, fmt.Errorf("立花証券ログイン HTTP %d: %s", resp.StatusCode, snippet(respBytes))
 	}
 
 	var res map[string]any
 	if err := json.Unmarshal(respBytes, &res); err != nil {
+		fields["body"] = snippet(respBytes)
+		t.logWarn("broker.request_failed", "立花証券ログイン応答が JSON でない", fields)
 		return nil, fmt.Errorf("立花証券ログインJSONパースエラー: %w", err)
 	}
 
-	if pErrno := strings.TrimSpace(text(res["p_errno"])); pErrno != "0" {
+	pErrno := strings.TrimSpace(text(res["p_errno"]))
+	fields["p_errno"] = pErrno
+	if pErrno != "0" {
+		fields["p_err"] = strings.TrimSpace(text(res["p_err"]))
+		t.logWarn("broker.request_failed", "立花証券ログインが拒否された", fields)
 		return nil, fmt.Errorf("立花証券ログインエラー p_errno=%s %s", pErrno, strings.TrimSpace(text(res["p_err"])))
 	}
+	t.logInfo("broker.request", "立花証券API 電文（ログイン）", fields)
 
 	// 3 つの仮想URL はどれも要る。復号できないものを空で通すと、postTo が
 	// 発注口（sUrlRequest）へ黙ってフォールバックし、時価問合が発注口の
@@ -383,8 +544,27 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 	}
 	defer unlock()
 
-	for attempt := 0; ; attempt++ {
+	// 送り直しは 2 種類を各 1 回まで。通信エラー（届いたか分からない）は照会だけ、
+	// セッション失効（p_errno）はログインし直して照会だけ。新規注文はどちらも送り直さない
+	netRetried, sessionRetried := false, false
+	retryNet := func(stage string, err error) bool {
+		var deadline *ErrDeadline
+		if netRetried || !resendable(clmID) || errors.As(err, &deadline) || !t.canWait(netRetryBackoff) {
+			return false
+		}
+		netRetried = true
+		t.logWarn("broker.retry", "通信エラーのため 1 度だけ送り直す", map[string]any{
+			"clm": clmID, "iface": iface, "stage": stage, "error": err.Error(),
+			"backoff_ms": netRetryBackoff.Milliseconds(),
+		})
+		time.Sleep(netRetryBackoff)
+		return true
+	}
+	for {
 		if err := t.ensureSessionLocked(sessionPath); err != nil {
+			if retryNet("login", err) {
+				continue
+			}
 			return nil, err
 		}
 		// 採番はファイルを権威にする。送る前に進めて書く——送信後に落ちても
@@ -397,6 +577,9 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 
 		res, err := t.send(iface, pNo, clmID, params)
 		if err != nil {
+			if retryNet("send", err) {
+				continue
+			}
 			return nil, err
 		}
 		errno := strings.TrimSpace(text(res["p_errno"]))
@@ -404,7 +587,11 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 			return res, nil
 		}
 		t.invalidateSessionLocked(sessionPath)
-		if attempt == 0 && resendable(clmID) {
+		if !sessionRetried && resendable(clmID) {
+			sessionRetried = true
+			t.logWarn("broker.retry", "セッションが失効したためログインし直して送り直す", map[string]any{
+				"clm": clmID, "iface": iface, "p_errno": errno, "p_err": strings.TrimSpace(text(res["p_err"])),
+			})
 			continue
 		}
 		return nil, &ErrSession{CLMID: clmID, Errno: errno, Text: text(res["p_err"])}
@@ -433,28 +620,77 @@ func (t *TachibanaBroker) send(iface string, pNo int, clmID string, params map[s
 	}
 
 	endpoint := t.session.URLRequest
+	timeout := requestTimeout
 	switch iface {
 	case interfacePrice:
 		endpoint = t.session.URLPrice
+		timeout = priceTimeout
 	case interfaceMaster:
 		endpoint = t.session.URLMaster
 	}
-	resp, err := t.httpClient.Post(endpoint, "application/json", bytes.NewReader(sjisBytes))
+
+	// 1 電文 1 行の記録。何を送ったか（電文の種類・銘柄）と、どれだけ待って何が返ったか
+	// （所要・HTTP 状態・p_errno・結果コード）。パラメータ本体は残さない——
+	// 発注パスワードが入っている
+	fields := map[string]any{"clm": clmID, "iface": iface, "p_no": pNo}
+	if symbol := strings.TrimSpace(text(params["sIssueCode"])); symbol != "" {
+		fields["symbol"] = symbol
+	}
+	if number := strings.TrimSpace(text(params["sOrderNumber"])); number != "" {
+		fields["order_number"] = number
+	}
+	fail := func(msg string, err error) (map[string]any, error) {
+		fields["error"] = err.Error()
+		t.logWarn("broker.request_failed", msg, fields)
+		return nil, err
+	}
+
+	ctx, cancel, err := t.requestContext(clmID, timeout)
 	if err != nil {
-		return nil, fmt.Errorf("立花証券API通信エラー: %w", err)
+		return fail("締め切りを過ぎたため送らない", err)
+	}
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(sjisBytes))
+	if err != nil {
+		return nil, fmt.Errorf("立花証券API 電文の組み立てに失敗しました: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	started := time.Now()
+	resp, err := t.httpClient.Do(req)
+	fields["elapsed_ms"] = time.Since(started).Milliseconds()
+	fields["timeout_ms"] = timeout.Milliseconds()
+	if err != nil {
+		return fail("立花証券API 通信エラー", fmt.Errorf("立花証券API通信エラー: %w", err))
 	}
 	defer resp.Body.Close()
+	fields["http_status"] = resp.StatusCode
 
 	utf8Reader := transform.NewReader(resp.Body, japanese.ShiftJIS.NewDecoder())
 	respBytes, err := io.ReadAll(utf8Reader)
 	if err != nil {
-		return nil, fmt.Errorf("立花証券API応答読込エラー: %w", err)
+		return fail("立花証券API 応答読込エラー", fmt.Errorf("立花証券API応答読込エラー: %w", err))
+	}
+	if resp.StatusCode != http.StatusOK {
+		fields["body"] = snippet(respBytes)
+		return fail("立花証券API が HTTP エラー", fmt.Errorf("立花証券API HTTP %d: %s", resp.StatusCode, snippet(respBytes)))
 	}
 
 	var res map[string]any
 	if err := json.Unmarshal(respBytes, &res); err != nil {
-		return nil, fmt.Errorf("立花証券API JSONパースエラー: %w", err)
+		fields["body"] = snippet(respBytes)
+		return fail("立花証券API 応答が JSON でない", fmt.Errorf("立花証券API JSONパースエラー: %w", err))
 	}
+	fields["p_errno"] = strings.TrimSpace(text(res["p_errno"]))
+	if code := strings.TrimSpace(text(res["sResultCode"])); code != "" {
+		fields["result_code"] = code
+	}
+	if msg := strings.TrimSpace(text(res["sResultText"])); msg != "" {
+		fields["result_text"] = msg
+	}
+	if number := strings.TrimSpace(text(res["sOrderNumber"])); number != "" {
+		fields["order_number"] = number
+	}
+	t.logInfo("broker.request", "立花証券API 電文", fields)
 	return res, nil
 }
 
@@ -487,9 +723,9 @@ func (t *TachibanaBroker) Place(req domain.OrderRequest) (*domain.OrderAck, erro
 	if number == "" || day == "" {
 		// 受理されたのに注文番号が取れないと、以後この注文を照会も取消もできない。
 		// 注文は出ているので発注失敗とはせず、番号なしで返して呼び出し側に記録させる。
-		fmt.Fprintf(os.Stderr,
-			"[error] 発注応答に注文番号／営業日がありません。この注文は照会・取消できません（%s）\n",
-			req.ClientOrderID)
+		t.logError("broker.order_number_missing",
+			"発注応答に注文番号／営業日がありません。この注文は照会・取消できません",
+			map[string]any{"client_order_id": req.ClientOrderID, "symbol": req.Symbol})
 		return &domain.OrderAck{
 			ClientOrderID: req.ClientOrderID,
 			Status:        domain.OrderStatusSubmitted,

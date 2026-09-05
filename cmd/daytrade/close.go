@@ -60,7 +60,13 @@ func runClose(live, yes, ignoreWindow bool, date string) error {
 		return nil
 	}
 	allowed, reason := appSettings.CanExecuteLive(live, cfg.Execution.KillSwitch)
-	logConfig(cfg, "close", map[string]any{"day": day.Format(DateLayout), "live": live})
+	// 締め切り: 時間帯の終わり（15:30。それを過ぎた成行は出さない）と開始 + max_run_seconds の早い方
+	started := now
+	deadline := cfg.Execution.RunDeadline("exit", now, live && !ignoreWindow, jst)
+	logConfig(cfg, "close", map[string]any{
+		"day": day.Format(DateLayout), "live": live,
+		"deadline": deadlineText(deadline), "max_run_seconds": cfg.Execution.MaxRunSeconds,
+	})
 
 	led, err := dtledger.Open(appSettings.DaytradeDBPath())
 	if err != nil {
@@ -73,12 +79,16 @@ func runClose(live, yes, ignoreWindow bool, date string) error {
 		}
 	}()
 
-	env := execute.Env{Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout, RetryWait: execute.DefaultRetryWait}
+	env := execute.Env{
+		Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout,
+		RetryWait: execute.DefaultRetryWait, Deadline: deadline,
+	}
 	var b broker.Broker
 	if allowed {
 		if b, err = connectBroker(cfg); err != nil {
 			return err
 		}
+		broker.SetDeadline(b, deadline)
 		// 朝の建玉や前回の手仕舞いで送信結果が分からなかったものを判定してから、数量を決める
 		if err := resolvePending(env, b); err != nil {
 			return err
@@ -132,6 +142,7 @@ func runClose(live, yes, ignoreWindow bool, date string) error {
 	logInfo("daytrade.run", "引けの売りを終了", map[string]any{
 		"phase": "close", "live": allowed, "reason": reason,
 		"sells": len(targets), "failures": len(failures),
+		"elapsed_ms": clock.NowUTC().Sub(started).Milliseconds(), "deadline": deadlineText(deadline),
 	})
 	digest.Note(map[string]any{
 		"phase": "close", "live": allowed, "sells": len(targets),

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/fees"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
@@ -207,6 +208,33 @@ type Execution struct {
 	KillSwitch bool     `toml:"kill_switch"`
 	// MaxQuoteAge は気配のタイムスタンプがこれより古ければ使わない（秒）。
 	MaxQuoteAge int `toml:"max_quote_age"`
+	// MaxRunSeconds は open / close の 1 回の実行に許す時間（秒）。開始からこれだけ経つか
+	// 時間帯（entry_window / exit_window）の終わりが来たら、その先の電文は送らず、
+	// 送信中のものは打ち切る。ブローカーが遅い日に 1 回の実行がロックを握り続けて
+	// 次の cron まで潰す（発注の機会が丸ごと消える）のを防ぐ。cron の間隔より短くする。
+	// 0 なら時間帯の終わりだけを締め切りにする。
+	MaxRunSeconds int `toml:"max_run_seconds"`
+}
+
+// RunDeadline は now に始めた実行の締め切り。
+//
+// 時間帯の終わり（useWindow が真のとき。JST の今日）と now + MaxRunSeconds の早い方。
+// どちらも無ければゼロ値（締め切りなし）。
+func (e Execution) RunDeadline(name string, now time.Time, useWindow bool, jst *time.Location) time.Time {
+	var deadline time.Time
+	if e.MaxRunSeconds > 0 {
+		deadline = now.Add(time.Duration(e.MaxRunSeconds) * time.Second)
+	}
+	if useWindow {
+		if _, _, eh, em, err := e.Window(name); err == nil {
+			local := now.In(jst)
+			end := time.Date(local.Year(), local.Month(), local.Day(), eh, em, 0, 0, jst)
+			if deadline.IsZero() || end.Before(deadline) {
+				deadline = end
+			}
+		}
+	}
+	return deadline
 }
 
 // Config はデイトレの設定ぜんぶ。
@@ -240,6 +268,10 @@ type Book struct {
 	// Scope は記録する銘柄。all（前夜の plan の全行 ＝ 全上場）/ universe（母集団だけ）。
 	// 既定は all——母集団の条件を将来変えたくなったとき、記録が無いと検証できない。
 	Scope string `toml:"scope"`
+	// MaxRunSeconds は snap 1 回に許す時間（秒）。snap は open / close とロックを共有する
+	// ので、遅い日にここで粘ると 9:01 の発注がロックを取れずに消える。全上場 3,700 銘柄
+	// でも正常なら 10 秒で終わる。0 なら締め切りなし。
+	MaxRunSeconds int `toml:"max_run_seconds"`
 }
 
 // Default は既定値。TOML に書かれた項目だけが上書きされる。
@@ -285,8 +317,9 @@ func Default() Config {
 			EntryWindow:    []string{"09:00", "09:15"},
 			ExitWindow:     []string{"15:20", "15:30"},
 			MaxQuoteAge:    90,
+			MaxRunSeconds:  150,
 		},
-		Book: Book{Enabled: true, Scope: "all"},
+		Book: Book{Enabled: true, Scope: "all", MaxRunSeconds: 50},
 		Margin: Margin{
 			Enabled:              false,
 			OrderBudget:          decimal.NewFromInt(670_000),
@@ -491,6 +524,9 @@ func (c Config) Validate() error {
 	}
 	if _, _, _, _, err := c.Execution.Window("exit"); err != nil {
 		return err
+	}
+	if c.Execution.MaxRunSeconds < 0 || c.Book.MaxRunSeconds < 0 {
+		return fmt.Errorf("execution.max_run_seconds / book.max_run_seconds は 0 以上")
 	}
 	if err := validateWeighting(c.Margin.Weighting); err != nil {
 		return err

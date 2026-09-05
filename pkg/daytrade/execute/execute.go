@@ -45,6 +45,11 @@ type Env struct {
 	// RetryWait は送信結果が分からなかったとき、当日の注文一覧で判定するまでに待つ時間
 	// （受付が一覧に載るまでの猶予）。テストは 0。
 	RetryWait time.Duration
+	// Deadline はこの実行の締め切り（config.Execution.RunDeadline）。過ぎたら新しい注文は
+	// 送らず「締め切り」として見送る。ゼロ値なら締め切りなし。ブローカー側の締め切り
+	// （broker.SetDeadline）と同じ値を渡す——こちらは「次を始めない」、あちらは
+	// 「送信中を打ち切る」の役割。
+	Deadline time.Time
 }
 
 // DefaultRetryWait は RetryWait の既定。
@@ -54,6 +59,66 @@ func (e Env) printf(format string, a ...any) {
 	if e.Out != nil {
 		fmt.Fprintf(e.Out, format, a...)
 	}
+}
+
+// expired は締め切りを過ぎているか。
+func (e Env) expired() bool {
+	return !e.Deadline.IsZero() && !clock.NowUTC().Before(e.Deadline)
+}
+
+// deadlineText は人向けの締め切り（JST）。
+func (e Env) deadlineText() string {
+	return clock.ToZone(e.Deadline, clock.Tokyo).Format("15:04:05")
+}
+
+// boundedWait は d 待つ。締め切りが先に来るならそこまでしか待たない。
+func (e Env) boundedWait(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	if !e.Deadline.IsZero() {
+		if remaining := e.Deadline.Sub(clock.NowUTC()); remaining < d {
+			d = remaining
+		}
+	}
+	if d > 0 {
+		time.Sleep(d)
+	}
+}
+
+// Placed は今日すでに建てた（生きている／約定した）建玉の数。拒否・失効・dry-run は数えない。
+type Placed struct {
+	Long  int
+	Short int
+	// Symbols は建てた銘柄 → 向き。同じ銘柄を同じ日に重ねて建てないために使う。
+	Symbols map[string]domain.Side
+}
+
+// Total は長短の合計。
+func (p Placed) Total() int { return p.Long + p.Short }
+
+// PlacedToday は台帳から今日の建玉の数を数える。
+//
+// 再実行は「残りの枚数だけ建て直す」——1 回目が途中で落ちても（通信エラー・締め切り）、
+// 次の cron が N − 発注済みぶんを埋める。1 回目に建てた銘柄は候補から外す。
+func PlacedToday(env Env) (Placed, error) {
+	entries, err := env.Ledger.EntriesOn(env.Day)
+	if err != nil {
+		return Placed{}, err
+	}
+	placed := Placed{Symbols: map[string]domain.Side{}}
+	for _, o := range entries {
+		if o.IsDryRun() || o.IsDead() {
+			continue
+		}
+		if o.Side == domain.SideBuy {
+			placed.Long++
+		} else {
+			placed.Short++
+		}
+		placed.Symbols[o.Symbol] = o.Side
+	}
+	return placed, nil
 }
 
 func (e Env) dayText() string { return e.Day.Format(cli.DateLayout) }
@@ -147,6 +212,18 @@ func PlaceRecorded(env Env, b broker.Broker, request domain.OrderRequest, price 
 	}
 	ack, err := b.Place(request)
 	if err != nil {
+		var deadline *broker.ErrDeadline
+		if errors.As(err, &deadline) {
+			// 締め切りで**送っていない**。届いた可能性は無いので UNSENT にして次の回に譲る
+			// （PENDING のままだと次の回が一覧照会で判定するまで再送できない）
+			if uerr := env.Ledger.UpdateStatus(request.ClientOrderID, domain.OrderStatusUnsent, decimal.Zero, nil, nil); uerr != nil {
+				env.Report.Error("daytrade.ledger", "未送信を記録できません（台帳は送信中のまま）", map[string]any{
+					"client_order_id": request.ClientOrderID, "symbol": request.Symbol, "error": uerr.Error(),
+				})
+			}
+			intent(execution.ReasonWindowClosed, err.Error())
+			return err
+		}
 		var rejected *broker.OrderRejectedError
 		if errors.As(err, &rejected) {
 			if uerr := env.Ledger.UpdateStatus(request.ClientOrderID, domain.OrderStatusRejected, decimal.Zero, nil, nil); uerr != nil {
@@ -189,9 +266,7 @@ func placeResolving(env Env, b broker.Broker, build func(attempt int) domain.Ord
 	if !errors.As(err, &unconfirmed) {
 		return request, err
 	}
-	if env.RetryWait > 0 {
-		time.Sleep(env.RetryWait)
-	}
+	env.boundedWait(env.RetryWait)
 	if _, rerr := ResolvePending(env, b, 0); rerr != nil {
 		env.Report.Warn("daytrade.pending_unresolved", "送信結果不明の注文を判定できません（次の実行で再判定）", map[string]any{
 			"client_order_id": request.ClientOrderID, "error": rerr.Error()})
@@ -322,11 +397,28 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 			skipRow(pick, request, execution.ReasonDryRun, "")
 			outcome = "dry-run"
 			orders++
+		} else if env.expired() {
+			// 締め切りを過ぎた。ここから先の注文は送らない——時間帯の外に成行を出さないため。
+			// 送れなかった分は次の cron が「残りの枚数」として建て直す
+			outcome = fmt.Sprintf("見送り 締め切り（%s）を過ぎた", env.deadlineText())
+			failures = append(failures, fmt.Sprintf("%s %s: %s", pick.Symbol, label, outcome))
+			env.printf("  %s: %s\n", pick.Symbol, outcome)
+			skipRow(pick, request, execution.ReasonWindowClosed, outcome)
 		} else {
 			if _, ok := remaining[request.Trade]; !ok {
 				balance, err := b.GetBalance()
 				if err != nil {
-					return orders, failures, err
+					// 余力が分からないのはこの 1 銘柄の見送りにとどめ、次の銘柄へ進む。
+					// ここで実行ごと止めると、既に建てた銘柄があるとき残りが二度と建たない
+					outcome = fmt.Sprintf("見送り 余力を照会できない: %v", err)
+					failures = append(failures, fmt.Sprintf("%s %s: %s", pick.Symbol, label, outcome))
+					env.printf("  %s: %s\n", pick.Symbol, outcome)
+					env.Report.Warn("daytrade.balance_failed", "余力を照会できず見送り", map[string]any{
+						"day": env.dayText(), "symbol": pick.Symbol, "trade": string(request.Trade), "error": err.Error(),
+					})
+					skipRow(pick, request, execution.ReasonBrokerError, outcome)
+					logOrder(env, pick, request, b != nil, outcome)
+					continue
 				}
 				remaining[request.Trade] = balance.BuyingPowerFor(request.Trade)
 			}
@@ -350,15 +442,20 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 				orders++
 			}
 		}
-		env.Report.Info("daytrade.order", "寄付の注文", map[string]any{
-			"day": env.dayText(), "symbol": pick.Symbol,
-			"side": string(pick.Side), "trade": string(request.Trade),
-			"client_order_id": request.ClientOrderID,
-			"quantity":        pick.Quantity.String(), "price": pick.Price.String(),
-			"amount": pick.Amount().String(), "live": b != nil, "outcome": outcome,
-		})
+		logOrder(env, pick, request, b != nil, outcome)
 	}
 	return orders, failures, nil
+}
+
+// logOrder は寄付の 1 注文の結末を残す（発注・見送り・失敗のどれでも 1 行）。
+func logOrder(env Env, pick selection.Pick, request domain.OrderRequest, live bool, outcome string) {
+	env.Report.Info("daytrade.order", "寄付の注文", map[string]any{
+		"day": env.dayText(), "symbol": pick.Symbol,
+		"side": string(pick.Side), "trade": string(request.Trade),
+		"client_order_id": request.ClientOrderID,
+		"quantity":        pick.Quantity.String(), "price": pick.Price.String(),
+		"amount": pick.Amount().String(), "live": live, "outcome": outcome,
+	})
 }
 
 // skipRow は発注しなかった建玉を実行品質に残す。
@@ -631,6 +728,10 @@ func PlaceExit(env Env, b broker.Broker, target ExitTarget) (string, error) {
 	price := decimal.Zero
 	if target.FillPrice != nil {
 		price = *target.FillPrice
+	}
+	if env.expired() {
+		// 時間帯の外に成行を出さない。手仕舞えなかった建玉は呼び出し側が持ち越しとして知らせる
+		return "", fmt.Errorf("締め切り（%s）を過ぎたため%sを送りませんでした", env.deadlineText(), action)
 	}
 	if _, err := placeResolving(env, b, build, attempt, price, nil); err != nil {
 		return "", err

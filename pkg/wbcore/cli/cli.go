@@ -114,7 +114,25 @@ func (r *Run) Crash(title, code string, err error) error {
 	return err
 }
 
+// ConnectBroker は Run の記録先を付けてブローカーに繋ぐ。
+//
+// 実機の電文（何を送って、どれだけ待って、何が返ったか）が run_id 付きの JSONL に
+// 1 本 1 行で残る。後から「9:01 のどの電文で何秒待ったか」を追うのに要る。
+func (r *Run) ConnectBroker(name string, s *settings.AppSettings) (broker.Broker, error) {
+	b, err := ConnectBroker(name, s)
+	if err != nil {
+		return nil, err
+	}
+	if r != nil {
+		if l, ok := b.(broker.LoggerSetter); ok {
+			l.SetLogger(r)
+		}
+	}
+	return b, nil
+}
+
 // ConnectBroker は設定名のブローカーに繋ぐ。paper はメモリ上の模型、tachibana は実機。
+// 電文の記録を run_id に紐づけるなら (*Run).ConnectBroker を使う。
 func ConnectBroker(name string, s *settings.AppSettings) (broker.Broker, error) {
 	switch name {
 	case "paper":

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	dtquotes "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/quotes"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
@@ -24,7 +25,7 @@ func newQuotesCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			found, err := fetchQuotes(cfg, args, sourceFlag, quoteFileFlag)
+			found, err := fetchQuotes(cfg, args, sourceFlag, quoteFileFlag, time.Time{})
 			if err != nil {
 				return err
 			}
@@ -65,6 +66,7 @@ func showRawQuotes(symbols []string, columns string) error {
 	if err != nil {
 		return err
 	}
+	source.Broker.SetLogger(run)
 	rows, err := source.Broker.MarketPricesRaw(symbols, columns)
 	if err != nil {
 		return err
