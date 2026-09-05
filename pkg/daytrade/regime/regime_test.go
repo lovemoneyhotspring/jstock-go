@@ -131,3 +131,43 @@ func TestMarketGapOf(t *testing.T) {
 		t.Errorf("中央値 = %v, want -0.03", got)
 	}
 }
+
+func TestShockScalesLegsWithoutStopping(t *testing.T) {
+	cfg := config.Default().Regime
+	gap := decimal.RequireFromString("-0.02")
+	us := decimal.RequireFromString("-0.02")
+	cfg.ShockMarketGap = &gap
+	cfg.ShockUsRet = &us
+	cfg.ShockLongScale = decimal.NewFromInt(2)
+	cfg.ShockShortScale = decimal.Zero
+
+	// 市場ギャップ −2.5% → ショック日。取引は止めず、ロング ×2・ショート ×0
+	v := Evaluate(cfg, Signals{Day: day(6, 1), MarketGap: f(-0.025)})
+	if !v.Trade || !v.Shock || v.ShockLong != 2 || v.ShockShort != 0 {
+		t.Errorf("市場ギャップのショック: %+v", v)
+	}
+	if v.Notes["shock"] != true {
+		t.Error("shock が記録に入っていない")
+	}
+	// 前夜の S&P −3% でも同じ
+	v = Evaluate(cfg, Signals{Day: day(6, 1), UsRet: f(-0.03)})
+	if !v.Shock || v.ShockLong != 2 {
+		t.Errorf("前夜のショック: %+v", v)
+	}
+	// どちらも閾値の内側なら倍率は 1
+	v = Evaluate(cfg, Signals{Day: day(6, 1), MarketGap: f(-0.01), UsRet: f(-0.01)})
+	if v.Shock || v.ShockLong != 1 || v.ShockShort != 1 {
+		t.Errorf("ショックでない日: %+v", v)
+	}
+	// 閾値を設定しなければ何もしない（既定）
+	v = Evaluate(config.Default().Regime, Signals{Day: day(6, 1), MarketGap: f(-0.05), UsRet: f(-0.05)})
+	if v.Shock || v.ShockLong != 1 {
+		t.Errorf("既定でショックを判定している: %+v", v)
+	}
+	// 止める日はショックでも止まる（12 月）
+	cfg.SkipMonths = []int{12}
+	v = Evaluate(cfg, Signals{Day: day(12, 1), MarketGap: f(-0.05)})
+	if v.Trade {
+		t.Error("ショック日がゲートを上書きしている")
+	}
+}

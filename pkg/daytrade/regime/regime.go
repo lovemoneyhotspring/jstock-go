@@ -56,6 +56,13 @@ type Verdict struct {
 	Scale float64
 	// ScaleReason は縮めた理由（縮めていなければ空）。
 	ScaleReason string
+	// Shock は予期せぬ急落の日（shock_market_gap / shock_us_ret のどちらかに掛かった）。
+	// ShockLong / ShockShort はその日にロング／ショートの資金へ掛ける倍率（ショックでなければ 1）。
+	// ゲートで止めた日（Trade が偽）には意味を持たない。
+	Shock       bool
+	ShockReason string
+	ShockLong   float64
+	ShockShort  float64
 }
 
 // Weak は「取引はするが資産曲線の合図で縮められた日」か（地合いが弱い日）。
@@ -103,8 +110,28 @@ func Evaluate(cfg config.Regime, s Signals) Verdict {
 		reasons = append(reasons, reason)
 	}
 
+	// ショック日: 止めるのではなく、脚ごとの倍率を変える（既定は 1 = 記録だけ）。
+	// 急落の寄付は逆張りが最も効く日で、ロングを増やしショートを減らすのが検証の結論
+	shock := false
+	var shockWhy []string
+	if cfg.ShockMarketGap != nil && s.MarketGap != nil && *s.MarketGap <= floatOf(*cfg.ShockMarketGap) {
+		shock = true
+		shockWhy = append(shockWhy, fmt.Sprintf("市場ギャップ %+.2f%% ≤ %+.1f%%", *s.MarketGap*100, floatOf(*cfg.ShockMarketGap)*100))
+	}
+	if cfg.ShockUsRet != nil && s.UsRet != nil && *s.UsRet <= floatOf(*cfg.ShockUsRet) {
+		shock = true
+		shockWhy = append(shockWhy, fmt.Sprintf("前夜の S&P500 %+.2f%% ≤ %+.1f%%", *s.UsRet*100, floatOf(*cfg.ShockUsRet)*100))
+	}
+	shockLong, shockShort := 1.0, 1.0
+	shockReason := ""
+	if shock {
+		shockLong, shockShort = floatOf(cfg.ShockLongScale), floatOf(cfg.ShockShortScale)
+		shockReason = fmt.Sprintf("ショック日（%s）→ ロング ×%g、ショート ×%g", joinReasons(shockWhy), shockLong, shockShort)
+	}
+
 	notes := map[string]any{
 		"month":         int(s.Day.Month()),
+		"shock":         shock,
 		"iv_prev":       floatPtr(s.IVPrev),
 		"drift_bp":      scaledPtr(s.Drift, 1e4, 2),
 		"market_gap_bp": scaledPtr(s.MarketGap, 1e4, 1),
@@ -119,7 +146,22 @@ func Evaluate(cfg config.Regime, s Signals) Verdict {
 		Notes:       notes,
 		Scale:       scale,
 		ScaleReason: scaleReason,
+		Shock:       shock,
+		ShockReason: shockReason,
+		ShockLong:   shockLong,
+		ShockShort:  shockShort,
 	}
+}
+
+func joinReasons(parts []string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += "、"
+		}
+		out += p
+	}
+	return out
 }
 
 // MarketGapOf は候補全体のギャップの中央値（9:00 の市場ギャップの代用）。

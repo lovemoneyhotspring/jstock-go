@@ -404,3 +404,121 @@ func TestYearlyOf(t *testing.T) {
 		t.Errorf("勝率（取引日ベース）= %v, want 0.5", y.WinRate)
 	}
 }
+
+func TestSimulateMarginShockScalesLegs(t *testing.T) {
+	days := fixture.BusinessDays(start, 60)
+	arch := buildArchive(t, days)
+	cfg := baseConfig()
+	cfg.Margin.Enabled = true
+	cfg.Margin.Cash = decimal.NewFromInt(2_000_000)
+	cfg.Margin.MaxCapital = decimal.NewFromInt(2_000_000)
+	cfg.Margin.MinGap = decimal.RequireFromString("0.05")
+	from, to := days[30], days[len(days)-1]
+	panel, err := backtest.LoadPanel(arch, from, to, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := backtest.SimulateMargin(panel, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 最後の日だけ「前夜の S&P −3%」のショックにする
+	shockDay := days[len(days)-1].Format(layout)
+	us := decimal.RequireFromString("-0.02")
+	cfg.Regime.ShockUsRet = &us
+	cfg.Regime.ShockLongScale = decimal.NewFromInt(2)
+	cfg.Regime.ShockShortScale = decimal.Zero
+	ret := -0.03
+	signals := &backtest.Inputs{UsRet: map[string]*float64{shockDay: &ret}}
+	shocked, err := backtest.SimulateMargin(panel, cfg, signals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	find := func(r *backtest.MarginResult) backtest.Daily {
+		for _, d := range r.Daily {
+			if d.Date.Format(layout) == shockDay {
+				return d
+			}
+		}
+		t.Fatal("ショックの日が無い")
+		return backtest.Daily{}
+	}
+	b, s := find(base), find(shocked)
+	if b.LongPnL == 0 || s.LongPnL != b.LongPnL*2 {
+		t.Errorf("ショック日のロング損益 %v, want %v の 2 倍", s.LongPnL, b.LongPnL)
+	}
+	if s.ShortPnL != 0 || s.ShortN != 0 {
+		t.Errorf("ショック日のショートが止まっていない: pnl %v n %d", s.ShortPnL, s.ShortN)
+	}
+	// 他の日は変わらない
+	if shocked.Summary.TotalPnL-s.PnL != base.Summary.TotalPnL-b.PnL {
+		t.Error("ショックでない日の損益が変わっている")
+	}
+	// 保証金の見積もりはショック日の建玉（ロング ×2）を取る
+	peak, _ := backtest.RequiredMargin(cfg)
+	if want := decimal.NewFromInt(4_000_000); !peak.Equal(want) {
+		t.Errorf("建玉の最大 %s, want %s（ロング 200 万 × 2 + ショート 0）", peak, want)
+	}
+}
+
+func TestSimulateMarginSpillsUnusedShortBudgetToLong(t *testing.T) {
+	days := fixture.BusinessDays(start, 60)
+	arch := buildArchive(t, days)
+	cfg := baseConfig()
+	cfg.Capital.MaxCapital = decimal.NewFromInt(3_000_000)
+	cfg.Capital.OrderBudget = decimal.NewFromInt(1_000_000) // ロング N3
+	cfg.Capital.MaxPositions = 10
+	cfg.Margin.Enabled = true
+	cfg.Margin.Cash = decimal.NewFromInt(2_000_000)
+	cfg.Margin.MaxCapital = decimal.NewFromInt(2_000_000)
+	cfg.Margin.OrderBudget = decimal.NewFromInt(670_000) // ショート N3
+	cfg.Margin.MinGap = decimal.RequireFromString("0.05")
+	cfg.Margin.MaxOrder = decimal.NewFromInt(1_000_000)
+	from, to := days[30], days[len(days)-1]
+	panel, err := backtest.LoadPanel(arch, from, to, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := backtest.SimulateMargin(panel, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Margin.SpillToLong = true
+	spill, err := backtest.SimulateMargin(panel, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ショートは 20000 の 1 銘柄だけ（上限 100 万）。余り 200 − 100 = 100 万がロングへ回り、
+	// ロングの総予算は 300 → 400 万。ロング候補は 10000 の 1 銘柄なので株数が増える
+	last := days[len(days)-1].Format(layout)
+	amount := func(r *backtest.MarginResult, side string) (float64, int) {
+		total, n := 0.0, 0
+		trades := r.LongTrades
+		if side == "short" {
+			trades = r.ShortTrades
+		}
+		for _, tr := range trades {
+			if tr.Date.Format(layout) == last {
+				total += tr.Amount
+				n++
+			}
+		}
+		return total, n
+	}
+	shortAmt, shortN := amount(spill, "short")
+	if shortN != 1 || shortAmt > 1_000_000 {
+		t.Fatalf("ショートの建玉 %v（%d 銘柄）, want 1 銘柄 ≤ 100 万", shortAmt, shortN)
+	}
+	baseLong, _ := amount(base, "long")
+	spillLong, _ := amount(spill, "long")
+	if spillLong <= baseLong {
+		t.Errorf("余りがロングに回っていない: %v → %v", baseLong, spillLong)
+	}
+	if spillLong+shortAmt > 5_000_000+1 {
+		t.Errorf("長短の合計 %v が 500 万を超えている", spillLong+shortAmt)
+	}
+	// ショートの取引は変わらない
+	if len(spill.ShortTrades) != len(base.ShortTrades) || spill.ShortSummary.TotalPnL != base.ShortSummary.TotalPnL {
+		t.Error("ショート側が変わっている")
+	}
+}

@@ -52,6 +52,16 @@ equity_curve_scale = 0.5   # 縮めた後の倍率（0 なら休む）。MaxDD �
 us_skip_low = 0.0
 us_skip_high = 0.01
 us_vix_override = 24
+# ショック日（予期せぬ急落）: 9:00 の市場ギャップ（候補の中央値）か前夜の S&P500 がこれ以下の日。
+# 予定された経済イベント（FOMC・日銀・雇用統計・選挙）には効きが無く、予定できないショックだけが効く。
+# 市場ギャップ ≤ −2% の日は +7.8 万/日（10 年、t = 6.2、勝率 78%、IS/OOS 一致）で戦略の最良の日。
+# 効くのはロング脚だけ（ショートの勝率 16〜26%）。根拠は docs/research/2026-09-jp-shock-days.md
+shock_market_gap = -0.02
+shock_us_ret = -0.02
+# 倍率は現物（この設定）では 1 = 記録だけ。現金 200 万で 300 万は買えない。信用買いの
+# config/daytrade_margin が 1.5 / 0 に上書きする（ロング ×1.5 でも建玉 450 万 < 通常の 500 万）
+shock_long_scale = 1.0
+shock_short_scale = 1.0
 
 [book]
 # 板・気配の記録（`daytrade snap`。docs/OPENING_DATA.md）。集めるだけで選定には使わない。

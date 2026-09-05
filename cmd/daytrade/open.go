@@ -196,6 +196,8 @@ func runOpen(opts openOptions) error {
 		"quotes_usable":    len(quotes),
 		// signal.skip_opened で外した「既に寄っていた」銘柄の数（設定が偽なら null）
 		"quotes_opened": nil,
+		// margin.spill_to_long でロングに回したショートの余り（円。回さなかった日は null）
+		"spill": nil,
 	}
 	finish := func(outcome string, extra map[string]any) {
 		row := map[string]any{}
@@ -261,6 +263,14 @@ func runOpen(opts openOptions) error {
 		fmt.Println(strings.Split(verdict.ScaleReason, "→")[0] +
 			"→ ロングは縮めず、ショートを建てる合図にする")
 	}
+	// ショック日（regime.shock_*）: 縮小の後にロングの予算へ倍率を掛ける（検証と同じ順序）
+	if verdict.Shock && !watchOnly {
+		budget = budget.Mul(decimal.NewFromFloat(verdict.ShockLong)).Round(0)
+		fmt.Printf("%s（ロング 1 注文 %s 円）\n", verdict.ShockReason, yen(budget))
+		logInfo("daytrade.regime", "ショック日", map[string]any{
+			"reason": verdict.ShockReason, "long_scale": verdict.ShockLong, "short_scale": verdict.ShockShort,
+		})
+	}
 
 	// signal.skip_opened: 9:01 の時点で既に寄っている銘柄を候補から外す。
 	// 順位付けの直前に気配そのものを落とすので、ロング・ショートの両方に効く
@@ -277,6 +287,50 @@ func runOpen(opts openOptions) error {
 		})
 	}
 
+	// ショートの脚（[margin]）を**先に**決める: 使わなかった資金をロングに回すため
+	// （margin.spill_to_long。検証の simulateMarginSpill と同じ順序）。資金はシーソー
+	shortMultiplier := decimal.Zero
+	if cfg.Margin.Enabled && cfg.Margin.Positions() > 0 && !watchOnly {
+		shortMultiplier = cfg.Margin.MultiplierNormal
+		if weak {
+			shortMultiplier = cfg.Margin.MultiplierLongWeak
+		}
+		if verdict.Shock {
+			shortMultiplier = shortMultiplier.Mul(decimal.NewFromFloat(verdict.ShockShort))
+		}
+	}
+	var (
+		shortRanking []selection.Ranked
+		shortPicks   []selection.Pick
+		shortN       int
+		shortBudget  decimal.Decimal
+	)
+	if shortMultiplier.GreaterThan(decimal.Zero) {
+		shortN = cfg.Margin.Positions()
+		shortBudget = cfg.Margin.BudgetPerOrder().Mul(shortMultiplier).Round(0)
+		shortRanking = selection.RankShort(shortUniverse, rankQuotes, cfg.Margin)
+		shortPicks = selection.PickFrom(shortRanking, selection.PickOptions{
+			N: shortN, Budget: shortBudget, Weighting: cfg.Margin.Weighting, Side: domain.SideSell,
+			MaxAmount: cfg.Margin.MaxOrder,
+		})
+	}
+
+	// ショートの余り（候補が無い・上限で頭打ち）をロングに回す。銘柄数は総予算 ÷ 1 注文の
+	// 予算（capital.max_positions が上限）。倍率 0 の日（ショック日）は回す元が無い
+	if cfg.Margin.SpillToLong && shortMultiplier.GreaterThan(decimal.Zero) && !watchOnly {
+		used := decimal.Zero
+		for _, pk := range shortPicks {
+			used = used.Add(pk.Amount())
+		}
+		if spill := shortBudget.Mul(decimal.NewFromInt(int64(shortN))).Sub(used); spill.GreaterThan(decimal.Zero) {
+			n, budget = selection.SpillInto(n, budget, cfg.Capital.BudgetPerOrder(), spill, cfg.Capital.MaxPositions)
+			fmt.Printf("ショートの余り %s 円をロングに回す → N=%d、1 注文 %s 円\n", yen(spill), n, yen(budget))
+			summary["spill"] = spill
+			logInfo("daytrade.regime", "ショートの余りをロングへ", map[string]any{
+				"spill": spill.String(), "n": n, "budget": budget.String()})
+		}
+	}
+
 	ranking := selection.Rank(eligible, rankQuotes, cfg.Signal)
 	picks := selection.PickFrom(ranking, selection.PickOptions{
 		N: n, Budget: budget, Weighting: weighting, Side: domain.SideBuy,
@@ -287,21 +341,7 @@ func runOpen(opts openOptions) error {
 	printPicks(picks, len(rankQuotes), p, watchOnly, "")
 	logRanking(day, "BUY", ranking, picks, n, budget, verdict.Scale, weighting, len(rankQuotes))
 
-	// ショートの脚（[margin]）: 貸借銘柄 × ギャップ上位を売建てる。資金はシーソー
-	shortMultiplier := decimal.Zero
-	if cfg.Margin.Enabled && cfg.Margin.Positions() > 0 && !watchOnly {
-		shortMultiplier = cfg.Margin.MultiplierNormal
-		if weak {
-			shortMultiplier = cfg.Margin.MultiplierLongWeak
-		}
-	}
 	if shortMultiplier.GreaterThan(decimal.Zero) {
-		shortN := cfg.Margin.Positions()
-		shortBudget := cfg.Margin.BudgetPerOrder().Mul(shortMultiplier).Round(0)
-		shortRanking := selection.RankShort(shortUniverse, rankQuotes, cfg.Margin)
-		shortPicks := selection.PickFrom(shortRanking, selection.PickOptions{
-			N: shortN, Budget: shortBudget, Weighting: cfg.Margin.Weighting, Side: domain.SideSell,
-		})
 		label := "通常日"
 		if weak {
 			label = "弱い日"

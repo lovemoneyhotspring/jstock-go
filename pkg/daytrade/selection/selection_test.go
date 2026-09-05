@@ -228,3 +228,19 @@ func TestPickFee(t *testing.T) {
 		t.Errorf("Fee = %s, want 88", p.Fee())
 	}
 }
+
+func TestPickFromCapsEachOrderAtMaxAmount(t *testing.T) {
+	// 候補 1 銘柄・N=3・1 注文 67 万: 既定は総予算 200 万を 1 銘柄に寄せる
+	ranked := []Ranked{{Rank: 1, Symbol: "1000", Price: decimal.NewFromInt(1000), Gap: decimal.RequireFromString("0.08")}}
+	budget := decimal.NewFromInt(670_000)
+	pooled := PickFrom(ranked, PickOptions{N: 3, Budget: budget, Weighting: "equal", Side: domain.SideSell})
+	if len(pooled) != 1 || !pooled[0].Quantity.Equal(decimal.NewFromInt(2000)) {
+		t.Fatalf("総予算の按分 = %v, want 2,000 株（201 万 ÷ 1,000 円）", pooled)
+	}
+	// 上限を付けると 1 注文は 67 万まで
+	capped := PickFrom(ranked, PickOptions{N: 3, Budget: budget, Weighting: "equal", Side: domain.SideSell,
+		MaxAmount: budget})
+	if len(capped) != 1 || !capped[0].Quantity.Equal(decimal.NewFromInt(600)) {
+		t.Fatalf("上限付き = %v, want 600 株（67 万 ÷ 1,000 円）", capped)
+	}
+}

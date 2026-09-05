@@ -270,22 +270,33 @@ func ReconstructRanking(p plan.Plan, bars map[string]Bar, cfg config.Config, at 
 	}
 	n := cfg.Capital.Positions()
 	budget := cfg.Capital.BudgetPerOrder()
-	longRanking := selection.Rank(p.Eligible(), quotes, cfg.Signal)
-	longPicks := selection.PickFrom(longRanking, selection.PickOptions{
-		N: n, Budget: budget, Weighting: cfg.Capital.Weighting, Side: domain.SideBuy,
-	})
-	out := rowsOf(longRanking, longPicks, "BUY", n, budget)
 
+	// ショートを先に決め、余りをロングに回す（open と同じ順序。危険信号・ショックは
+	// 作り直しでは見ない——前夜の plan と始値だけから同じ規則で作るため）
+	var shortRows []RankingRow
 	if cfg.Margin.Enabled && cfg.Margin.Positions() > 0 {
 		shortN := cfg.Margin.Positions()
 		shortBudget := cfg.Margin.BudgetPerOrder().Mul(cfg.Margin.MultiplierNormal).Round(0)
 		shortRanking := selection.RankShort(p.ShortEligible(), quotes, cfg.Margin)
 		shortPicks := selection.PickFrom(shortRanking, selection.PickOptions{
 			N: shortN, Budget: shortBudget, Weighting: cfg.Margin.Weighting, Side: domain.SideSell,
+			MaxAmount: cfg.Margin.MaxOrder,
 		})
-		out = append(out, rowsOf(shortRanking, shortPicks, "SELL", shortN, shortBudget)...)
+		shortRows = rowsOf(shortRanking, shortPicks, "SELL", shortN, shortBudget)
+		if cfg.Margin.SpillToLong {
+			used := decimal.Zero
+			for _, pk := range shortPicks {
+				used = used.Add(pk.Amount())
+			}
+			spill := shortBudget.Mul(decimal.NewFromInt(int64(shortN))).Sub(used)
+			n, budget = selection.SpillInto(n, budget, cfg.Capital.BudgetPerOrder(), spill, cfg.Capital.MaxPositions)
+		}
 	}
-	return out
+	longRanking := selection.Rank(p.Eligible(), quotes, cfg.Signal)
+	longPicks := selection.PickFrom(longRanking, selection.PickOptions{
+		N: n, Budget: budget, Weighting: cfg.Capital.Weighting, Side: domain.SideBuy,
+	})
+	return append(rowsOf(longRanking, longPicks, "BUY", n, budget), shortRows...)
 }
 
 func rowsOf(ranking []selection.Ranked, picks []selection.Pick, side string, n int, budget decimal.Decimal) []RankingRow {
