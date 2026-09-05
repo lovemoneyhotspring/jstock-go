@@ -399,23 +399,55 @@ func TestBackfillRejectsNonBulkEndpoint(t *testing.T) {
 	}
 }
 
-func TestBulkMonths(t *testing.T) {
+func TestBulkCoverage(t *testing.T) {
 	ep := bars()
 	ing := newTestIngestor(t, &stubClient{})
-	for _, target := range []string{"bulk:equities_bars_daily_202501.csv.gz", "2025-02-03"} {
+	// J-Quants の一括は過去が月次（historical/）、当月が日次（live/）で配られる。
+	// 日次ファイルを月として数えると、その月の他の日が欠けていても見逃してしまう
+	targets := []string{
+		"bulk:equities/bars/daily/historical/2025/equities_bars_daily_202501.csv.gz",
+		"bulk:equities/bars/daily/live/equities_bars_daily_20250203.csv.gz",
+		"2025-02-04", // 一括ではない普通の取り込み記録
+	}
+	for _, target := range targets {
 		if err := ing.Ledger.Record(IngestRecord{
 			Endpoint: ep.Path, Target: target, Source: "x",
-			FetchedUTC: jstAt(2025, 2, 4, 12, 0), Digest: "d",
+			FetchedUTC: jstAt(2025, 2, 5, 12, 0), Digest: "d",
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	months, err := ing.BulkMonths(ep)
+	covered, err := ing.BulkCoverage(ep)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(months) != 1 || !months["2025-01"] {
-		t.Fatalf("BulkMonths = %v", months)
+	if len(covered) != 2 || !covered["2025-01"] || !covered["2025-02-03"] {
+		t.Fatalf("BulkCoverage = %v", covered)
+	}
+	// 月次ファイルの月はその月の全日を覆う
+	if !covers(covered, time.Date(2025, 1, 20, 0, 0, 0, 0, time.UTC)) {
+		t.Error("月次ファイルの月内の日が覆われていない")
+	}
+	// 日次ファイルはその日だけ。同じ月の他の日は覆わない
+	if !covers(covered, time.Date(2025, 2, 3, 0, 0, 0, 0, time.UTC)) {
+		t.Error("日次ファイルの当日が覆われていない")
+	}
+	if covers(covered, time.Date(2025, 2, 10, 0, 0, 0, 0, time.UTC)) {
+		t.Error("日次ファイルが月全体を覆ってしまっている（当月の欠けを見逃す）")
+	}
+}
+
+func TestCoverageIn(t *testing.T) {
+	cases := map[string]string{
+		"equities/bars/minute/historical/2026/equities_bars_minute_202608.csv.gz": "2026-08",
+		"equities/bars/minute/live/equities_bars_minute_20260904.csv.gz":          "2026-09-04",
+		"equities_bars_daily_202501.csv.gz":                                       "2025-01",
+		"なにか別のファイル.csv.gz":                                                        "",
+	}
+	for key, want := range cases {
+		if got := coverageIn(key); got != want {
+			t.Errorf("coverageIn(%q) = %q, want %q", key, got, want)
+		}
 	}
 }
 

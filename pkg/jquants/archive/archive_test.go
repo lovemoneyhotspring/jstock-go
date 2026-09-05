@@ -591,3 +591,54 @@ func TestDaySplitDates(t *testing.T) {
 		t.Errorf("先頭の日付 = %s", dates[0].Format("2006-01-02"))
 	}
 }
+
+func TestCSVToFramesByDaySplitsInOrder(t *testing.T) {
+	ep := minute()
+	csv := "Date,Time,Code,O,H,L,C,Vo,Va\n" +
+		"2026-09-07,09:00,72030,100,101,99,100,10,1000\n" +
+		"2026-09-07,09:01,72030,100,101,99,100,20,2000\n" +
+		"2026-09-08,09:00,72030,200,201,199,200,30,3000\n"
+	var days []string
+	var heights []int
+	if err := CSVToFramesByDay([]byte(csv), ep, func(f *Frame) error {
+		v := f.Rows[0][f.col("Date")]
+		days = append(days, *v)
+		heights = append(heights, f.Height())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(days) != 2 || days[0] != "2026-09-07" || days[1] != "2026-09-08" {
+		t.Fatalf("渡された日 = %v", days)
+	}
+	if heights[0] != 2 || heights[1] != 1 {
+		t.Fatalf("日ごとの行数 = %v", heights)
+	}
+}
+
+func TestCSVToFramesByDayRejectsUnsorted(t *testing.T) {
+	ep := minute()
+	// 日分割の Upsert はその日を丸ごと差し替えるので、同じ日が離れて 2 度届くと
+	// 後の塊が前を消す。黙って欠けるより取り込まずに止める
+	csv := "Date,Time,Code,C\n" +
+		"2026-09-07,09:00,72030,100\n" +
+		"2026-09-08,09:00,72030,200\n" +
+		"2026-09-07,09:01,72030,101\n"
+	err := CSVToFramesByDay([]byte(csv), ep, func(f *Frame) error { return nil })
+	if err == nil {
+		t.Fatal("日付が並んでいない CSV をエラーにしていない")
+	}
+}
+
+func TestCSVToFrameKeepsWholeFile(t *testing.T) {
+	// 月分割の端点（日足）は従来どおり全体を 1 つの Frame で返す
+	ep := bars()
+	csv := "Date,Code,Close\n2026-09-07,72030,100\n2026-09-08,72030,200\n"
+	f, err := CSVToFrame([]byte(csv), ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Height() != 2 {
+		t.Fatalf("行数 = %d, want 2", f.Height())
+	}
+}

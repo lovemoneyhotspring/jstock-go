@@ -37,6 +37,13 @@ if [ -f "$HOME_DIR/.env" ]; then
 fi
 export WBJP_ENV="${WBJP_ENV:-prod}"
 
+# メモリの上限（deploy/crontab.txt と同じ値）。claude が子プロセスで daytrade / jquants を
+# 叩くので、ここで export しないと上限の無いまま DuckDB がシステムメモリの 80% を取りに行く
+export JQUANTS_READ_BUDGET_MB="${JQUANTS_READ_BUDGET_MB:-2048}"
+export GOMEMLIMIT="${GOMEMLIMIT:-4GiB}"
+export GOGC="${GOGC:-400}"
+export WBJP_DUCKDB_MEMORY_LIMIT="${WBJP_DUCKDB_MEMORY_LIMIT:-2GB}"
+
 # --- 異常の有無を先に判定する（claude を起動する前）--------------------------
 DIGESTS=()
 for d in "$YESTERDAY" "$TODAY"; do

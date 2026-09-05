@@ -232,15 +232,48 @@ func RowsToFrame(rows []map[string]any, ep Endpoint) (*Frame, error) {
 }
 
 // CSVToFrame は一括ダウンロードの csv.gz を保存形にする。列名は API と同じ前提。
-//
-// gzip は流しながら読む（展開した全文を一度メモリに置かない。bars の 1 か月は
-// 展開すると数十 MB で、Frame 本体と合わせて 2 重に持つことになる）。
 func CSVToFrame(payload []byte, ep Endpoint) (*Frame, error) {
+	var out *Frame
+	err := csvEachDay(payload, ep, false, func(f *Frame) error {
+		if out == nil {
+			out = f
+			return nil
+		}
+		out.Rows = append(out.Rows, f.Rows...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return &Frame{}, nil
+	}
+	return out, nil
+}
+
+// CSVToFramesByDay は一括 CSV を**日付ごとに区切って** fn に渡す。
+//
+// 分足の一括は 1 か月 960 万行あり、丸ごと Frame に載せると 3.8GB になる
+// （9 列 × 44 バイト/セル）。J-Quants の一括 CSV は日付順に並んでいるので、
+// 日が変わった時点で前の日を渡せば常駐は 1 日ぶん（約 190MB）で済む。
+//
+// 並びが崩れていた場合はエラーで止める。日分割の Upsert は「その日を丸ごと
+// 差し替える」ので、同じ日が離れて 2 度届くと後の塊が前の塊を消してしまう——
+// 黙ってデータが欠けるより、取り込まずに止める方がよい。
+func CSVToFramesByDay(payload []byte, ep Endpoint, fn func(*Frame) error) error {
+	return csvEachDay(payload, ep, true, fn)
+}
+
+// csvEachDay は一括 CSV を読み、split が真なら日付ごとに、偽なら全体を 1 つの
+// Frame にして fn に渡す。
+//
+// gzip は流しながら読む（展開した全文を一度メモリに置かない）。
+func csvEachDay(payload []byte, ep Endpoint, split bool, fn func(*Frame) error) error {
 	var source io.Reader = bytes.NewReader(payload)
 	if len(payload) >= 2 && payload[0] == 0x1f && payload[1] == 0x8b {
 		zr, err := gzip.NewReader(bytes.NewReader(payload))
 		if err != nil {
-			return nil, fmt.Errorf("一括 CSV の展開に失敗しました: %w", err)
+			return fmt.Errorf("一括 CSV の展開に失敗しました: %w", err)
 		}
 		defer zr.Close()
 		source = zr
@@ -253,10 +286,10 @@ func CSVToFrame(payload []byte, ep Endpoint) (*Frame, error) {
 	reader.LazyQuotes = true
 	header, err := reader.Read()
 	if err == io.EOF {
-		return &Frame{}, nil
+		return nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("一括 CSV の見出しを読めません: %w", err)
+		return fmt.Errorf("一括 CSV の見出しを読めません: %w", err)
 	}
 	// ReuseRecord なので見出しのスライスは次の Read で上書きされる。複製しておく
 	header = append([]string(nil), header...)
@@ -264,14 +297,60 @@ func CSVToFrame(payload []byte, ep Endpoint) (*Frame, error) {
 	if len(header) > 0 {
 		header[0] = strings.TrimPrefix(header[0], "\ufeff")
 	}
+	dateIdx := -1
+	if split {
+		for i, name := range header {
+			if name == ep.DateColumn {
+				dateIdx = i
+				break
+			}
+		}
+		if dateIdx < 0 {
+			return fmt.Errorf("一括 CSV に日付列 %s がありません（列: %v）", ep.DateColumn, header)
+		}
+	}
+
 	f := &Frame{Columns: append([]string(nil), header...)}
+	current := ""
+	seen := map[string]bool{}
+	flush := func() error {
+		if f.Height() == 0 {
+			return nil
+		}
+		if err := withDates(f, ep); err != nil {
+			return err
+		}
+		if err := fn(f); err != nil {
+			return err
+		}
+		f = &Frame{Columns: append([]string(nil), header...)}
+		return nil
+	}
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("一括 CSV の読み取りに失敗しました: %w", err)
+			return fmt.Errorf("一括 CSV の読み取りに失敗しました: %w", err)
+		}
+		if split {
+			day := ""
+			if dateIdx < len(record) {
+				day = record[dateIdx]
+			}
+			if day != current {
+				if err := flush(); err != nil {
+					return err
+				}
+				if seen[day] {
+					return fmt.Errorf(
+						"一括 CSV の日付が並んでいません（%s が離れて現れました）。"+
+							"日分割の取り込みは日付順を前提にしています", day)
+				}
+				seen[day] = true
+				current = day
+			}
 		}
 		row := make(Row, len(header))
 		// 値の文字列ヘッダは行ごとに 1 本にまとめる（decodeRow と同じ理由）
@@ -285,10 +364,7 @@ func CSVToFrame(payload []byte, ep Endpoint) (*Frame, error) {
 		}
 		f.Rows = append(f.Rows, row)
 	}
-	if err := withDates(f, ep); err != nil {
-		return nil, err
-	}
-	return f, nil
+	return flush()
 }
 
 // typedSkip は「数字だけだが数値ではない」列。Typed で数値化しない。

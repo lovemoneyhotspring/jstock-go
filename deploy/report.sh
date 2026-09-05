@@ -41,6 +41,13 @@ if [ -f "$HOME_DIR/.env" ]; then
 fi
 export WBJP_ENV="${WBJP_ENV:-prod}"
 
+# メモリの上限（deploy/crontab.txt と同じ値）。claude が子プロセスで daytrade / jquants を
+# 叩くので、ここで export しないと上限の無いまま DuckDB がシステムメモリの 80% を取りに行く
+export JQUANTS_READ_BUDGET_MB="${JQUANTS_READ_BUDGET_MB:-2048}"
+export GOMEMLIMIT="${GOMEMLIMIT:-4GiB}"
+export GOGC="${GOGC:-400}"
+export WBJP_DUCKDB_MEMORY_LIMIT="${WBJP_DUCKDB_MEMORY_LIMIT:-2GB}"
+
 # cron の PATH には ~/.local/bin が入っていないので絶対パスで持つ
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 [ -x "$CLAUDE_BIN" ] || CLAUDE_BIN="$(command -v claude || echo "$CLAUDE_BIN")"

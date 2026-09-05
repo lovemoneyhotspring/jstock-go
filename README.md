@@ -349,7 +349,7 @@ WBJP_ENV=prod wbjp run --live
 
 日本株の四本値だけでなく、財務・決算予定・投資部門別・信用残・空売り・指数・EDINET など Standard プランで取れる**全端点**をローカルに溜める（設計は [docs/JQUANTS_ARCHIVE.md](docs/JQUANTS_ARCHIVE.md)）。API は 10 年しか遡れないので、溜め始めた日から手元の履歴が伸びる。
 
-寄り付きの**板**と**分足**は同じ理由でさらに急ぐ——板はどこにも履歴が無く（立花のリアルタイムだけ）、分足は 2 年で消える。収集の設計は [docs/OPENING_DATA.md](docs/OPENING_DATA.md)。
+**分足**（有料アドオン）も同じ経路で溜める。履歴が 2 年しか無いので、過去 2 年ぶんを 2026-09-05 に取り込んだ（1 日 47 万行・4.7MB、`JQUANTS_MINUTE_BARS=1` で日次に載る）。**板**はどこにも履歴が無く（立花のリアルタイムだけ）、記録を始めた日からしか手に入らない。何のために集めるかは [docs/OPENING_DATA.md](docs/OPENING_DATA.md)。
 
 ```bash
 # 初回: 一括ダウンロード（月次 csv.gz）で全期間（約 15 分）
