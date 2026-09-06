@@ -402,10 +402,8 @@ func (p *PaperBroker) Settle(openPrices map[string]decimal.Decimal, highs, lows 
 	defer p.mu.Unlock()
 
 	var filled []domain.Fill
-	for id, order := range p.orders {
-		if !order.Status.IsOpen() {
-			continue
-		}
+	for _, id := range p.openOrderIDsLocked() {
+		order := p.orders[id]
 
 		openPrice, hasOpen := openPrices[order.Symbol]
 		if !hasOpen {
@@ -443,6 +441,33 @@ func (p *PaperBroker) Settle(openPrices map[string]decimal.Decimal, highs, lows 
 
 	p.fills = append(p.fills, filled...)
 	return filled
+}
+
+// openOrderIDsLocked は未約定の注文 ID を約定させる順に並べる。
+//
+// orders は map なので、そのまま走査すると順序が実行ごとに変わる。買付余力が
+// 足りない日は先に処理した買い注文だけが約定するため、順序が結果を変える——
+// 同じ設定のバックテストが走らせるたびに数十ポイント違う値を返していた。
+// 売りを先にするのは、手仕舞いで戻る現金をその日の新規建てに使えるようにするため。
+// 同じ側の中は銘柄コード、次に注文 ID の順。
+func (p *PaperBroker) openOrderIDsLocked() []string {
+	ids := make([]string, 0, len(p.orders))
+	for id, o := range p.orders {
+		if o.Status.IsOpen() {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		a, b := p.orders[ids[i]], p.orders[ids[j]]
+		if a.Side != b.Side {
+			return a.Side == domain.SideSell
+		}
+		if a.Symbol != b.Symbol {
+			return a.Symbol < b.Symbol
+		}
+		return ids[i] < ids[j]
+	})
+	return ids
 }
 
 // executionPriceLocked は約定値。約定しなければ nil。
