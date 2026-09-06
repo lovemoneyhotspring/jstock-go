@@ -300,10 +300,10 @@ func TestEnsureNoUnrecordedPositionsAllowsCarried(t *testing.T) {
 	}
 	carried, _, _ := CarriedPositions(env, b, broker.PositionsByLeg(b))
 	picks := []selection.Pick{pick("7203", domain.SideBuy)}
-	if err := EnsureNoUnrecordedPositions(env, b, picks, carried); err != nil {
+	if err := EnsureNoUnrecordedPositions(env, broker.PositionsByLeg(b), picks, carried); err != nil {
 		t.Fatalf("持ち越しは既知の建玉のはず: %v", err)
 	}
-	if err := EnsureNoUnrecordedPositions(env, b, picks, nil); err == nil {
+	if err := EnsureNoUnrecordedPositions(env, broker.PositionsByLeg(b), picks, nil); err == nil {
 		t.Fatal("持ち越しを知らなければ台帳外として止まるはず")
 	}
 }
@@ -368,13 +368,13 @@ func TestEnsureNoUnrecordedPositionsIgnoresCashHolding(t *testing.T) {
 		{Symbol: "7203", Quantity: decimal.NewFromInt(300), Trade: domain.TradeTypeCash},
 	}}
 	picks := []selection.Pick{pick("7203", domain.SideBuy)}
-	if err := EnsureNoUnrecordedPositions(env, b, picks, nil); err != nil {
+	if err := EnsureNoUnrecordedPositions(env, broker.PositionsByLeg(b), picks, nil); err != nil {
 		t.Errorf("積立の現物で発注が止まった: %v", err)
 	}
 
 	// 同じ銘柄に台帳外の信用建玉があれば止める
 	b.positions = append(b.positions, margin("7203", 100))
-	if err := EnsureNoUnrecordedPositions(env, b, picks, nil); err == nil {
+	if err := EnsureNoUnrecordedPositions(env, broker.PositionsByLeg(b), picks, nil); err == nil {
 		t.Error("台帳外の信用建玉で止まらない")
 	}
 }
@@ -487,7 +487,7 @@ func TestPositionQueryFailuresAreIndependent(t *testing.T) {
 	if _, err := UnrecordedMargin(env, broker.PositionsByLeg(b), carried); err != nil {
 		t.Errorf("現物の障害で台帳外の判定が止まった: %v", err)
 	}
-	if err := EnsureNoUnrecordedPositions(env, b, picks, carried); err != nil {
+	if err := EnsureNoUnrecordedPositions(env, broker.PositionsByLeg(b), picks, carried); err != nil {
 		t.Errorf("現物の障害で発注が止まった: %v", err)
 	}
 
@@ -500,7 +500,7 @@ func TestPositionQueryFailuresAreIndependent(t *testing.T) {
 	if _, err := UnrecordedMargin(env, broker.PositionsByLeg(b), nil); err == nil {
 		t.Error("信用の障害で台帳外の判定が止まらない")
 	}
-	if err := EnsureNoUnrecordedPositions(env, b, picks, nil); err == nil {
+	if err := EnsureNoUnrecordedPositions(env, broker.PositionsByLeg(b), picks, nil); err == nil {
 		t.Error("信用の障害で発注が止まらない")
 	}
 }

@@ -104,7 +104,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 		// 朝の返済が寄らずに失効した持ち越しがあれば、引けでもう一度。判定できなくても
 		// **当日の手仕舞いは止めない**——ここで止めると今日の建玉が丸ごと持ち越しになる
 		// （open は逆で、判定できなければ新規に建てない）
-		if carried, err = settleCarried(env, b, "引けで持ち越しを手仕舞い"); err != nil {
+		if carried, _, err = settleCarried(env, b, "引けで持ち越しを手仕舞い"); err != nil {
 			fmt.Printf("持ち越しを判定できません。当日の手仕舞いだけ行います: %v\n", err)
 			logError("daytrade.carry_check_failed", "持ち越しを判定できず当日の手仕舞いだけ行う",
 				map[string]any{"error": err.Error()})

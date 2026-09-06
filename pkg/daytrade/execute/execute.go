@@ -496,11 +496,14 @@ func skipRow(pick selection.Pick, request domain.OrderRequest, reason execution.
 // carried は今朝までに判定した持ち越しと、返済に回した台帳外の信用建玉。台帳が説明
 // できる建玉なので差し引く——差し引かないと、持ち越した銘柄が今日も候補になった朝に
 // 発注が丸ごと止まる。
-func EnsureNoUnrecordedPositions(env Env, b broker.Broker, picks []selection.Pick, carried []Carried) error {
+//
+// held は実行の冒頭（持ち越しの判定）で照会した建玉をそのまま使う。その後に送ったのは
+// 持ち越しの返済だけで、それが約定していれば建玉は減る方向なので、古い照会で判定しても
+// 結果は同じか保守側にしかならない。照会し直すと 1 実行で 2 電文増える。
+func EnsureNoUnrecordedPositions(env Env, held broker.LegPositions, picks []selection.Pick, carried []Carried) error {
 	if len(picks) == 0 {
 		return nil
 	}
-	held := broker.PositionsByLeg(b)
 
 	// 台帳が知っている今日の建玉ぶんと持ち越しぶんは差し引く（正常な再実行では止めない）
 	recorded, err := recordedByLeg(env, carried)
