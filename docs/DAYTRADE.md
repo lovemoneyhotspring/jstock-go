@@ -265,6 +265,7 @@ daytrade backtest --since 2024-11-05 --fill-entry 09:01 --fill-exit 15:20
 | `quotes` | 9:00 に受け取った気配 1 銘柄。`usable`（鮮度の検査を通った）・`opened`（もう寄っていた）・`gap` 付き | `open` が気配を取ったとき |
 | `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount` | `open` が順位を付けたとき |
 | `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数 | `open` が判断まで進んだとき |
+| `open_run` の `broker_verify` | 実機検証の実行（`--broker-verify`）だったか | `open` のたび |
 | `book` | 板・気配 1 銘柄 × 1 観測時刻（`slot` = JST の HHMM）。時価問合の応答をそのまま（値は文字列） | `snap` のたび（1 日 10 回。[OPENING_DATA.md](OPENING_DATA.md)） |
 
 全ファイルに `day`（判定日）・`run_id`（ログと同じ）・`recorded_at`（UTC）が付く。
@@ -308,6 +309,20 @@ daytrade history book --date 2026-09-08 --csv /tmp/book.csv
   古いファイルは `union_by_name` でそのまま読める
 - cron は `open` / `close` と**同じロック**を使う。時価問合のレート制限（4 回/秒）はプロセス内なので、
   同時に走ると発注側が弾かれうる。取れなければ `snap` は何もせず終わる（発注が優先）
+
+## 実機検証の印（`--broker-verify`）
+
+発注経路を実機で確かめるとき（[BROKER_VERIFY.md](BROKER_VERIFY.md)）は、`open` / `close` /
+`verify` に `--broker-verify` を付ける。**`env` では切り分けられない**——本番口座で
+確かめることがあり、印が無いと後からログを読む `night-repair` / `daily-report` が
+「時間外の発注」「持ち越し」を本当の異常として拾う。
+
+- ログの**全行**に `verify: true`、ダイジェストにも `verify: true`
+- 台帳の注文に `verify` の印（`daytrade status` では「（検証）」付きで並ぶ）
+- 検証で建てた玉は**本物**なので `close` / `verify` は普段どおり手仕舞う
+- 外れるのは**成績の集計だけ**——`evaluate` / `review` / `trades` と、
+  資産曲線のゲート（直近 20 日の実現損益）。1 単元の検証取引で翌日の資金が
+  半分に縮まないようにするため
 
 ## 候補の結果と選定の妥当性（`evaluate` / `review` / `trades`）
 

@@ -76,8 +76,32 @@ jq 'select(.run_id == "abc123" and .routine != true)' state/logs/daytrade-prod.j
 | `env` | `uat` / `prod` | |
 | `command` | 実行したサブコマンド | `run` / `data sync` |
 | `code` | 出来事の**安定した識別子**（付いているものだけ）。集計や分類はこれで行う | `accum.decision` |
+| `verify` | **実機検証で手で走らせた実行**（`--broker-verify`）。付いていない行は通常の運用 | `true` |
 
 `event` は人向けの文で、文言が変わることがある。分類には `code` を使うこと。
+
+### `verify` —— 手で検証したのか、異常が起きたのか
+
+発注経路の実機検証（[BROKER_VERIFY.md](BROKER_VERIFY.md)）は**本番口座（`env=prod`）で
+行うことがある**。`env` は口座の選択でしかないので、「時間外に建てた」「持ち越しが出た」が
+検証の手順どおりなのか本当の異常なのかを `env` では切り分けられない。
+
+そこで実行そのものに印を持たせる。`--broker-verify` を付けて走らせると、
+**その実行のログの全行**に `verify: true` が付き、ダイジェストにも `verify: true` が残る。
+通常の実行では項目ごと出ない（既存の形は変わらない）。
+
+```console
+# 検証を除いた本当の異常だけを見る
+jq -c 'select(.level == "error" and (.verify | not))' state/logs/daytrade-prod.jsonl
+# 検証で走らせた実行だけを追う
+jq -c 'select(.verify)' state/logs/daytrade-prod.jsonl
+jq -c 'select(.verify)' state/digest/prod-2026-09-06.jsonl
+```
+
+台帳にも同じ印が付く（`orders.verify`）。検証で建てた玉は**本物**なので `close` / `verify` は
+同じように扱うが、成績の集計（`evaluate` / `review` / `trades` / レポート）と
+**資産曲線のゲート**（直近 20 日の実現損益）からは外れる——1 単元の検証取引で
+翌日の資金が半分に縮まないようにするため。
 
 `timestamp`（表示の時間帯）は**ファイルには残さない**。`ts_utc` と同じ時刻の
 二重持ちで、1 行あたり約 55 バイトを占めていた。端末の表示には従来どおり出る。

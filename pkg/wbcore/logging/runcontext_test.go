@@ -2,6 +2,9 @@ package logging
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -98,5 +101,74 @@ func TestNewLoggerForRun(t *testing.T) {
 	// ログと履歴の run_id が必ず一致すること
 	if logger.RunID() != runID {
 		t.Fatalf("logger の run_id = %s, want %s", logger.RunID(), runID)
+	}
+}
+
+func TestSetVerifyMarksEveryRecord(t *testing.T) {
+	ClearSecrets()
+	dir := t.TempDir()
+	// env=prod で実機検証することがあるので、env では切り分けられない
+	logger, err := NewLogger("daytrade", "prod", "run1", "open", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("daytrade.order", "検証の前に出た行")
+	logger.SetVerify(true)
+	logger.Info("daytrade.order", "検証で出た行")
+	logger.Warn("daytrade.carry", "検証で出た持ち越しの警告")
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "daytrade-prod.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("行数 = %d, want 3", len(lines))
+	}
+	verify := make([]bool, 0, 3)
+	for _, line := range lines {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record["env"] != "prod" {
+			t.Errorf("env = %v", record["env"])
+		}
+		v, _ := record["verify"].(bool)
+		verify = append(verify, v)
+	}
+	// 印を立てる前の行には付かず、以降は警告も含めて全行に付く
+	if verify[0] {
+		t.Error("SetVerify の前の行に印が付いた")
+	}
+	if !verify[1] || !verify[2] {
+		t.Errorf("SetVerify の後の行に印が無い: %v", verify)
+	}
+}
+
+func TestVerifyAbsentOnNormalRun(t *testing.T) {
+	// 通常の実行では項目ごと出ない（既存のログの形を変えない）
+	dir := t.TempDir()
+	logger, err := NewLogger("daytrade", "prod", "run1", "open", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("daytrade.order", "通常の行")
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "daytrade-prod.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &record); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := record["verify"]; ok {
+		t.Errorf("通常の実行に verify が付いた: %s", raw)
 	}
 }

@@ -61,11 +61,22 @@ func newStatusCmd() *cobra.Command {
 			fmt.Printf("\n%s の注文\n", day.Format(DateLayout))
 			fmt.Printf("  %-25s %-6s %-4s %10s %10s %10s %12s %s\n",
 				"時刻", "銘柄", "売買", "株数", "約定", "価格", "約定単価", "状態")
+			verifying := 0
 			for _, o := range orders {
+				// 実機検証の注文は成績に数えないので、一覧でも見分けが付くようにする
+				status := o.Status
+				if o.Verify {
+					status += "（検証）"
+					verifying++
+				}
 				fmt.Printf("  %-25s %-6s %-4s %10s %10s %10s %12s %s\n",
 					clock.FmtISO(o.PlacedAt, clock.MustZone(appSettings.Timezone)),
 					o.Symbol, string(o.Side), yen(o.Quantity), yen(o.FilledQuantity),
-					yenPtr(o.Price), yenPtr(o.AvgFillPrice), o.Status)
+					yenPtr(o.Price), yenPtr(o.AvgFillPrice), status)
+			}
+			if verifying > 0 {
+				fmt.Printf("\n  うち %d 件は実機検証（--broker-verify）。成績の集計と資産曲線のゲートからは外れます\n",
+					verifying)
 			}
 			return nil
 		},

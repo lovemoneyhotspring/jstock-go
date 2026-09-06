@@ -15,29 +15,36 @@ import (
 
 func newVerifyCmd() *cobra.Command {
 	var dateFlag string
+	var brokerVerifyFlag bool
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "引け後: 手仕舞いが全部約定したかを照会し、未約定（持ち越し）なら通知する",
 		Long: "引け後: 今日の手仕舞いが全部約定したかをブローカーに照会し、未約定（持ち越し）なら\n" +
 			"通知する。ロング（買い→売り）もショート（売建→返済買い）も脚ごとに突き合わせる。",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return crash("手仕舞いの検証", "daytrade.crash", runVerify(dateFlag))
+			return crash("手仕舞いの検証", "daytrade.crash", runVerify(dateFlag, brokerVerifyFlag))
 		},
 	}
 	cmd.Flags().StringVar(&dateFlag, "date", "", "判定日（YYYY-MM-DD、既定は今日）")
+	cmd.Flags().BoolVar(&brokerVerifyFlag, "broker-verify", false,
+		"発注経路の実機検証の一部として走らせる（docs/BROKER_VERIFY.md）。ログとダイジェストに印を付ける")
 	return cmd
 }
 
-func runVerify(date string) error {
+func runVerify(date string, brokerVerify bool) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
+	// 検証中の「持ち越しあり」は想定内。印が無いと night-repair が異常として拾う
+	run.SetVerify(brokerVerify)
 	day, err := dayOrToday(date, clock.NowUTC())
 	if err != nil {
 		return err
 	}
-	logConfig(cfg, "verify", map[string]any{"day": day.Format(DateLayout)})
+	logConfig(cfg, "verify", map[string]any{
+		"day": day.Format(DateLayout), "broker_verify": brokerVerify,
+	})
 
 	led, err := dtledger.Open(appSettings.DaytradeDBPath())
 	if err != nil {

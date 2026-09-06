@@ -362,6 +362,10 @@ func actualsOf(orders []dtledger.Order) map[string]actual {
 		if o.IsDryRun() || o.IsDead() {
 			continue
 		}
+		// 実機検証の注文は成績ではない（docs/BROKER_VERIFY.md）。候補の評価から外す
+		if o.Verify {
+			continue
+		}
 		key := o.Symbol + "|" + o.Leg()
 		if o.IsEntry() {
 			entries[key] = o

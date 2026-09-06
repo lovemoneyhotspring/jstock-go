@@ -115,6 +115,11 @@ type LogRecord struct {
 	Code    string         `json:"code,omitempty"`
 	Msg     string         `json:"msg"`
 	Extra   map[string]any `json:"extra,omitempty"`
+	// Verify は実機検証の実行か（docs/BROKER_VERIFY.md）。**env とは独立**で、
+	// 本番口座（env=prod）で検証したときも真になる。付いている行は「手で検証した
+	// ときの記録」で、異常ではない——night-repair / daily-report はこれで切り分ける。
+	// 通常の実行では項目ごと出ない（omitempty）。
+	Verify bool `json:"verify,omitempty"`
 }
 
 // Logger は構造化ロガー。
@@ -126,6 +131,8 @@ type Logger struct {
 	command string
 	file    *os.File
 	out     io.Writer
+	// verify は実機検証の実行か。真なら以降の全行に verify: true が付く。
+	verify bool
 	// tz は端末表示の時間帯。ファイルに書く ts_utc は常に UTC。
 	tz *time.Location
 }
@@ -199,6 +206,7 @@ func (l *Logger) log(level, code, msg string, extra map[string]any) {
 		Code:    code,
 		Msg:     redactedMsg,
 		Extra:   redactedExtra,
+		Verify:  l.verify,
 	}
 
 	bytes, err := json.Marshal(record)
@@ -374,6 +382,17 @@ func (l *Logger) SetOutput(w io.Writer) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.out = w
+}
+
+// SetVerify は以降の全行に検証の印を付ける（--broker-verify）。
+//
+// env は口座の選択でしかなく、本番口座（env=prod）で実機検証をすることがある。
+// 「手で検証したのか、本当に異常が起きたのか」を env では切り分けられないので、
+// 実行そのものに印を持たせる。night-repair / daily-report はこれで切り分ける。
+func (l *Logger) SetVerify(verify bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.verify = verify
 }
 
 // RunID はこのロガーが付ける実行の識別子。

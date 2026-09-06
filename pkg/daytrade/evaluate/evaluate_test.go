@@ -144,6 +144,28 @@ func TestEvaluateJoinsLedger(t *testing.T) {
 	}
 }
 
+func TestEvaluateSkipsBrokerVerify(t *testing.T) {
+	// 実機検証（--broker-verify）の約定は成績ではないので、候補の評価に混ぜない。
+	// env=prod で検証することがあるので、口座では切り分けられない
+	buy := dec(1000)
+	sell := dec(1050)
+	orders := []dtledger.Order{
+		{Symbol: "1000", Side: "BUY", Trade: "CASH", Status: "FILLED", Verify: true,
+			Quantity: dec(100), FilledQuantity: dec(100), AvgFillPrice: &buy},
+		{Symbol: "1000", Side: "SELL", Trade: "CASH", Status: "FILLED", Verify: true,
+			Quantity: dec(100), FilledQuantity: dec(100), AvgFillPrice: &sell},
+	}
+	result := evaluate.Evaluate(ranking(), "", bars(), baseConfig(), orders, evaluate.SourceQuotes)
+	for _, row := range result.Rows {
+		if row["traded"].(bool) {
+			t.Errorf("検証の約定が traded になっている: %v", row["symbol"])
+		}
+		if row["actual_pnl"] != nil {
+			t.Errorf("検証の損益が実現損益に入った: %v", row["actual_pnl"])
+		}
+	}
+}
+
 func TestSummarize(t *testing.T) {
 	result := evaluate.Evaluate(ranking(), "", bars(), baseConfig(), nil, evaluate.SourceQuotes)
 	summary := evaluate.Summarize(result)

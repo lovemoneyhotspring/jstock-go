@@ -159,6 +159,9 @@ var OpenRunSchema = []history.Column{
 	{Name: "short_multiplier", Type: history.TypeFloat64},
 	{Name: "long_picks", Type: history.TypeInt64},
 	{Name: "short_picks", Type: history.TypeInt64},
+	// broker_verify は実機検証の実行か（--broker-verify。docs/BROKER_VERIFY.md）。
+	// 建てる玉は本物だが戦略の判断ではないので、成績の集計からは外す。
+	{Name: "broker_verify", Type: history.TypeBool},
 	// orders は台帳に書いた注文の数（dry-run を含む）、failures は通らなかった数。
 	{Name: "orders", Type: history.TypeInt64},
 	{Name: "failures", Type: history.TypeInt64},

@@ -62,6 +62,10 @@ func (o LedgerOrder) EffectiveAmount() decimal.Decimal {
 type Ledger struct {
 	db   *sql.DB
 	path string
+	// Verify が真なら、この実行で書く注文に実機検証の印を付ける（--broker-verify）。
+	// 買った株は本物なので「発注済み」には数える（実際に払っている）が、
+	// evaluate の集計からは外す。戦略の判断ではないため。
+	Verify bool
 }
 
 // Path は台帳ファイルの置き場所。二重買付を疑う場面で人に示す。
@@ -92,6 +96,10 @@ var migrations = []storage.Migration{
 	{Name: "orders.columns", Up: storage.AddColumns("orders", map[string]string{
 		"plan_month": "TEXT", "amount": "TEXT", "market": "TEXT",
 		"filled_quantity": "TEXT", "avg_fill_price": "TEXT", "updated_at": "TEXT",
+	})},
+	// 実機検証（docs/BROKER_VERIFY.md）の注文に印を付ける。既定 0 = 通常の注文
+	{Name: "orders.verify", Up: storage.AddColumns("orders", map[string]string{
+		"verify": "INTEGER NOT NULL DEFAULT 0",
 	})},
 }
 
@@ -256,8 +264,8 @@ func (l *Ledger) Record(req domain.OrderRequest, status string, brokerOrderID *s
 
 	query := `INSERT INTO orders (
 		client_order_id, broker_order_id, symbol, quantity, status, reason, placed_at,
-		plan_month, amount, market, filled_quantity
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		plan_month, amount, market, filled_quantity, verify
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(client_order_id) DO UPDATE SET
 		broker_order_id = excluded.broker_order_id,
 		status = excluded.status,
@@ -275,8 +283,17 @@ func (l *Ledger) Record(req domain.OrderRequest, status string, brokerOrderID *s
 		amtStr,
 		mktStr,
 		"0",
+		boolToInt(l.Verify),
 	)
 	return err
+}
+
+// boolToInt は SQLite に真偽を入れるための 0 / 1。
+func boolToInt(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // Backup は台帳を別ファイルに複製する。
