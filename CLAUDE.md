@@ -16,8 +16,12 @@
 | 検証から抽出した原則 | `~/obsidian-vault/40-insights/` |
 | このシステムの常設ノート | `~/obsidian-vault/30-projects/`（`jstock-go` `daytrade` `wbjp` `accum` `jquants`） |
 
-**読むときは `~/obsidian-vault/20-research/結論一覧.md`（3 KB）から。** 全 14 本の検証の
-一行結論が入っている。個別のノートは 1 本 5〜36 KB あるので、必要と分かってから開く。
+**読むときは索引から入る。** 全文を開くのは必要と分かってから。
+
+| 知りたいこと | まず読む | 大きさ |
+|---|---|---|
+| 検証の結論 | `~/obsidian-vault/20-research/結論一覧.md` | 3 KB（全文は 225 KB） |
+| このリポジトリの仕様 | `docs/README.md` | 1 KB（全文は 155 KB） |
 
 書き方の規約は `~/obsidian-vault/CLAUDE.md`。vault は独立した git リポジトリ（private）なので、
 **書いたら vault 側で commit して push まで済ませる**。頼まれるのを待たない。
