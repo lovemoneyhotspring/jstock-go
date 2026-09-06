@@ -104,3 +104,22 @@ ross_cameron では +0.29%（n=1,167）、rsi_pullback では +0.11%。年別は
   中小型のショート候補の順位付け（売り長は下がりやすい）として再検証する余地はある。
 - 空売り残高報告の「積み増し → 踏み上げ」は分布が歪んでおり、ロング候補の除外条件ではなく、
   含み損の建玉を早く切る材料としてなら使えるかもしれない。
+
+## 過去の記録の見直し（2026-09-06）
+
+上の 2 つの問題が過去の研究記録にどう当たるかを 8 本ぶん確かめ、各記録の冒頭に注記を入れた。
+
+| 記録 | ツール | 母集団 | 影響 | 扱い |
+|---|---|---|---|---|
+| 2026-08-buffett-quality-swing-regime | wbjp backtest | 今日の財務で選んだ 28 銘柄（事後選抜を自認） | **高**（A・B） | 参考に格下げ。取り直し不可（米国株スタックは 478ec18 で削除） |
+| 2026-08-rsi-pullback-exit-grid | wbjp backtest | 固定 91 銘柄 | **高**（B） | 格子の行ごとの差は信用しない。主結論（SPY に届かない）は保つ |
+| 2026-08-entry-exit-cycles | wbjp backtest | 固定 91 銘柄 | **高**（B） | B 採用・E 棄却は再現しない可能性。手順は正しい |
+| 2026-08-us-swing-strategy-research | wbjp backtest | 固定 91 銘柄 | 中（B） | 1pt 未満の順位は信用しない。主結論は保つ |
+| 2026-08-buffett-13f-accumulate | accum | 13F を提出日翌営業日から反映（時点）。被買収は除外 | 低〜中（A） | 主結論は保つ（バイアスは控えめ側） |
+| 2026-08-jp-daytrade-selection | scratch SQL ＋ daytrade backtest | 日次の時点構成（前日までの売買代金・master） | 低 | 取り直し不要 |
+| 2026-08-jp-alt-data-scan | scratch ＋ daytrade backtest | 日次の時点構成 | 低 | 取り直し不要（売り禁のプレミアムは別の理由で割引） |
+| 2026-09-jp-gap-up-short / gap-minute / shock-days | scratch ＋ daytrade backtest | 日次の時点構成、貸借銘柄 × プライム | 低 | 取り直し不要。`pkg/daytrade/backtest` は別実装で約定順の問題も無い |
+
+daytrade 系は母集団を毎朝の `master` と前日までの売買代金で作る（構造的に時点）ので無事。
+問題は wbjp の研究に固まっており、いずれも米国株の時代のもので取り直せない。以後の wbjp の研究は
+時点母集団（`config/jp-levels`）と決定的なエンジンで行う。
