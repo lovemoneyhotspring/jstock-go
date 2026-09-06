@@ -180,20 +180,19 @@ if [ "$PERIOD" != "daily" ] && [ -d "$VAULT_DIR/.git" ]; then
     cat "$REPORT"
   } > "$VAULT_NOTE"
 
-  # PC 側の編集と衝突しないよう、commit の前に取り込む。競合したら諦めて次回に回す
-  # （このノートは新規ファイルなので、次回の実行でそのまま入る）。
-  if git -C "$VAULT_DIR" pull --rebase --quiet 2>>"${REPORT%.md}.err"; then
-    git -C "$VAULT_DIR" add "$VAULT_NOTE" 2>>"${REPORT%.md}.err" || :
-    # 同じ期間を撮り直したときは中身が変わらないことがある。その場合は commit しない
-    if git -C "$VAULT_DIR" diff --cached --quiet -- "$VAULT_NOTE"; then
-      echo "vault: $TITLE に変更なし" >&2
-    else
-      git -C "$VAULT_DIR" commit --quiet -m "docs(reports): $TITLE" 2>>"${REPORT%.md}.err" \
-        && git -C "$VAULT_DIR" push --quiet origin main 2>>"${REPORT%.md}.err" \
-        || echo "vault への commit/push に失敗（ノートは $VAULT_NOTE に残っている）" >&2
-    fi
+  # 先に commit してから取り込む。pull --rebase は未コミットの変更があると必ず失敗するので、
+  # pull を先に置くと（VM 側で何か触りかけているだけで）毎回止まる。他人の変更が残っていても
+  # 進めるよう --autostash を付ける。競合したら push を諦めて次回に回す。
+  git -C "$VAULT_DIR" add "$VAULT_NOTE" 2>>"${REPORT%.md}.err" || :
+  # 同じ期間を撮り直したときは中身が変わらないことがある。その場合は commit しない
+  if git -C "$VAULT_DIR" diff --cached --quiet -- "$VAULT_NOTE"; then
+    echo "vault: $TITLE に変更なし" >&2
+  elif git -C "$VAULT_DIR" commit --quiet -m "docs(reports): $TITLE" 2>>"${REPORT%.md}.err"; then
+    git -C "$VAULT_DIR" pull --rebase --autostash --quiet 2>>"${REPORT%.md}.err" \
+      && git -C "$VAULT_DIR" push --quiet origin main 2>>"${REPORT%.md}.err" \
+      || echo "vault の push に失敗（commit は済んでいる。次回の実行で一緒に上がる）" >&2
   else
-    echo "vault の pull に失敗。commit は見送る（ノートは $VAULT_NOTE に残っている）" >&2
+    echo "vault への commit に失敗（ノートは $VAULT_NOTE に残っている）" >&2
   fi
 fi
 

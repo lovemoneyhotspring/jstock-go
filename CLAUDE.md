@@ -17,6 +17,7 @@
 | このシステムの常設ノート | `~/obsidian-vault/30-projects/`（`jstock-go` `daytrade` `wbjp` `accum` `jquants`） |
 
 vault 側の書き方の規約は `~/obsidian-vault/CLAUDE.md` にある。vault は独立した git リポジトリ
-（private）なので、書いたら vault 側でも commit する。
+（private）なので、**書いたら vault 側で commit して push まで済ませる**。頼まれるのを待たない。
+push していない記録は PC 側の Obsidian から見えず、存在しないのと同じ。
 
 2026-09-07 より前の検証は `docs/research/` にあった。git の履歴に残っている。
