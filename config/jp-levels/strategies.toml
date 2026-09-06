@@ -1,0 +1,8 @@
+combiner = "weighted_vote"
+entry_threshold = 0.3
+exit_threshold = 0.1
+
+[[strategies]]
+name = "level_bounce"
+enabled = true
+weight = 1.0

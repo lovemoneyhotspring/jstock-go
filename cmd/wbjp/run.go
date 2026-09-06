@@ -214,7 +214,18 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 	//
 	// 戦略には銘柄ごとではなく全銘柄をまとめて渡す。モメンタムの
 	// 順位付けやベンチマークとの比較は、1 銘柄ずつ呼ぶ形では書けない。
-	stratCtx := strategy.NewContext(todayJST, allBars, posMap, equity)
+	stratUniverse := strategy.NewUniverse(allBars)
+	if needsMargin(stratCfg) {
+		book, err := loadMarginBook(setCfg.Universe.Symbols)
+		if err != nil {
+			return err
+		}
+		if book == nil {
+			logger.Warn("wbjp.margin_missing", "信用残がアーカイブにありません。margin_balance は黙ります")
+		}
+		stratUniverse.SetMargin(book)
+	}
+	stratCtx := stratUniverse.At(todayJST, posMap, equity)
 
 	signalsBySymbol := make(map[string][]domain.Signal)
 	for _, s := range strats {

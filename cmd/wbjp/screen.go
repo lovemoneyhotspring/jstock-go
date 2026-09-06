@@ -56,7 +56,15 @@ func newScreenCmd() *cobra.Command {
 			today := clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006-01-02")
 			// 建玉は渡さない。screen は「今から建てるなら何か」を見るための
 			// コマンドなので、保有の有無で結果が変わらないほうが読みやすい。
-			ctx := strategy.NewContext(today, allBars, nil, decimal.Zero)
+			screenUniverse := strategy.NewUniverse(allBars)
+			if needsMargin(stratCfg) {
+				book, err := loadMarginBook(setCfg.Universe.Symbols)
+				if err != nil {
+					return err
+				}
+				screenUniverse.SetMargin(book)
+			}
+			ctx := screenUniverse.At(today, nil, decimal.Zero)
 
 			signalsBySymbol := make(map[string][]domain.Signal)
 			for _, s := range strats {

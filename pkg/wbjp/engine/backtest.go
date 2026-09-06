@@ -44,6 +44,8 @@ type BacktestOptions struct {
 	// CashYield は待機資金の年利（%）の日足。^IRX など。
 	// 与えると現金に日割り（360 日）で利息を付ける。
 	CashYield []domain.Bar
+	// Margin は信用残（週次）。nil なら信用残を使う戦略は黙る。
+	Margin *strategy.MarginBook
 }
 
 // FillModels は選べる約定モデル。
@@ -147,7 +149,7 @@ func RunBacktest(
 
 	// 指標は全履歴に対して一度だけ計算し、日ごとに切り詰めて見せる。
 	// 日ごとに足を切り出して計算し直すと、日数の二乗に比例して遅くなる。
-	universe := strategy.NewUniverse(allBars)
+	universe := strategy.NewUniverse(allBars).SetMargin(opts.Margin)
 
 	var allFills []domain.Fill
 	equityHistory := make([]decimal.Decimal, 0, len(dates))

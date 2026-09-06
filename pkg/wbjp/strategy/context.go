@@ -119,6 +119,11 @@ type Context struct {
 	views     map[string]View
 	positions map[string]domain.Position
 	symbols   []string
+
+	// margin は信用残（無ければ nil）。分位は初めて訊かれたときに一度だけ計算する。
+	margin      *MarginBook
+	marginOnce  sync.Once
+	marginRanks map[string]float64
 }
 
 // Symbols は足が用意されている銘柄（辞書順）。
@@ -175,6 +180,7 @@ func (c *Context) HeldSymbols() []string {
 // 指標のキャッシュが Series 側にあるので、日数ぶん再計算されない。
 type Universe struct {
 	series map[string]*Series
+	margin *MarginBook
 }
 
 // NewUniverse は銘柄→日足（date 昇順）から Universe を作る。
@@ -183,6 +189,12 @@ func NewUniverse(bars map[string][]domain.Bar) *Universe {
 	for sym, b := range bars {
 		u.series[sym] = NewSeries(sym, b)
 	}
+	return u
+}
+
+// SetMargin は信用残を載せる。nil なら「信用残の無い環境」として扱う。
+func (u *Universe) SetMargin(book *MarginBook) *Universe {
+	u.margin = book
 	return u
 }
 
@@ -195,6 +207,7 @@ func (u *Universe) At(asOf string, positions map[string]domain.Position, equity 
 		Equity:    equity,
 		views:     make(map[string]View, len(u.series)),
 		positions: positions,
+		margin:    u.margin,
 	}
 	if ctx.positions == nil {
 		ctx.positions = map[string]domain.Position{}

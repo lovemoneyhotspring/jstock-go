@@ -258,3 +258,37 @@ func TestPaperBrokerAccrueInterest(t *testing.T) {
 		t.Error("日数ゼロで利息が付きました")
 	}
 }
+
+// 買付余力が 1 銘柄ぶんしか無い日に 3 銘柄の買いを出すと、約定するのは 1 つだけ
+// （発注時の検査は 1 本ずつ余力と比べるので 3 本とも通る）。どれが約定するかが
+// map の走査順（実行ごとに変わる）で決まってはいけない——同じ設定のバックテストが
+// 走らせるたびに違う値を返していた原因。
+func TestPaperBrokerSettlesOpenOrdersInDeterministicOrder(t *testing.T) {
+	place := func(pb *PaperBroker, id, symbol string, side domain.Side) {
+		t.Helper()
+		req, err := domain.NewOrderRequest(id, symbol, side, domain.OrderTypeMarket, decimal.NewFromInt(100), nil,
+			domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pb.Place(req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prices := map[string]decimal.Decimal{
+		"9984": decimal.NewFromInt(1000), "7203": decimal.NewFromInt(1000), "6758": decimal.NewFromInt(1000),
+	}
+
+	for i := 0; i < 20; i++ {
+		pb := NewPaperBroker(decimal.NewFromInt(150_000), "open") // 1 銘柄（10 万円 + 手数料）ぶん
+		pb.Mark(prices)
+		place(pb, "o-9984", "9984", domain.SideBuy)
+		place(pb, "o-7203", "7203", domain.SideBuy)
+		place(pb, "o-6758", "6758", domain.SideBuy)
+		fills := pb.Settle(prices, nil, nil, nil)
+		if len(fills) != 1 || fills[0].Symbol != "6758" {
+			t.Fatalf("銘柄コード順に約定するはず（6758）: %+v", fills)
+		}
+	}
+
+}

@@ -1,0 +1,38 @@
+# 研究用の設定（level_bounce / margin_balance の検証）。発注先は paper なので実運用には使わない。
+#
+# symbols.txt は scratch/levels-universe が作る。**2017-08-31 時点の銘柄一覧**から
+# 2016-09〜2017-08 の売買代金上位 300 を選ぶ（上場廃止銘柄を含む時点母集団）:
+#   go run ./scratch/levels-universe -master-as-of 2017-08-31 -rank-from 2016-09-01 -rank-to 2017-08-31 -top 300 -out config/jp-levels/symbols.txt
+# 「今も上場していて直近の売買代金が多い銘柄」で選ぶと事後の勝ち組を選ぶことになり、
+# 等金額買い持ちだけで +268%（時点母集団は +149% ≒ TOPIX）と、どの戦略も水増しされる
+# （docs/research/2026-09-jp-margin-sentiment.md）。
+
+[universe]
+market = "JP"
+symbols_file = "symbols.txt"
+
+[risk]
+kill_switch = false
+max_order_value = "10000000"
+max_orders_per_day = 50
+max_daily_loss = "3000000"
+max_position_weight = "0.20"
+max_gross_exposure = "0.95"
+max_preview_deviation = "0.02"
+
+[sizing]
+method = "atr_risk"
+risk_per_trade = "0.01"
+atr_stop_multiple = "2.0"
+fixed_notional = "3000000"
+max_positions = 10
+
+[execution]
+broker = "paper"
+tax_account_type = "SPECIFIC"
+order_type = "limit"
+limit_offset = "0.005"
+
+[stops]
+trailing = false
+max_hold_days = 15

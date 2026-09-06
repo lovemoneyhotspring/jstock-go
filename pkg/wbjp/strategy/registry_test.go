@@ -6,7 +6,7 @@ import (
 )
 
 func TestAllStrategiesAreRegistered(t *testing.T) {
-	want := []string{"atr_breakout", "momentum_rank", "ross_cameron", "rsi_pullback", "rsi_reversion", "sma_cross", "trend_pullback"}
+	want := []string{"atr_breakout", "level_bounce", "margin_balance", "momentum_rank", "ross_cameron", "rsi_pullback", "rsi_reversion", "sma_cross", "trend_pullback"}
 	got := Available()
 	if len(got) != len(want) {
 		t.Fatalf("登録数 = %d (%v), 期待 %d", len(got), got, len(want))
