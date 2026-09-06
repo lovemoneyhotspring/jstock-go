@@ -398,7 +398,7 @@ cron が溜め続ける J-Quants アーカイブ（`data/jquants`、2016 年〜�
 1 個だけ出す（`jq` にそのまま渡せる）。
 
 パラメータは `config/<dir>/*.toml` を書き換えて再実行する。別案を試すときは `config/` をディレクトリごと複製し
-`--config-dir` で指す（cron が読む設定を壊さない）。研究の記録は `docs/research/` に日付付きで残す。
+`--config-dir` で指す（cron が読む設定を壊さない）。研究の記録は Obsidian の vault（`~/obsidian-vault/20-research/`）に日付付きで残す。
 
 ## cron で回す
 
