@@ -16,8 +16,11 @@
 | 検証から抽出した原則 | `~/obsidian-vault/40-insights/` |
 | このシステムの常設ノート | `~/obsidian-vault/30-projects/`（`jstock-go` `daytrade` `wbjp` `accum` `jquants`） |
 
-vault 側の書き方の規約は `~/obsidian-vault/CLAUDE.md` にある。vault は独立した git リポジトリ
-（private）なので、**書いたら vault 側で commit して push まで済ませる**。頼まれるのを待たない。
+**読むときは `~/obsidian-vault/20-research/結論一覧.md`（3 KB）から。** 全 14 本の検証の
+一行結論が入っている。個別のノートは 1 本 5〜36 KB あるので、必要と分かってから開く。
+
+書き方の規約は `~/obsidian-vault/CLAUDE.md`。vault は独立した git リポジトリ（private）なので、
+**書いたら vault 側で commit して push まで済ませる**。頼まれるのを待たない。
 push していない記録は PC 側の Obsidian から見えず、存在しないのと同じ。
 
 2026-09-07 より前の検証は `docs/research/` にあった。git の履歴に残っている。
