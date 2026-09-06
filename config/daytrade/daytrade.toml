@@ -37,6 +37,10 @@ skip_limit_down = true     # 気配がストップ安の銘柄は買わない（
 # ギャップ 0 と見えて候補に載らず、これを true にすると候補が 1 つも残らない（毎日 no_picks になる）。
 # 根拠は docs/research/2026-09-jp-gap-minute.md の発見 1。
 skip_opened = false
+# 候補の並べ方。gap … ギャップの小さい順（既定）／ gap_vol … ギャップ ÷ 20 日ボラの小さい順。
+# gap_vol は探索 +6.7 bp/日（t 2.1）・確認 +6.7 bp（t 1.7）で、事前基準（t 2.5）には届かず追跡中
+# （docs/research/2026-09-jp-daytrade-selection-2.md）。
+rank_by = "gap"
 
 [regime]
 # 危険信号（docs/DAYTRADE.md「危険信号」）。毎朝すべて計算してログに残し、有効にしたものだけが取引を止める

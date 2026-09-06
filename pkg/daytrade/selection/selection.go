@@ -6,6 +6,7 @@
 package selection
 
 import (
+	"math"
 	"sort"
 	"time"
 
@@ -107,6 +108,7 @@ func Rank(candidates []universe.Candidate, quotes map[string]Quote, cfg config.S
 	return rankBy(candidates, quotes, gapFilter{
 		min: cfg.MinGap, max: cfg.MaxGap,
 		skipLimit: cfg.SkipLimitDown, limitDown: true,
+		rankBy: cfg.RankBy,
 	})
 }
 
@@ -128,6 +130,20 @@ type gapFilter struct {
 	skipLimit  bool
 	limitDown  bool
 	descending bool
+	// rankBy は並べる鍵（config.RankByGap / RankByGapVol。空は gap）。
+	rankBy string
+}
+
+// RankKey は並べ替えの鍵。gap_vol はギャップ ÷ max(20 日ボラ, VolFloor)。
+// ボラが無い銘柄は ok=false（並びの末尾）。バックテスト（backtest.pickDay）も同じ鍵を使う。
+func RankKey(rankBy string, gap float64, vol *float64) (float64, bool) {
+	if rankBy != config.RankByGapVol {
+		return gap, true
+	}
+	if vol == nil {
+		return 0, false
+	}
+	return gap / math.Max(*vol, VolFloor), true
 }
 
 func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilter) []Ranked {
@@ -164,14 +180,19 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 			Vol:       c.Vol20,
 		})
 	}
-	// 同じギャップなら銘柄コード順（順位を実行ごとに揺らさない）
+	// 同じ鍵なら銘柄コード順（順位を実行ごとに揺らさない）。鍵の無い銘柄は末尾。
 	sort.SliceStable(scored, func(i, j int) bool {
 		a, b := scored[i], scored[j]
-		if !a.Gap.Equal(b.Gap) {
+		ka, oka := RankKey(f.rankBy, a.Gap.InexactFloat64(), a.Vol)
+		kb, okb := RankKey(f.rankBy, b.Gap.InexactFloat64(), b.Vol)
+		if oka != okb {
+			return oka
+		}
+		if ka != kb {
 			if f.descending {
-				return a.Gap.GreaterThan(b.Gap)
+				return ka > kb
 			}
-			return a.Gap.LessThan(b.Gap)
+			return ka < kb
 		}
 		return a.Symbol < b.Symbol
 	})
