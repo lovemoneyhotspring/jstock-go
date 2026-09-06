@@ -160,14 +160,10 @@ func EntryRequest(pick selection.Pick, day time.Time, cfg config.Config, attempt
 	if attempt > 0 {
 		seed = fmt.Sprintf("%s|%d", seed, attempt)
 	}
-	trade := domain.TradeTypeCash
+	trade := EntryTrade(pick.Side, cfg)
 	action := "買い"
-	switch {
-	case pick.Side == domain.SideSell:
-		trade = domain.TradeTypeMarginOpen // 売建（空売り）
+	if pick.Side == domain.SideSell {
 		action = "売建"
-	case cfg.Margin.Enabled && cfg.Margin.LongViaMargin:
-		trade = domain.TradeTypeMarginOpen // 信用買い（日計り。手数料 0 円）
 	}
 	gap, _ := pick.Gap.Float64()
 	return domain.OrderRequest{
@@ -181,6 +177,19 @@ func EntryRequest(pick selection.Pick, day time.Time, cfg config.Config, attempt
 			cfg.StrategyName(), day.Format(cli.DateLayout), cli.Pct(gap), pick.Rank, action),
 		Trade: trade,
 	}
+}
+
+// EntryTrade はその脚を建てるときの売買区分。
+//
+//   - 売り     … 信用新規売り（売建。現物では空売りできない）
+//   - 買い     … long_via_margin なら信用買い（日計りは手数料 0 円）、そうでなければ現物
+//
+// 建玉をブローカーに照会して突き合わせるとき、現物と信用を取り違えないために使う。
+func EntryTrade(side domain.Side, cfg config.Config) domain.TradeType {
+	if side == domain.SideSell || (cfg.Margin.Enabled && cfg.Margin.LongViaMargin) {
+		return domain.TradeTypeMarginOpen
+	}
+	return domain.TradeTypeCash
 }
 
 // PlaceRecorded は送る前に台帳へ PENDING を書き、送ったら結果で更新する。
@@ -476,36 +485,32 @@ func skipRow(pick selection.Pick, request domain.OrderRequest, reason execution.
 //
 // 台帳（client_order_id）に基づく冪等性は台帳が生きている前提の仕組みで、失うと
 // 効かない。ブローカー側の建玉は失われないので、発注の直前にそちらと突き合わせる。
-// 見つかったら**発注を中止する**——自動で手仕舞うと他の戦略の保有を触りかねないし、
-// 二重に建てると日計りの資金計画が崩れる。人が確かめるまで止める。
+//
+// 見つかったら**発注を中止する**。ここに残るのは現物だけで（信用は settleCarried が
+// 返済する）、現物は積立の保有かもしれないので自動では手仕舞わない。人が確かめるまで
+// 止める。信用でしか建てない構成（long_via_margin = true）なら現物は見ないので、
+// 実際に止まるのは照会できないときだけになる。
 //
 // 照会できないときも中止する。二重建てを否定できないまま実弾を出さない。
 //
-// carried は今朝までに判定した持ち越し（前営業日以前の建玉）。台帳が知っている建玉なので
-// 差し引く——差し引かないと、持ち越した銘柄が今日も候補になった朝に発注が丸ごと止まる。
+// carried は今朝までに判定した持ち越しと、返済に回した台帳外の信用建玉。台帳が説明
+// できる建玉なので差し引く——差し引かないと、持ち越した銘柄が今日も候補になった朝に
+// 発注が丸ごと止まる。
 func EnsureNoUnrecordedPositions(env Env, b broker.Broker, picks []selection.Pick, carried []Carried) error {
 	if len(picks) == 0 {
 		return nil
 	}
-	positions, err := broker.PositionsBySymbolIncludingMargin(b)
-	if err != nil {
-		env.Report.Error("daytrade.unrecorded_check_failed", "建玉を照会できません",
-			map[string]any{"day": env.dayText(), "error": err.Error()})
-		return fmt.Errorf("建玉を照会できないため発注を中止しました（二重に建てないため）: %w", err)
-	}
+	held := broker.PositionsByLeg(b)
 
 	// 台帳が知っている今日の建玉ぶんと持ち越しぶんは差し引く（正常な再実行では止めない）
-	recorded := carriedQuantities(carried)
+	recorded := carriedByLeg(carried)
 	if entries, err := env.Ledger.EntriesOn(env.Day); err == nil {
 		for _, o := range entries {
 			if o.IsDryRun() || o.IsDead() {
 				continue
 			}
-			sign := decimal.NewFromInt(1)
-			if o.Side != domain.SideBuy {
-				sign = decimal.NewFromInt(-1)
-			}
-			recorded[o.Symbol] = recorded[o.Symbol].Add(sign.Mul(o.Quantity))
+			leg := broker.LegOf(o.Symbol, o.Trade, o.Leg() == "short")
+			recorded[leg] = recorded[leg].Add(o.Quantity)
 		}
 	}
 
@@ -516,13 +521,25 @@ func EnsureNoUnrecordedPositions(env Env, b broker.Broker, picks []selection.Pic
 			continue
 		}
 		seen[pick.Symbol] = struct{}{}
-		held, ok := positions[pick.Symbol]
-		if !ok || held.Quantity.IsZero() {
-			continue
-		}
-		if leftover := held.Quantity.Sub(recorded[pick.Symbol]); !leftover.IsZero() {
-			unrecorded = append(unrecorded, fmt.Sprintf("%s %s 株（台帳の記録は %s 株）",
-				pick.Symbol, leftover, recorded[pick.Symbol]))
+		for _, leg := range CheckedLegs(pick.Symbol, env.Cfg) {
+			position, ok := held.At(leg)
+			if !ok {
+				// 見る側を照会できていない。二重建てを否定できないまま実弾を出さない
+				what := "現物"
+				if leg.Margin {
+					what = "信用建玉"
+				}
+				env.Report.Error("daytrade.unrecorded_check_failed", what+"を照会できません",
+					map[string]any{"day": env.dayText(), "error": held.Err(leg.Margin).Error()})
+				return fmt.Errorf("%sを照会できないため発注を中止しました（二重に建てないため）: %w",
+					what, held.Err(leg.Margin))
+			}
+			leftover := position.Quantity.Sub(recorded[leg])
+			if !leftover.IsPositive() {
+				continue
+			}
+			unrecorded = append(unrecorded, fmt.Sprintf("%s %s %s 株（台帳の記録は %s 株）",
+				pick.Symbol, LegName(leg), leftover, recorded[leg]))
 		}
 	}
 	if len(unrecorded) == 0 {
@@ -546,6 +563,10 @@ type ExitTarget struct {
 	Entry     ledger.Order
 	Quantity  decimal.Decimal
 	FillPrice *decimal.Decimal
+	// Unrecorded は台帳が説明できない建玉か（Entry は建玉から組み立てた作り物）。
+	// client_order_id の種を分けるために持つ——台帳の建玉の手仕舞いと同じ銘柄・
+	// 同じ株数になると ID が衝突し、片方が「発注済み（冪等）」として送られない。
+	Unrecorded bool
 }
 
 // LiveEntries は今日の建玉のうち dry-run でないもの。dryRun は除いた数。
@@ -674,12 +695,14 @@ func recordFill(env Env, order ledger.Order, current *domain.Order, filled decim
 // ExitRequest は 1 建玉の反対売買。信用で建てたものは返済、現物の買いは売却。
 // action は人向けの動詞（売り／返済売り／返済買い）。
 func ExitRequest(entry ledger.Order, quantity decimal.Decimal, day time.Time, cfg config.Config, attempt int) (domain.OrderRequest, string) {
-	return ExitRequestAs(entry, quantity, day, cfg, attempt, "引けで手仕舞い")
+	return ExitRequestAs(ExitTarget{Entry: entry, Quantity: quantity}, day, cfg, attempt, "引けで手仕舞い")
 }
 
 // ExitRequestAs は理由の言葉を変えた ExitRequest（持ち越しの返済は「翌寄りで持ち越しを手仕舞い」）。
-// client_order_id の種は同じなので、言葉が違っても同じ日・同じ試行なら同じ注文になる。
-func ExitRequestAs(entry ledger.Order, quantity decimal.Decimal, day time.Time, cfg config.Config, attempt int, phrase string) (domain.OrderRequest, string) {
+// client_order_id の種は言葉では変わらない（同じ日・同じ試行なら同じ注文）。台帳外の
+// 建玉の返済だけは種を分ける（ExitTarget.Unrecorded）。
+func ExitRequestAs(target ExitTarget, day time.Time, cfg config.Config, attempt int, phrase string) (domain.OrderRequest, string) {
+	entry, quantity := target.Entry, target.Quantity
 	exitSide := domain.SideSell
 	if entry.Side != domain.SideBuy {
 		exitSide = domain.SideBuy
@@ -696,7 +719,11 @@ func ExitRequestAs(entry ledger.Order, quantity decimal.Decimal, day time.Time, 
 	}[string(exitSide)+"|"+string(exitTrade)]
 
 	// 前回の手仕舞いが拒否されていたら種を変えて送り直す（同じ ID はブローカーが弾く）
-	seed := fmt.Sprintf("daytrade-close|%s|%d", day.Format(cli.DateLayout), attempt)
+	kind := "daytrade-close"
+	if target.Unrecorded {
+		kind = "daytrade-sweep"
+	}
+	seed := fmt.Sprintf("%s|%s|%d", kind, day.Format(cli.DateLayout), attempt)
 	return domain.OrderRequest{
 		ClientOrderID: domain.MakeClientOrderID(seed, entry.Symbol, exitSide, quantity),
 		Symbol:        entry.Symbol,
@@ -724,10 +751,10 @@ func PlaceExitAs(env Env, b broker.Broker, target ExitTarget, phrase string) (st
 	}
 	attempt := env.Ledger.DeadCount(env.Day, entry.Symbol, exitSide)
 	build := func(a int) domain.OrderRequest {
-		req, _ := ExitRequestAs(entry, target.Quantity, env.Day, env.Cfg, a, phrase)
+		req, _ := ExitRequestAs(target, env.Day, env.Cfg, a, phrase)
 		return req
 	}
-	request, action := ExitRequestAs(entry, target.Quantity, env.Day, env.Cfg, attempt, phrase)
+	request, action := ExitRequestAs(target, env.Day, env.Cfg, attempt, phrase)
 	if env.Ledger.WasPlaced(request.ClientOrderID) {
 		env.printf("  %s: %s発注済み（冪等）\n", entry.Symbol, action)
 		return "冪等", nil
@@ -844,6 +871,15 @@ func Verify(env Env, b broker.Broker, entries, exits []ledger.Order) VerifyResul
 	opened := tally(entries, "建玉注文の約定状況")
 	closed := tally(exits, "手仕舞い注文の約定状況")
 
+	// 脚ごとの売買区分（現物か信用か）。ブローカーの建玉と突き合わせるときの鍵に使う
+	entryTrade := map[string]domain.TradeType{}
+	for _, order := range entries {
+		key := order.Symbol + "|" + order.Leg()
+		if _, seen := entryTrade[key]; !seen {
+			entryTrade[key] = order.Trade
+		}
+	}
+
 	flagged := map[string]struct{}{}
 	keys := make([]string, 0, len(opened))
 	for key := range opened {
@@ -867,34 +903,33 @@ func Verify(env Env, b broker.Broker, entries, exits []ledger.Order) VerifyResul
 		}
 	}
 
-	positions, err := broker.PositionsBySymbolIncludingMargin(b)
-	if err != nil {
-		env.Report.Warn("daytrade.reconcile", "建玉を照会できず突合を省略", map[string]any{"error": err.Error()})
-		positions = nil
-		result.Unconfirmed = append(result.Unconfirmed, fmt.Sprintf("建玉の照会に失敗: %v", err))
-	}
+	// 突合は脚ごと（現物 / 信用、買建 / 売建）。銘柄コードだけで数えると、積立が現物で
+	// 持っている銘柄をデイトレが売建てた日に相殺されて、残った売建が見えなくなる
+	held := broker.PositionsByLeg(b)
 	for _, key := range keys {
 		symbol, leg, _ := strings.Cut(key, "|")
 		if _, already := flagged[symbol]; already {
 			continue
 		}
-		held, ok := positions[symbol]
+		// 見る側だけを問題にする。信用の脚の突合に現物の照会は要らない
+		position, ok := held.At(broker.LegOf(symbol, entryTrade[key], leg == "short"))
 		if !ok {
+			err := held.Err(entryTrade[key].IsMargin())
+			env.Report.Warn("daytrade.reconcile", "建玉を照会できず突合を省略",
+				map[string]any{"symbol": symbol, "leg": leg, "error": err.Error()})
+			result.Unconfirmed = append(result.Unconfirmed,
+				fmt.Sprintf("%s %s: 建玉の照会に失敗: %v", symbol, leg, err))
 			continue
 		}
-		// ロングの脚なら正の建玉、ショートの脚なら負（売建）の建玉が残っていれば不一致
-		leftover := held.Quantity.GreaterThan(decimal.Zero)
-		if leg == "short" {
-			leftover = held.Quantity.LessThan(decimal.Zero)
-		}
-		if !leftover {
+		quantity := position.Quantity
+		if !quantity.IsPositive() {
 			continue
 		}
-		result.Carried = append(result.Carried, fmt.Sprintf("%s %s 株（台帳と不一致）", symbol, cli.Yen(held.Quantity)))
-		env.printf("  %s: ブローカーに %s 株の建玉（台帳では手仕舞い済み）\n", symbol, cli.Yen(held.Quantity))
+		result.Carried = append(result.Carried, fmt.Sprintf("%s %s 株（台帳と不一致）", symbol, cli.Yen(quantity)))
+		env.printf("  %s: ブローカーに %s 株の建玉（台帳では手仕舞い済み）\n", symbol, cli.Yen(quantity))
 		env.Report.Error("daytrade.reconcile", "台帳と建玉が不一致", map[string]any{
 			"day": env.dayText(), "symbol": symbol, "leg": leg,
-			"held": held.Quantity.String(),
+			"held": quantity.String(),
 		})
 	}
 	return result

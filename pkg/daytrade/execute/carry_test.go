@@ -1,9 +1,12 @@
 package execute
 
 import (
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/shopspring/decimal"
@@ -242,5 +245,169 @@ func TestCapByTied(t *testing.T) {
 		if n != c.wantN || !budget.Equal(d(c.wantBudget)) {
 			t.Errorf("%s: (%d, %s), want (%d, %d)", c.name, n, budget, c.wantN, c.wantBudget)
 		}
+	}
+}
+
+// 積立が現物で持っている銘柄をデイトレが売建てて持ち越しても、相殺されて見失わない。
+// 口座は共用（台帳は別）なので、銘柄コードだけで数えると 300 − 300 = 0 になる。
+func TestCarriedPositionsIgnoresCashHolding(t *testing.T) {
+	env, _ := newEnv(t)
+	entryID, d := recordEntry(t, env, 1, "7203", domain.SideSell, 300, 1000)
+	exitID := recordDeadExit(t, env, d, "7203", domain.SideBuy, 300)
+	b := &stubBroker{
+		getOrder: filledLookup(map[string]int64{entryID: 300, exitID: 0}),
+		positions: []domain.Position{
+			{Symbol: "7203", Quantity: decimal.NewFromInt(300), Trade: domain.TradeTypeCash},
+			margin("7203", -300),
+		},
+	}
+	carried, _, err := CarriedPositions(env, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(carried) != 1 || !carried[0].Target.Quantity.Equal(decimal.NewFromInt(300)) {
+		t.Fatalf("売建 300 株の持ち越しを拾えていない: %+v", carried)
+	}
+}
+
+// 積立の現物は「台帳外の建玉」に数えない（数えるとその日の発注が丸ごと止まる）。
+func TestEnsureNoUnrecordedPositionsIgnoresCashHolding(t *testing.T) {
+	env, _ := newEnv(t)
+	env.Cfg.Margin.Enabled = true
+	env.Cfg.Margin.LongViaMargin = true // ロングも信用 → 現物は積立のものでしかない
+	b := &stubBroker{positions: []domain.Position{
+		{Symbol: "7203", Quantity: decimal.NewFromInt(300), Trade: domain.TradeTypeCash},
+	}}
+	picks := []selection.Pick{pick("7203", domain.SideBuy)}
+	if err := EnsureNoUnrecordedPositions(env, b, picks, nil); err != nil {
+		t.Errorf("積立の現物で発注が止まった: %v", err)
+	}
+
+	// 同じ銘柄に台帳外の信用建玉があれば止める
+	b.positions = append(b.positions, margin("7203", 100))
+	if err := EnsureNoUnrecordedPositions(env, b, picks, nil); err == nil {
+		t.Error("台帳外の信用建玉で止まらない")
+	}
+}
+
+// 台帳に無い信用建玉は返済の対象にする。現物は積立のものかもしれないので触らない。
+func TestUnrecordedMarginSweepsOnlyMargin(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &stubBroker{positions: []domain.Position{
+		{Symbol: "7203", Quantity: decimal.NewFromInt(300), Trade: domain.TradeTypeCash, CostPrice: decimal.NewFromInt(2000)},
+		{Symbol: "6758", Quantity: decimal.NewFromInt(-200), Trade: domain.TradeTypeMarginOpen, CostPrice: decimal.NewFromInt(1500)},
+		{Symbol: "9984", Quantity: decimal.NewFromInt(100), Trade: domain.TradeTypeMarginOpen, CostPrice: decimal.NewFromInt(8000)},
+	}}
+	out, err := UnrecordedMargin(env, b, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("信用の 2 件だけを返済するはず: %+v", out)
+	}
+	if out[0].Target.Entry.Symbol != "6758" || out[0].Leg() != "short" {
+		t.Errorf("売建 200 株が対象になっていない: %s", out[0])
+	}
+	if !out[0].Notional().Equal(decimal.NewFromInt(300000)) {
+		t.Errorf("拘束金額が建値で出ていない: %s", out[0].Notional())
+	}
+	if out[1].Target.Entry.Symbol != "9984" || out[1].Leg() != "long" {
+		t.Errorf("信用買い 100 株が対象になっていない: %s", out[1])
+	}
+	for _, c := range out {
+		if !c.Target.Unrecorded {
+			t.Errorf("台帳外の印が付いていない: %s", c)
+		}
+	}
+}
+
+// 台帳が知っている建玉（今日の建玉・判定済みの持ち越し）は差し引く。二重に返済しない。
+func TestUnrecordedMarginSubtractsLedger(t *testing.T) {
+	env, _ := newEnv(t)
+	env.Cfg.Margin.Enabled = true
+	env.Cfg.Margin.LongViaMargin = true
+	b := &stubBroker{balance: richBalance()}
+	if _, _, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)}); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, _ := LiveEntries(env)
+	quantity := entries[0].Quantity
+	b.positions = []domain.Position{
+		{Symbol: "7203", Quantity: quantity, Trade: domain.TradeTypeMarginOpen, CostPrice: decimal.NewFromInt(1000)},
+	}
+	out, err := UnrecordedMargin(env, b, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("今日の建玉を台帳外として返済しようとした: %+v", out)
+	}
+
+	// ブローカーの建玉が台帳より多ければ、超えたぶんだけ返済する
+	b.positions[0].Quantity = quantity.Add(decimal.NewFromInt(100))
+	out, err = UnrecordedMargin(env, b, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || !out[0].Target.Quantity.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("超過 100 株だけを返済するはず: %+v", out)
+	}
+}
+
+// 台帳外の返済は、同じ銘柄・同じ株数の通常の手仕舞いと注文 ID が衝突しない。
+func TestUnrecordedExitIDDiffersFromNormalExit(t *testing.T) {
+	entry := ledger.Order{Symbol: "7203", Side: domain.SideBuy, Trade: domain.TradeTypeMarginOpen}
+	qty := decimal.NewFromInt(100)
+	cfg := config.Default()
+	normal, _ := ExitRequestAs(ExitTarget{Entry: entry, Quantity: qty}, day, cfg, 0, "引けで手仕舞い")
+	sweep, _ := ExitRequestAs(ExitTarget{Entry: entry, Quantity: qty, Unrecorded: true}, day, cfg, 0, "台帳外を返済")
+	if normal.ClientOrderID == sweep.ClientOrderID {
+		t.Fatalf("注文 ID が衝突している: %s", normal.ClientOrderID)
+	}
+}
+
+// 現物と信用は別の電文。片方が落ちても、もう片方だけを見る判断は止めない。
+func TestPositionQueryFailuresAreIndependent(t *testing.T) {
+	env, _ := newEnv(t)
+	env.Cfg.Margin.Enabled = true
+	env.Cfg.Margin.LongViaMargin = true // 信用でしか建てない構成
+	entryID, d := recordEntry(t, env, 1, "7203", domain.SideSell, 300, 1000)
+	exitID := recordDeadExit(t, env, d, "7203", domain.SideBuy, 300)
+	newBroker := func() *stubBroker {
+		return &stubBroker{
+			getOrder:  filledLookup(map[string]int64{entryID: 300, exitID: 0}),
+			positions: []domain.Position{margin("7203", -300)},
+		}
+	}
+	picks := []selection.Pick{pick("7203", domain.SideBuy)}
+
+	// 現物が落ちても、信用しか見ないデイトレの判断は続く
+	b := newBroker()
+	b.posErr = errors.New("現物が取れない")
+	carried, _, err := CarriedPositions(env, b)
+	if err != nil {
+		t.Fatalf("現物の障害で持ち越しの判定が止まった: %v", err)
+	}
+	if len(carried) != 1 {
+		t.Fatalf("売建の持ち越しを拾えていない: %+v", carried)
+	}
+	if _, err := UnrecordedMargin(env, b, carried); err != nil {
+		t.Errorf("現物の障害で台帳外の判定が止まった: %v", err)
+	}
+	if err := EnsureNoUnrecordedPositions(env, b, picks, carried); err != nil {
+		t.Errorf("現物の障害で発注が止まった: %v", err)
+	}
+
+	// 信用が落ちたときは止める（持ち越しを 0 株と読むと見失う）
+	b = newBroker()
+	b.marginErr = errors.New("信用が取れない")
+	if _, _, err := CarriedPositions(env, b); err == nil {
+		t.Error("信用の障害で持ち越しの判定が止まらない")
+	}
+	if _, err := UnrecordedMargin(env, b, nil); err == nil {
+		t.Error("信用の障害で台帳外の判定が止まらない")
+	}
+	if err := EnsureNoUnrecordedPositions(env, b, picks, nil); err == nil {
+		t.Error("信用の障害で発注が止まらない")
 	}
 }

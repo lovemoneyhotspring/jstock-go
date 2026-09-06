@@ -699,7 +699,11 @@ func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOver
 	return found, nil
 }
 
-// settleCarried は前営業日以前の持ち越しを判定し、成行で手仕舞う（open / close 共用）。
+// settleCarried は前営業日以前の持ち越しと台帳外の信用建玉を判定し、成行で手仕舞う
+// （open / close 共用）。
+//
+// 信用はデイトレでしか使わないので、台帳が説明できない信用建玉も自分の玉として返済する
+// （UnrecordedMargin）。現物は積立の保有かもしれないので触らない。
 //
 // 照会できなかった注文がある銘柄は手仕舞わず、人に知らせる。通らなかった返済も知らせる
 // （次の実行が同じ判定でもう一度送る。台帳は建てた日の下に記録され、冪等）。
@@ -712,13 +716,24 @@ func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.C
 		alert("デイトレ: 持ち越しの建玉を照会できません。口座を確認してください", strings.Join(unconfirmed, "\n"))
 		digest.Anomaly("daytrade.carry_unconfirmed", fmt.Sprintf("%d 件の注文を照会できず持ち越しを判定できません", len(unconfirmed)))
 	}
+	// 照会できなかった注文がある間は台帳外かどうかを決められない（建っていたかもしれない
+	// 玉を「台帳外」と読んで返済すると、建っていなかった場合に反対建玉を作る）
+	if len(unconfirmed) == 0 {
+		unrecorded, err := execute.UnrecordedMargin(env, b, carried)
+		if err != nil {
+			return nil, err
+		}
+		if len(unrecorded) > 0 {
+			alert(fmt.Sprintf("デイトレ: 台帳に無い信用建玉 %d 件を返済します", len(unrecorded)),
+				strings.Join(carriedLines(unrecorded), "\n"))
+			digest.Anomaly("daytrade.sweep", fmt.Sprintf("台帳に無い信用建玉 %d 件を返済", len(unrecorded)))
+			carried = append(carried, unrecorded...)
+		}
+	}
 	if len(carried) == 0 {
 		return nil, nil
 	}
-	lines := make([]string, 0, len(carried))
-	for _, c := range carried {
-		lines = append(lines, c.String())
-	}
+	lines := carriedLines(carried)
 	fmt.Printf("持ち越し %d 件を成行で手仕舞います: %s\n", len(carried), strings.Join(lines, "、"))
 	logWarn("daytrade.carry", "持ち越しを手仕舞う", map[string]any{"count": len(carried), "positions": lines, "phrase": phrase})
 	digest.Anomaly("daytrade.carry", fmt.Sprintf("%d 件の持ち越しを手仕舞い", len(carried)))
@@ -727,4 +742,13 @@ func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.C
 		digest.Anomaly("daytrade.carry_failed", fmt.Sprintf("%d 件の持ち越しの手仕舞いが通らず", len(failures)))
 	}
 	return carried, nil
+}
+
+// carriedLines は持ち越しを人向けの 1 行ずつにする。
+func carriedLines(carried []execute.Carried) []string {
+	lines := make([]string, 0, len(carried))
+	for _, c := range carried {
+		lines = append(lines, c.String())
+	}
+	return lines
 }

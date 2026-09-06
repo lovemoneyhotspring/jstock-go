@@ -21,7 +21,8 @@ type stubBroker struct {
 	place      func(domain.OrderRequest) (*domain.OrderAck, error)
 	getOrder   func(clientOrderID string) (*domain.Order, error)
 	positions  []domain.Position
-	posErr     error
+	posErr     error // 現物の照会エラー
+	marginErr  error // 信用建玉の照会エラー（現物とは別の電文なので別に持つ）
 	balance    domain.Balance
 	balanceErr error
 	placed     []domain.OrderRequest
@@ -38,7 +39,25 @@ func (s *stubBroker) GetBalance() (*domain.Balance, error) {
 	b := s.balance
 	return &b, nil
 }
-func (s *stubBroker) GetPositions() ([]domain.Position, error) { return s.positions, s.posErr }
+
+// GetPositions は現物だけ、MarginPositions は信用だけ（立花証券と同じ切り分け）。
+func (s *stubBroker) GetPositions() ([]domain.Position, error) {
+	return s.positionsOfKind(false), s.posErr
+}
+
+func (s *stubBroker) MarginPositions() ([]domain.Position, error) {
+	return s.positionsOfKind(true), s.marginErr
+}
+
+func (s *stubBroker) positionsOfKind(margin bool) []domain.Position {
+	var out []domain.Position
+	for _, p := range s.positions {
+		if broker.LegOf(p.Symbol, p.Trade, p.Quantity.IsNegative()).Margin == margin {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 func (s *stubBroker) PositionsBySymbol() (map[string]domain.Position, error) {
 	if s.posErr != nil {
 		return nil, s.posErr
