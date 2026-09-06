@@ -19,6 +19,7 @@ import (
 func newBacktestCmd() *cobra.Command {
 	var fromFlag, toFlag, fillModelFlag string
 	var cashFlag int64
+	var marginLagFlag int
 
 	cmd := &cobra.Command{
 		Use:   "backtest",
@@ -79,6 +80,20 @@ func newBacktestCmd() *cobra.Command {
 				FillModel: fillModelFlag,
 			}
 
+			// 信用残は使う戦略があるときだけ読む（200 万行の走査）。
+			if needsMargin(stratCfg) {
+				book, err := loadMarginBookWithLag(setCfg.Universe.Symbols, marginLagFlag)
+				if err != nil {
+					return err
+				}
+				if book == nil {
+					fmt.Println("信用残（markets/margin-interest）がアーカイブにありません。margin_balance は黙ります")
+				} else {
+					fmt.Printf("信用残: %d 銘柄 %d 週\n\n", book.Len(), book.Weeks())
+				}
+				opts.Margin = book
+			}
+
 			// 待機資金の利回り。足が無ければ無利息で続ける——
 			// 利回りの系列が揃っていないだけで検証全体を止める理由はない。
 			if symbol := setCfg.Regime.CashYieldSymbol; symbol != "" {
@@ -111,6 +126,8 @@ func newBacktestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&fromFlag, "from", "2024-01-01", "開始日 YYYY-MM-DD")
 	cmd.Flags().StringVar(&toFlag, "to", "", "終了日 YYYY-MM-DD（既定は最終営業日）")
 	cmd.Flags().Int64Var(&cashFlag, "cash", 0, "初期資金（口座通貨。既定は円300万/ドル3万）")
+	cmd.Flags().IntVar(&marginLagFlag, "margin-lag-days", strategy.MarginPublicationLag,
+		"信用残が見えるまでの遅れ（暦日）。実際より長くして情報の鮮度を検定する")
 	cmd.Flags().StringVar(&fillModelFlag, "fill-model", "open",
 		"指値の約定判定: open（寄付だけ。保守的）/ intrabar（高安も見る。楽観的）")
 	return cmd

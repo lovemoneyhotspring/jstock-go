@@ -48,3 +48,16 @@ weight = 1.5
 channel = 20
 atr_period = 14
 min_atr_ratio = 0.005
+
+# 信用需給（信用倍率＝買残 ÷ 売残 の銘柄横断分位）。売り長（下位 20%）の買いを打ち消す。
+# 根拠と限界は docs/research/2026-09-jp-margin-sentiment.md。効果は 20 日で +0.1% 程度の
+# 小さな順位付け要因で、単独で勝てる戦略ではない。分位はユニバース内で取るので、
+# 銘柄が 5 つしか無いこの設定では「常に 1 銘柄を弾く」だけになる——50 銘柄以上で使う。
+# 信用残は J-Quants アーカイブ（markets/margin-interest、jquants sync が週次で更新）から読む。
+# weighted_vote で打ち消すには他の戦略の重みの合計以上の重みが要る。
+[[strategies]]
+name = "margin_balance"
+enabled = false
+weight = 10.0
+mode = "filter"        # filter … 売り長を弾くだけ / tilt … 買い長（上位 20%）に買い意見も出す
+avoid_below = 0.2

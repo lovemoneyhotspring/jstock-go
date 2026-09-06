@@ -158,6 +158,52 @@ func init() {
 			return NewMomentumRank(o)
 		})
 
+	Registry.MustRegister("level_bounce",
+		"節目反発（フィボナッチ・キリ番の押し目 ＋ 出来高を伴う反転確認、損益比で足切り）",
+		func(raw map[string]any) (Strategy, error) {
+			p := newParams(raw)
+			o := DefaultLevelBounceOptions()
+			o.SwingLookback = p.Int("swing_lookback", o.SwingLookback)
+			o.MinImpulse = p.Float("min_impulse", o.MinImpulse)
+			o.MinPullbackDays = p.Int("min_pullback_days", o.MinPullbackDays)
+			o.Levels = p.Floats("levels", o.Levels)
+			o.RoundNumbers = p.Bool("round_numbers", o.RoundNumbers)
+			o.ToleranceATR = p.Float("tolerance_atr", o.ToleranceATR)
+			o.BounceWindow = p.Int("bounce_window", o.BounceWindow)
+			o.RVOLMin = p.Float("rvol_min", o.RVOLMin)
+			o.VolumeLookback = p.Int("volume_lookback", o.VolumeLookback)
+			o.CloseStrength = p.Float("close_strength", o.CloseStrength)
+			o.MinRewardRisk = p.Float("min_reward_risk", o.MinRewardRisk)
+			o.SMALong = p.Int("sma_long", o.SMALong)
+			o.ATRPeriod = p.Int("atr_period", o.ATRPeriod)
+			o.MinATRRatio = p.Float("min_atr_ratio", o.MinATRRatio)
+			o.MaxATRRatio = p.Float("max_atr_ratio", o.MaxATRRatio)
+			o.MinDollarVolume = p.Float("min_dollar_volume", o.MinDollarVolume)
+			o.Benchmark = p.String("benchmark", o.Benchmark)
+			o.BenchmarkSMA = p.Int("benchmark_sma", o.BenchmarkSMA)
+			o.ExitOnTarget = p.Bool("exit_on_target", o.ExitOnTarget)
+			o.ExitOnBreak = p.Bool("exit_on_break", o.ExitOnBreak)
+			if err := p.Err(); err != nil {
+				return nil, err
+			}
+			return NewLevelBounce(o)
+		})
+
+	Registry.MustRegister("margin_balance",
+		"信用需給（信用倍率の銘柄横断分位。売り長を避ける／買い長に傾ける）",
+		func(raw map[string]any) (Strategy, error) {
+			p := newParams(raw)
+			o := DefaultMarginBalanceOptions()
+			o.Mode = p.String("mode", o.Mode)
+			o.AvoidBelow = p.Float("avoid_below", o.AvoidBelow)
+			o.FavorAbove = p.Float("favor_above", o.FavorAbove)
+			o.ExitHeld = p.Bool("exit_held", o.ExitHeld)
+			if err := p.Err(); err != nil {
+				return nil, err
+			}
+			return NewMarginBalance(o)
+		})
+
 	Registry.MustRegister("ross_cameron",
 		"ロス・キャメロン流 Gap & Go / マイクロプルバック（日足版）",
 		func(raw map[string]any) (Strategy, error) {
@@ -248,6 +294,34 @@ func (p *paramReader) Float(key string, def float64) float64 {
 	}
 	p.errs = append(p.errs, fmt.Sprintf("%s は数値で指定してください（%v）", key, v))
 	return def
+}
+
+// Floats は数値の配列（TOML の [0.382, 0.5]）。
+func (p *paramReader) Floats(key string, def []float64) []float64 {
+	v, ok := p.lookup(key)
+	if !ok {
+		return def
+	}
+	items, ok := v.([]any)
+	if !ok {
+		p.errs = append(p.errs, fmt.Sprintf("%s は数値の配列で指定してください（%v）", key, v))
+		return def
+	}
+	out := make([]float64, 0, len(items))
+	for _, item := range items {
+		switch n := item.(type) {
+		case float64:
+			out = append(out, n)
+		case int64:
+			out = append(out, float64(n))
+		case int:
+			out = append(out, float64(n))
+		default:
+			p.errs = append(p.errs, fmt.Sprintf("%s は数値の配列で指定してください（%v）", key, v))
+			return def
+		}
+	}
+	return out
 }
 
 // OptFloat は「指定が無ければ無効」の数値。nil は未設定を表す。
