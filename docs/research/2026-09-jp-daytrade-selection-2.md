@@ -124,7 +124,8 @@
 ## 実装
 
 - `config.Signal.RankBy`（`gap` / `gap_vol`、既定 `gap`）、`selection.RankKey`、`backtest.pickDay`（現物・信用の両方）。
-  `config/daytrade/daytrade.toml` の `[signal] rank_by` に説明。**本番設定は変えていない。**
+  `config/daytrade/daytrade.toml` の `[signal] rank_by` に説明。`config/daytrade_margin` では `gap_vol` を有効にした
+  （リスク低減の設定として。発注は止まっており、`plan` / `evaluate` で蓄積する）。土台の `config/daytrade` は `gap` のまま。
 - `scratch/dtsel-study/features.sql`（特徴量）、`/tmp/dtsel/run_is.sh` 相当の変種評価（`scratch/minute -panel-only` の CSV から）。
 
 ## 次にやるなら
