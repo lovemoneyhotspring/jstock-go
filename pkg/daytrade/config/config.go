@@ -456,7 +456,15 @@ func load(configDir string, visited []string) (Config, error) {
 	}
 	cfg := Default()
 	if head.Extends != "" {
-		base, err := load(filepath.Join(configDir, head.Extends), visited)
+		// extends は「この設定ディレクトリからの相対」が基本だが、絶対パスで
+		// 書かれたらそのまま使う。filepath.Join に絶対パスを渡すと先頭の / が
+		// 落ちて configDir の下にぶら下がってしまう（/a を土台にしたつもりが
+		// <configDir>/a を読みに行き「設定が見つかりません」になる）。
+		baseDir := head.Extends
+		if !filepath.IsAbs(baseDir) {
+			baseDir = filepath.Join(configDir, baseDir)
+		}
+		base, err := load(baseDir, visited)
 		if err != nil {
 			return Config{}, fmt.Errorf("%s の土台（extends = %q）: %w", path, head.Extends, err)
 		}
