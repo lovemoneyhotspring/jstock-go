@@ -149,6 +149,7 @@ func runOpen(opts openOptions) error {
 	}
 	var b broker.Broker
 	var carried []execute.Carried
+	var held broker.LegPositions
 	if allowed {
 		if b, err = connectBroker(cfg); err != nil {
 			return err
@@ -162,7 +163,7 @@ func runOpen(opts openOptions) error {
 		// 前営業日以前の建玉が残っていれば（引けで返済できなかった持ち越し）、新規に建てる前に
 		// 寄付の成行で手仕舞う。検証は margin.carry_penalty で「翌寄りで返済」としているので同じにする。
 		// 判定できなければ止める——持ち越しを知らずに建てると二重になりうる
-		if carried, err = settleCarried(env, b, "翌寄りで持ち越しを手仕舞い"); err != nil {
+		if carried, held, err = settleCarried(env, b, "翌寄りで持ち越しを手仕舞い"); err != nil {
 			return err
 		}
 	} else {
@@ -209,7 +210,7 @@ func runOpen(opts openOptions) error {
 		symbols = mergeSymbols(symbols, p.Symbols(shortUniverse))
 	}
 
-	received, err := fetchQuotes(cfg, symbols, opts.quoteSource, opts.quoteFile, deadline)
+	received, err := fetchQuotes(cfg, b, symbols, opts.quoteSource, opts.quoteFile, deadline)
 	if err != nil {
 		fmt.Println(err)
 		logError("daytrade.skip", "気配が取れず寄付の買いを見送り", map[string]any{"reason": "no_quotes", "error": err.Error()})
@@ -463,7 +464,7 @@ func runOpen(opts openOptions) error {
 		// 台帳に無い建玉がブローカーにあれば、この実行は二重に建てることになる。
 		// 冪等性は台帳の client_order_id で担保しているので、台帳を失う・別ホストへ
 		// 移す・復元した直後は効かない。発注の直前にブローカーと突き合わせる
-		if err := execute.EnsureNoUnrecordedPositions(env, b, picks, carried); err != nil {
+		if err := execute.EnsureNoUnrecordedPositions(env, held, picks, carried); err != nil {
 			var unrecorded *execute.ErrUnrecordedPositions
 			if errors.As(err, &unrecorded) {
 				digest.Anomaly("daytrade.unrecorded_positions",
@@ -670,7 +671,9 @@ func sortedKeys[V any](m map[string]V) []string {
 }
 
 // fetchQuotes は設定（または上書き）の取得元から気配を取る。deadline は立花の電文の締め切り。
-func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOverride string, deadline time.Time) (map[string]selection.Quote, error) {
+// fetchQuotes は候補の気配を取る。b が立花の接続なら時価問合もそれで送る（接続と
+// セッションの取り回しを増やさない）。nil（dry-run）なら取得元が自分で繋ぐ。
+func fetchQuotes(cfg dtconfig.Config, b broker.Broker, symbols []string, sourceOverride, fileOverride string, deadline time.Time) (map[string]selection.Quote, error) {
 	name := cfg.Execution.QuoteSource
 	if sourceOverride != "" {
 		name = sourceOverride
@@ -679,10 +682,11 @@ func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOver
 	if fileOverride != "" {
 		file = fileOverride
 	}
+	tachibana, _ := b.(*broker.TachibanaBroker)
 	source, err := dtquotes.New(name, dtquotes.Params{
 		Env: appSettings.Env, Dotenv: appSettings.DotenvMap,
 		StateDir: appSettings.StateDir, QuoteFile: file,
-		Logger: run, Deadline: deadline,
+		Logger: run, Deadline: deadline, Broker: tachibana,
 	})
 	if err != nil {
 		return nil, err
@@ -714,12 +718,15 @@ func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOver
 //
 // 照会できなかった注文がある銘柄は手仕舞わず、人に知らせる。通らなかった返済も知らせる
 // （次の実行が同じ判定でもう一度送る。台帳は建てた日の下に記録され、冪等）。
-func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.Carried, error) {
-	// 建玉の照会は 1 回（現物と信用で 2 電文）。持ち越しと台帳外の判定は同じ建玉を見る
+//
+// 返す held は照会した建玉。発注直前の台帳外の検査（EnsureNoUnrecordedPositions）も
+// これを使い、1 実行の建玉照会を 1 回（現物と信用で 2 電文）にする。
+func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.Carried, broker.LegPositions, error) {
+	// 持ち越しと台帳外の判定は同じ建玉を見る
 	held := broker.PositionsByLeg(b)
 	carried, unconfirmed, err := execute.CarriedPositions(env, b, held)
 	if err != nil {
-		return nil, err
+		return nil, held, err
 	}
 	if len(unconfirmed) > 0 {
 		alert("デイトレ: 持ち越しの建玉を照会できません。口座を確認してください", strings.Join(unconfirmed, "\n"))
@@ -730,7 +737,7 @@ func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.C
 	if len(unconfirmed) == 0 {
 		unrecorded, err := execute.UnrecordedMargin(env, held, carried)
 		if err != nil {
-			return nil, err
+			return nil, held, err
 		}
 		if len(unrecorded) > 0 {
 			alert(fmt.Sprintf("デイトレ: 台帳に無い信用建玉 %d 件を返済します", len(unrecorded)),
@@ -740,7 +747,7 @@ func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.C
 		}
 	}
 	if len(carried) == 0 {
-		return nil, nil
+		return nil, held, nil
 	}
 	lines := carriedLines(carried)
 	fmt.Printf("持ち越し %d 件を成行で手仕舞います: %s\n", len(carried), strings.Join(lines, "、"))
@@ -750,7 +757,7 @@ func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.C
 		alert(fmt.Sprintf("デイトレ: %d 件の持ち越しの手仕舞いが通らず", len(failures)), strings.Join(failures, "\n"))
 		digest.Anomaly("daytrade.carry_failed", fmt.Sprintf("%d 件の持ち越しの手仕舞いが通らず", len(failures)))
 	}
-	return carried, nil
+	return carried, held, nil
 }
 
 // carriedLines は持ち越しを人向けの 1 行ずつにする。

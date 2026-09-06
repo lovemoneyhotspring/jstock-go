@@ -154,12 +154,19 @@ type Params struct {
 	Logger broker.Logger
 	// Deadline は立花の電文の締め切り（ゼロ値なら無し）。過ぎたら送らない。
 	Deadline time.Time
+	// Broker は繋ぎ済みの立花の接続。あればそれで時価問合を送る（HTTP の接続と
+	// セッションファイルの取り回しを増やさない）。nil なら Connect で新しく繋ぐ。
+	Broker *broker.TachibanaBroker
 }
 
 // New は設定の名前から取得元を組み立てる。
 func New(name string, params Params) (Source, error) {
 	switch name {
 	case "tachibana":
+		if params.Broker != nil {
+			// 発注に使っている接続をそのまま使う。締め切りは呼び出し側が同じ値を入れている
+			return &Tachibana{Broker: params.Broker}, nil
+		}
 		t, err := Connect(params.Env, params.Dotenv, params.StateDir)
 		if err != nil {
 			return nil, err
