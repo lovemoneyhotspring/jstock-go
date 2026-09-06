@@ -244,3 +244,41 @@ func TestPickFromCapsEachOrderAtMaxAmount(t *testing.T) {
 		t.Fatalf("上限付き = %v, want 600 株（67 万 ÷ 1,000 円）", capped)
 	}
 }
+
+// rank_by = gap_vol は「ギャップ ÷ 20 日ボラ」の小さい順。1% しか動かない銘柄の −3% は
+// 5% 動く銘柄の −5% より極端（−3.0 vs −1.0）。ボラの無い銘柄は末尾。
+func TestRankByGapVolNormalizesByVolatility(t *testing.T) {
+	cfg := config.Default().Signal
+	cfg.RankBy = config.RankByGapVol
+	lowVol, highVol := 0.01, 0.05
+	candidates := []universe.Candidate{
+		candidate("1000", 1000, &highVol), // gap -5%, vol 5% → -1.0
+		candidate("2000", 1000, &lowVol),  // gap -3%, vol 1% → -3.0（最も極端）
+		candidate("3000", 1000, nil),      // gap -4%, ボラ不明 → 末尾
+	}
+	quotes := map[string]Quote{
+		"1000": quote("1000", 950), "2000": quote("2000", 970), "3000": quote("3000", 960),
+	}
+	ranked := Rank(candidates, quotes, cfg)
+	got := []string{ranked[0].Symbol, ranked[1].Symbol, ranked[2].Symbol}
+	if got[0] != "2000" || got[1] != "1000" || got[2] != "3000" {
+		t.Errorf("正規化ギャップの順になっていない: %v", got)
+	}
+
+	// 既定（gap）は生のギャップ順のまま
+	cfg.RankBy = config.RankByGap
+	ranked = Rank(candidates, quotes, cfg)
+	if ranked[0].Symbol != "1000" || ranked[1].Symbol != "3000" || ranked[2].Symbol != "2000" {
+		t.Errorf("gap ではギャップの小さい順のはず: %s %s %s", ranked[0].Symbol, ranked[1].Symbol, ranked[2].Symbol)
+	}
+}
+
+func TestRankKeyRejectsMissingVol(t *testing.T) {
+	if _, ok := RankKey(config.RankByGapVol, -0.03, nil); ok {
+		t.Error("ボラ不明は ok=false（末尾）")
+	}
+	tiny := 0.001
+	if k, _ := RankKey(config.RankByGapVol, -0.02, &tiny); k != -0.02/VolFloor {
+		t.Errorf("ボラは VolFloor で下から押さえる: %g", k)
+	}
+}

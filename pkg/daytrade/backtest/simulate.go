@@ -163,8 +163,10 @@ type legParams struct {
 	commission bool
 	// descending が真ならギャップの大きい順（ショート）。
 	descending bool
-	minGap     float64
-	maxGap     float64
+	// rankBy は並べる鍵（config.Signal.RankBy。selection.RankKey と同じ）。
+	rankBy string
+	minGap float64
+	maxGap float64
 	// maxShares は 1 銘柄の株数の上限（0 で無制限）。成行の信用新規売りは
 	// 空売り価格規制で 50 単元までなので、按分がそれを超える低位株はそこで頭打ち
 	// （selection.PickFrom と同じ）。
@@ -214,11 +216,16 @@ func pickDay(rows []Row, p legParams, n int, total float64) []Trade {
 	}
 	sort.SliceStable(pool, func(i, j int) bool {
 		a, b := pool[i].row, pool[j].row
-		if a.Gap != b.Gap {
+		ka, oka := selection.RankKey(p.rankBy, a.Gap, a.Vol20)
+		kb, okb := selection.RankKey(p.rankBy, b.Gap, b.Vol20)
+		if oka != okb {
+			return oka
+		}
+		if ka != kb {
 			if p.descending {
-				return a.Gap > b.Gap
+				return ka > kb
 			}
-			return a.Gap < b.Gap
+			return ka < kb
 		}
 		return a.Code < b.Code
 	})
@@ -459,6 +466,7 @@ func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options
 	trades := pickAndPrice(longRows, panel.Days, legParams{
 		n: n, budget: budget, weighting: cfg.Capital.Weighting,
 		sign: 1, commission: true, minGap: minGap, maxGap: maxGap, fill: opts.fill(),
+		rankBy: cfg.Signal.RankBy,
 	})
 	trades = applyCarry(trades, rowsByKey(panel), 1, carryPenalty)
 

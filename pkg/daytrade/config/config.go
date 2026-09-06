@@ -129,6 +129,12 @@ type Universe struct {
 }
 
 // Signal は 9:00 に決める条件（[signal]）。
+// 候補の並べ方（Signal.RankBy）。
+const (
+	RankByGap    = "gap"
+	RankByGapVol = "gap_vol"
+)
+
 type Signal struct {
 	// MaxGap はギャップ（寄付 ÷ 前日終値 − 1）がこれ**未満**の銘柄だけ。
 	MaxGap decimal.Decimal `toml:"max_gap"`
@@ -137,6 +143,12 @@ type Signal struct {
 	// SkipLimitDown は 9:00 の気配がストップ安の銘柄は買わない
 	// （売り殺到の板では引けの売りが約定せず持ち越しになる。勝率 9%）。
 	SkipLimitDown bool `toml:"skip_limit_down"`
+	// RankBy は候補の並べ方。gap（既定）はギャップの小さい順、gap_vol はギャップを
+	// 20 日ボラで割った正規化ギャップの小さい順（1% しか動かない銘柄の −5% は、4% 動く
+	// 銘柄の −5% より極端）。ボラが取れない銘柄は末尾。
+	// 研究ノート 2026-09-jp-daytrade-selection-2: 探索 +6.7 bp/日（t 2.1）・確認 +6.7 bp（t 1.7）で
+	// 事前基準（t 2.5）には届かず、追跡中の仮説。
+	RankBy string `toml:"rank_by"`
 	// SkipOpened は 9:01 の時点で**既に寄っている**銘柄を候補から外す。
 	// ロング・ショートの**両方**に効く（気配そのものを落とすため）。
 	//
@@ -297,6 +309,7 @@ func Default() Config {
 			MaxGap:        decimal.Zero,
 			MinGap:        decimal.NewFromInt(-1),
 			SkipLimitDown: true,
+			RankBy:        RankByGap,
 			SkipOpened:    false,
 		},
 		Regime: Regime{
@@ -497,6 +510,9 @@ func (c Config) Validate() error {
 	}
 	if c.Universe.ExcludeCapTerciles < 0 || c.Universe.ExcludeCapTerciles > 2 {
 		return fmt.Errorf("universe.exclude_cap_terciles は 0〜2")
+	}
+	if c.Signal.RankBy != RankByGap && c.Signal.RankBy != RankByGapVol {
+		return fmt.Errorf("signal.rank_by は %s / %s: %q", RankByGap, RankByGapVol, c.Signal.RankBy)
 	}
 	if err := validateGap(c.Signal.MaxGap, "signal.max_gap"); err != nil {
 		return err
