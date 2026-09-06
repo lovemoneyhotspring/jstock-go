@@ -36,6 +36,30 @@ type Run struct {
 	Logger *logging.Logger
 	// Alerter は運用通知の送り先。既定は notify.Alert。テストで差し替える。
 	Alerter func(title, body string, logger *logging.Logger) bool
+	// Verify は実機検証の実行か（--broker-verify）。SetVerify で立てる。
+	Verify bool
+}
+
+// SetVerify はこの実行を実機検証として印を付ける（docs/BROKER_VERIFY.md）。
+//
+// **env とは独立**。口座の選択（uat / prod）と「手で検証しているか」は別の軸で、
+// 本番口座で電文を確かめることがある。印が無いと、ログを後から読む
+// night-repair / daily-report が検証の注文を「異常」と読んでしまう。
+//
+// 立てると以降のログの全行に verify: true が付き、ダイジェストにも残る。
+// 端末には目立つ形で出す——検証のつもりでない実行に付いていたら気づけるように。
+func (r *Run) SetVerify(verify bool) {
+	if r == nil {
+		return
+	}
+	r.Verify = verify
+	if r.Logger != nil {
+		r.Logger.SetVerify(verify)
+	}
+	digest.SetVerify(verify)
+	if verify {
+		fmt.Println("*** 実機検証の実行（--broker-verify）: 台帳・履歴・ログに印を付け、成績の集計から外します ***")
+	}
 }
 
 // StartRun は run_id を発行し、ログとダイジェストを起こす。コマンドの入口で 1 回だけ呼ぶ。

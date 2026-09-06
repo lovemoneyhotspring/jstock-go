@@ -28,15 +28,22 @@ tools: Bash, Read, Glob, Grep, Edit, Write
 
 ## 手順
 
+0. **実機検証の実行を先に除く。** `verify: true` が付いた実行は、人が
+   `--broker-verify` を付けて手で走らせた発注経路の検証（`docs/BROKER_VERIFY.md`）で、
+   **異常ではない**。時間外の発注・持ち越し・1 単元だけの建玉はどれも手順どおりの姿。
+   `env` では切り分けられない（**本番口座で検証する**）ので、必ずこの印で見る。
+   検証の実行しか無い日は「異常なし」として、コードを触らずに終える。
+
 1. **異常を特定する**（`docs/FEEDBACK.md` の層構造）。
    ```bash
    TODAY=$(TZ=Asia/Tokyo date +%F)
    YESTERDAY=$(TZ=Asia/Tokyo date -d yesterday +%F)
-   jq -c 'select(.anomalies or .outcome == "error")' state/digest/prod-$YESTERDAY.jsonl state/digest/prod-$TODAY.jsonl 2>/dev/null
+   # verify が付いた実行は検証なので外す
+   jq -c 'select((.anomalies or .outcome == "error") and (.verify | not))' state/digest/prod-$YESTERDAY.jsonl state/digest/prod-$TODAY.jsonl 2>/dev/null
    ```
 2. **`run_id` を鍵に層 3（`state/logs/<app>-prod.jsonl`）へ降りて、何が起きたかを特定する。**
    ```bash
-   jq -c 'select(.run_id == "<run_id>" and .routine != true)' state/logs/<app>-prod.jsonl
+   jq -c 'select(.run_id == "<run_id>" and .routine != true and (.verify | not))' state/logs/<app>-prod.jsonl
    ```
    `pending_ambiguous` が絡む異常は、`docs/FEEDBACK.md`「自己修復の手順」の対象（`pending resolve`
    コマンドで直る）。**それは既存の仕組みで直るのでコードは触らない**——次の実行で自動的に

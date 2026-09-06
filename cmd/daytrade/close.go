@@ -19,7 +19,7 @@ import (
 )
 
 func newCloseCmd() *cobra.Command {
-	var liveFlag, yesFlag, ignoreWindowFlag bool
+	var liveFlag, yesFlag, ignoreWindowFlag, brokerVerifyFlag bool
 	var dateFlag string
 	cmd := &cobra.Command{
 		Use:   "close",
@@ -28,21 +28,25 @@ func newCloseCmd() *cobra.Command {
 			"売建は返済買い（15:25 以降ならクロージング・オークションで引け値）。既定は dry-run。",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return crash("引けの売り", "daytrade.crash",
-				runClose(liveFlag, yesFlag, ignoreWindowFlag, dateFlag))
+				runClose(liveFlag, yesFlag, ignoreWindowFlag, dateFlag, brokerVerifyFlag))
 		},
 	}
 	cmd.Flags().BoolVar(&liveFlag, "live", false, "注文を出す。無ければ対象を示すだけ")
 	cmd.Flags().BoolVarP(&yesFlag, "yes", "y", false, "本番の確認を省く（cron 用）")
 	cmd.Flags().BoolVar(&ignoreWindowFlag, "ignore-window", false, "時間帯の外でも売る")
 	cmd.Flags().StringVar(&dateFlag, "date", "", "判定日（YYYY-MM-DD、既定は今日）")
+	cmd.Flags().BoolVar(&brokerVerifyFlag, "broker-verify", false,
+		"発注経路の実機検証（docs/BROKER_VERIFY.md）。台帳・履歴・ログに印を付け、成績の集計から外す")
 	return cmd
 }
 
-func runClose(live, yes, ignoreWindow bool, date string) error {
+func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
+	// 以降のログの全行とダイジェストに印を付ける（env とは独立）
+	run.SetVerify(brokerVerify)
 	fmt.Println(appSettings.DescribeMode(live, cfg.Execution.KillSwitch))
 	now := clock.NowUTC()
 	day, err := dayOrToday(date, now)
@@ -66,12 +70,14 @@ func runClose(live, yes, ignoreWindow bool, date string) error {
 	logConfig(cfg, "close", map[string]any{
 		"day": day.Format(DateLayout), "live": live,
 		"deadline": deadlineText(deadline), "max_run_seconds": cfg.Execution.MaxRunSeconds,
+		"broker_verify": brokerVerify,
 	})
 
 	led, err := dtledger.Open(appSettings.DaytradeDBPath())
 	if err != nil {
 		return err
 	}
+	led.Verify = brokerVerify
 	defer led.Close()
 	defer func() {
 		if err := execution.Flush(historyStore(), day); err != nil {

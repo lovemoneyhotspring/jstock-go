@@ -26,23 +26,29 @@ func newRunCmd() *cobra.Command {
 	var liveFlag bool
 	var yesFlag bool
 	var noSyncFlag bool
+	var brokerVerifyFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "日次実行サイクルを実行する（--live で発注）",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run.Crash("日次実行", "wbjp.crash", runDaily(liveFlag, yesFlag, noSyncFlag))
+			return run.Crash("日次実行", "wbjp.crash",
+				runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag))
 		},
 	}
 
 	cmd.Flags().BoolVar(&liveFlag, "live", false, "実際にブローカーへ発注する")
 	cmd.Flags().BoolVarP(&yesFlag, "yes", "y", false, "本番発注時の確認プロンプトをスキップする")
 	cmd.Flags().BoolVar(&noSyncFlag, "no-sync", false, "足の更新をしない")
+	cmd.Flags().BoolVar(&brokerVerifyFlag, "broker-verify", false,
+		"発注経路の実機検証（docs/BROKER_VERIFY.md）。ログとダイジェストに印を付ける")
 	return cmd
 }
 
 // runDaily は本体。RunE から切り出してあるのは、異常終了を run.Crash で記録・通知するため。
-func runDaily(liveFlag, yesFlag, noSyncFlag bool) error {
+func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
+	// 以降のログの全行とダイジェストに印を付ける（env とは独立）
+	run.SetVerify(brokerVerifyFlag)
 	setCfg, err := wbjpcfg.LoadSettingsFile(configDirFlag)
 	if err != nil {
 		return err

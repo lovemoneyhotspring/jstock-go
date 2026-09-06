@@ -133,3 +133,28 @@ func TestNoRunIsHarmless(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSetVerifyMarksRun(t *testing.T) {
+	dir := t.TempDir()
+	start(t, dir)
+	SetVerify(true)
+	if err := Flush(); err != nil {
+		t.Fatal(err)
+	}
+	record := readOnly(t, dir)
+	if v, _ := record["verify"].(bool); !v {
+		t.Errorf("検証の印が無い: %v", record)
+	}
+}
+
+func TestVerifyAbsentByDefault(t *testing.T) {
+	// 通常の実行では項目ごと出ない（既存のダイジェストの形を変えない）
+	dir := t.TempDir()
+	start(t, dir)
+	if err := Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readOnly(t, dir)["verify"]; ok {
+		t.Error("通常の実行に verify が付いた")
+	}
+}

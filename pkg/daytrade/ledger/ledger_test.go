@@ -189,3 +189,67 @@ func TestBackup(t *testing.T) {
 		t.Errorf("バックアップに注文が無い: %d", len(orders))
 	}
 }
+
+func TestVerifyMarksOrders(t *testing.T) {
+	led := openTest(t)
+	price := decimal.NewFromInt(1000)
+	// 通常の実行 → 印なし
+	if err := led.Record(request("a", "7203", domain.SideBuy, 100, domain.TradeTypeCash), day,
+		string(domain.OrderStatusSubmitted), &price, nil); err != nil {
+		t.Fatal(err)
+	}
+	// 実機検証の実行 → 印あり。env を変えずに切り分けられること
+	led.Verify = true
+	if err := led.Record(request("b", "9984", domain.SideBuy, 100, domain.TradeTypeCash), day,
+		string(domain.OrderStatusSubmitted), &price, nil); err != nil {
+		t.Fatal(err)
+	}
+	orders, err := led.OrdersOn(day, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, o := range orders {
+		got[o.ClientOrderID] = o.Verify
+	}
+	if got["a"] {
+		t.Error("通常の注文に検証の印が付いた")
+	}
+	if !got["b"] {
+		t.Error("検証の注文に印が付いていない")
+	}
+}
+
+func TestRealizedPnLSkipsVerify(t *testing.T) {
+	led := openTest(t)
+	fill := func(id string, price int64) {
+		p := decimal.NewFromInt(price)
+		if err := led.UpdateStatus(id, domain.OrderStatusFilled, decimal.NewFromInt(100), &p, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := decimal.NewFromInt(1000)
+	// 検証で建てて手仕舞った 1 往復だけを台帳に置く
+	led.Verify = true
+	for id, side := range map[string]domain.Side{"v-buy": domain.SideBuy, "v-sell": domain.SideSell} {
+		if err := led.Record(request(id, "7203", side, 100, domain.TradeTypeCash), day,
+			string(domain.OrderStatusSubmitted), &entry, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fill("v-buy", 1000)
+	fill("v-sell", 900) // 1 万円の損。ゲートに数えると当日の資金が縮む
+
+	pnl, err := led.RealizedPnL([]time.Time{day}, "long")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 検証の往復しか無い日は「建てていない日」と同じ 0 になる（縮小の合図にしない）
+	got := pnl[day.Format(dayLayout)]
+	if got == nil {
+		t.Fatalf("損益が nil（検証の注文を数えて未確定になっている）")
+	}
+	if *got != 0 {
+		t.Errorf("検証の損益が資産曲線に入った: %v", *got)
+	}
+}

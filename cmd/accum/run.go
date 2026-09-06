@@ -19,12 +19,14 @@ func newRunCmd() *cobra.Command {
 	var yesFlag bool
 	var ignoreWindowFlag bool
 	var noSyncFlag bool
+	var brokerVerifyFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "本日の積立を実行する（--live で発注）",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run.Crash("積立の実行", "accum.crash", runAccumulation(liveFlag, yesFlag, ignoreWindowFlag, noSyncFlag))
+			return run.Crash("積立の実行", "accum.crash",
+				runAccumulation(liveFlag, yesFlag, ignoreWindowFlag, noSyncFlag, brokerVerifyFlag))
 		},
 	}
 
@@ -32,11 +34,15 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&yesFlag, "yes", "y", false, "本番発注時の確認プロンプトをスキップする")
 	cmd.Flags().BoolVar(&ignoreWindowFlag, "ignore-window", false, "発注時間帯の外でも注文を作る")
 	cmd.Flags().BoolVar(&noSyncFlag, "no-sync", false, "足の更新をしない")
+	cmd.Flags().BoolVar(&brokerVerifyFlag, "broker-verify", false,
+		"発注経路の実機検証（docs/BROKER_VERIFY.md）。台帳・ログ・ダイジェストに印を付ける")
 	return cmd
 }
 
 // runAccumulation は本体。RunE から切り出してあるのは、異常終了を run.Crash で記録・通知するため。
-func runAccumulation(liveFlag, yesFlag, ignoreWindowFlag, noSyncFlag bool) error {
+func runAccumulation(liveFlag, yesFlag, ignoreWindowFlag, noSyncFlag, brokerVerifyFlag bool) error {
+	// 以降のログの全行とダイジェストに印を付ける（env とは独立）
+	run.SetVerify(brokerVerifyFlag)
 	cfg, err := accumcfg.LoadAccumConfig(configDirFlag)
 	if err != nil {
 		return err
@@ -79,6 +85,7 @@ func runAccumulation(liveFlag, yesFlag, ignoreWindowFlag, noSyncFlag bool) error
 		return err
 	}
 	defer led.Close()
+	led.Verify = brokerVerifyFlag
 
 	// dry-run は常にメモリ上の模型
 	var b broker.Broker

@@ -33,8 +33,15 @@ cat state/digest/prod-<日付>.jsonl
 1 実行 1 行。`outcome` は `ok` / `skip`（休日・時間帯の外）/ `error`。
 `anomalies` は**いつもと違うことが起きた実行にだけ**付く。ここに出ない実行は深掘りしなくてよい。
 
+`verify: true` が付いた実行は、人が `--broker-verify` を付けて手で走らせた発注経路の
+検証（`docs/BROKER_VERIFY.md`）。**異常ではないし、成績でもない**——時間外の発注も
+1 単元の建玉も手順どおりの姿で、台帳の印によって `review` / `trades` の集計からも
+外れている。`env` では切り分けられない（**本番口座で検証する**）ので、必ずこの印で見る。
+検証があった日は、異常として扱わず「検証を N 回実施」と 1 行添えるだけでよい。
+
 ```bash
-jq -c 'select(.anomalies)' state/digest/prod-<日付>.jsonl
+jq -c 'select(.anomalies and (.verify | not))' state/digest/prod-<日付>.jsonl   # 本当の異常
+jq -c 'select(.verify)' state/digest/prod-<日付>.jsonl                          # 手で走らせた検証
 ```
 
 `pending_attributed` / `pending_unsent` / `pending_ambiguous` は、送信結果が分からなかった注文を
@@ -92,7 +99,7 @@ Parquet を直接開く必要はない。`history` が読んで JSON にする�
 層 1 で拾った `run_id` を鍵に降りる。**定型行（`routine: true`）は読み飛ばす。**
 
 ```bash
-jq -c 'select(.run_id == "<run_id>" and .routine != true)' state/logs/daytrade-prod.jsonl
+jq -c 'select(.run_id == "<run_id>" and .routine != true and (.verify | not))' state/logs/daytrade-prod.jsonl
 ```
 
 `code` の一覧は `docs/LOGGING.md`。分類には `event`（文言が変わる）ではなく `code` を使う。

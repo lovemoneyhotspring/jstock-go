@@ -47,6 +47,10 @@ type Order struct {
 	Reason         string
 	// Trade は現物 / 信用新規 / 信用返済。古い台帳（列が無い）は現物。
 	Trade domain.TradeType
+	// Verify は発注経路の実機検証（docs/BROKER_VERIFY.md）で出した注文か。
+	// 建玉としては本物なので close / verify は同じように扱うが、成績の集計
+	//（資産曲線のゲート・evaluate・レポート）からは外す。戦略の判断ではないため。
+	Verify bool
 }
 
 // IsDryRun は dry-run の記録か。
@@ -98,6 +102,10 @@ func (o Order) Leg() string {
 type Ledger struct {
 	db   *sql.DB
 	path string
+	// Verify が真なら、この実行で書く注文に検証の印を付ける（--verify）。
+	// 実機検証は本番の台帳に本物の建玉を作るので、別の DB に逃がすと close /
+	// verify が拾えなくなる。同じ台帳に置いたまま、印で成績から外す。
+	Verify bool
 }
 
 // Path は台帳ファイルの置き場所。二重発注を疑う場面で人に示す。
@@ -126,6 +134,10 @@ var migrations = []storage.Migration{
 	{Name: "orders.trade", Up: storage.AddColumns("orders", map[string]string{
 		"trade": "TEXT NOT NULL DEFAULT 'CASH'",
 	})},
+	// 実機検証の注文に印を付ける。既定 0 = 従来どおりの本番の注文
+	{Name: "orders.verify", Up: storage.AddColumns("orders", map[string]string{
+		"verify": "INTEGER NOT NULL DEFAULT 0",
+	})},
 }
 
 // Open は台帳を開き、スキーマを最新に揃える。
@@ -149,11 +161,11 @@ func (l *Ledger) Record(req domain.OrderRequest, day time.Time, status string, p
 	_, err := l.db.Exec(
 		`INSERT OR REPLACE INTO orders (client_order_id, broker_order_id, day, symbol, side,
 			quantity, filled_quantity, status, price, avg_fill_price, reason, placed_at,
-			updated_at, trade)
-		 VALUES (?, ?, ?, ?, ?, ?, '0', ?, ?, NULL, ?, ?, NULL, ?)`,
+			updated_at, trade, verify)
+		 VALUES (?, ?, ?, ?, ?, ?, '0', ?, ?, NULL, ?, ?, NULL, ?, ?)`,
 		req.ClientOrderID, brokerOrderID, day.Format(dayLayout), req.Symbol, string(req.Side),
 		req.Quantity.String(), status, decimalPtrString(price), req.Reason,
-		clock.NowUTC().Format(time.RFC3339), string(req.Trade))
+		clock.NowUTC().Format(time.RFC3339), string(req.Trade), boolToInt(l.Verify))
 	if err != nil {
 		return fmt.Errorf("台帳への記録に失敗しました: %w", err)
 	}
@@ -218,7 +230,7 @@ func (l *Ledger) DeadCount(day time.Time, symbol string, side domain.Side) int {
 // Get は 1 件の注文。無ければ ok が偽。
 func (l *Ledger) Get(clientOrderID string) (Order, bool, error) {
 	orders, err := l.query("SELECT client_order_id, broker_order_id, day, symbol, side, quantity,"+
-		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade"+
+		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify"+
 		" FROM orders WHERE client_order_id = ?", clientOrderID)
 	if err != nil || len(orders) == 0 {
 		return Order{}, false, err
@@ -248,7 +260,7 @@ func (l *Ledger) BrokerOrderIDs() (map[string]struct{}, error) {
 // OrdersOn はその日の注文（dry-run を含む）。side が nil なら全部。
 func (l *Ledger) OrdersOn(day time.Time, side *domain.Side) ([]Order, error) {
 	query := "SELECT client_order_id, broker_order_id, day, symbol, side, quantity, filled_quantity," +
-		" status, price, avg_fill_price, placed_at, updated_at, reason, trade FROM orders WHERE day = ?"
+		" status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify FROM orders WHERE day = ?"
 	args := []any{day.Format(dayLayout)}
 	if side != nil {
 		query += " AND side = ?"
@@ -279,7 +291,7 @@ func (l *Ledger) ExitsOn(day time.Time) ([]Order, error) {
 // OpenOrders は結果が確定していない注文（全期間）。
 func (l *Ledger) OpenOrders() ([]Order, error) {
 	orders, err := l.query("SELECT client_order_id, broker_order_id, day, symbol, side, quantity," +
-		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade" +
+		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify" +
 		" FROM orders ORDER BY placed_at")
 	if err != nil {
 		return nil, err
@@ -290,7 +302,7 @@ func (l *Ledger) OpenOrders() ([]Order, error) {
 // Recent は新しい順の注文。
 func (l *Ledger) Recent(limit int) ([]Order, error) {
 	return l.query("SELECT client_order_id, broker_order_id, day, symbol, side, quantity,"+
-		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade"+
+		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify"+
 		" FROM orders ORDER BY placed_at DESC LIMIT ?", limit)
 }
 
@@ -320,10 +332,11 @@ func (l *Ledger) query(query string, args ...any) ([]Order, error) {
 			price, avgFillPrice    *string
 			updatedAt, reason      *string
 			trade                  *string
+			verify                 *int64
 		)
 		if err := rows.Scan(&o.ClientOrderID, &brokerOrderID, &dayText, &o.Symbol, &side,
 			&quantity, &filled, &o.Status, &price, &avgFillPrice, &o.PlacedAt, &updatedAt,
-			&reason, &trade); err != nil {
+			&reason, &trade, &verify); err != nil {
 			return nil, err
 		}
 		o.BrokerOrderID = brokerOrderID
@@ -341,6 +354,7 @@ func (l *Ledger) query(query string, args ...any) ([]Order, error) {
 		if trade != nil && *trade != "" {
 			o.Trade = domain.TradeType(*trade)
 		}
+		o.Verify = verify != nil && *verify != 0
 		out = append(out, o)
 	}
 	return out, rows.Err()
@@ -377,6 +391,11 @@ func (l *Ledger) RealizedPnL(days []time.Time, leg string) (map[string]*float64,
 		var orders []Order
 		for _, o := range all {
 			if o.IsDryRun() {
+				continue
+			}
+			// 実機検証の注文は戦略の判断ではないので、資産曲線のゲートに数えない
+			// （1 単元の検証取引で当日の資金が半分に縮むのを避ける）
+			if o.Verify {
 				continue
 			}
 			if leg != "" && o.Leg() != leg {
@@ -428,6 +447,14 @@ func (l *Ledger) RealizedPnL(days []time.Time, leg string) (map[string]*float64,
 		}
 	}
 	return result, nil
+}
+
+// boolToInt は SQLite に真偽を入れるための 0 / 1。
+func boolToInt(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func parseDecimal(text string) decimal.Decimal {

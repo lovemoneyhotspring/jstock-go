@@ -34,6 +34,7 @@ func newOpenCmd() *cobra.Command {
 		quoteSourceFlag  string
 		quoteFileFlag    string
 		dateFlag         string
+		brokerVerifyFlag bool
 	)
 	cmd := &cobra.Command{
 		Use:   "open",
@@ -44,7 +45,7 @@ func newOpenCmd() *cobra.Command {
 			return crash("寄付の買い", "daytrade.crash", runOpen(openOptions{
 				live: liveFlag, yes: yesFlag, ignoreWindow: ignoreWindowFlag,
 				allowDelayed: allowDelayedFlag, quoteSource: quoteSourceFlag,
-				quoteFile: quoteFileFlag, date: dateFlag,
+				quoteFile: quoteFileFlag, date: dateFlag, brokerVerify: brokerVerifyFlag,
 			}))
 		},
 	}
@@ -55,12 +56,17 @@ func newOpenCmd() *cobra.Command {
 	cmd.Flags().StringVar(&quoteSourceFlag, "quote-source", "", "気配の取得元を上書き（tachibana / csv）")
 	cmd.Flags().StringVar(&quoteFileFlag, "quote-file", "", "csv のときのファイル")
 	cmd.Flags().StringVar(&dateFlag, "date", "", "判定日（YYYY-MM-DD、既定は今日）")
+	cmd.Flags().BoolVar(&brokerVerifyFlag, "broker-verify", false,
+		"発注経路の実機検証（docs/BROKER_VERIFY.md）。台帳・履歴・ログに印を付け、成績の集計から外す")
 	return cmd
 }
 
 type openOptions struct {
 	live, yes, ignoreWindow, allowDelayed bool
 	quoteSource, quoteFile, date          string
+	// brokerVerify は実機検証の実行か（--broker-verify）。建てる玉は本物だが、
+	// 戦略の判断ではないので成績の集計からは外す。
+	brokerVerify bool
 }
 
 func runOpen(opts openOptions) error {
@@ -68,6 +74,8 @@ func runOpen(opts openOptions) error {
 	if err != nil {
 		return err
 	}
+	// 以降のログの全行とダイジェストに印を付ける（env とは独立）
+	run.SetVerify(opts.brokerVerify)
 	if !cfg.Capital.Enabled {
 		fmt.Println("jp_gap_fade は無効（capital.enabled = false）。何もしません")
 		logInfo("daytrade.skip", "戦略が無効", map[string]any{"reason": "disabled"})
@@ -92,6 +100,7 @@ func runOpen(opts openOptions) error {
 		"allow_delayed": opts.allowDelayed, "quote_override": opts.quoteSource,
 		"watch_only": watchOnly, "deadline": deadlineText(deadline),
 		"max_run_seconds": cfg.Execution.MaxRunSeconds,
+		"broker_verify":   opts.brokerVerify,
 	})
 	if watchOnly {
 		fmt.Println("資金 0（max_capital = 0）: スクリーニングと候補の表示だけ行い、買いません")
@@ -125,6 +134,7 @@ func runOpen(opts openOptions) error {
 	if err != nil {
 		return err
 	}
+	led.Verify = opts.brokerVerify
 	defer led.Close()
 	// 実行品質の記録は最後にまとめて書き出す（1 発注 1 ファイルにしない）
 	defer func() {
@@ -225,6 +235,7 @@ func runOpen(opts openOptions) error {
 		"already_long":  placed.Long,
 		"already_short": placed.Short,
 		"deadline":      deadlineText(deadline),
+		"broker_verify": opts.brokerVerify,
 	}
 	finish := func(outcome string, extra map[string]any) {
 		row := map[string]any{}

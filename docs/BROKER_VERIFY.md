@@ -67,7 +67,41 @@ Go への初回移植で推定に頼って多数取り違えたため、そこ�
 
 ## UAT での確認順
 
-`WBJP_ENV=uat` で、1 段ずつ結果を見てから次に進む。
+### 検証の実行には必ず `--broker-verify` を付ける
+
+**`env` では切り分けられない。** 本番口座（`env=prod`）で電文を確かめることがあり、
+そのとき `env` は普段の運用と同じ値になる。印が無いと、あとからログを読む
+`night-repair`（4:00）と `daily-report`（21:00）が、検証で出た「時間外の発注」
+「持ち越し」を**本当の異常として拾う**。
+
+`--broker-verify` を付けると:
+
+| どこ | 何が付くか | 効き |
+|---|---|---|
+| ログ（`state/logs/<app>-<env>.jsonl`） | その実行の**全行**に `verify: true` | `jq 'select(.verify \| not)'` で本当の異常だけ見られる |
+| ダイジェスト（`state/digest/<env>-<日付>.jsonl`） | `verify: true` | 日次・週次レポートが検証の回を除ける |
+| 台帳（`orders.verify`） | 検証で出した注文の行 | 成績の集計と資産曲線のゲートから外れる |
+| 履歴（`open_run.broker_verify`） | 実行 1 回の要約 | 後から「あの日は検証だった」と分かる |
+
+検証で建てた玉は**本物**なので、`close` / `verify` は普段どおり手仕舞う（印を理由に
+無視したりしない）。外れるのは成績の集計だけ——戦略の判断ではないため。
+
+> **その日の本番の `open` は動かなくなる。** 冪等の判定（「今日もう建てたか」）は
+> 台帳の生きている注文を数えるだけで、検証の印は見ない。**検証で建てた玉の上に
+> 本番の建玉を重ねない**ための意図した挙動なので、寄り付き前に検証するのは避け、
+> 引け後か、その日は取引しないと決めた日にやること。
+
+```bash
+daytrade open   --live --yes --broker-verify --config-dir config/daytrade_margin
+daytrade close  --live --yes --broker-verify --config-dir config/daytrade_margin
+daytrade verify              --broker-verify --config-dir config/daytrade_margin
+accum run       --live       --broker-verify
+wbjp  run       --live       --broker-verify
+daytrade status              # 検証の注文は「（検証）」付きで並ぶ
+```
+
+`WBJP_ENV=uat` で、1 段ずつ結果を見てから次に進む。**本番口座で確かめるときも
+手順は同じで、`--broker-verify` を必ず付ける。**
 
 ```bash
 # 0. 認証が通ることと、取得元を確認する
@@ -78,7 +112,7 @@ WBJP_ENV=uat wbjp account
 WBJP_ENV=uat accum orders --check
 
 # 2. 現物を 1 単元だけ発注し、照会で拾えることを確かめる
-WBJP_ENV=uat accum run --live --ignore-window
+WBJP_ENV=uat accum run --live --ignore-window --broker-verify
 WBJP_ENV=uat accum orders --check      # 状態が SUBMITTED → FILLED に変わるか
 ```
 
@@ -96,9 +130,9 @@ WBJP_ENV=uat accum orders --check      # 状態が SUBMITTED → FILLED に変�
 WBJP_ENV=uat daytrade status --config-dir config/daytrade_margin
 
 # 4. 1 銘柄だけ建てて、同じ日に返済まで通す
-WBJP_ENV=uat daytrade open   --config-dir config/daytrade_margin --live --yes
-WBJP_ENV=uat daytrade close  --config-dir config/daytrade_margin --live --yes
-WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin
+WBJP_ENV=uat daytrade open   --config-dir config/daytrade_margin --live --yes --broker-verify
+WBJP_ENV=uat daytrade close  --config-dir config/daytrade_margin --live --yes --broker-verify
+WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 ```
 
 信用で確認したいのはこの 3 点。

@@ -54,6 +54,8 @@ type run struct {
 	fields    map[string]any
 	anomalies []string
 	written   bool
+	// verify は実機検証の実行か。env とは独立に「手で検証した記録」を示す。
+	verify bool
 }
 
 var (
@@ -99,6 +101,16 @@ func StartRun(opts StartOptions) {
 		started: time.Now(),
 		outcome: "ok",
 		fields:  map[string]any{},
+	}
+}
+
+// SetVerify はこの実行を実機検証として印を付ける（docs/BROKER_VERIFY.md）。
+// 本番口座で検証することがあるので、env では切り分けられない。
+func SetVerify(verify bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	if current != nil {
+		current.verify = verify
 	}
 }
 
@@ -194,6 +206,10 @@ func Flush() error {
 		"run_id":  current.runID,
 		"outcome": current.outcome,
 		"dur_ms":  time.Since(current.started).Milliseconds(),
+	}
+	// 実機検証の実行にだけ付ける。通常の実行の形は変えない
+	if current.verify {
+		record["verify"] = true
 	}
 	for key, value := range current.fields {
 		record[key] = value
