@@ -26,11 +26,8 @@ extends = "../daytrade"
 max_capital = 3000000
 order_budget = 1000000     # N = 3。手数料 0 円なので 67 万円の段階（20〜100 万一律）に縛られない
 
-[signal]
-# 正規化ギャップ（ギャップ ÷ 20 日ボラ）の小さい順に並べる。利益は同じでリスクが下がる
-# （10 年 Sharpe 2.52 → 2.78、探索・確認・分足の 4 窓すべてで DD 改善。docs/research/2026-09-jp-daytrade-selection-2.md）。
-# 事前基準（等金額の t ≥ 2.5）には届いていないので「リスク低減の設定」。plan / evaluate で蓄積して見直す。
-rank_by = "gap_vol"
+# [signal]（rank_by = gap_vol を含む）は土台 config/daytrade をそのまま継ぐ。
+# ロングの規則は土台と子で同一であること（config_test の TestMarginConfigMatchesBaseLongRules）。
 
 # [regime] の equity_curve_days / equity_curve_scale は土台と同じ値。ここでは
 # 「ロング側の直近 20 日損益 ≤ 0 が地合いが弱い合図」として読む。ショートは常時なので
