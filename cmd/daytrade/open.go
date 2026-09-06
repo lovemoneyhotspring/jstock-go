@@ -148,6 +148,7 @@ func runOpen(opts openOptions) error {
 		RetryWait: execute.DefaultRetryWait, Deadline: deadline,
 	}
 	var b broker.Broker
+	var carried []execute.Carried
 	if allowed {
 		if b, err = connectBroker(cfg); err != nil {
 			return err
@@ -156,6 +157,12 @@ func runOpen(opts openOptions) error {
 		// 前回の実行で送信結果が分からなかった注文があれば、ここで判定して台帳を直す。
 		// 届いていなければ UNSENT になり、下の「発注済み」には数えない（種を変えて送り直す）
 		if err := resolvePending(env, b); err != nil {
+			return err
+		}
+		// 前営業日以前の建玉が残っていれば（引けで返済できなかった持ち越し）、新規に建てる前に
+		// 寄付の成行で手仕舞う。検証は margin.carry_penalty で「翌寄りで返済」としているので同じにする。
+		// 判定できなければ止める——持ち越しを知らずに建てると二重になりうる
+		if carried, err = settleCarried(env, b, "翌寄りで持ち越しを手仕舞い"); err != nil {
 			return err
 		}
 	} else {
@@ -173,6 +180,20 @@ func runOpen(opts openOptions) error {
 	remainingLong, remainingShort := cfg.Capital.Positions()-placed.Long, 0
 	if cfg.Margin.Enabled && !watchOnly {
 		remainingShort = cfg.Margin.Positions() - placed.Short
+	}
+	// 持ち越しが拘束している資金（残り株数 × 建値）を上限から引き、残りで建てられる件数に頭打ち。
+	// 返済注文は出したが、寄っていない銘柄はまだ約定しておらず資金は戻っていない
+	if tiedLong, tiedShort := execute.TiedCapital(carried); tiedLong.IsPositive() || tiedShort.IsPositive() {
+		capLong := execute.PositionsWithin(cfg.Capital.MaxCapital, tiedLong, cfg.Capital.OrderBudget)
+		capShort := execute.PositionsWithin(cfg.Margin.MaxCapital, tiedShort, cfg.Margin.OrderBudget)
+		remainingLong, remainingShort = min(remainingLong, capLong), min(remainingShort, capShort)
+		fmt.Printf("持ち越しが拘束する資金 ロング %s 円 / ショート %s 円 → 今日はロング %d 件 / ショート %d 件まで\n",
+			yen(tiedLong), yen(tiedShort), max(remainingLong, 0), max(remainingShort, 0))
+		logWarn("daytrade.carry", "持ち越しの拘束資金で件数を頭打ち", map[string]any{
+			"tied_long": tiedLong.String(), "tied_short": tiedShort.String(),
+			"cap_long": capLong, "cap_short": capShort,
+			"remaining_long": max(remainingLong, 0), "remaining_short": max(remainingShort, 0),
+		})
 	}
 	if placed.Total() > 0 {
 		if remainingLong <= 0 && remainingShort <= 0 {
@@ -427,7 +448,7 @@ func runOpen(opts openOptions) error {
 		// 台帳に無い建玉がブローカーにあれば、この実行は二重に建てることになる。
 		// 冪等性は台帳の client_order_id で担保しているので、台帳を失う・別ホストへ
 		// 移す・復元した直後は効かない。発注の直前にブローカーと突き合わせる
-		if err := execute.EnsureNoUnrecordedPositions(env, b, picks); err != nil {
+		if err := execute.EnsureNoUnrecordedPositions(env, b, picks, carried); err != nil {
 			var unrecorded *execute.ErrUnrecordedPositions
 			if errors.As(err, &unrecorded) {
 				digest.Anomaly("daytrade.unrecorded_positions",
@@ -668,4 +689,34 @@ func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOver
 		"missing": len(missing), "missing_sample": sample(missing), "elapsed_ms": elapsed,
 	})
 	return found, nil
+}
+
+// settleCarried は前営業日以前の持ち越しを判定し、成行で手仕舞う（open / close 共用）。
+//
+// 照会できなかった注文がある銘柄は手仕舞わず、人に知らせる。通らなかった返済も知らせる
+// （次の実行が同じ判定でもう一度送る。台帳は建てた日の下に記録され、冪等）。
+func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.Carried, error) {
+	carried, unconfirmed, err := execute.CarriedPositions(env, b)
+	if err != nil {
+		return nil, err
+	}
+	if len(unconfirmed) > 0 {
+		alert("デイトレ: 持ち越しの建玉を照会できません。口座を確認してください", strings.Join(unconfirmed, "\n"))
+		digest.Anomaly("daytrade.carry_unconfirmed", fmt.Sprintf("%d 件の注文を照会できず持ち越しを判定できません", len(unconfirmed)))
+	}
+	if len(carried) == 0 {
+		return nil, nil
+	}
+	lines := make([]string, 0, len(carried))
+	for _, c := range carried {
+		lines = append(lines, c.String())
+	}
+	fmt.Printf("持ち越し %d 件を成行で手仕舞います: %s\n", len(carried), strings.Join(lines, "、"))
+	logWarn("daytrade.carry", "持ち越しを手仕舞う", map[string]any{"count": len(carried), "positions": lines, "phrase": phrase})
+	digest.Anomaly("daytrade.carry", fmt.Sprintf("%d 件の持ち越しを手仕舞い", len(carried)))
+	if failures := execute.ReturnCarried(env, b, carried, phrase); len(failures) > 0 {
+		alert(fmt.Sprintf("デイトレ: %d 件の持ち越しの手仕舞いが通らず", len(failures)), strings.Join(failures, "\n"))
+		digest.Anomaly("daytrade.carry_failed", fmt.Sprintf("%d 件の持ち越しの手仕舞いが通らず", len(failures)))
+	}
+	return carried, nil
 }

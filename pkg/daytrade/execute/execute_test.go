@@ -332,7 +332,7 @@ func TestEnsureNoUnrecordedPositions(t *testing.T) {
 	picks := []selection.Pick{pick("7203", domain.SideBuy)}
 	b := &stubBroker{positions: []domain.Position{{Symbol: "7203", Quantity: decimal.NewFromInt(100)}}}
 
-	err := EnsureNoUnrecordedPositions(env, b, picks)
+	err := EnsureNoUnrecordedPositions(env, b, picks, nil)
 	var unrecorded *ErrUnrecordedPositions
 	if !errors.As(err, &unrecorded) || len(unrecorded.Positions) != 1 {
 		t.Fatalf("台帳外の建玉で止まらない: %v", err)
@@ -346,13 +346,13 @@ func TestEnsureNoUnrecordedPositions(t *testing.T) {
 	if err := env.Ledger.Record(req, day, string(domain.OrderStatusSubmitted), nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := EnsureNoUnrecordedPositions(env, b, picks); err != nil {
+	if err := EnsureNoUnrecordedPositions(env, b, picks, nil); err != nil {
 		t.Errorf("台帳が知っている建玉で止まった: %v", err)
 	}
 
 	// 照会できないときも止める
 	b.posErr = errors.New("down")
-	if err := EnsureNoUnrecordedPositions(env, b, picks); err == nil {
+	if err := EnsureNoUnrecordedPositions(env, b, picks, nil); err == nil {
 		t.Error("照会できないのに発注に進んだ")
 	}
 }

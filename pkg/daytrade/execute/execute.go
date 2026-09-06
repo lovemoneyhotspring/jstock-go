@@ -480,7 +480,10 @@ func skipRow(pick selection.Pick, request domain.OrderRequest, reason execution.
 // 二重に建てると日計りの資金計画が崩れる。人が確かめるまで止める。
 //
 // 照会できないときも中止する。二重建てを否定できないまま実弾を出さない。
-func EnsureNoUnrecordedPositions(env Env, b broker.Broker, picks []selection.Pick) error {
+//
+// carried は今朝までに判定した持ち越し（前営業日以前の建玉）。台帳が知っている建玉なので
+// 差し引く——差し引かないと、持ち越した銘柄が今日も候補になった朝に発注が丸ごと止まる。
+func EnsureNoUnrecordedPositions(env Env, b broker.Broker, picks []selection.Pick, carried []Carried) error {
 	if len(picks) == 0 {
 		return nil
 	}
@@ -491,8 +494,8 @@ func EnsureNoUnrecordedPositions(env Env, b broker.Broker, picks []selection.Pic
 		return fmt.Errorf("建玉を照会できないため発注を中止しました（二重に建てないため）: %w", err)
 	}
 
-	// 台帳が知っている今日の建玉ぶんは差し引く（正常な再実行では止めない）
-	recorded := map[string]decimal.Decimal{}
+	// 台帳が知っている今日の建玉ぶんと持ち越しぶんは差し引く（正常な再実行では止めない）
+	recorded := carriedQuantities(carried)
 	if entries, err := env.Ledger.EntriesOn(env.Day); err == nil {
 		for _, o := range entries {
 			if o.IsDryRun() || o.IsDead() {
@@ -671,6 +674,12 @@ func recordFill(env Env, order ledger.Order, current *domain.Order, filled decim
 // ExitRequest は 1 建玉の反対売買。信用で建てたものは返済、現物の買いは売却。
 // action は人向けの動詞（売り／返済売り／返済買い）。
 func ExitRequest(entry ledger.Order, quantity decimal.Decimal, day time.Time, cfg config.Config, attempt int) (domain.OrderRequest, string) {
+	return ExitRequestAs(entry, quantity, day, cfg, attempt, "引けで手仕舞い")
+}
+
+// ExitRequestAs は理由の言葉を変えた ExitRequest（持ち越しの返済は「翌寄りで持ち越しを手仕舞い」）。
+// client_order_id の種は同じなので、言葉が違っても同じ日・同じ試行なら同じ注文になる。
+func ExitRequestAs(entry ledger.Order, quantity decimal.Decimal, day time.Time, cfg config.Config, attempt int, phrase string) (domain.OrderRequest, string) {
 	exitSide := domain.SideSell
 	if entry.Side != domain.SideBuy {
 		exitSide = domain.SideBuy
@@ -695,14 +704,19 @@ func ExitRequest(entry ledger.Order, quantity decimal.Decimal, day time.Time, cf
 		OrderType:     domain.OrderTypeMarket,
 		Quantity:      quantity,
 		TaxType:       cfg.Execution.TaxAccountType,
-		Reason: fmt.Sprintf("%s %s 引けで手仕舞い（%s）",
-			cfg.StrategyName(), day.Format(cli.DateLayout), action),
+		Reason: fmt.Sprintf("%s %s %s（%s）",
+			cfg.StrategyName(), day.Format(cli.DateLayout), phrase, action),
 		Trade: exitTrade,
 	}, action
 }
 
 // PlaceExit は 1 建玉の反対売買を送る。b が nil なら dry-run。
 func PlaceExit(env Env, b broker.Broker, target ExitTarget) (string, error) {
+	return PlaceExitAs(env, b, target, "引けで手仕舞い")
+}
+
+// PlaceExitAs は理由の言葉を変えた PlaceExit（持ち越しの返済用）。
+func PlaceExitAs(env Env, b broker.Broker, target ExitTarget, phrase string) (string, error) {
 	entry := target.Entry
 	exitSide := domain.SideSell
 	if entry.Side != domain.SideBuy {
@@ -710,10 +724,10 @@ func PlaceExit(env Env, b broker.Broker, target ExitTarget) (string, error) {
 	}
 	attempt := env.Ledger.DeadCount(env.Day, entry.Symbol, exitSide)
 	build := func(a int) domain.OrderRequest {
-		req, _ := ExitRequest(entry, target.Quantity, env.Day, env.Cfg, a)
+		req, _ := ExitRequestAs(entry, target.Quantity, env.Day, env.Cfg, a, phrase)
 		return req
 	}
-	request, action := ExitRequest(entry, target.Quantity, env.Day, env.Cfg, attempt)
+	request, action := ExitRequestAs(entry, target.Quantity, env.Day, env.Cfg, attempt, phrase)
 	if env.Ledger.WasPlaced(request.ClientOrderID) {
 		env.printf("  %s: %s発注済み（冪等）\n", entry.Symbol, action)
 		return "冪等", nil
