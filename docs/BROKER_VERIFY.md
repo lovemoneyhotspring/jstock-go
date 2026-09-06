@@ -135,12 +135,18 @@ WBJP_ENV=uat daytrade close  --config-dir config/daytrade_margin --live --yes --
 WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 ```
 
-信用で確認したいのはこの 3 点。
+信用で確認したいのはこの 4 点。
 
 1. 建てた玉が `MarginPositions` に現れ、**建玉番号（`sOrderTategyokuNumber`）が取れる**
    （返済の指定に要る）
 2. `close` が返済として通る（現物売りになっていない。手数料と受渡が信用のものか）
 3. `verify` が「持ち越しなし」で終わる（＝ `close` の数量が建玉と一致した）
+4. **前営業日の注文を `CLMOrderListDetail`（注文番号 + 営業日）で照会できる**。持ち越しの判定
+   （`execute.CarriedPositions`）は、台帳で未確定のまま残った前日以前の注文をこれで照会する。
+   一覧（`CLMOrderList`）と同じく当日分しか返らないなら、`verify` が走らなかった日の注文 1 件が
+   14 暦日のあいだ毎回「照会できない」と通知され、その間は台帳外の建玉の掃除も止まる。
+   確かめ方: 翌営業日に `daytrade verify --date <前日> --broker-verify` を回し、前日の注文の
+   約定数量が入ること
 
 ```bash
 # 5. 逆指値（デモ環境で。信用返済での逆指値はリファレンスに例文が無いので必ず実機で）
@@ -166,7 +172,7 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 
 ## 本番へ移すときの条件
 
-上の 7 点がすべて確認できるまで、`deploy/crontab.txt` の発注経路の行は開けない。
+上の 8 点がすべて確認できるまで、`deploy/crontab.txt` の発注経路の行は開けない。
 開けるときも **まず `--live` 無しで数日**、次に `--live` の順にする。
 
 停止は `config/<戦略名>/settings.toml`（`daytrade.toml`）の `kill_switch = true`。

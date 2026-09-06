@@ -326,7 +326,7 @@ func runOpen(opts openOptions) error {
 	// 1 件を小さく建てる——一部が拘束されただけで一日を休むのは機会損失
 	if tiedLong.IsPositive() && !watchOnly {
 		before := n
-		n, budget = execute.CapByTied(n, cfg.Capital.MaxCapital, tiedLong, budget)
+		n, budget = execute.CapByTied(n, placed.Long, cfg.Capital.MaxCapital, tiedLong, budget)
 		fmt.Printf("持ち越しがロングの資金 %s 円を拘束 → 今日は %d 件（1 注文 %s 円）\n", yen(tiedLong), n, yen(budget))
 		logWarn("daytrade.carry", "持ち越しの拘束資金でロングを縮める", map[string]any{
 			"tied": tiedLong.String(), "n_before": before, "n": n, "budget": budget.String()})
@@ -339,6 +339,13 @@ func runOpen(opts openOptions) error {
 	if len(placed.Symbols) > 0 {
 		// 同じ日に建てた銘柄は重ねて建てない（再実行は残りの枚数を別の銘柄で埋める）
 		rankQuotes = dtquotes.DropSymbols(rankQuotes, placed.Symbols)
+	}
+	if swept := execute.SweptSymbols(carried); len(swept) > 0 {
+		// 台帳外として返済に回した銘柄は今日は建てない。返済注文が今日の下に記録されるので、
+		// 同じ銘柄を今日建てると引けの手仕舞いがそれを「発注済み」と取り違えて当日の建玉を残す
+		rankQuotes = dtquotes.DropSymbols(rankQuotes, swept)
+		logWarn("daytrade.sweep", "台帳外の返済に回した銘柄を今日の候補から外す",
+			map[string]any{"symbols": sortedKeys(swept)})
 	}
 	if cfg.Signal.SkipOpened {
 		kept, dropped := dtquotes.DropOpened(quotes)
@@ -374,7 +381,7 @@ func runOpen(opts openOptions) error {
 		shortBudget = cfg.Margin.BudgetPerOrder().Mul(shortMultiplier).Round(0)
 		if tiedShort.IsPositive() {
 			before := shortN
-			shortN, shortBudget = execute.CapByTied(shortN, cfg.Margin.MaxCapital, tiedShort, shortBudget)
+			shortN, shortBudget = execute.CapByTied(shortN, placed.Short, cfg.Margin.MaxCapital, tiedShort, shortBudget)
 			fmt.Printf("持ち越しがショートの資金 %s 円を拘束 → 今日は %d 件（1 注文 %s 円）\n", yen(tiedShort), shortN, yen(shortBudget))
 			logWarn("daytrade.carry", "持ち越しの拘束資金でショートを縮める", map[string]any{
 				"tied": tiedShort.String(), "n_before": before, "n": shortN, "budget": shortBudget.String()})
@@ -708,7 +715,9 @@ func fetchQuotes(cfg dtconfig.Config, symbols []string, sourceOverride, fileOver
 // 照会できなかった注文がある銘柄は手仕舞わず、人に知らせる。通らなかった返済も知らせる
 // （次の実行が同じ判定でもう一度送る。台帳は建てた日の下に記録され、冪等）。
 func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.Carried, error) {
-	carried, unconfirmed, err := execute.CarriedPositions(env, b)
+	// 建玉の照会は 1 回（現物と信用で 2 電文）。持ち越しと台帳外の判定は同じ建玉を見る
+	held := broker.PositionsByLeg(b)
+	carried, unconfirmed, err := execute.CarriedPositions(env, b, held)
 	if err != nil {
 		return nil, err
 	}
@@ -719,7 +728,7 @@ func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.C
 	// 照会できなかった注文がある間は台帳外かどうかを決められない（建っていたかもしれない
 	// 玉を「台帳外」と読んで返済すると、建っていなかった場合に反対建玉を作る）
 	if len(unconfirmed) == 0 {
-		unrecorded, err := execute.UnrecordedMargin(env, b, carried)
+		unrecorded, err := execute.UnrecordedMargin(env, held, carried)
 		if err != nil {
 			return nil, err
 		}

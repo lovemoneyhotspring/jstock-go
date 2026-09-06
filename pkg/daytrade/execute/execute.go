@@ -503,15 +503,9 @@ func EnsureNoUnrecordedPositions(env Env, b broker.Broker, picks []selection.Pic
 	held := broker.PositionsByLeg(b)
 
 	// 台帳が知っている今日の建玉ぶんと持ち越しぶんは差し引く（正常な再実行では止めない）
-	recorded := carriedByLeg(carried)
-	if entries, err := env.Ledger.EntriesOn(env.Day); err == nil {
-		for _, o := range entries {
-			if o.IsDryRun() || o.IsDead() {
-				continue
-			}
-			leg := broker.LegOf(o.Symbol, o.Trade, o.Leg() == "short")
-			recorded[leg] = recorded[leg].Add(o.Quantity)
-		}
+	recorded, err := recordedByLeg(env, carried)
+	if err != nil {
+		return err
 	}
 
 	var unrecorded []string
@@ -692,6 +686,37 @@ func recordFill(env Env, order ledger.Order, current *domain.Order, filled decim
 	})
 }
 
+// fillResult は 1 注文の約定状況（queryFill の結果）。
+type fillResult struct {
+	Filled decimal.Decimal
+	Price  *decimal.Decimal
+	// Unconfirmed は結果が分からない——台帳で未確定なのに、ブローカーに該当が無いか照会に失敗した。
+	// Err はその理由。該当が無いだけなら nil。
+	Unconfirmed bool
+	Err         error
+}
+
+// queryFill は注文の約定数量と平均単価を出す。
+//
+// 台帳で確定済み（FILLED・失効・拒否など）の注文は**ブローカーに聞かない**。確定した注文は
+// もう変わらないし、持ち越しの判定は 14 暦日ぶんの注文を open / close のたびに見るので、
+// 全部を聞くと 1 実行で百を超える電文になる（立花は 1 件 1 電文）。未確定のものだけ照会し、
+// 結果を台帳に残す。未確定なのに照会できなければ Unconfirmed——数量を推測しない。
+func queryFill(env Env, b broker.Broker, order ledger.Order, msg string) fillResult {
+	result := fillResult{Filled: order.FilledQuantity, Price: order.AvgFillPrice}
+	if !order.IsOpen() {
+		return result
+	}
+	current, err := b.GetOrder(order.ClientOrderID, order.BrokerOrderID)
+	if current == nil {
+		result.Unconfirmed, result.Err = true, err
+		return result
+	}
+	result.Filled, result.Price = current.FilledQuantity, current.AvgFillPrice
+	recordFill(env, order, current, result.Filled, result.Price, msg)
+	return result
+}
+
 // ExitRequest は 1 建玉の反対売買。信用で建てたものは返済、現物の買いは売却。
 // action は人向けの動詞（売り／返済売り／返済買い）。
 func ExitRequest(entry ledger.Order, quantity decimal.Decimal, day time.Time, cfg config.Config, attempt int) (domain.OrderRequest, string) {
@@ -850,21 +875,16 @@ func Verify(env Env, b broker.Broker, entries, exits []ledger.Order) VerifyResul
 		})
 	}
 
+	// 確定済みの注文は台帳の値を使い、未確定のものだけブローカーに聞く（queryFill）
 	tally := func(orders []ledger.Order, msg string) map[string]decimal.Decimal {
 		totals := map[string]decimal.Decimal{}
 		for _, order := range orders {
 			key := order.Symbol + "|" + order.Leg()
-			filled := order.FilledQuantity
-			current, err := b.GetOrder(order.ClientOrderID, order.BrokerOrderID)
-			if err != nil || current == nil {
-				if domain.OrderStatus(order.Status).IsOpen() {
-					noteUnconfirmed(order, err)
-				}
-			} else {
-				filled = current.FilledQuantity
-				recordFill(env, order, current, filled, current.AvgFillPrice, msg)
+			fill := queryFill(env, b, order, msg)
+			if fill.Unconfirmed {
+				noteUnconfirmed(order, fill.Err)
 			}
-			totals[key] = totals[key].Add(filled)
+			totals[key] = totals[key].Add(fill.Filled)
 		}
 		return totals
 	}
@@ -912,9 +932,10 @@ func Verify(env Env, b broker.Broker, entries, exits []ledger.Order) VerifyResul
 			continue
 		}
 		// 見る側だけを問題にする。信用の脚の突合に現物の照会は要らない
-		position, ok := held.At(broker.LegOf(symbol, entryTrade[key], leg == "short"))
+		positionLeg := broker.LegOf(symbol, entryTrade[key], leg == "short")
+		position, ok := held.At(positionLeg)
 		if !ok {
-			err := held.Err(entryTrade[key].IsMargin())
+			err := held.Err(positionLeg.Margin)
 			env.Report.Warn("daytrade.reconcile", "建玉を照会できず突合を省略",
 				map[string]any{"symbol": symbol, "leg": leg, "error": err.Error()})
 			result.Unconfirmed = append(result.Unconfirmed,
