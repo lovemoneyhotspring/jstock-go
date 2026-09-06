@@ -73,9 +73,13 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # snap は待たない（wait 0）。open / close が握っていれば見送る（発注が優先）。snap 自身は
 # book.max_run_seconds（50 秒）で切れるので、9:00 の snap が 9:01 の open を長く塞ぐことはない。
 # 9:10 は open と同じ分なので snap は 9:11 に置く（同時に始まると open が 30 秒待っても
-# 取れない日が出る）。取れなかったバッチは snap が 1 度取り直し、取れた分だけでも記録する
+# 取れない日が出る）。取れなかったバッチは snap が 1 度取り直し、取れた分だけでも記録する。
+# 9:00 の回はロックを取る前に 5 秒待つ。9:00:00 に始めると 31 バッチが板寄せの前後に
+# またがり、「板寄せの結果」の点にならない（寄り前は 8:59 の回が持つ）。ロックは寝ている間
+# 握らず、最悪でも 9:00:55 に終わるので 9:01 の open（30 秒待つ）は塞がない
 #30,45,55,59 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
-#0,2,5,11 9 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+#0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+#2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 #0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 
 # --- 判断の妥当性（改善ループ。docs/FEEDBACK.md）---------------------------------
