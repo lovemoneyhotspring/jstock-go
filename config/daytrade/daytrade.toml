@@ -13,6 +13,7 @@ max_capital = 2000000      # 円。1 日に使う上限。0 にするとスク�
 order_budget = 670000      # 1 注文の目安。N = max_capital ÷ order_budget（200 万なら 3）
 max_positions = 10
 weighting = "inverse_vol"  # N 銘柄への配分。equal（等金額）/ inverse_vol（20 日ボラの逆数。荒い銘柄を少なく）
+max_order = 1000000        # 1 銘柄の上限（円、1 注文予算の 1.5 倍）。候補が N に満たない日に総予算を 1 銘柄に寄せない（0 で上限なし）
 
 [universe]
 segments = ["prime"]       # prime / standard / growth

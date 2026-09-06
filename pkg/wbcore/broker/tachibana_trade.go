@@ -79,7 +79,8 @@ func (t *TachibanaBroker) GetBalance() (*domain.Balance, error) {
 	return balance, nil
 }
 
-// GetPositions は現物の保有。信用建玉は MarginPositions（両方要るなら AllPositions）。
+// GetPositions は現物の保有。信用建玉は MarginPositions。
+// 両方を脚ごとに束ねたいときは PositionsByLeg（片方が落ちても他方を使える）。
 func (t *TachibanaBroker) GetPositions() ([]domain.Position, error) {
 	res, err := t.postRequest(clmCashPositions, map[string]any{"sIssueCode": ""})
 	if err != nil {
@@ -188,22 +189,6 @@ func (t *TachibanaBroker) MarginPositions() ([]domain.Position, error) {
 		})
 	}
 	return positions, nil
-}
-
-// AllPositions は現物と信用建玉をまとめて返す。
-//
-// daytrade（信用）は建玉が見えないと手仕舞いの数量を決められない。
-// GetPositions は現物しか返さないので、両方要る場面はこちらを使う。
-func (t *TachibanaBroker) AllPositions() ([]domain.Position, error) {
-	cash, err := t.GetPositions()
-	if err != nil {
-		return nil, err
-	}
-	margin, err := t.MarginPositions()
-	if err != nil {
-		return nil, err
-	}
-	return append(cash, margin...), nil
 }
 
 // Preview は 1 注文の見積り。見積り電文は無いので手元で出す。

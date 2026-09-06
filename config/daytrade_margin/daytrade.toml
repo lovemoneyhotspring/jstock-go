@@ -25,6 +25,8 @@ extends = "../daytrade"
 # 保証金率 33% なので長短合計 600 万円まで（300 万 + ショート 200 万 = 500 万、保証金 165 万）。
 max_capital = 3000000
 order_budget = 1000000     # N = 3。手数料 0 円なので 67 万円の段階（20〜100 万一律）に縛られない
+max_order = 1500000        # 1 銘柄の上限（1 注文予算の 1.5 倍）。候補が 3 に満たない日に 300 万を 1 銘柄へ寄せない。
+                           # spill_to_long の上乗せ（1 注文が 100 万を超える日）は殺さない: 100 万だと 10 年で −11%、150 万で不変
 
 # [signal]（rank_by = gap_vol を含む）は土台 config/daytrade をそのまま継ぐ。
 # ロングの規則は土台と子で同一であること（config_test の TestMarginConfigMatchesBaseLongRules）。

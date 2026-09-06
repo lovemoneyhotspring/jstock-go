@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -90,6 +91,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 		RetryWait: execute.DefaultRetryWait, Deadline: deadline,
 	}
 	var b broker.Broker
+	var carried []execute.Carried
 	if allowed {
 		if b, err = connectBroker(cfg); err != nil {
 			return err
@@ -97,6 +99,10 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 		broker.SetDeadline(b, deadline)
 		// 朝の建玉や前回の手仕舞いで送信結果が分からなかったものを判定してから、数量を決める
 		if err := resolvePending(env, b); err != nil {
+			return err
+		}
+		// 朝の返済が寄らずに失効した持ち越しがあれば、引けでもう一度
+		if carried, err = settleCarried(env, b, "引けで持ち越しを手仕舞い"); err != nil {
 			return err
 		}
 	}
@@ -108,7 +114,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 		fmt.Printf("今日の建玉が台帳にありません（dry-run %d 件）。何もしません\n", dryRun)
 		logInfo("daytrade.skip", "売る対象なし", map[string]any{"reason": "no_buys", "dry_run": dryRun})
 		if allowed {
-			warnUnrecordedPositions(cfg, day)
+			warnUnrecordedPositions(cfg, day, carried)
 		}
 		return nil
 	}
@@ -162,11 +168,12 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 }
 
 // warnUnrecordedPositions は台帳に今日の買いが無いのに、今日の候補だった銘柄を
-// ブローカーが保有していれば知らせる。
+// ブローカーが**現物で**保有していれば知らせる。
 //
-// 台帳を失う・open が送信後に落ちて記録できない、といったときの保険。自動では売らない
-// （他の戦略の保有かもしれない）。人が確かめて手で売る。
-func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time) {
+// 信用建玉は settleCarried が返済するのでここには出ない（信用はデイトレでしか使わない）。
+// 現物はデイトレが現物で建てる構成（long_via_margin = false）でしか自分の玉にならず、
+// 積立の保有と口座からは見分けられないので、自動では売らずに人に知らせる。
+func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time, carried []execute.Carried) {
 	p, ok, err := dtplan.Load(appSettings.DaytradeDir(), day)
 	if err != nil || !ok {
 		return
@@ -182,36 +189,53 @@ func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time) {
 		return
 	}
 	// 信用建玉も見る。立花の GetPositions は現物しか返さないので、
-	// これを使わないと日計りで建てた玉が「無い」ことになる。
-	positions, err := broker.PositionsBySymbolIncludingMargin(b)
-	if err != nil {
-		logWarn("daytrade.reconcile", "建玉を照会できず保険の確認を省略", map[string]any{"error": err.Error()})
+	// これを使わないと日計りで建てた玉が「無い」ことになる。脚ごとに数えるのは、
+	// 積立が現物で持っている銘柄と相殺させないため（口座は共用、台帳は別）。
+	positions := broker.PositionsByLeg(b)
+	// 見るのは現物だけ。信用の照会が落ちていてもここの判断には要らない
+	if err := positions.CashErr; err != nil {
+		logWarn("daytrade.reconcile", "現物を照会できず保険の確認を省略", map[string]any{"error": err.Error()})
 		return
 	}
-	held := map[string]decimal.Decimal{}
-	for symbol, position := range positions {
-		if _, ok := symbols[symbol]; ok && !position.Quantity.IsZero() {
-			held[symbol] = position.Quantity
+	// 今朝判定した持ち越しは台帳が知っている建玉なので除く
+	known := map[string]struct{}{}
+	for _, c := range carried {
+		known[c.Target.Entry.Symbol] = struct{}{}
+	}
+	held := map[broker.PositionLeg]decimal.Decimal{}
+	for symbol := range symbols {
+		if _, carriedOver := known[symbol]; carriedOver {
+			continue
+		}
+		for _, leg := range execute.CheckedLegs(symbol, cfg) {
+			if leg.Margin {
+				continue // settleCarried が返済済み（返済注文がまだ約定していないだけかもしれない）
+			}
+			position, _ := positions.At(leg)
+			if position.Quantity.IsPositive() {
+				held[leg] = position.Quantity
+			}
 		}
 	}
 	if len(held) == 0 {
 		return
 	}
 	var parts []string
-	names := make([]string, 0, len(held))
-	for symbol := range held {
-		names = append(names, symbol)
+	legs := make([]broker.PositionLeg, 0, len(held))
+	for leg := range held {
+		legs = append(legs, leg)
 	}
-	sortStrings(names)
-	detail := map[string]any{}
-	for _, symbol := range names {
-		quantity := held[symbol]
-		suffix := ""
-		if quantity.IsNegative() {
-			suffix = "（売建）"
+	sort.Slice(legs, func(i, j int) bool {
+		if legs[i].Symbol != legs[j].Symbol {
+			return legs[i].Symbol < legs[j].Symbol
 		}
-		parts = append(parts, fmt.Sprintf("%s %s 株%s", symbol, yen(quantity), suffix))
-		detail[symbol] = quantity.String()
+		return execute.LegName(legs[i]) < execute.LegName(legs[j])
+	})
+	detail := map[string]any{}
+	for _, leg := range legs {
+		quantity := held[leg]
+		parts = append(parts, fmt.Sprintf("%s %s %s 株", leg.Symbol, execute.LegName(leg), yen(quantity)))
+		detail[leg.Symbol+"|"+execute.LegName(leg)] = quantity.String()
 	}
 	text := strings.Join(parts, "、")
 	fmt.Printf("台帳に無い建玉があります（今日の候補の銘柄）: %s。手で確かめてください\n", text)

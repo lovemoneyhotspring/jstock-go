@@ -463,10 +463,11 @@ func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options
 	longRows := groupByDay(panel, longKeep(cfg, opts))
 	minGap, _ := cfg.Signal.MinGap.Float64()
 	maxGap, _ := cfg.Signal.MaxGap.Float64()
+	longMaxOrder, _ := cfg.Capital.MaxOrder.Float64()
 	trades := pickAndPrice(longRows, panel.Days, legParams{
 		n: n, budget: budget, weighting: cfg.Capital.Weighting,
 		sign: 1, commission: true, minGap: minGap, maxGap: maxGap, fill: opts.fill(),
-		rankBy: cfg.Signal.RankBy,
+		rankBy: cfg.Signal.RankBy, maxAmount: longMaxOrder,
 	})
 	trades = applyCarry(trades, rowsByKey(panel), 1, carryPenalty)
 

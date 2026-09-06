@@ -43,6 +43,9 @@ type Capital struct {
 	MaxPositions int `toml:"max_positions"`
 	// Weighting は N 銘柄への配分。equal（等金額）か inverse_vol（20 日ボラの逆数）。
 	Weighting string `toml:"weighting"`
+	// MaxOrder は 1 銘柄の金額の上限（円）。候補が N に満たない日に総予算を 1 銘柄に寄せない
+	// （margin.max_order のロング版）。0 なら上限なし＝総予算 OrderBudget × N を残った銘柄で按分する。
+	MaxOrder decimal.Decimal `toml:"max_order"`
 }
 
 // Margin は信用売り（ショート）の資金と条件（[margin]）。jp_gap_fade_margin 専用。
@@ -502,6 +505,9 @@ func (c Config) Validate() error {
 	if c.Capital.OrderBudget.LessThanOrEqual(decimal.Zero) {
 		return fmt.Errorf("capital.order_budget は正の値")
 	}
+	if c.Capital.MaxOrder.IsNegative() {
+		return fmt.Errorf("capital.max_order は 0 以上（0 は上限なし）")
+	}
 	if c.Capital.MaxCapital.IsNegative() {
 		return fmt.Errorf("capital.max_capital は 0 以上（0 は「買わない」）")
 	}
@@ -583,6 +589,7 @@ func (c Config) Validate() error {
 		"margin.long_extra_cost_bp":   c.Margin.LongExtraCostBP,
 		"margin.multiplier_normal":    c.Margin.MultiplierNormal,
 		"margin.multiplier_long_weak": c.Margin.MultiplierLongWeak,
+		"capital.max_order":           c.Capital.MaxOrder,
 		"margin.min_turnover":         c.Margin.MinTurnover,
 	} {
 		if v.IsNegative() {

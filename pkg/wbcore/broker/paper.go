@@ -17,6 +17,10 @@ var DefaultSlippageRate = decimal.RequireFromString("0.001")
 type holding struct {
 	quantity  decimal.Decimal
 	costPrice decimal.Decimal
+	// trade は建てたときの売買区分（現物 / 信用新規）。建玉一覧で返す。
+	// 立花証券は現物と信用を別の電文で返すので区別できるが、こちらは
+	// 銘柄ごとに 1 つに束ねているため、建てたときの区分を覚えておく。
+	trade domain.TradeType
 }
 
 // PaperBroker は約定を模擬するブローカー（検証と dry-run）。
@@ -125,9 +129,13 @@ func (p *PaperBroker) getPositionsLocked() ([]domain.Position, error) {
 			lastPrice = mark
 		}
 
-		trade := domain.TradeTypeCash
-		if h.quantity.IsNegative() {
-			trade = domain.TradeTypeMarginOpen
+		trade := h.trade
+		if trade == "" {
+			// 古い経路で建てた玉。売り玉は信用にしかない
+			trade = domain.TradeTypeCash
+			if h.quantity.IsNegative() {
+				trade = domain.TradeTypeMarginOpen
+			}
 		}
 
 		positions = append(positions, domain.Position{
@@ -592,6 +600,7 @@ func (p *PaperBroker) executeLocked(order domain.Order, price decimal.Decimal, w
 			h = &holding{quantity: decimal.Zero, costPrice: decimal.Zero}
 			p.holdings[order.Symbol] = h
 		}
+		h.trade = order.Trade
 		totalQty := h.quantity.Add(order.Quantity)
 		cost := h.costPrice.Mul(h.quantity).Add(price.Mul(order.Quantity)).Div(totalQty)
 		h.costPrice = cost
@@ -603,6 +612,7 @@ func (p *PaperBroker) executeLocked(order domain.Order, price decimal.Decimal, w
 			h = &holding{quantity: decimal.Zero, costPrice: decimal.Zero}
 			p.holdings[order.Symbol] = h
 		}
+		h.trade = order.Trade
 		short := h.quantity.Neg()
 		total := short.Add(order.Quantity)
 		h.costPrice = h.costPrice.Mul(short).Add(price.Mul(order.Quantity)).Div(total)
