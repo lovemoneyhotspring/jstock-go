@@ -8,6 +8,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/shopspring/decimal"
 )
@@ -32,8 +33,19 @@ func recordEntry(t *testing.T, env Env, back int, symbol string, side domain.Sid
 	return req.ClientOrderID, d
 }
 
-// recordDeadExit は前日の手仕舞いが失効した（約定 0）記録。
+// recordDeadExit は前日の手仕舞いが失効した（約定 0、台帳で確定済み）記録。
 func recordDeadExit(t *testing.T, env Env, d time.Time, symbol string, side domain.Side, qty int64) string {
+	t.Helper()
+	return recordExit(t, env, d, symbol, side, qty, domain.OrderStatusExpired)
+}
+
+// recordOpenExit は前日の手仕舞いが台帳で未確定のまま（送信済み。照会が要る）の記録。
+func recordOpenExit(t *testing.T, env Env, d time.Time, symbol string, side domain.Side, qty int64) string {
+	t.Helper()
+	return recordExit(t, env, d, symbol, side, qty, domain.OrderStatusSubmitted)
+}
+
+func recordExit(t *testing.T, env Env, d time.Time, symbol string, side domain.Side, qty int64, status domain.OrderStatus) string {
 	t.Helper()
 	req, err := domain.NewOrderRequest("x-"+symbol+"-"+d.Format("0102"), symbol, side, domain.OrderTypeMarket,
 		decimal.NewFromInt(qty), nil, domain.TaxAccountSpecific, "test", domain.TradeTypeMarginClose)
@@ -41,10 +53,19 @@ func recordDeadExit(t *testing.T, env Env, d time.Time, symbol string, side doma
 		t.Fatal(err)
 	}
 	id := "B/" + req.ClientOrderID
-	if err := env.Ledger.Record(req, d, string(domain.OrderStatusExpired), nil, &id); err != nil {
+	if err := env.Ledger.Record(req, d, string(status), nil, &id); err != nil {
 		t.Fatal(err)
 	}
 	return req.ClientOrderID
+}
+
+// countingLookup は filledLookup に照会回数の記録を足す。
+func countingLookup(filled map[string]int64, calls *int) func(string) (*domain.Order, error) {
+	inner := filledLookup(filled)
+	return func(clientOrderID string) (*domain.Order, error) {
+		*calls++
+		return inner(clientOrderID)
+	}
 }
 
 func filledLookup(filled map[string]int64) func(string) (*domain.Order, error) {
@@ -76,7 +97,7 @@ func TestCarriedPositionsFindsUnclosedShort(t *testing.T) {
 		positions: []domain.Position{margin("7203", -300)},
 	}
 
-	carried, unconfirmed, err := CarriedPositions(env, b)
+	carried, unconfirmed, err := CarriedPositions(env, b, broker.PositionsByLeg(b))
 	if err != nil || len(unconfirmed) != 0 {
 		t.Fatalf("err %v, unconfirmed %v", err, unconfirmed)
 	}
@@ -97,29 +118,30 @@ func TestCarriedPositionsFindsUnclosedShort(t *testing.T) {
 }
 
 // 手仕舞いが一部約定（300 のうち 200）なら残り 100 株。ブローカーの建玉で頭打ち。
+// 手仕舞いは台帳で未確定（verify が走らなかった）なので、照会して約定を知る。
 func TestCarriedPositionsUsesRemainingAndBrokerHolding(t *testing.T) {
 	env, _ := newEnv(t)
 	entryID, d := recordEntry(t, env, 1, "9984", domain.SideBuy, 300, 2000)
-	exitID := recordDeadExit(t, env, d, "9984", domain.SideSell, 300)
+	exitID := recordOpenExit(t, env, d, "9984", domain.SideSell, 300)
 	b := &stubBroker{
 		getOrder:  filledLookup(map[string]int64{entryID: 300, exitID: 200}),
 		positions: []domain.Position{margin("9984", 100)},
 	}
-	carried, _, err := CarriedPositions(env, b)
+	carried, _, err := CarriedPositions(env, b, broker.PositionsByLeg(b))
 	if err != nil || len(carried) != 1 || !carried[0].Target.Quantity.Equal(decimal.NewFromInt(100)) {
 		t.Fatalf("残り 100 株のはず: %v %v", carried, err)
 	}
 
 	// ブローカーに 40 株しか無ければ 40（手で一部返済済み）
 	b.positions = []domain.Position{margin("9984", 40)}
-	carried, _, _ = CarriedPositions(env, b)
+	carried, _, _ = CarriedPositions(env, b, broker.PositionsByLeg(b))
 	if len(carried) != 1 || !carried[0].Target.Quantity.Equal(decimal.NewFromInt(40)) {
 		t.Fatalf("ブローカーの 40 株で頭打ちのはず: %v", carried)
 	}
 
 	// ブローカーに無ければ対象外（手で返済済み）
 	b.positions = nil
-	if carried, _, _ = CarriedPositions(env, b); len(carried) != 0 {
+	if carried, _, _ = CarriedPositions(env, b, broker.PositionsByLeg(b)); len(carried) != 0 {
 		t.Fatalf("建玉が無ければ持ち越し無しのはず: %v", carried)
 	}
 }
@@ -134,7 +156,7 @@ func TestCarriedPositionsSkipsUnconfirmed(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := &stubBroker{positions: []domain.Position{margin("6758", 100)}}
-	carried, unconfirmed, err := CarriedPositions(env, b)
+	carried, unconfirmed, err := CarriedPositions(env, b, broker.PositionsByLeg(b))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +175,7 @@ func TestReturnCarriedRecordsUnderEntryDayAndIsIdempotent(t *testing.T) {
 		positions: []domain.Position{margin("7203", -300)},
 		balance:   richBalance(),
 	}
-	carried, _, _ := CarriedPositions(env, b)
+	carried, _, _ := CarriedPositions(env, b, broker.PositionsByLeg(b))
 	if failures := ReturnCarried(env, b, carried, "翌寄りで持ち越しを手仕舞い"); len(failures) != 0 {
 		t.Fatalf("返済が通るはず: %v", failures)
 	}
@@ -185,6 +207,69 @@ func TestReturnCarriedRecordsUnderEntryDayAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// 台帳で確定済みの注文（約定・失効）はブローカーに聞かない。14 暦日ぶんを open / close の
+// たびに聞くと 1 実行で百を超える電文になる。未確定の注文だけ聞く。
+func TestCarriedPositionsQueriesOnlyOpenOrders(t *testing.T) {
+	env, _ := newEnv(t)
+	entryID, d := recordEntry(t, env, 1, "7203", domain.SideSell, 300, 1000)
+	exitID := recordDeadExit(t, env, d, "7203", domain.SideBuy, 300)
+	calls := 0
+	b := &stubBroker{
+		getOrder:  countingLookup(map[string]int64{entryID: 300, exitID: 0}, &calls),
+		positions: []domain.Position{margin("7203", -300)},
+	}
+	carried, _, err := CarriedPositions(env, b, broker.PositionsByLeg(b))
+	if err != nil || len(carried) != 1 {
+		t.Fatalf("持ち越し 1 件のはず: %v %v", carried, err)
+	}
+	if calls != 0 {
+		t.Errorf("確定済みの注文をブローカーに聞いている: %d 回", calls)
+	}
+
+	// 未確定の手仕舞いが 1 本あれば、それだけ聞く
+	openID := recordOpenExit(t, env, d, "6758", domain.SideBuy, 100)
+	recordEntry(t, env, 1, "6758", domain.SideSell, 100, 1000)
+	b.getOrder = countingLookup(map[string]int64{openID: 100}, &calls)
+	if _, _, err := CarriedPositions(env, b, broker.PositionsByLeg(b)); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("未確定の 1 本だけを聞くはず: %d 回", calls)
+	}
+	// 照会の結果は台帳に残る（次の実行はもう聞かない）
+	exits, _ := env.Ledger.ExitsOn(d)
+	for _, o := range exits {
+		if o.ClientOrderID == openID && o.IsOpen() {
+			t.Error("照会した約定が台帳に残っていない")
+		}
+	}
+}
+
+// 同じ脚の持ち越しが複数日にあれば、ブローカーの建玉を日をまたいで消費する。
+// 日ごとに建玉全体を上限にすると、返済の合計が建玉（手で一部返済済み）を超える。
+func TestCarriedPositionsConsumesHoldingAcrossDays(t *testing.T) {
+	env, _ := newEnv(t)
+	e1, d1 := recordEntry(t, env, 1, "7203", domain.SideSell, 300, 1000)
+	x1 := recordDeadExit(t, env, d1, "7203", domain.SideBuy, 300)
+	e2, d2 := recordEntry(t, env, 2, "7203", domain.SideSell, 300, 1000)
+	x2 := recordDeadExit(t, env, d2, "7203", domain.SideBuy, 300)
+	b := &stubBroker{
+		getOrder:  filledLookup(map[string]int64{e1: 300, x1: 0, e2: 300, x2: 0}),
+		positions: []domain.Position{margin("7203", -400)}, // 600 のうち 200 は手で返済済み
+	}
+	carried, _, err := CarriedPositions(env, b, broker.PositionsByLeg(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := decimal.Zero
+	for _, c := range carried {
+		total = total.Add(c.Target.Quantity)
+	}
+	if len(carried) != 2 || !total.Equal(decimal.NewFromInt(400)) {
+		t.Fatalf("返済の合計は建玉の 400 株で頭打ちのはず: %v", carried)
+	}
+}
+
 func TestPositionsWithin(t *testing.T) {
 	cases := []struct {
 		capital, tied, budget int64
@@ -213,7 +298,7 @@ func TestEnsureNoUnrecordedPositionsAllowsCarried(t *testing.T) {
 		getOrder:  filledLookup(map[string]int64{entryID: 300, exitID: 0}),
 		positions: []domain.Position{margin("7203", -300)},
 	}
-	carried, _, _ := CarriedPositions(env, b)
+	carried, _, _ := CarriedPositions(env, b, broker.PositionsByLeg(b))
 	picks := []selection.Pick{pick("7203", domain.SideBuy)}
 	if err := EnsureNoUnrecordedPositions(env, b, picks, carried); err != nil {
 		t.Fatalf("持ち越しは既知の建玉のはず: %v", err)
@@ -227,21 +312,25 @@ func TestCapByTied(t *testing.T) {
 	d := decimal.NewFromInt
 	cases := []struct {
 		name                  string
-		n                     int
+		n, placed             int
 		capital, tied, budget int64
 		wantN                 int
 		wantBudget            int64
 	}{
-		{"拘束なし", 3, 3_000_000, 0, 1_000_000, 3, 1_000_000},
-		{"1 件ぶん拘束 → 2 件", 3, 3_000_000, 1_000_000, 1_000_000, 2, 1_000_000},
-		{"2 件半拘束 → 残り 50 万で 1 件を小さく", 3, 3_000_000, 2_500_000, 1_000_000, 1, 500_000},
-		{"全額拘束 → 0 件", 3, 3_000_000, 3_000_000, 1_000_000, 0, 1_000_000},
-		{"拘束が上限を超える → 0 件", 3, 3_000_000, 4_000_000, 1_000_000, 0, 1_000_000},
-		{"縮小後の予算でも同じ規則", 3, 3_000_000, 1_000_000, 500_000, 3, 500_000},
-		{"もともと 0 件なら 0", 0, 3_000_000, 0, 1_000_000, 0, 1_000_000},
+		{"拘束なし", 3, 0, 3_000_000, 0, 1_000_000, 3, 1_000_000},
+		{"1 件ぶん拘束 → 2 件", 3, 0, 3_000_000, 1_000_000, 1_000_000, 2, 1_000_000},
+		{"2 件半拘束 → 残り 50 万で 1 件を小さく", 3, 0, 3_000_000, 2_500_000, 1_000_000, 1, 500_000},
+		{"全額拘束 → 0 件", 3, 0, 3_000_000, 3_000_000, 1_000_000, 0, 1_000_000},
+		{"拘束が上限を超える → 0 件", 3, 0, 3_000_000, 4_000_000, 1_000_000, 0, 1_000_000},
+		{"縮小後の予算でも同じ規則", 3, 0, 3_000_000, 1_000_000, 500_000, 3, 500_000},
+		{"もともと 0 件なら 0", 0, 0, 3_000_000, 0, 1_000_000, 0, 1_000_000},
+		// 再実行: 前の回が建てた分の資金も引く。1 件ぶん拘束で 2 件建て済みなら残り 0
+		{"再実行で資金を使い切っている → 0 件", 1, 2, 3_000_000, 1_000_000, 1_000_000, 0, 1_000_000},
+		{"再実行で残りが 1 件ぶん → 1 件", 2, 1, 3_000_000, 1_000_000, 1_000_000, 1, 1_000_000},
+		{"再実行で残りが予算未満 → 1 件を小さく", 2, 1, 3_000_000, 1_500_000, 1_000_000, 1, 500_000},
 	}
 	for _, c := range cases {
-		n, budget := CapByTied(c.n, d(c.capital), d(c.tied), d(c.budget))
+		n, budget := CapByTied(c.n, c.placed, d(c.capital), d(c.tied), d(c.budget))
 		if n != c.wantN || !budget.Equal(d(c.wantBudget)) {
 			t.Errorf("%s: (%d, %s), want (%d, %d)", c.name, n, budget, c.wantN, c.wantBudget)
 		}
@@ -261,7 +350,7 @@ func TestCarriedPositionsIgnoresCashHolding(t *testing.T) {
 			margin("7203", -300),
 		},
 	}
-	carried, _, err := CarriedPositions(env, b)
+	carried, _, err := CarriedPositions(env, b, broker.PositionsByLeg(b))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +387,7 @@ func TestUnrecordedMarginSweepsOnlyMargin(t *testing.T) {
 		{Symbol: "6758", Quantity: decimal.NewFromInt(-200), Trade: domain.TradeTypeMarginOpen, CostPrice: decimal.NewFromInt(1500)},
 		{Symbol: "9984", Quantity: decimal.NewFromInt(100), Trade: domain.TradeTypeMarginOpen, CostPrice: decimal.NewFromInt(8000)},
 	}}
-	out, err := UnrecordedMargin(env, b, nil)
+	out, err := UnrecordedMargin(env, broker.PositionsByLeg(b), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +408,10 @@ func TestUnrecordedMarginSweepsOnlyMargin(t *testing.T) {
 			t.Errorf("台帳外の印が付いていない: %s", c)
 		}
 	}
+	swept := SweptSymbols(out)
+	if _, ok := swept["6758"]; !ok || len(swept) != 2 {
+		t.Errorf("返済に回した 2 銘柄が候補の除外に入っていない: %v", swept)
+	}
 }
 
 // 台帳が知っている建玉（今日の建玉・判定済みの持ち越し）は差し引く。二重に返済しない。
@@ -335,7 +428,7 @@ func TestUnrecordedMarginSubtractsLedger(t *testing.T) {
 	b.positions = []domain.Position{
 		{Symbol: "7203", Quantity: quantity, Trade: domain.TradeTypeMarginOpen, CostPrice: decimal.NewFromInt(1000)},
 	}
-	out, err := UnrecordedMargin(env, b, nil)
+	out, err := UnrecordedMargin(env, broker.PositionsByLeg(b), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +438,7 @@ func TestUnrecordedMarginSubtractsLedger(t *testing.T) {
 
 	// ブローカーの建玉が台帳より多ければ、超えたぶんだけ返済する
 	b.positions[0].Quantity = quantity.Add(decimal.NewFromInt(100))
-	out, err = UnrecordedMargin(env, b, nil)
+	out, err = UnrecordedMargin(env, broker.PositionsByLeg(b), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,14 +477,14 @@ func TestPositionQueryFailuresAreIndependent(t *testing.T) {
 	// 現物が落ちても、信用しか見ないデイトレの判断は続く
 	b := newBroker()
 	b.posErr = errors.New("現物が取れない")
-	carried, _, err := CarriedPositions(env, b)
+	carried, _, err := CarriedPositions(env, b, broker.PositionsByLeg(b))
 	if err != nil {
 		t.Fatalf("現物の障害で持ち越しの判定が止まった: %v", err)
 	}
 	if len(carried) != 1 {
 		t.Fatalf("売建の持ち越しを拾えていない: %+v", carried)
 	}
-	if _, err := UnrecordedMargin(env, b, carried); err != nil {
+	if _, err := UnrecordedMargin(env, broker.PositionsByLeg(b), carried); err != nil {
 		t.Errorf("現物の障害で台帳外の判定が止まった: %v", err)
 	}
 	if err := EnsureNoUnrecordedPositions(env, b, picks, carried); err != nil {
@@ -401,10 +494,10 @@ func TestPositionQueryFailuresAreIndependent(t *testing.T) {
 	// 信用が落ちたときは止める（持ち越しを 0 株と読むと見失う）
 	b = newBroker()
 	b.marginErr = errors.New("信用が取れない")
-	if _, _, err := CarriedPositions(env, b); err == nil {
+	if _, _, err := CarriedPositions(env, b, broker.PositionsByLeg(b)); err == nil {
 		t.Error("信用の障害で持ち越しの判定が止まらない")
 	}
-	if _, err := UnrecordedMargin(env, b, nil); err == nil {
+	if _, err := UnrecordedMargin(env, broker.PositionsByLeg(b), nil); err == nil {
 		t.Error("信用の障害で台帳外の判定が止まらない")
 	}
 	if err := EnsureNoUnrecordedPositions(env, b, picks, nil); err == nil {

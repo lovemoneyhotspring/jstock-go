@@ -66,11 +66,17 @@ func (c Carried) String() string {
 // 場合に新規の反対建玉を作る。
 //
 // **台帳が使っている側**（現物 / 信用）を照会できなければ error。持ち越しの有無が
-// 分からないまま新規に建てると二重になりうるので、呼び出し側は発注を止める
+// 分からないまま新規に建てると二重になりうるので、open は発注を止める
 // （EnsureNoUnrecordedPositions と同じ判断）。使っていない側の障害では止めない——
 // 信用でしか建てない構成なら、現物の照会が落ちてもデイトレの判断には要らない。
-func CarriedPositions(env Env, b broker.Broker) (carried []Carried, unconfirmed []string, err error) {
-	held := broker.PositionsByLeg(b)
+//
+// held は照会済みの建玉（broker.PositionsByLeg）。呼び出し側が UnrecordedMargin と共有する。
+// 注文の照会は台帳で未確定のものだけ（queryFill）。確定済みまで聞くと 14 暦日ぶんで
+// 1 実行に百を超える電文になり、9:01 の発注より前にそれを消費してしまう。
+func CarriedPositions(env Env, b broker.Broker, held broker.LegPositions) (carried []Carried, unconfirmed []string, err error) {
+	// 同じ脚の持ち越しが複数日にあれば、ブローカーの建玉を日をまたいで消費する。
+	// 日ごとに建玉全体を上限にすると、手で一部返済した後に返済の合計が建玉を超える
+	consumed := map[broker.PositionLeg]decimal.Decimal{}
 
 	for back := 1; back <= CarryLookbackDays; back++ {
 		day := env.Day.AddDate(0, 0, -back)
@@ -98,27 +104,21 @@ func CarriedPositions(env Env, b broker.Broker) (carried []Carried, unconfirmed 
 					continue
 				}
 				key := order.Symbol + "|" + order.Leg()
-				filled := order.FilledQuantity
-				price := order.AvgFillPrice
-				current, err := b.GetOrder(order.ClientOrderID, order.BrokerOrderID)
-				switch {
-				case current != nil:
-					filled, price = current.FilledQuantity, current.AvgFillPrice
-					recordFill(envDay, order, current, filled, price, "持ち越しの照会")
-				case order.IsOpen():
+				fill := queryFill(envDay, b, order, "持ち越しの照会")
+				if fill.Unconfirmed {
 					// 結果が分からない注文。数量を推測しない
 					reason := "応答に該当の注文がありません"
-					if err != nil {
-						reason = err.Error()
+					if fill.Err != nil {
+						reason = fill.Err.Error()
 					}
 					unconfirmed = append(unconfirmed, fmt.Sprintf("%s %s（%s）: %s",
 						day.Format(cli.DateLayout), order.Symbol, order.Leg(), reason))
 					blocked[key] = struct{}{}
 				}
-				totals[key] = totals[key].Add(filled)
+				totals[key] = totals[key].Add(fill.Filled)
 				if isEntry {
 					if _, seen := first[key]; !seen {
-						first[key], fillPrice[key] = order, price
+						first[key], fillPrice[key] = order, fill.Price
 					}
 				}
 			}
@@ -142,12 +142,13 @@ func CarriedPositions(env Env, b broker.Broker) (carried []Carried, unconfirmed 
 			}
 			symbol, leg, _ := strings.Cut(key, "|")
 			entry := first[key]
-			position, ok := held.At(broker.LegOf(symbol, entry.Trade, leg == "short"))
+			positionLeg := broker.LegOf(symbol, entry.Trade, leg == "short")
+			position, ok := held.At(positionLeg)
 			if !ok {
 				// この脚の建玉が照会できていない。0 株と読んで見送ると持ち越しを見失う
-				return nil, nil, carryQueryError(env, held, entry.Trade)
+				return nil, nil, carryQueryError(env, held, positionLeg)
 			}
-			available := position.Quantity
+			available := position.Quantity.Sub(consumed[positionLeg])
 			if available.LessThanOrEqual(decimal.Zero) {
 				env.printf("  %s: 台帳では %s 株が未返済だがブローカーに建玉が無い（手で返済済み）\n", symbol, cli.Yen(remaining))
 				env.Report.Warn("daytrade.carry", "台帳の未返済がブローカーに無い", map[string]any{
@@ -165,6 +166,7 @@ func CarriedPositions(env Env, b broker.Broker) (carried []Carried, unconfirmed 
 				})
 				remaining = available
 			}
+			consumed[positionLeg] = consumed[positionLeg].Add(remaining)
 			carried = append(carried, Carried{Day: day, Target: ExitTarget{
 				Entry: entry, Quantity: remaining, FillPrice: fillPrice[key],
 			}})
@@ -183,28 +185,21 @@ func CarriedPositions(env Env, b broker.Broker) (carried []Carried, unconfirmed 
 //
 // 現物には触らない——積立の保有かもしれず、口座からは見分けられない。
 //
-// carried は先に判定した持ち越し。今日の台帳の建玉と合わせて差し引く（台帳が
-// 知っている建玉を二重に返済しない）。返済注文を出したがまだ約定していない建玉も、
-// 台帳の建玉として差し引かれるので重複しない。
-func UnrecordedMargin(env Env, b broker.Broker, carried []Carried) ([]Carried, error) {
-	held := broker.PositionsByLeg(b)
+// held は照会済みの建玉（CarriedPositions と同じもの）。carried は先に判定した持ち越し。
+// 今日の台帳の建玉と合わせて差し引く（台帳が知っている建玉を二重に返済しない）。
+// 返済注文を出したがまだ約定していない建玉も、台帳の建玉として差し引かれるので重複しない。
+//
+// 返済に回した銘柄はその日の候補から外す（SweptSymbols）。
+func UnrecordedMargin(env Env, held broker.LegPositions, carried []Carried) ([]Carried, error) {
 	// 見るのは信用だけ。現物の照会が落ちていてもデイトレの判断には要らない
 	if err := held.MarginErr; err != nil {
 		env.Report.Error("daytrade.sweep_check_failed", "信用建玉を照会できません",
 			map[string]any{"day": env.dayText(), "error": err.Error()})
 		return nil, fmt.Errorf("信用建玉を照会できないため台帳外の建玉を判定できません: %w", err)
 	}
-	recorded := carriedByLeg(carried)
-	entries, err := env.Ledger.EntriesOn(env.Day)
+	recorded, err := recordedByLeg(env, carried)
 	if err != nil {
 		return nil, err
-	}
-	for _, o := range entries {
-		if o.IsDryRun() || o.IsDead() {
-			continue
-		}
-		leg := broker.LegOf(o.Symbol, o.Trade, o.Leg() == "short")
-		recorded[leg] = recorded[leg].Add(o.Quantity)
 	}
 
 	var out []Carried
@@ -243,13 +238,13 @@ func UnrecordedMargin(env Env, b broker.Broker, carried []Carried) ([]Carried, e
 }
 
 // carryQueryError は必要な側の建玉を照会できなかったときのエラー。通知も出す。
-func carryQueryError(env Env, held broker.LegPositions, trade domain.TradeType) error {
-	margin := trade.IsMargin()
+// 側は脚（LegOf）で決める——TradeType.IsMargin とは空の扱いが違うので、At と同じ規則を使う。
+func carryQueryError(env Env, held broker.LegPositions, leg broker.PositionLeg) error {
 	what := "現物"
-	if margin {
+	if leg.Margin {
 		what = "信用建玉"
 	}
-	err := held.Err(margin)
+	err := held.Err(leg.Margin)
 	env.Report.Error("daytrade.carry_check_failed", what+"を照会できません",
 		map[string]any{"day": env.dayText(), "error": err.Error()})
 	return fmt.Errorf("%sを照会できないため持ち越しを判定できません: %w", what, err)
@@ -308,14 +303,18 @@ func PositionsWithin(capital, tied, budget decimal.Decimal) int {
 
 // CapByTied は拘束資金を引いた残りで建てられる件数と 1 注文の予算。
 //
+// n は今日まだ建てられる件数（N − placed）、placed は今日すでに建てた件数。残りの資金は
+// capital − tied − placed × budget——再実行は前の回が使った資金も引いて数える（引かないと、
+// 途中で落ちた回の再実行が拘束を超えて建てる）。
 // 残りが 1 注文の予算以上なら件数を floor(残り ÷ 予算) に減らす（予算はそのまま）。
 // 予算に満たなくても残りがあれば **1 件を残りの金額で**建てる——一部が拘束されただけで
 // 一日を休むのは機会損失。0 件になるのは残りが無いときだけ。
-func CapByTied(n int, capital, tied, budget decimal.Decimal) (int, decimal.Decimal) {
+func CapByTied(n, placed int, capital, tied, budget decimal.Decimal) (int, decimal.Decimal) {
 	if n <= 0 || budget.LessThanOrEqual(decimal.Zero) {
 		return 0, budget
 	}
-	remaining := capital.Sub(tied)
+	spent := budget.Mul(decimal.NewFromInt(int64(max(placed, 0))))
+	remaining := capital.Sub(tied).Sub(spent)
 	if remaining.LessThanOrEqual(decimal.Zero) {
 		return 0, budget
 	}
@@ -332,6 +331,42 @@ func carriedByLeg(carried []Carried) map[broker.PositionLeg]decimal.Decimal {
 	for _, c := range carried {
 		leg := broker.LegOf(c.Target.Entry.Symbol, c.Target.Entry.Trade, c.Leg() == "short")
 		out[leg] = out[leg].Add(c.Target.Quantity)
+	}
+	return out
+}
+
+// recordedByLeg は台帳が知っている建玉を脚ごとに集める——判定済みの持ち越し（返済に回した
+// 台帳外の建玉を含む）と、今日の建玉注文（生きている／約定した）。株数は注文数量（約定数量
+// ではない）。建てた直後で約定数量がまだ台帳に無くても、ブローカーの建玉を台帳外と読まないため。
+// UnrecordedMargin と EnsureNoUnrecordedPositions が同じ差し引きをする。
+func recordedByLeg(env Env, carried []Carried) (map[broker.PositionLeg]decimal.Decimal, error) {
+	recorded := carriedByLeg(carried)
+	entries, err := env.Ledger.EntriesOn(env.Day)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range entries {
+		if o.IsDryRun() || o.IsDead() {
+			continue
+		}
+		leg := broker.LegOf(o.Symbol, o.Trade, o.Leg() == "short")
+		recorded[leg] = recorded[leg].Add(o.Quantity)
+	}
+	return recorded, nil
+}
+
+// SweptSymbols は台帳外として返済に回した銘柄。その日の候補から外すために使う。
+//
+// 掃除の返済注文は建てた日が分からないので**今日の下**に記録される。同じ銘柄・同じ脚を
+// 今日また建てると、引けの手仕舞いがその返済注文を「手仕舞い発注済み」と読んで当日の建玉を
+// 返済せず、翌朝の持ち越し判定でも掃除の約定ぶんが差し引かれて残りが少なく出る。
+// 台帳を失った朝にしか起きないので、その銘柄を一日休むほうが安い。
+func SweptSymbols(carried []Carried) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, c := range carried {
+		if c.Target.Unrecorded {
+			out[c.Target.Entry.Symbol] = struct{}{}
+		}
 	}
 	return out
 }

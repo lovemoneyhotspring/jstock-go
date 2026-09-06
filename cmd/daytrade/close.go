@@ -101,9 +101,15 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 		if err := resolvePending(env, b); err != nil {
 			return err
 		}
-		// 朝の返済が寄らずに失効した持ち越しがあれば、引けでもう一度
+		// 朝の返済が寄らずに失効した持ち越しがあれば、引けでもう一度。判定できなくても
+		// **当日の手仕舞いは止めない**——ここで止めると今日の建玉が丸ごと持ち越しになる
+		// （open は逆で、判定できなければ新規に建てない）
 		if carried, err = settleCarried(env, b, "引けで持ち越しを手仕舞い"); err != nil {
-			return err
+			fmt.Printf("持ち越しを判定できません。当日の手仕舞いだけ行います: %v\n", err)
+			logError("daytrade.carry_check_failed", "持ち越しを判定できず当日の手仕舞いだけ行う",
+				map[string]any{"error": err.Error()})
+			digest.Anomaly("daytrade.carry_check_failed", "持ち越しを判定できず当日の手仕舞いだけ行った: "+err.Error())
+			carried = nil
 		}
 	}
 	entries, dryRun, err := execute.LiveEntries(env)
@@ -114,7 +120,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 		fmt.Printf("今日の建玉が台帳にありません（dry-run %d 件）。何もしません\n", dryRun)
 		logInfo("daytrade.skip", "売る対象なし", map[string]any{"reason": "no_buys", "dry_run": dryRun})
 		if allowed {
-			warnUnrecordedPositions(cfg, day, carried)
+			warnUnrecordedPositions(cfg, day, b, carried)
 		}
 		return nil
 	}
@@ -173,7 +179,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 // 信用建玉は settleCarried が返済するのでここには出ない（信用はデイトレでしか使わない）。
 // 現物はデイトレが現物で建てる構成（long_via_margin = false）でしか自分の玉にならず、
 // 積立の保有と口座からは見分けられないので、自動では売らずに人に知らせる。
-func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time, carried []execute.Carried) {
+func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time, b broker.Broker, carried []execute.Carried) {
 	p, ok, err := dtplan.Load(appSettings.DaytradeDir(), day)
 	if err != nil || !ok {
 		return
@@ -184,13 +190,7 @@ func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time, carried []execu
 			symbols[c.Symbol] = struct{}{}
 		}
 	}
-	b, err := connectBroker(cfg)
-	if err != nil {
-		return
-	}
-	// 信用建玉も見る。立花の GetPositions は現物しか返さないので、
-	// これを使わないと日計りで建てた玉が「無い」ことになる。脚ごとに数えるのは、
-	// 積立が現物で持っている銘柄と相殺させないため（口座は共用、台帳は別）。
+	// 脚ごとに数えるのは、積立が現物で持っている銘柄と相殺させないため（口座は共用、台帳は別）
 	positions := broker.PositionsByLeg(b)
 	// 見るのは現物だけ。信用の照会が落ちていてもここの判断には要らない
 	if err := positions.CashErr; err != nil {
