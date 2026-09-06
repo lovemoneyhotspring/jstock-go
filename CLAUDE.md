@@ -10,7 +10,7 @@
 
 | 書くもの | 場所 |
 |---|---|
-| 検証（バックテスト・要因の検定）の記録 | `~/obsidian-vault/20-research/`（雛形: `90-templates/検証ノート.md`） |
+| 検証（バックテスト・要因の検定）の記録 | `~/obsidian-vault/20-research/`（雛形: `90-templates/検証ノート.md`）。**数字は同じ commit で `20-research/結果.csv` にも足す** |
 | 日々の運用の記録 | `~/obsidian-vault/10-journal/YYYY-MM-DD.md` |
 | 週次・月次レポート | `~/obsidian-vault/50-reports/`（`deploy/report.sh` が自動で入れる） |
 | 検証から抽出した原則 | `~/obsidian-vault/40-insights/` |
@@ -21,6 +21,7 @@
 | 知りたいこと | まず読む | 大きさ |
 |---|---|---|
 | 検証の結論 | `~/obsidian-vault/20-research/結論一覧.md` | 3 KB（全文は 225 KB） |
+| 検証の数字（DD・Sharpe・CAGR で絞る） | `bin/jquants query "… read_csv('~/obsidian-vault/20-research/結果.csv') …"` | 86 行 |
 | このリポジトリの仕様 | `docs/README.md` | 1 KB（全文は 155 KB） |
 
 書き方の規約は `~/obsidian-vault/CLAUDE.md`。vault は独立した git リポジトリ（private）なので、
