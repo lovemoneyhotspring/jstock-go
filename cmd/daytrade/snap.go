@@ -86,27 +86,42 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string) error {
 	if cfg.Book.MaxRunSeconds > 0 {
 		tachibana.Broker.SetDeadline(now.Add(time.Duration(cfg.Book.MaxRunSeconds) * time.Second))
 	}
-	rows, err := tachibana.Broker.MarketPricesRaw(symbols, columns)
-	if err != nil {
-		logError("daytrade.snap", "板の取得に失敗", map[string]any{
-			"error": err.Error(), "symbols": len(symbols),
-			"elapsed_ms": clock.NowUTC().Sub(now).Milliseconds(), "max_run_seconds": cfg.Book.MaxRunSeconds,
-		})
-		return err
+	// 取れたバッチは積む。失敗したバッチは 1 度取り直され、それでも駄目なら落とす
+	// （記録は遡れないので、1 本の失敗で 30 本ぶんを捨てない）
+	rows, failed := tachibana.Broker.MarketPricesRawPartial(symbols, columns)
+	missing := 0
+	for _, f := range failed {
+		missing += len(f.Symbols)
 	}
 
-	path := appendHistory(dthistory.KindBook, dthistory.BookFrame(rows, slot, now), day)
+	path := ""
+	if len(rows) > 0 {
+		path = appendHistory(dthistory.KindBook, dthistory.BookFrame(rows, slot, now), day)
+	}
 	fmt.Printf("%s %s: %d 銘柄に問合せ、%d 行を記録（%s）\n",
 		day.Format(DateLayout), slot, len(symbols), len(rows), source)
 	if path != "" {
 		fmt.Printf("  %s\n", path)
 	}
-	logInfo("daytrade.snap", "板を記録", map[string]any{
+	fields := map[string]any{
 		"day": day.Format(DateLayout), "slot": slot, "scope": source,
 		"requested": len(symbols), "rows": len(rows), "path": path,
-		"elapsed_ms": clock.NowUTC().Sub(now).Milliseconds(),
-	})
-	return nil
+		"elapsed_ms": clock.NowUTC().Sub(now).Milliseconds(), "max_run_seconds": cfg.Book.MaxRunSeconds,
+	}
+	if len(failed) == 0 {
+		logInfo("daytrade.snap", "板を記録", fields)
+		return nil
+	}
+	fields["failed_batches"] = len(failed)
+	fields["missing"] = missing
+	fields["error"] = failed[0].Error()
+	if len(rows) == 0 {
+		logError("daytrade.snap", "板の取得に失敗", fields)
+	} else {
+		logWarn("daytrade.snap", "板の一部を取れなかった（取れた分は記録した）", fields)
+	}
+	fmt.Printf("  取れなかったバッチ %d/%d（%d 銘柄）: %v\n", len(failed), failed[0].Batches, missing, failed[0])
+	return fmt.Errorf("板の一部を取れませんでした（%d/%d バッチ、%d 銘柄）", len(failed), failed[0].Batches, missing)
 }
 
 // snapSymbols は記録する銘柄。--symbols があればそれ、無ければ前夜の plan の行。

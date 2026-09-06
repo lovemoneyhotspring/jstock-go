@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -37,6 +38,10 @@ type fakeTachibana struct {
 	failErrno string
 	// failHTTPNext は次の n 電文を HTTP 500 で返す（通信エラーの模型）。
 	failHTTPNext int
+	// priceFail は時価問合で、先頭の銘柄がこのコードのバッチをあと n 回 HTTP 500 にする。
+	priceFail map[string]int
+	// priceBatches は時価問合で受け取ったバッチの先頭銘柄（送信順）。
+	priceBatches []string
 }
 
 func newFakeTachibana(t *testing.T, pub *rsa.PublicKey) *fakeTachibana {
@@ -74,6 +79,21 @@ func (f *fakeTachibana) handle(w http.ResponseWriter, r *http.Request) {
 	pNo, _ := req["p_no"].(float64)
 	f.pNos = append(f.pNos, int(pNo))
 	f.clmIDs = append(f.clmIDs, text(req["sCLMID"]))
+	if r.URL.Path == "/price/" {
+		codes := strings.Split(text(req["sTargetIssueCode"]), ",")
+		f.priceBatches = append(f.priceBatches, codes[0])
+		if f.priceFail[codes[0]] > 0 {
+			f.priceFail[codes[0]]--
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		rows := make([]map[string]any, 0, len(codes))
+		for _, c := range codes {
+			rows = append(rows, map[string]any{"sIssueCode": c, "pDPP": "1000", "pPRP": "1010"})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"p_errno": "0", "aCLMMfdsMarketPrice": rows})
+		return
+	}
 	if f.failHTTPNext > 0 {
 		f.failHTTPNext--
 		w.WriteHeader(http.StatusInternalServerError)
