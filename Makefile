@@ -5,7 +5,7 @@
 #   make lint    go vet + staticcheck
 #   make ci      build + lint + test（push 前に）
 
-STATICCHECK := go run honnef.co/go/tools/cmd/staticcheck@2025.1.1
+STATICCHECK := go run honnef.co/go/tools/cmd/staticcheck@2026.2
 
 .PHONY: build test lint vet staticcheck ci fmt
 

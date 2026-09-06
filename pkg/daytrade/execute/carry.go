@@ -88,7 +88,6 @@ func CarriedPositions(env Env, b broker.Broker) (carried []Carried, unconfirmed 
 			return nil, nil, err
 		}
 
-		opened := map[string]decimal.Decimal{}
 		first := map[string]ledger.Order{}
 		fillPrice := map[string]*decimal.Decimal{}
 		blocked := map[string]struct{}{}
@@ -125,7 +124,7 @@ func CarriedPositions(env Env, b broker.Broker) (carried []Carried, unconfirmed 
 			}
 			return totals
 		}
-		opened = tally(entries, true)
+		opened := tally(entries, true)
 		closed := tally(exits, false)
 
 		keys := make([]string, 0, len(opened))
