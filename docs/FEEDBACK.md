@@ -152,7 +152,7 @@ DRY_RUN=1 deploy/report.sh monthly 2026-08   # その月
 
 ## 自動化するときの線引き
 
-提案の生成（`evaluate` → `review` → `backtest` → `docs/research/` への記録）までは
+提案の生成（`evaluate` → `review` → `backtest` → `~/obsidian-vault/20-research/` への記録）までは
 自動化してよい。**`config/*.toml` への反映は人が承認する。** パラメータの自動書き換えは
 過学習と暴走がそのまま実弾に繋がるため。
 
