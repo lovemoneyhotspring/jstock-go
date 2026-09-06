@@ -219,3 +219,28 @@ func TestEnsureNoUnrecordedPositionsAllowsCarried(t *testing.T) {
 		t.Fatal("持ち越しを知らなければ台帳外として止まるはず")
 	}
 }
+
+func TestCapByTied(t *testing.T) {
+	d := decimal.NewFromInt
+	cases := []struct {
+		name                  string
+		n                     int
+		capital, tied, budget int64
+		wantN                 int
+		wantBudget            int64
+	}{
+		{"拘束なし", 3, 3_000_000, 0, 1_000_000, 3, 1_000_000},
+		{"1 件ぶん拘束 → 2 件", 3, 3_000_000, 1_000_000, 1_000_000, 2, 1_000_000},
+		{"2 件半拘束 → 残り 50 万で 1 件を小さく", 3, 3_000_000, 2_500_000, 1_000_000, 1, 500_000},
+		{"全額拘束 → 0 件", 3, 3_000_000, 3_000_000, 1_000_000, 0, 1_000_000},
+		{"拘束が上限を超える → 0 件", 3, 3_000_000, 4_000_000, 1_000_000, 0, 1_000_000},
+		{"縮小後の予算でも同じ規則", 3, 3_000_000, 1_000_000, 500_000, 3, 500_000},
+		{"もともと 0 件なら 0", 0, 3_000_000, 0, 1_000_000, 0, 1_000_000},
+	}
+	for _, c := range cases {
+		n, budget := CapByTied(c.n, d(c.capital), d(c.tied), d(c.budget))
+		if n != c.wantN || !budget.Equal(d(c.wantBudget)) {
+			t.Errorf("%s: (%d, %s), want (%d, %d)", c.name, n, budget, c.wantN, c.wantBudget)
+		}
+	}
+}

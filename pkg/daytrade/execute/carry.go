@@ -13,8 +13,9 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// CarryLookbackDays は持ち越しを探して台帳を遡る暦日数。連休を挟んでも前営業日の建玉を拾える長さ。
-const CarryLookbackDays = 7
+// CarryLookbackDays は持ち越しを探して台帳を遡る暦日数。何日も寄らない銘柄（連続ストップ高）と
+// 連休を合わせても見失わない長さ。台帳の照会は日ごとに軽い。
+const CarryLookbackDays = 14
 
 // Carried は前営業日以前に建てて手仕舞えていない建玉（持ち越し）。
 //
@@ -203,6 +204,25 @@ func PositionsWithin(capital, tied, budget decimal.Decimal) int {
 		return 0
 	}
 	return int(remaining.Div(budget).Floor().IntPart())
+}
+
+// CapByTied は拘束資金を引いた残りで建てられる件数と 1 注文の予算。
+//
+// 残りが 1 注文の予算以上なら件数を floor(残り ÷ 予算) に減らす（予算はそのまま）。
+// 予算に満たなくても残りがあれば **1 件を残りの金額で**建てる——一部が拘束されただけで
+// 一日を休むのは機会損失。0 件になるのは残りが無いときだけ。
+func CapByTied(n int, capital, tied, budget decimal.Decimal) (int, decimal.Decimal) {
+	if n <= 0 || budget.LessThanOrEqual(decimal.Zero) {
+		return 0, budget
+	}
+	remaining := capital.Sub(tied)
+	if remaining.LessThanOrEqual(decimal.Zero) {
+		return 0, budget
+	}
+	if remaining.LessThan(budget) {
+		return 1, remaining.Floor()
+	}
+	return min(n, int(remaining.Div(budget).Floor().IntPart())), budget
 }
 
 // carriedQuantities は持ち越しを銘柄 → 符号付き株数（買いは正、売建は負）にする。

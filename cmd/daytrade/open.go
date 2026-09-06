@@ -181,20 +181,10 @@ func runOpen(opts openOptions) error {
 	if cfg.Margin.Enabled && !watchOnly {
 		remainingShort = cfg.Margin.Positions() - placed.Short
 	}
-	// 持ち越しが拘束している資金（残り株数 × 建値）を上限から引き、残りで建てられる件数に頭打ち。
-	// 返済注文は出したが、寄っていない銘柄はまだ約定しておらず資金は戻っていない
-	if tiedLong, tiedShort := execute.TiedCapital(carried); tiedLong.IsPositive() || tiedShort.IsPositive() {
-		capLong := execute.PositionsWithin(cfg.Capital.MaxCapital, tiedLong, cfg.Capital.OrderBudget)
-		capShort := execute.PositionsWithin(cfg.Margin.MaxCapital, tiedShort, cfg.Margin.OrderBudget)
-		remainingLong, remainingShort = min(remainingLong, capLong), min(remainingShort, capShort)
-		fmt.Printf("持ち越しが拘束する資金 ロング %s 円 / ショート %s 円 → 今日はロング %d 件 / ショート %d 件まで\n",
-			yen(tiedLong), yen(tiedShort), max(remainingLong, 0), max(remainingShort, 0))
-		logWarn("daytrade.carry", "持ち越しの拘束資金で件数を頭打ち", map[string]any{
-			"tied_long": tiedLong.String(), "tied_short": tiedShort.String(),
-			"cap_long": capLong, "cap_short": capShort,
-			"remaining_long": max(remainingLong, 0), "remaining_short": max(remainingShort, 0),
-		})
-	}
+	// 持ち越しが拘束している資金（残り株数 × 建値）。返済注文は出したが、寄っていない銘柄は
+	// まだ約定しておらず資金は戻っていない。件数と予算への反映は、倍率を掛けた後の予算が
+	// 決まったところで行う（execute.CapByTied）
+	tiedLong, tiedShort := execute.TiedCapital(carried)
 	if placed.Total() > 0 {
 		if remainingLong <= 0 && remainingShort <= 0 {
 			fmt.Printf("今日の建玉は発注済み（ロング %d / ショート %d 件、冪等）。何もしません\n", placed.Long, placed.Short)
@@ -332,6 +322,16 @@ func runOpen(opts openOptions) error {
 		})
 	}
 
+	// 持ち越しの拘束: 残りの資金で建てられる件数に減らす。1 注文の予算に満たなくても残りがあれば
+	// 1 件を小さく建てる——一部が拘束されただけで一日を休むのは機会損失
+	if tiedLong.IsPositive() && !watchOnly {
+		before := n
+		n, budget = execute.CapByTied(n, cfg.Capital.MaxCapital, tiedLong, budget)
+		fmt.Printf("持ち越しがロングの資金 %s 円を拘束 → 今日は %d 件（1 注文 %s 円）\n", yen(tiedLong), n, yen(budget))
+		logWarn("daytrade.carry", "持ち越しの拘束資金でロングを縮める", map[string]any{
+			"tied": tiedLong.String(), "n_before": before, "n": n, "budget": budget.String()})
+	}
+
 	// signal.skip_opened: 9:01 の時点で既に寄っている銘柄を候補から外す。
 	// 順位付けの直前に気配そのものを落とすので、ロング・ショートの両方に効く
 	// （市場ギャップと危険信号は落とす前の気配で見る——候補全体の分布が変わるため）
@@ -372,6 +372,13 @@ func runOpen(opts openOptions) error {
 	if shortMultiplier.GreaterThan(decimal.Zero) && remainingShort > 0 {
 		shortN = remainingShort
 		shortBudget = cfg.Margin.BudgetPerOrder().Mul(shortMultiplier).Round(0)
+		if tiedShort.IsPositive() {
+			before := shortN
+			shortN, shortBudget = execute.CapByTied(shortN, cfg.Margin.MaxCapital, tiedShort, shortBudget)
+			fmt.Printf("持ち越しがショートの資金 %s 円を拘束 → 今日は %d 件（1 注文 %s 円）\n", yen(tiedShort), shortN, yen(shortBudget))
+			logWarn("daytrade.carry", "持ち越しの拘束資金でショートを縮める", map[string]any{
+				"tied": tiedShort.String(), "n_before": before, "n": shortN, "budget": shortBudget.String()})
+		}
 		shortRanking = selection.RankShort(shortUniverse, rankQuotes, cfg.Margin)
 		shortPicks = selection.PickFrom(shortRanking, selection.PickOptions{
 			N: shortN, Budget: shortBudget, Weighting: cfg.Margin.Weighting, Side: domain.SideSell,
@@ -398,6 +405,7 @@ func runOpen(opts openOptions) error {
 	ranking := selection.Rank(eligible, rankQuotes, cfg.Signal)
 	picks := selection.PickFrom(ranking, selection.PickOptions{
 		N: n, Budget: budget, Weighting: weighting, Side: domain.SideBuy,
+		MaxAmount: cfg.Capital.MaxOrder,
 	})
 	longPicks := len(picks)
 	frames := []history.Frame{dthistory.RankingFrame(ranking, picks, "BUY", n, budget)}
