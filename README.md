@@ -236,7 +236,7 @@ Broker                PaperBroker（証券会社の実装を足せる）
 
 | 領域 | 選定 | 理由 |
 |---|---|---|
-| 言語 | Go 1.26 | 単一の実行ファイルで配れる。cron から叩くのにランタイムの用意が要らない |
+| 言語 | Go 1.27 | 単一の実行ファイルで配れる。cron から叩くのにランタイムの用意が要らない |
 | パッケージ管理 | Go modules | `go.sum` で再現性。追加のツールは要らない |
 | 数値 | shopspring/decimal | 金額・株数は二進浮動小数点に載せない（丸め誤差が注文数量に出る） |
 | 価格データ | J-Quants API（日本株）/ FRED（米国の指数） | 日本株は JPX 公式・調整済み四本値。米国の指数は判断材料にだけ使うので、無料・キー不要・pandas 不要の FRED。取得済みは必ずローカルキャッシュ |
@@ -252,7 +252,7 @@ deploy/build.sh              # bin/ に wbjp / accum / daytrade / jquants / disc
 export PATH="$PWD/bin:$PATH"
 ```
 
-必要なのは Go 1.26 以上だけ。`go build ./...` でも同じものが作れる。
+必要なのは Go 1.27 以上だけ。`go build ./...` でも同じものが作れる。
 DuckDB を使う機能（`jquants query`）は cgo を要求するので、C コンパイラが要る。
 
 ---

@@ -22,7 +22,7 @@ git clone https://github.com/lovemoneyhotspring/jstock-go.git /home/abobo/jstock
 # private リポジトリなので認証が必要。HTTPS の場合はパスワード欄に PAT（Personal Access Token）を使う。
 # SSH鍵を使うなら代わりに: git clone git@github.com:lovemoneyhotspring/jstock-go.git /home/abobo/jstock-go
 
-# 2. 実行ファイルを作る（Go 1.26 以上。uv も Python も要らない）
+# 2. 実行ファイルを作る（Go 1.27 以上。uv も Python も要らない）
 deploy/build.sh          # bin/ に wbjp / accum / daytrade / jquants / discord-post ができる
 
 # 3. APIキー（J-Quants）と立花証券の認証情報（2b 節）

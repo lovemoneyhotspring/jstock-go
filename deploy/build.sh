@@ -4,7 +4,7 @@
 #   deploy/build.sh          # $WBJP_HOME/bin に作る
 #   BIN_DIR=/tmp/bin deploy/build.sh
 #
-# 依存は Go だけ（1.26 以上）。uv も Python も要らない。
+# 依存は Go だけ（1.27 以上）。uv も Python も要らない。
 
 set -euo pipefail
 
