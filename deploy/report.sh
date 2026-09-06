@@ -7,13 +7,14 @@
 #   deploy/report.sh weekly 2026-09-02    # その日を含む週
 #   deploy/report.sh monthly              # 前月（1 日に cron が回す前提）
 #   deploy/report.sh monthly 2026-08      # その月
-#   DRY_RUN=1 deploy/report.sh weekly     # 生成するだけで Discord に送らない
+#   DRY_RUN=1 deploy/report.sh weekly     # 生成するだけで Discord に送らない・vault にも入れない
 #
 # 設計の要点（3 期間で共通）:
 #   - レポートの生成（claude）と配達（discord-post）を分ける。モデルが
 #     「送るのを忘れる」経路を無くし、配達は決め打ちのスクリプトが担う
 #   - 生成に失敗しても黙って消えないよう、失敗した事実を Discord に流す
 #   - 本文は state/reports/ に必ず残す。Discord に届かなくても後から読める
+#   - 週次・月次は Obsidian の vault（50-reports/）にも写して commit する。記録の本体は vault
 #   - claude には Edit / Write を渡さない（サブエージェント側でも禁止しているが二重に）
 #
 # 日次だけ前提が違う（1 日ぶんのダイジェストの写しを渡す）ので、そこだけ分岐する。
@@ -152,6 +153,48 @@ fi
 if [ "${DRY_RUN:-}" = "1" ]; then
   cat "$REPORT"
   exit 0
+fi
+
+# 週次・月次は Obsidian の vault にも残す。記録の本体は vault 側（~/obsidian-vault）で、
+# state/reports/ は生成の作業場という位置づけ。日次は量が多くノイズなので入れない。
+# vault は独立した private リポジトリなので、書いたら commit・push まで済ませる。
+# ここで失敗してもレポートの配達は止めない（記録が 1 本欠けるだけ）。
+VAULT_DIR="${VAULT_DIR:-$HOME/obsidian-vault}"
+if [ "$PERIOD" != "daily" ] && [ -d "$VAULT_DIR/.git" ]; then
+  VAULT_NOTE="$VAULT_DIR/50-reports/$(basename "$REPORT")"
+  {
+    echo "---"
+    echo "type: report"
+    echo "domain: 投資"
+    echo "project: jstock-go"
+    echo "period: $PERIOD"
+    echo "from: $FROM"
+    echo "to: $TO"
+    echo "generated: $NOW"
+    echo "tags:"
+    echo "  - レポート"
+    echo "---"
+    echo
+    echo "# $TITLE"
+    echo
+    cat "$REPORT"
+  } > "$VAULT_NOTE"
+
+  # PC 側の編集と衝突しないよう、commit の前に取り込む。競合したら諦めて次回に回す
+  # （このノートは新規ファイルなので、次回の実行でそのまま入る）。
+  if git -C "$VAULT_DIR" pull --rebase --quiet 2>>"${REPORT%.md}.err"; then
+    git -C "$VAULT_DIR" add "$VAULT_NOTE" 2>>"${REPORT%.md}.err" || :
+    # 同じ期間を撮り直したときは中身が変わらないことがある。その場合は commit しない
+    if git -C "$VAULT_DIR" diff --cached --quiet -- "$VAULT_NOTE"; then
+      echo "vault: $TITLE に変更なし" >&2
+    else
+      git -C "$VAULT_DIR" commit --quiet -m "docs(reports): $TITLE" 2>>"${REPORT%.md}.err" \
+        && git -C "$VAULT_DIR" push --quiet origin main 2>>"${REPORT%.md}.err" \
+        || echo "vault への commit/push に失敗（ノートは $VAULT_NOTE に残っている）" >&2
+    fi
+  else
+    echo "vault の pull に失敗。commit は見送る（ノートは $VAULT_NOTE に残っている）" >&2
+  fi
 fi
 
 # 日次は本文の 1 行目が見出し（エージェントが書く）。週次・月次は期間が見出しなので

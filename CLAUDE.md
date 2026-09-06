@@ -10,10 +10,11 @@
 
 | 書くもの | 場所 |
 |---|---|
-| 検証（バックテスト・要因の検定）の記録 | `~/obsidian-vault/20-research/`（テンプレート: `90-templates/検証ノート.md`） |
+| 検証（バックテスト・要因の検定）の記録 | `~/obsidian-vault/20-research/`（雛形: `90-templates/検証ノート.md`） |
 | 日々の運用の記録 | `~/obsidian-vault/10-journal/YYYY-MM-DD.md` |
-| 週次・月次レポート | `~/obsidian-vault/50-reports/` |
+| 週次・月次レポート | `~/obsidian-vault/50-reports/`（`deploy/report.sh` が自動で入れる） |
 | 検証から抽出した原則 | `~/obsidian-vault/40-insights/` |
+| このシステムの常設ノート | `~/obsidian-vault/30-projects/`（`jstock-go` `daytrade` `wbjp` `accum` `jquants`） |
 
 vault 側の書き方の規約は `~/obsidian-vault/CLAUDE.md` にある。vault は独立した git リポジトリ
 （private）なので、書いたら vault 側でも commit する。
