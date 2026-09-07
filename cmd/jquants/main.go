@@ -16,6 +16,7 @@ func main() {
 	rootCmd.AddCommand(newCheckCmd())
 	rootCmd.AddCommand(newSyncCmd())
 	rootCmd.AddCommand(newBackfillCmd())
+	rootCmd.AddCommand(newPruneCmd())
 	rootCmd.AddCommand(newQueryCmd())
 
 	if err := rootCmd.Execute(); err != nil {

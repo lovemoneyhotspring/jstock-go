@@ -379,6 +379,47 @@ func (a *Archive) upsertPart(ep Endpoint, part string, new *Frame) (int, error) 
 	return changed, nil
 }
 
+// pruneFile は 1 ファイルを時間帯で絞って書き戻す。落とす行が無ければ触らない。
+// 落とした行は Frame に載せない（scanParquet の keep）ので、常駐は残す行ぶんだけ。
+func (a *Archive) pruneFile(ep Endpoint, part string, windows Windows, dryRun bool) (Pruned, error) {
+	path := a.PathFor(ep, part)
+	info, err := os.Stat(path)
+	if err != nil {
+		return Pruned{}, err
+	}
+	res := Pruned{Part: part, Bytes: info.Size()}
+	before := 0
+	kept, err := scanParquet(path, scanOptions{keep: func(row RowView) bool {
+		before++
+		return windows.Keep(row.Text(ep.TimeColumn))
+	}})
+	if err != nil {
+		return Pruned{}, err
+	}
+	res.Before, res.After = before, kept.Height()
+	if dryRun || res.After == res.Before {
+		return res, nil
+	}
+	unlock, err := a.lock(ep)
+	if err != nil {
+		return Pruned{}, err
+	}
+	defer unlock()
+	sortByKey(kept, ep.Key)
+	tmp := path + ".tmp"
+	if err := writeParquet(tmp, kept, ep.columnKinds()); err != nil {
+		return Pruned{}, err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return Pruned{}, fmt.Errorf("保管庫の Parquet の差し替えに失敗しました %s: %w", path, err)
+	}
+	if info, err := os.Stat(path); err == nil {
+		res.Bytes = info.Size()
+	}
+	res.Written = true
+	return res, nil
+}
+
 // ExistingParquetDirs は Parquet を 1 つ以上持つ端点ディレクトリ名。
 // DuckDB のビュー登録（query コマンド）に使う。
 func (a *Archive) ExistingParquetDirs() []string {

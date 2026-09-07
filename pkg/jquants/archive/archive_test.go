@@ -410,6 +410,39 @@ func TestAddonEndpointsAreOptIn(t *testing.T) {
 	if !found {
 		t.Errorf("%s=1 でも分足が有効にならない", MinuteBarsEnv)
 	}
+	// ティックは分足とは別の環境変数で開ける（大きさが 10 倍違うので一緒にしない）
+	for _, ep := range ActiveEndpoints() {
+		if ep.Path == "/equities/trades" {
+			t.Errorf("%s だけでティックまで有効になっている", MinuteBarsEnv)
+		}
+	}
+	t.Setenv(TicksEnv, "1")
+	found = false
+	for _, ep := range ActiveEndpoints() {
+		if ep.Path == "/equities/trades" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("%s=1 でもティックが有効にならない", TicksEnv)
+	}
+}
+
+// ticks はティック（アドオン、一括のみ・日分割・型付き・_raw なし）。
+func ticks() Endpoint { return MustEndpoint("equities_trades") }
+
+func TestTicksEndpointShape(t *testing.T) {
+	ep := ticks()
+	if !ep.BulkOnly || !ep.Bulk || !ep.NoRaw || ep.Split != SplitDay || !ep.Addon {
+		t.Errorf("ティックの端点の形が想定と違う: %+v", ep)
+	}
+	if ep.Name() != "equities_trades" {
+		t.Errorf("Name = %s", ep.Name())
+	}
+	// TransactionId は先頭ゼロ付き（000000000012）なので数値にしてはいけない
+	if _, typed := ep.ColumnTypes["TransactionId"]; typed {
+		t.Errorf("TransactionId に型が付いている（先頭ゼロが落ちる）")
+	}
 }
 
 func TestPartOf(t *testing.T) {

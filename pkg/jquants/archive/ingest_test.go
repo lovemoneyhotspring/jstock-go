@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -466,4 +468,215 @@ func gzipped(text string) []byte {
 	_, _ = w.Write([]byte(text))
 	_ = w.Close()
 	return buf.Bytes()
+}
+
+// ticksCSV は 2026-09-04 の一括ティックと同じ形の 1 日ぶん。
+const ticksCSV = "Date,Code,Time,SessionDistinction,Price,TradingVolume,TransactionId\n" +
+	"2026-09-04,13010,09:00:00.065599,01,4660,1400,000000000012\n" +
+	"2026-09-04,13010,09:00:00.083619,01,4660,600,000000000030\n" +
+	"2026-09-04,72030,09:00:00.100000,01,2500.5,100,000000000031\n"
+
+func TestSyncTakesBulkOnlyEndpointFromDailyFiles(t *testing.T) {
+	t.Setenv(TicksEnv, "1")
+	ep := ticks()
+	key := "equities/trades/live/equities_trades_20260904.csv.gz"
+	client := &stubClient{
+		bulk:  map[string][]map[string]any{ep.Path: {{"Key": key, "LastModified": "2026-09-04T07:23:33+00:00"}}},
+		files: map[string][]byte{key: gzipped(ticksCSV)},
+	}
+	ing := newTestIngestor(t, client)
+	now := jstAt(2026, 9, 4, 17, 0)
+
+	// API の date= では叩かない
+	jobs, err := ing.Plan(now, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range jobs {
+		if job.Endpoint.Path == ep.Path {
+			t.Fatalf("API の無い端点に date= の仕事が立っている: %+v", job)
+		}
+	}
+
+	result, err := ing.Sync(now, -1, []string{"equities_trades"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Failures) != 0 {
+		t.Fatalf("失敗: %+v", result.Failures)
+	}
+	if len(result.Ingests) != 1 || result.Ingests[0].Rows != 3 || result.Ingests[0].Source != "bulk" {
+		t.Fatalf("一括の日次ファイルを取っていない: %+v", result.Ingests)
+	}
+	for _, c := range client.calls {
+		if strings.HasPrefix(c, ep.Path) {
+			t.Errorf("API を叩いている: %s", c)
+		}
+	}
+	// 1 日 1 ファイルの Parquet に、鍵順で落ちている
+	if _, err := os.Stat(ing.Archive.PathFor(ep, "2026-09-04")); err != nil {
+		t.Fatalf("日分割の Parquet が無い: %v", err)
+	}
+	back, err := ing.Archive.Scan(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Height() != 3 {
+		t.Fatalf("行数 = %d", back.Height())
+	}
+	if got := *back.Get(0, "TransactionId"); got != "000000000012" {
+		t.Errorf("TransactionId の先頭ゼロが落ちた: %s", got)
+	}
+	// _raw は残さない（月 1GB）
+	if entries, _ := os.ReadDir(ing.Archive.RawDir(ep)); len(entries) != 0 {
+		t.Errorf("ティックの _raw が残っている: %v", entries)
+	}
+	// 欠けの判定は一括の日次ファイルを「取った日」と見る
+	gaps, err := ing.Gaps(ep, time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gaps) != 0 {
+		t.Errorf("取った日を欠けとみなしている: %v", gaps)
+	}
+
+	// 2 度目は LastModified が同じなので何もしない
+	again, err := ing.Sync(now, -1, []string{"equities_trades"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Ingests) != 0 {
+		t.Errorf("同じファイルを取り直している: %+v", again.Ingests)
+	}
+}
+
+func TestSyncBulkSkipsMonthsBeforeLookback(t *testing.T) {
+	ep := ticks()
+	old, recent := "equities/trades/historical/2026/equities_trades_202607.csv.gz", "equities/trades/live/equities_trades_20260904.csv.gz"
+	client := &stubClient{
+		bulk: map[string][]map[string]any{ep.Path: {
+			{"Key": old, "LastModified": "a"},
+			{"Key": recent, "LastModified": "b"},
+		}},
+		files: map[string][]byte{
+			old:    gzipped("Date,Code,Time,SessionDistinction,Price,TradingVolume,TransactionId\n2026-07-01,1,09:00:00.000000,01,1,1,1\n"),
+			recent: gzipped(ticksCSV),
+		},
+	}
+	ing := newTestIngestor(t, client)
+	result, err := ing.SyncBulk(ep, jstAt(2026, 9, 4, 17, 0), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Ingests) != 1 || result.Ingests[0].Target != "bulk:"+recent {
+		t.Fatalf("遡りの範囲より前の月次ファイルまで取っている: %+v", result.Ingests)
+	}
+}
+
+func TestIngestTrimsToWindows(t *testing.T) {
+	t.Setenv(TicksWindowsEnv, "09:00-09:00") // 不正（開始 = 終了）はエラーで止まる
+	ep := ticks()
+	key := "equities/trades/live/equities_trades_20260904.csv.gz"
+	client := &stubClient{
+		bulk:  map[string][]map[string]any{ep.Path: {{"Key": key, "LastModified": "x"}}},
+		files: map[string][]byte{key: gzipped(ticksCSV)},
+	}
+	ing := newTestIngestor(t, client)
+	result, err := ing.Backfill(ep, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Failures) != 1 {
+		t.Fatalf("読めない時間帯で取り込みが進んだ: %+v", result)
+	}
+
+	// 09:00:00.08 以降だけ残す窓は無いので、秒単位の窓で 2 行目・3 行目を落とす例にする
+	t.Setenv(TicksWindowsEnv, "15:10-15:31")
+	result, err = ing.Backfill(ep, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Failures) != 0 || len(result.Ingests) != 1 {
+		t.Fatalf("%+v", result)
+	}
+	// 3 行とも 09:00 なので全部落ち、Parquet は書かれない（0 行の Upsert は何もしない）
+	if result.Ingests[0].Rows != 0 {
+		t.Errorf("窓の外の行が残っている: %+v", result.Ingests[0])
+	}
+
+	t.Setenv(TicksWindowsEnv, "09:00-09:10")
+	// 台帳の LastModified が同じなので、取り直させるために別の stamp にする
+	client.bulk[ep.Path][0]["LastModified"] = "y"
+	result, err = ing.Backfill(ep, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Ingests) != 1 || result.Ingests[0].Rows != 3 {
+		t.Errorf("窓の中の行が落ちた: %+v", result.Ingests)
+	}
+}
+
+func TestPruneKeepsOnlyWindows(t *testing.T) {
+	ep := ticks()
+	ing := newTestIngestor(t, &stubClient{})
+	csv := "Date,Code,Time,SessionDistinction,Price,TradingVolume,TransactionId\n" +
+		"2026-09-04,13010,08:59:59.000000,01,4660,100,000000000001\n" +
+		"2026-09-04,13010,09:00:00.065599,01,4660,1400,000000000012\n" +
+		"2026-09-04,13010,09:10:00.000000,01,4661,100,000000000020\n" +
+		"2026-09-04,13010,12:30:00.000000,01,4662,100,000000000030\n" +
+		"2026-09-04,13010,15:30:00.500000,01,4663,100,000000000040\n"
+	frame, err := CSVToFrame(gzipped(csv), ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ing.Archive.Upsert(ep, frame); err != nil {
+		t.Fatal(err)
+	}
+	windows, _ := ParseWindows("09:00-09:10,15:10-15:31")
+
+	// 数えるだけ
+	dry, err := ing.Prune(ep, windows, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dry) != 1 || dry[0].Before != 5 || dry[0].After != 2 || dry[0].Written {
+		t.Fatalf("dry-run = %+v", dry)
+	}
+	back, _ := ing.Archive.Scan(ep)
+	if back.Height() != 5 {
+		t.Fatalf("dry-run が書き換えた: %d 行", back.Height())
+	}
+
+	got, err := ing.Prune(ep, windows, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !got[0].Written || got[0].After != 2 {
+		t.Fatalf("prune = %+v", got)
+	}
+	back, _ = ing.Archive.Scan(ep)
+	if back.Height() != 2 {
+		t.Fatalf("残った行数 = %d", back.Height())
+	}
+	if *back.Get(0, "TransactionId") != "000000000012" || *back.Get(1, "TransactionId") != "000000000040" {
+		t.Errorf("残った行が違う: %s %s", *back.Get(0, "TransactionId"), *back.Get(1, "TransactionId"))
+	}
+	// 型付きの列は型のまま書き戻されている（Price は数値として読める）
+	if *back.Get(1, "Price") != "4663" {
+		t.Errorf("Price = %s", *back.Get(1, "Price"))
+	}
+	// 台帳に prune の記録
+	last, err := ing.Ledger.Last(ep, "2026-09-04")
+	if err != nil || last == nil || last.Source != "prune" || last.Changed != 3 {
+		t.Errorf("台帳の記録 = %+v %v", last, err)
+	}
+	// 2 度目は落とす行が無いので触らない
+	again, _ := ing.Prune(ep, windows, false)
+	if again[0].Written {
+		t.Error("変化が無いのに書き換えている")
+	}
+	// 月分割の端点は対象外
+	if _, err := ing.Prune(bars(), windows, true); err == nil {
+		t.Error("月分割の端点を刈ろうとしている")
+	}
 }
