@@ -44,7 +44,7 @@ Standard プランで取れるデータを**全部**ローカルに溜め、オ�
 | `/edinet/cross-shareholdings` | 政策保有株式 | 同上 | `date=` | `DocId` | — |
 | `/edinet/large-volume-shareholders` | 大量保有報告 | 同上 | `date=` | `DocId` | — |
 
-Standard で**取れない**（設計に入れない）: 前場四本値、売買内訳、財務諸表 BS/PL/CF（`/fins/details`）、配当金、先物、個別オプション、ティック（アドオン。後述のとおり取らない）、適時開示（アドオン）。分足はアドオンを契約して取る（「分足（アドオン）」の節）。
+Standard で**取れない**（設計に入れない）: 前場四本値、売買内訳、財務諸表 BS/PL/CF（`/fins/details`）、配当金、先物、個別オプション、ティック（アドオン。「ティック（アドオン）」の節）、適時開示（アドオン）。分足はアドオンを契約して取る（「分足（アドオン）」の節）。
 
 ## 設計
 
@@ -250,7 +250,7 @@ Parquet 上では数十バイトの行が、メモリでは 10〜40 倍に膨ら
 
 ## 分足（アドオン）
 
-2026-01 に追加された有料アドオン（Light 以上、月額）で株価の分足とティックが取れる。**分足だけ取る。ティックは取らない**（下の理由）。これは設計の記録で、実装はまだ無い。
+2026-01 に追加された有料アドオン（Light 以上、月額）で株価の分足とティックが取れる。分足は 2026-09-05 に取り込みを実装して過去 2 年ぶんを入れた。ティックは「ティック（アドオン）」の節（経路は用意済み、取り込みはまだ）。
 
 ### 仕様（2026-09-03 時点、公式リファレンスより）
 
@@ -349,9 +349,84 @@ jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/202
 `GetAll` が全ページを集めてから `Frame` にするので同程度を見込むが、まだ実測していない。
 重ければ日次も一括（`live/` の日次ファイル）に切り替える。
 
-### ティックを取らない理由
+## ティック（アドオン）
 
-東証全体で 1 日数千万約定。Parquet にしても **年 50〜100GB** で、サーバーの空き（80GB）に 2 年ぶんは収まらない。ティックを使う戦略の目処も無い。必要になったら「`_raw` の csv.gz だけ残して変換しない」か「ユニバースの銘柄だけ Parquet 化する」から始める。分足で足りるかを先に確かめる。
+分足と同じアドオンで取れる約定の一覧。**一括 CSV しか無い**（API が無い）ので、取り方が他の端点と 1 か所違う。
+何のために使うかは `docs/OPENING_DATA.md`（寄りの瞬間の分解: 寄り遅れの秒数、板寄せ単独の出来高、寄付後 60 秒の経路）。
+
+### 規模（2026-09-04 の一括ファイルで実測。2026-09-07）
+
+| | 実測 |
+|---|---|
+| 1 日 | **469 万行 / 4,146 銘柄 / csv.gz 47MB / Parquet（zstd）43MB** |
+| うち 9:00〜9:10 | 48 万行（10%） |
+| うち 15:10〜15:30 | 27 万行（6%） |
+| 1 か月（一括 1 本） | csv.gz 0.98〜1.16GB |
+| 1 年 | 約 10.5GB（245 営業日） |
+| 全期間（2 年） | 約 21GB。一括 28 ファイル |
+
+設計時（2026-09-03）の「1 日数千万約定、年 50〜100GB」は過大だった。全銘柄・全時間帯でも 2 年 21GB で、
+サーバーの空き（63GB、2026-09-07）に入る。**`_raw` は残さない**（`Endpoint.NoRaw`）。csv.gz が Parquet と
+同じ大きさで、保険のために容量を倍にする価値が無い。分足と合わせて 10 年で 120GB になるので、
+ディスクは 2〜3 年のうちに足す。
+
+### 設計（経路は実装済み。2026-09-07）
+
+分足の設計（日分割・型付き Parquet・`AddonEndpoints`）をそのまま使い、違うのは次の 3 点。
+
+1. **API が無い（`Endpoint.BulkOnly`）**。`Plan()` は date= の仕事を立てず、`Sync()` の最後に `SyncBulk()` が
+   一括の一覧を見て、**当月の日次ファイル（`live/`）のうち台帳に無いか `LastModified` が変わったもの**を取る。
+   `Backfill` と同じ経路で、対象を「遡る日（`SettleDays`）を含む月から先」に絞っただけ。月が締まって
+   月次ファイル（`historical/`）に置き換わっても、日次で取り込み済みなので取り直しは起きない。
+   `sync --dry-run` は一覧を見るまで対象が分からないので `bulk` と 1 行だけ出す。
+2. **鍵は `(Date, Code, TransactionId)`**。`TransactionId` は先頭ゼロ付き（`000000000012`）なので文字列のまま。
+   `Time` も `HH:MM:SS.ffffff` の文字列。数値にするのは `Price`（Float64）と `TradingVolume`（Int64）だけ。
+3. **有効化は `JQUANTS_TICKS=1`**。分足の `JQUANTS_MINUTE_BARS` とは別にした。大きさが 10 倍違うので、
+   分足を動かしたままティックだけ止められるようにしておく。
+
+`check`（欠けの監視）は一括の日次ファイルを「その日を取った」と見る（`BulkCoverage` が 8 桁の日付を日として読む）。
+
+### 時間帯で絞る（分析が終わったあとの容量の削減）
+
+全時間帯で 2 年ぶん溜めて分析し、「効く時間帯」が決まったら、その窓だけ残して容量を落とせるようにしてある。
+寄りと引けだけ（9:00〜9:10 と 15:10〜15:30）なら行数は **16%**（1 日 75 万行・約 7MB、年 1.7GB）になる。
+
+- **窓の定義は 1 か所**。環境変数 `JQUANTS_TICKS_WINDOWS="09:00-09:10,15:10-15:31"`（`Endpoint.WindowEnv`）。
+  半開区間で、終了は含まない。引けの 15:30:00.xxx を残すには終了を `15:31` にする。空なら全時間帯。
+  `Time` の列は `HH:MM:SS.ffffff` の文字列なので、`HH:MM` と辞書順で比べるだけで判定できる（`Windows.Keep`）。
+- **取り込みも同じ窓で絞る**。`sync` / `backfill` は Parquet に書く前に窓の外の行を落とす（`trimWindows`）。
+  環境変数を cron の行に足せば、以後の日次は絞った形で入る。読めない値はエラーで止める（絞るつもりで
+  絞れていないのが最悪なので、黙って全部残さない）。
+- **溜めたぶんは `jquants prune` で刈る**。日分割のファイルを 1 日ずつ読み、窓の外の行を落として書き戻す
+  （落とす行は `Frame` に載せないので、常駐は残す行ぶんだけ）。`--dry-run` で行数と容量を先に数える。
+  台帳に `Source = "prune"` で残る（`Digest` に窓の文字列）。変化の無いファイルは触らない。
+- **戻せないが、取り直せる**。刈った行は消える。2 年以内なら一括を取り直せば復元できるが、台帳の `bulk:` 行の
+  `LastModified` が同じだと飛ばされるので、その日の `bulk:` 行を台帳から消してから `backfill` する。
+- 分足（`equities_bars_minute`）には `TimeColumn` を付けていないので絞れない。年 1.15GB で困っていないため。
+  付けるなら `Time` は `HH:mm` なので同じ仕組みがそのまま効く。
+
+```bash
+# 分析が終わったら: まず数える
+JQUANTS_TICKS_WINDOWS="09:00-09:10,15:10-15:31" jquants prune --only equities_trades --dry-run
+# 刈る（cron の sync の行にも同じ環境変数を足して、以後の日次を同じ窓にする）
+JQUANTS_TICKS_WINDOWS="09:00-09:10,15:10-15:31" jquants prune --only equities_trades
+```
+
+### 取り込みのメモリ（未実測）
+
+月次の一括 1 本は csv.gz 1GB・約 1 億行。`BulkDownload` が csv.gz を丸ごとメモリに置き（1GB）、
+`CSVToFramesByDay` が日ごとに区切って `Upsert` する。1 日ぶんの `Frame` は 469 万行 × 7 列 × 44 バイト ≒ 1.4GB。
+合わせて **3GB 前後**の見込みで `GOMEMLIMIT=4GiB` の内側だが、**初回の backfill は 1 ファイルだけで測ってから**
+残りを回す（`--since` で月を絞る）。超えるなら csv.gz をファイルに落として流し読みする改修が要る。
+
+```bash
+# 契約したら: まず 1 か月だけ取って時間とメモリを測る（履歴は 2 年しか無い）
+JQUANTS_TICKS=1 /usr/bin/time -v jquants backfill --only equities_trades --since 2026-08
+# 問題なければ全期間
+JQUANTS_TICKS=1 jquants backfill --only equities_trades
+# 日次に載せる（deploy/crontab.txt の該当行のコメントを外す。check の行にも JQUANTS_TICKS=1 を足す）
+JQUANTS_TICKS=1 jquants sync --only equities_trades
+```
 
 ## 決めていないこと（実装前に決める）
 
@@ -362,6 +437,10 @@ jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/202
 
 ## 状態
 
+- 2026-09-07: ティック（アドオン）の**取り込み経路を実装**。`Endpoint` に `BulkOnly`（API 無し）・`NoRaw`・`EnableEnv` を足し、
+  `Sync()` が一括の日次ファイルで増分を取る（`SyncBulk`）。有効化は `JQUANTS_TICKS=1`。
+  時間帯で絞る仕組み（`JQUANTS_TICKS_WINDOWS`・`jquants prune`）も入れた。分析後に寄り・引けだけ残す想定。
+  1 日ぶんの実測で見積もりを直した（年 10GB。以前の 50〜100GB は過大）。**まだ 1 行も取り込んでいない。**
 - 2026-09-04: `Frame` の行を `map[string]*string` から列に揃えた `[]*string` に変えた（1 セル 96 → 44 バイト）。
   列名で引くときは `Get` / `AppendRow`。読み出し・CSV・ダイジェスト・書き戻しの経路でセルごとのアロケートをやめた。
   数字は「ベンチマーク」の節。
@@ -372,5 +451,5 @@ jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/202
   `Addon` を足し、`AddonEndpoints` / `ActiveEndpoints()` / `JQUANTS_MINUTE_BARS` で契約前は日次に載せない。
   日足の端点の挙動は変えていない。**まだ 1 行も取り込んでいない**（アドオン未契約）。
   `FillModel` への繋ぎ込みは未実装。用途は `docs/OPENING_DATA.md`。
-- 2026-09-03: 分足（アドオン）の設計を追記。実装は未着手。ティックは取らない。
+- 2026-09-03: 分足（アドオン）の設計を追記。実装は未着手。ティックは取らない（→ 2026-09-07 に見積もりを直して経路を作った）。
 - 2026-08-31: 実装済み（`wbcore.data.jquants_client` / `wbcore.data.jquants_archive` / `jquants` CLI）。`JQuantsProvider` はアーカイブに揃っていればそこから読み、API から取ったぶんはアーカイブに書く。**実機（Standard）での疎通は未確認**——一括 CSV の列名が API と同じ前提、`HolDiv` の値、確報の反映時刻は初回実行で確かめる。

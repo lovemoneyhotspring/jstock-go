@@ -98,7 +98,8 @@ fi
 # 禁止事項として書いてある。1800 秒（30 分）で打ち切る。
 printf '%s' "$PROMPT" | timeout 1800 "$CLAUDE_BIN" -p \
   --agent night-repair \
-  --model "${NIGHT_REPAIR_MODEL:-opus}" \
+  --model "${NIGHT_REPAIR_MODEL:-claude-fable-5-1}" \
+  --effort "${NIGHT_REPAIR_EFFORT:-low}" \
   --permission-mode bypassPermissions \
   --disallowedTools "$DISALLOWED" \
   > "$REPORT" 2> "$REPORT_DIR/night-repair-$TODAY.err"

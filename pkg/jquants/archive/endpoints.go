@@ -111,6 +111,20 @@ type Endpoint struct {
 	// Addon は有料アドオンの端点か。契約していないと 403 になるので、
 	// ActiveEndpoints は環境変数で有効にされたものだけを返す。
 	Addon bool
+	// EnableEnv はアドオンを日次の取り込みに載せる環境変数の名前（Addon のときだけ）。
+	EnableEnv string
+	// BulkOnly は API が無く、一括ダウンロードでしか取れない端点か（ティック）。
+	// 日次の sync も API の date= ではなく、一括の日次ファイル（live/）を取る。
+	BulkOnly bool
+	// NoRaw は一括 CSV を _raw/ に残さない。ティックは月 1GB で Parquet と
+	// 同じ大きさになり、保険のために容量を倍にする価値が無い。
+	NoRaw bool
+	// TimeColumn は 1 日の中の時刻の列（"HH:MM" か "HH:MM:SS.ffffff"）。
+	// 時間帯で絞れる端点（ティック・分足）だけ持つ。
+	TimeColumn string
+	// WindowEnv は残す時間帯を指定する環境変数の名前（"09:00-09:10,15:10-15:31"）。
+	// 空なら全時間帯を残す。取り込み（sync / backfill）と刈り込み（prune）が同じ値を見る。
+	WindowEnv string
 }
 
 // Name はディレクトリ名。"/equities/bars/daily" → "equities_bars_daily"。
@@ -293,7 +307,24 @@ var AddonEndpoints = []Endpoint{
 			"O": KindFloat64, "H": KindFloat64, "L": KindFloat64, "C": KindFloat64,
 			"Vo": KindInt64, "Va": KindInt64,
 		},
-		Addon: true,
+		Addon: true, EnableEnv: MinuteBarsEnv,
+	},
+	{
+		// 株価ティック（分足と同じアドオン）。**一括 CSV しか無い**（API が無い）ので、
+		// 日次の sync も一括の日次ファイル（live/）を取る（BulkOnly）。
+		// 1 日 469 万行・Parquet 43MB（2026-09-04 の実測。年 10GB・2 年 21GB）。
+		// 設計は docs/JQUANTS_ARCHIVE.md「ティック（アドオン）」。
+		// Time は "HH:MM:SS.ffffff"、TransactionId は先頭ゼロ付きなので文字列のまま。
+		// _raw は残さない（csv.gz が月 1GB で Parquet と同じ大きさ）。
+		Path: "/equities/trades", Key: []string{"Date", "Code", "TransactionId"}, DateColumn: "Date",
+		Mode: ModeDate, DateParam: "date", AvailableAt: t1630,
+		SettleDays: 2, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		Split: SplitDay,
+		ColumnTypes: map[string]ColumnKind{
+			"Price": KindFloat64, "TradingVolume": KindInt64,
+		},
+		Addon: true, EnableEnv: TicksEnv, BulkOnly: true, NoRaw: true,
+		TimeColumn: "Time", WindowEnv: TicksWindowsEnv,
 	},
 }
 
@@ -301,12 +332,21 @@ var AddonEndpoints = []Endpoint{
 // 契約するまでは毎日 403 を叩きに行くだけなので、既定では載せない。
 const MinuteBarsEnv = "JQUANTS_MINUTE_BARS"
 
+// TicksEnv はティックの取り込みを日次の sync に載せる環境変数。
+// 分足と同じアドオンだが、1 日 43MB・年 10GB と大きいので別に開ける。
+const TicksEnv = "JQUANTS_TICKS"
+
+// TicksWindowsEnv はティックで残す時間帯（"09:00-09:10,15:10-15:31"）。
+// 空なら全時間帯。過去 2 年ぶんの分析で「効く時間帯」が分かったら、ここで絞って
+// 日次の取り込みを軽くし、溜めたぶんは `jquants prune` で同じ窓に刈る。
+const TicksWindowsEnv = "JQUANTS_TICKS_WINDOWS"
+
 // ActiveEndpoints は日次の取り込み（sync / check / status）が回す端点。
 // Standard の全部と、環境変数で有効にされたアドオン。
 func ActiveEndpoints() []Endpoint {
 	out := append([]Endpoint(nil), StandardEndpoints...)
 	for _, ep := range AddonEndpoints {
-		if ep.Path == "/equities/bars/minute" && enabledEnv(MinuteBarsEnv) {
+		if ep.EnableEnv != "" && enabledEnv(ep.EnableEnv) {
 			out = append(out, ep)
 		}
 	}

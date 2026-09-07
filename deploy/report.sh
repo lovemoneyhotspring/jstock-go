@@ -120,8 +120,9 @@ state/notify/<日付>.jsonl）と、bin/*  の review / evaluate に --from $FRO
 標準出力にはレポート本文だけを書いてください。"
 fi
 
-# --agent でエージェントを選ぶ。--effort は既定のまま（十分な深さで、かつ
-# 定期的に回すので上げすぎない）。時間切れで cron が詰まるのを防ぐ。
+# --agent でエージェントを選ぶ。モデルと effort は明示する（cron は
+# ~/.claude/settings.json の既定に頼らず、fable 5.1 / low で固定。
+# REPORT_MODEL / REPORT_EFFORT で上書き可）。時間切れで cron が詰まるのを防ぐ。
 # 期間が長いほど読む量が増えるので、上限も伸ばす。
 case "$PERIOD" in
   daily)   TIMEOUT=900 ;;
@@ -133,6 +134,8 @@ esac
 # 後ろに置いたプロンプトまでツール名として飲み込んでしまう。
 printf '%s' "$PROMPT" | timeout "$TIMEOUT" "$CLAUDE_BIN" -p \
   --agent "$AGENT" \
+  --model "${REPORT_MODEL:-claude-fable-5-1}" \
+  --effort "${REPORT_EFFORT:-low}" \
   --permission-mode bypassPermissions \
   --disallowedTools "Edit,Write,NotebookEdit" \
   > "$REPORT" 2> "${REPORT%.md}.err"

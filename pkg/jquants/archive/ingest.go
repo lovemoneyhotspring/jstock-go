@@ -128,6 +128,11 @@ func (i *Ingestor) IngestAll(ep Endpoint, today time.Time) (Ingest, error) {
 }
 
 func (i *Ingestor) store(ep Endpoint, target string, frame *Frame, source string) (Ingest, error) {
+	windows, err := ep.Windows()
+	if err != nil {
+		return Ingest{}, err
+	}
+	trimWindows(frame, ep, windows)
 	changed := 0
 	if frame.Height() > 0 {
 		n, err := i.Archive.Upsert(ep, frame)
@@ -187,7 +192,7 @@ func (i *Ingestor) Backfill(ep Endpoint, since string, keepRaw bool) (*SyncResul
 		if previous != nil && previous.Digest == stamp {
 			continue
 		}
-		if err := i.backfillOne(ep, key, target, stamp, keepRaw, result); err != nil {
+		if err := i.backfillOne(ep, key, target, stamp, keepRaw && !ep.NoRaw, result); err != nil {
 			i.errorLog("jquants.ingest_failed", fmt.Sprintf("一括取り込みに失敗 %s %s", ep.Path, target),
 				map[string]any{"endpoint": ep.Path, "target": target, "error": err.Error()})
 			result.Failures = append(result.Failures, Failure{ep.Path, target, err.Error()})
@@ -210,11 +215,16 @@ func (i *Ingestor) backfillOne(ep Endpoint, key, target, stamp string, keepRaw b
 			return fmt.Errorf("生ファイルを保存できません %s: %w", raw, err)
 		}
 	}
+	windows, err := ep.Windows()
+	if err != nil {
+		return err
+	}
 	rows, changed := 0, 0
 	if ep.Split == SplitDay {
 		// 一括の月次ファイルは 1 か月 960 万行あり、丸ごと Frame に載せると 3.8GB になる。
 		// 日付順に並んでいるので、日ごとに区切って書けば常駐は 1 日ぶんで済む
 		err = CSVToFramesByDay(payload, ep, func(f *Frame) error {
+			trimWindows(f, ep, windows)
 			n, err := i.Archive.Upsert(ep, f)
 			if err != nil {
 				return err
@@ -231,6 +241,7 @@ func (i *Ingestor) backfillOne(ep Endpoint, key, target, stamp string, keepRaw b
 		if err != nil {
 			return err
 		}
+		trimWindows(frame, ep, windows)
 		if changed, err = i.Archive.Upsert(ep, frame); err != nil {
 			return err
 		}
@@ -327,6 +338,9 @@ func (i *Ingestor) Plan(now time.Time, lookbackDays int) ([]Job, error) {
 				}})
 			}
 		default:
+			if ep.BulkOnly {
+				continue // API が無い。Sync が一括の日次ファイルで取る（SyncBulk）
+			}
 			back := ep.SettleDays
 			if lookbackDays >= 0 {
 				back = lookbackDays
@@ -440,7 +454,39 @@ func (i *Ingestor) Sync(now time.Time, lookbackDays int, only []string) (*SyncRe
 		}
 		i.try(result, job.Endpoint, job.Target, job.Params)
 	}
+	// API の無い端点（ティック）は一括の日次ファイルで増分を取る
+	for _, ep := range ActiveEndpoints() {
+		if !ep.BulkOnly || (len(wanted) > 0 && !wanted[ep.Path]) {
+			continue
+		}
+		bulk, err := i.SyncBulk(ep, now, lookbackDays)
+		if err != nil {
+			i.errorLog("jquants.ingest_failed", fmt.Sprintf("一括の一覧の取得に失敗 %s", ep.Path),
+				map[string]any{"endpoint": ep.Path, "target": "bulk:list", "error": err.Error()})
+			result.Failures = append(result.Failures, Failure{ep.Path, "bulk:list", err.Error()})
+			continue
+		}
+		result.Ingests = append(result.Ingests, bulk.Ingests...)
+		result.Failures = append(result.Failures, bulk.Failures...)
+	}
 	return result, nil
+}
+
+// SyncBulk は API の無い端点（BulkOnly）の増分を一括の日次ファイルで取る。
+//
+// J-Quants の一括は当月ぶんが日次ファイル（live/）で毎営業日の夕方に増え、
+// 月が締まると月次ファイル（historical/）に置き換わる。Backfill は台帳に同じ
+// Key と同じ LastModified があれば飛ばすので、「遡る月から先の全ファイル」を
+// 対象にしても、実際に取るのは新しく現れた日次ファイルと訂正で LastModified が
+// 変わったものだけになる。lookbackDays が負なら端点の SettleDays を使う。
+func (i *Ingestor) SyncBulk(ep Endpoint, now time.Time, lookbackDays int) (*SyncResult, error) {
+	back := ep.SettleDays
+	if lookbackDays >= 0 {
+		back = lookbackDays
+	}
+	today := truncateDay(now.In(clock.Tokyo))
+	since := today.AddDate(0, 0, -back).Format("2006-01")
+	return i.Backfill(ep, since, true)
 }
 
 func (i *Ingestor) try(result *SyncResult, ep Endpoint, target string, params map[string]string) {
@@ -602,4 +648,57 @@ func asString(v any) string {
 		return s
 	}
 	return fmt.Sprint(v)
+}
+
+// -- 刈り込み -----------------------------------------------------------
+
+// Pruned は 1 ファイルぶんの刈り込みの結果。
+type Pruned struct {
+	Part    string
+	Before  int
+	After   int
+	Bytes   int64 // 刈った後の大きさ（dryRun なら刈る前）
+	Written bool
+}
+
+// Prune は日分割の端点の保存済みファイルから、時間帯の外の行を落として書き戻す。
+//
+// 過去 2 年ぶんを全時間帯で溜めて分析し、「効く時間帯」が決まったあとで容量を
+// 減らすためのもの。取り込みの絞り込み（WindowEnv）と同じ Windows を渡し、
+// 取り込み側の環境変数も同じ値にしておけば、以後の日次も同じ窓で入る。
+//
+// 落とした行は戻せない（一括を取り直せば 2 年以内なら復元できる。台帳の
+// LastModified が同じだと飛ばされるので、そのときは台帳の bulk: 行を消す）。
+// dryRun なら数えるだけで書かない。台帳には Source "prune" で残す。
+func (i *Ingestor) Prune(ep Endpoint, windows Windows, dryRun bool) ([]Pruned, error) {
+	if ep.Split != SplitDay {
+		return nil, fmt.Errorf("%s は日分割ではないので刈り込みの対象外です", ep.Path)
+	}
+	if ep.TimeColumn == "" {
+		return nil, fmt.Errorf("%s には時刻の列が無いので時間帯で絞れません", ep.Path)
+	}
+	if len(windows) == 0 {
+		return nil, fmt.Errorf("時間帯が空です（全部残す＝何もしない）。%s か --windows で指定してください", ep.WindowEnv)
+	}
+	var out []Pruned
+	for _, part := range i.Archive.Months(ep) {
+		res, err := i.Archive.pruneFile(ep, part, windows, dryRun)
+		if err != nil {
+			return out, fmt.Errorf("%s の刈り込みに失敗しました: %w", part, err)
+		}
+		if res.Written {
+			if err := i.Ledger.Record(IngestRecord{
+				Endpoint: ep.Path, Target: part, Source: "prune",
+				Rows: res.After, Changed: res.Before - res.After, Digest: windows.String(), RunID: i.RunID,
+			}); err != nil {
+				return out, err
+			}
+			i.info("jquants.prune", fmt.Sprintf("刈り込み %s %s", ep.Path, part), map[string]any{
+				"endpoint": ep.Path, "target": part, "windows": windows.String(),
+				"before": res.Before, "after": res.After, "bytes": res.Bytes,
+			})
+		}
+		out = append(out, res)
+	}
+	return out, nil
 }

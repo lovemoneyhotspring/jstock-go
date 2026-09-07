@@ -7,6 +7,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/spf13/cobra"
 )
@@ -67,6 +68,12 @@ func newSyncCmd() *cobra.Command {
 						params = append(params, fmt.Sprintf("%s=%s", k, job.Params[k]))
 					}
 					lines = append(lines, [3]string{job.Endpoint.Path, job.Target, strings.Join(params, ", ")})
+				}
+				// API の無い端点は一括の一覧を見るまで対象が分からない
+				for _, ep := range archive.ActiveEndpoints() {
+					if ep.BulkOnly && (len(wanted) == 0 || wanted[ep.Path]) {
+						lines = append(lines, [3]string{ep.Path, "bulk", "一括の日次ファイルで、台帳に無いか更新されたもの"})
+					}
 				}
 				if len(lines) == 0 {
 					fmt.Println("やることはありません（すべて最新）")

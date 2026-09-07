@@ -5,7 +5,7 @@
 | 知りたいこと | ファイル | 大きさ |
 |---|---|---|
 | デイトレの規則・1 日の流れ・設定・危険信号 | [DAYTRADE.md](DAYTRADE.md) | 40 KB |
-| J-Quants の何をどう溜めているか（端点・メモリ・分足） | [JQUANTS_ARCHIVE.md](JQUANTS_ARCHIVE.md) | 34 KB |
+| J-Quants の何をどう溜めているか（端点・メモリ・分足・ティック） | [JQUANTS_ARCHIVE.md](JQUANTS_ARCHIVE.md) | 34 KB |
 | 本番への持っていき方・cron・緊急停止・更新手順 | [DEPLOY.md](DEPLOY.md) | 23 KB |
 | ログの項目・`code` の一覧・読み方 | [LOGGING.md](LOGGING.md) | 20 KB |
 | 板・分足を集める理由と段階 | [OPENING_DATA.md](OPENING_DATA.md) | 14 KB |
