@@ -298,6 +298,46 @@ SELECT leg || ' top3', count(*), round(avg(CASE WHEN s_first >= 600 THEN 1 ELSE 
   round(avg(CASE WHEN s_first >= 900 THEN 1 ELSE 0 END) * 100, 2), round(avg(CASE WHEN s_first >= 1800 THEN 1 ELSE 0 END) * 100, 2),
   round(quantile_cont(s_first, 0.99), 0), round(max(s_first), 0)
 FROM base WHERE rk <= 3 GROUP BY 1 ORDER BY 1`},
+		{"wait_n", "提案: T 秒まで待ち、その時点で寄っていない銘柄だけをギャップ順に N=3 買う（建値 = 板寄せ）。比較: 9:01 に全候補から上位 3（寄った銘柄は 9:01 の成行値）", `
+WITH t AS (SELECT unnest([0, 60, 120, 180, 300, 420, 600, 900]) AS T),
+cand AS (
+  SELECT b.leg, b.d, b.yr, b.gap, b.sgn, b.s_first, b.p_first, b.f_1520, b.f_60, b.f_120, b.f_180, b.f_300, b.f_600, b.f_900, t.T
+  FROM base b CROSS JOIN t WHERE b.f_1520 IS NOT NULL
+),
+-- 方式 A: T で寄っていない銘柄だけ残し、ギャップ順に 3 つ。建値は板寄せ
+a AS (
+  SELECT *, row_number() OVER (PARTITION BY leg, d, T ORDER BY CASE WHEN leg = 'L' THEN gap ELSE -gap END) AS r
+  FROM cand WHERE s_first >= T
+),
+-- 方式 B（今の運用）: T の時点で全候補から上位 3。寄っている銘柄は T の成行値で建てる
+b AS (
+  SELECT *, row_number() OVER (PARTITION BY leg, d, T ORDER BY CASE WHEN leg = 'L' THEN gap ELSE -gap END) AS r,
+    CASE WHEN s_first >= T THEN p_first
+         WHEN T = 60 THEN f_60 WHEN T = 120 THEN f_120 WHEN T = 180 THEN f_180 WHEN T = 300 THEN f_300 WHEN T = 600 THEN f_600 WHEN T = 900 THEN f_900 ELSE p_first END AS entry
+  FROM cand WHERE T IN (0, 60, 120, 180, 300, 600, 900)
+)
+SELECT leg, T, 'A 未寄りだけ' AS way, count(*) AS trades, count(DISTINCT d) AS days,
+  round(avg(sgn * (f_1520 / p_first - 1) * 1e4), 1) AS mean_bp,
+  round(sum(sgn * (f_1520 / p_first - 1) * 1e4) / 1e4 * 1000000, 0) AS pnl_1m_each,
+  round(avg(sgn * (f_1520 / p_first - 1) * 1e4) / nullif(stddev(sgn * (f_1520 / p_first - 1) * 1e4), 0) * sqrt(count(*)), 2) AS t
+FROM a WHERE r <= 3 GROUP BY 1, 2, 3
+UNION ALL
+SELECT leg, T, 'B 全候補', count(*), count(DISTINCT d),
+  round(avg(sgn * (f_1520 / entry - 1) * 1e4), 1),
+  round(sum(sgn * (f_1520 / entry - 1) * 1e4) / 1e4 * 1000000, 0),
+  round(avg(sgn * (f_1520 / entry - 1) * 1e4) / nullif(stddev(sgn * (f_1520 / entry - 1) * 1e4), 0) * sqrt(count(*)), 2)
+FROM b WHERE r <= 3 AND entry IS NOT NULL GROUP BY 1, 2, 3
+ORDER BY 1, 3, 2`},
+		{"wait_n_year", "提案の年別（方式 A、N=3）", `
+WITH t AS (SELECT unnest([60, 180, 300, 600]) AS T),
+a AS (
+  SELECT b.leg, b.d, b.yr, b.sgn, b.p_first, b.f_1520, t.T,
+    row_number() OVER (PARTITION BY b.leg, b.d, t.T ORDER BY CASE WHEN b.leg = 'L' THEN b.gap ELSE -b.gap END) AS r
+  FROM base b CROSS JOIN t WHERE b.f_1520 IS NOT NULL AND b.s_first >= t.T
+)
+SELECT leg, yr, T, count(*) AS trades, count(DISTINCT d) AS days, round(avg(sgn * (f_1520 / p_first - 1) * 1e4), 1) AS mean_bp,
+  round(sum(sgn * (f_1520 / p_first - 1) * 1e4) / 1e4 * 1000000, 0) AS pnl_1m_each
+FROM a WHERE r <= 3 GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`},
 		{"entry_secs", "発見 3: 9:00 から X 秒後に成行を出したときの建値→15:20（上位 10、群別）。0 = 板寄せ", `
 WITH u AS (
   SELECT leg, CASE WHEN s_first < 1 THEN 'opened' ELSE 'delayed' END AS grp, sgn, f_1520, p_first,
