@@ -338,6 +338,23 @@ a AS (
 SELECT leg, yr, T, count(*) AS trades, count(DISTINCT d) AS days, round(avg(sgn * (f_1520 / p_first - 1) * 1e4), 1) AS mean_bp,
   round(sum(sgn * (f_1520 / p_first - 1) * 1e4) / 1e4 * 1000000, 0) AS pnl_1m_each
 FROM a WHERE r <= 3 GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`},
+		{"decide_secs", "判断時刻 T 秒（方式 B: 全候補から上位 3。寄っている銘柄は T の成行値、未寄りは板寄せ値）。1 取引 100 万円の 2 年合計", `
+WITH t AS (SELECT unnest([0, 5, 10, 20, 30, 45, 60, 90, 120]) AS T),
+cand AS (
+  SELECT b.leg, b.d, b.yr, b.gap, b.sgn, b.s_first, b.p_first, b.f_1520, t.T,
+    CASE WHEN b.s_first >= t.T THEN b.p_first
+         WHEN t.T = 5 THEN f_5 WHEN t.T = 10 THEN f_10 WHEN t.T = 20 THEN f_20 WHEN t.T = 30 THEN f_30 WHEN t.T = 45 THEN f_45
+         WHEN t.T = 60 THEN f_60 WHEN t.T = 90 THEN f_90 WHEN t.T = 120 THEN f_120 ELSE b.p_first END AS entry,
+    row_number() OVER (PARTITION BY b.leg, b.d, t.T ORDER BY CASE WHEN b.leg = 'L' THEN b.gap ELSE -b.gap END) AS r
+  FROM base b CROSS JOIN t WHERE b.f_1520 IS NOT NULL
+)
+SELECT leg, T, count(*) AS trades,
+  round(avg(sgn * (f_1520 / entry - 1) * 1e4), 1) AS mean_bp,
+  round(sum(sgn * (f_1520 / entry - 1) * 1e4) / 1e4 * 1000000, 0) AS pnl_1m_each,
+  round(sum(CASE WHEN yr = 2025 THEN sgn * (f_1520 / entry - 1) * 1e4 END) / 1e4 * 1000000, 0) AS pnl_2025,
+  round(sum(CASE WHEN yr = 2026 THEN sgn * (f_1520 / entry - 1) * 1e4 END) / 1e4 * 1000000, 0) AS pnl_2026,
+  round(100.0 * avg(CASE WHEN s_first < T THEN 1 ELSE 0 END), 1) AS opened_pct
+FROM cand WHERE r <= 3 AND entry IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2`},
 		{"entry_secs", "発見 3: 9:00 から X 秒後に成行を出したときの建値→15:20（上位 10、群別）。0 = 板寄せ", `
 WITH u AS (
   SELECT leg, CASE WHEN s_first < 1 THEN 'opened' ELSE 'delayed' END AS grp, sgn, f_1520, p_first,
