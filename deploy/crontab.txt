@@ -46,7 +46,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # ティック（同じアドオン。docs/JQUANTS_ARCHIVE.md「ティック（アドオン）」）。API が無いので一括の日次ファイル
 # （16:23 JST 頃に増える）を取る。1 日 450 万行・35MB、年 8.5GB。過去 2 年ぶん（490 日・17GB）は
 # 2026-09-07 に取り込み済み。JQUANTS_TICKS が無いと ActiveEndpoints に載らない（sync が何もしない）。
-# 分析が終わって時間帯を絞るなら JQUANTS_TICKS_WINDOWS="09:00-09:10,15:10-15:31" をこの行に足し、
+# 分析が終わって時間帯を絞るなら JQUANTS_TICKS_WINDOWS="09:00-09:31" をこの行に足し、
 # 溜めたぶんは `jquants prune --only equities_trades` で同じ窓に刈る
 40 17 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_TICKS=1 flock -n /tmp/jquants.lock $WBJP_BIN/jquants sync --only equities_trades >> state/logs/jquants-ticks.log 2>&1
 # 営業日ごとの欠けを監視（WBJP_ALERT_CHANNEL_ID があれば Discord に通知）。

@@ -389,12 +389,13 @@ jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/202
 ### 時間帯で絞る（分析が終わったあとの容量の削減）
 
 全時間帯で 2 年ぶん溜めて分析し、「効く時間帯」が決まったら、その窓だけ残して容量を落とせるようにしてある。
-2026-09-07 の検証（vault `2026-09-jp-gap-ticks`、`scratch/ticks-study`）では、判断を変える情報は **9:00 直後の秒単位**
-（寄ったか・板寄せの厚み）にしかなく、引け側の 15:10〜15:30 は分足で足りた。残す窓は `09:00-09:11`（候補の 99% の板寄せを含む）。
-引け側 `15:10-15:31` を足すかは板の記録との突き合わせ用途の有無で決める。**まだ刈っていない。**
-寄りと引けだけ（9:00〜9:10 と 15:10〜15:30）なら行数は **16%**（1 日 75 万行・約 7MB、年 1.7GB）になる。
+2026-09-07 の検証（vault `2026-09-jp-gap-ticks`、`scratch/ticks-study`）では、判断を変える情報は**寄付の瞬間**
+（寄ったか・何分遅れて寄ったか・板寄せの厚み）にしかなく、引け側の 15:10〜15:30 は分足で足りるので捨てると決めた。
+候補の板寄せはショートの 3 分の 1 が 9:10 より後、9:30 までに 99.7〜100% が終わるので、残す窓は **`09:00-09:31`**
+（全体の約 19.5%、2 年で約 3.3GB）。1 回目に書いた 09:11 は抽出の窓の誤りだった。**まだ刈っていない。**
+寄りだけ（9:00〜9:31）なら行数は **約 19.5%**（1 日 75 万行前後・約 7MB、年 1.7GB）になる。
 
-- **窓の定義は 1 か所**。環境変数 `JQUANTS_TICKS_WINDOWS="09:00-09:10,15:10-15:31"`（`Endpoint.WindowEnv`）。
+- **窓の定義は 1 か所**。環境変数 `JQUANTS_TICKS_WINDOWS="09:00-09:31"`（`Endpoint.WindowEnv`）。
   半開区間で、終了は含まない。引けの 15:30:00.xxx を残すには終了を `15:31` にする。空なら全時間帯。
   `Time` の列は `HH:MM:SS.ffffff` の文字列なので、`HH:MM` と辞書順で比べるだけで判定できる（`Windows.Keep`）。
 - **取り込みも同じ窓で絞る**。`sync` / `backfill` は Parquet に書く前に窓の外の行を落とす（`trimWindows`）。
@@ -410,9 +411,9 @@ jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/202
 
 ```bash
 # 分析が終わったら: まず数える
-JQUANTS_TICKS_WINDOWS="09:00-09:10,15:10-15:31" jquants prune --only equities_trades --dry-run
+JQUANTS_TICKS_WINDOWS="09:00-09:31" jquants prune --only equities_trades --dry-run
 # 刈る（cron の sync の行にも同じ環境変数を足して、以後の日次を同じ窓にする）
-JQUANTS_TICKS_WINDOWS="09:00-09:10,15:10-15:31" jquants prune --only equities_trades
+JQUANTS_TICKS_WINDOWS="09:00-09:31" jquants prune --only equities_trades
 ```
 
 ### 取り込みの時間とメモリ（2026-09-07 の実測）
