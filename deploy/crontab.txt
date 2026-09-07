@@ -44,14 +44,14 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 1 日 47 万行・4.7MB。JQUANTS_MINUTE_BARS が無いと ActiveEndpoints に載らない（sync が何もしない）
 25 17 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_MINUTE_BARS=1 flock -n /tmp/jquants.lock $WBJP_BIN/jquants sync --only equities_bars_minute >> state/logs/jquants-minute.log 2>&1
 # ティック（同じアドオン。docs/JQUANTS_ARCHIVE.md「ティック（アドオン）」）。API が無いので一括の日次ファイル
-# （16:23 JST 頃に増える）を取る。1 日 469 万行・43MB、年 10GB。**まだ止めてある**——過去 2 年ぶんの backfill を
-# 済ませてから開ける。開けるときは check の行にも JQUANTS_TICKS=1 を足す（無いと欠けても黙る）。
+# （16:23 JST 頃に増える）を取る。1 日 450 万行・35MB、年 8.5GB。過去 2 年ぶん（490 日・17GB）は
+# 2026-09-07 に取り込み済み。JQUANTS_TICKS が無いと ActiveEndpoints に載らない（sync が何もしない）。
 # 分析が終わって時間帯を絞るなら JQUANTS_TICKS_WINDOWS="09:00-09:10,15:10-15:31" をこの行に足し、
 # 溜めたぶんは `jquants prune --only equities_trades` で同じ窓に刈る
-# 40 17 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_TICKS=1 flock -n /tmp/jquants.lock $WBJP_BIN/jquants sync --only equities_trades >> state/logs/jquants-ticks.log 2>&1
+40 17 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_TICKS=1 flock -n /tmp/jquants.lock $WBJP_BIN/jquants sync --only equities_trades >> state/logs/jquants-ticks.log 2>&1
 # 営業日ごとの欠けを監視（WBJP_ALERT_CHANNEL_ID があれば Discord に通知）。
-# 分足も見るので JQUANTS_MINUTE_BARS が要る（無いと ActiveEndpoints に載らず、欠けても黙る）
-0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_MINUTE_BARS=1    $WBJP_BIN/jquants check --notify                   >> state/logs/jquants-check.log    2>&1
+# 分足・ティックも見るので JQUANTS_MINUTE_BARS / JQUANTS_TICKS が要る（無いと ActiveEndpoints に載らず、欠けても黙る）
+0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_MINUTE_BARS=1 JQUANTS_TICKS=1 $WBJP_BIN/jquants check --notify                   >> state/logs/jquants-check.log    2>&1
 # スイング売買の銘柄の日足を J-Quants アーカイブから揃える（wbjp screen / backtest の材料）
 5 19 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/wbjp-data.lock $WBJP_BIN/wbjp data sync --config-dir config               >> state/logs/wbjp-data-sync.log   2>&1
 10 19 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM                  $WBJP_BIN/wbjp data check --config-dir config --notify     >> state/logs/wbjp-data-check.log  2>&1
