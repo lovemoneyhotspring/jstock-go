@@ -28,7 +28,7 @@ const jqDir = "data/jquants"
 const dayLayout = "2006-01-02"
 
 // fillSecs は「9:00 から X 秒後に成行を出した」の建値を取る秒（その秒以降の最初の約定）。
-var fillSecs = []int{5, 10, 20, 30, 45, 60, 90, 120, 180, 300, 600}
+var fillSecs = []int{5, 10, 20, 30, 45, 60, 90, 120, 180, 300, 600, 900, 1200, 1800}
 
 // markSecs は「9:00 から X 秒後の値洗い」（その秒以前の最後の約定）。
 var markSecs = []int{5, 10, 20, 30, 60, 120, 300, 600}
@@ -96,7 +96,10 @@ func writePanelCSV(panel *dtbacktest.Panel, path string) error {
 }
 
 // extractFeatures はティックから (日, 銘柄) ごとの特徴量を作る。母集団の行だけに絞り、
-// 時間帯も 9:00〜9:11 と 15:00〜 に絞って読む。
+// 時間帯は前場全体（9:00〜11:30）と 15:00〜 を読む。
+//
+// 最初は 9:00〜9:11 に絞っていたが、それより後に寄る銘柄（特別気配が長い＝ギャップが大きい）が
+// 特徴量から落ち、順位の計算からも外れていた（ロング上位 3 の 10%、ショート上位 3 の 36%）。
 func extractFeatures(start, end time.Time) error {
 	db, err := storage.OpenDuckDB()
 	if err != nil {
@@ -149,7 +152,7 @@ WITH tk AS (
          epoch(CAST('2000-01-01 ' || t."Time" AS TIMESTAMP)) - epoch(TIMESTAMP '2000-01-01 09:00:00') AS s
   FROM read_parquet([%s], union_by_name=true) t
   JOIN (SELECT DISTINCT d, code FROM panel) pn ON pn.d = t."Date" AND pn.code = t."Code"
-  WHERE t."Time" < '09:11' OR t."Time" >= '15:00'
+  WHERE t."Time" < '11:30:01' OR t."Time" >= '15:00'
 ),
 first AS (SELECT d, code, min(s) AS s0 FROM tk WHERE ses = '01' GROUP BY d, code),
 agg AS (
@@ -230,7 +233,7 @@ s AS (
 )
 SELECT *,
   CASE WHEN s_first < 1 THEN 'a <1s' WHEN s_first < 10 THEN 'b 1-10s' WHEN s_first < 60 THEN 'c 10-60s'
-       WHEN s_first < 300 THEN 'd 1-5m' WHEN s_first < 600 THEN 'e 5-10m' ELSE 'f >10m' END AS delay,
+       WHEN s_first < 300 THEN 'd 1-5m' WHEN s_first < 600 THEN 'e 5-10m' WHEN s_first < 900 THEN 'f 10-15m' WHEN s_first < 1200 THEN 'g 15-20m' WHEN s_first < 1800 THEN 'h 20-30m' ELSE 'i >30m' END AS delay,
   -- ret: 建値 → 15:20 成行（bp）。ロングは買い、ショートは売り
   CASE WHEN leg = 'L' THEN (f_1520 / p_first - 1) ELSE (p_first / f_1520 - 1) END * 1e4 AS ret,
   CASE WHEN leg = 'L' THEN 1 ELSE -1 END AS sgn,
@@ -286,17 +289,24 @@ SELECT leg, yr, t3, round(median(auct_ratio) * 100, 1) AS ratio_pct, ` + stat("r
 SELECT leg, count(*) AS n,
   round(avg(CASE WHEN s_first >= 600 THEN 1 ELSE 0 END) * 100, 2) AS after_0910_pct,
   round(avg(CASE WHEN s_first >= 300 THEN 1 ELSE 0 END) * 100, 2) AS after_0905_pct,
-  round(quantile_cont(s_first, 0.99), 0) AS p99_sec
-FROM base WHERE rk <= 10 GROUP BY 1 ORDER BY 1`},
+  round(avg(CASE WHEN s_first >= 900 THEN 1 ELSE 0 END) * 100, 2) AS after_0915_pct,
+  round(avg(CASE WHEN s_first >= 1800 THEN 1 ELSE 0 END) * 100, 2) AS after_0930_pct,
+  round(quantile_cont(s_first, 0.99), 0) AS p99_sec, round(max(s_first), 0) AS max_sec
+FROM base WHERE rk <= 10 GROUP BY 1
+UNION ALL
+SELECT leg || ' top3', count(*), round(avg(CASE WHEN s_first >= 600 THEN 1 ELSE 0 END) * 100, 2), round(avg(CASE WHEN s_first >= 300 THEN 1 ELSE 0 END) * 100, 2),
+  round(avg(CASE WHEN s_first >= 900 THEN 1 ELSE 0 END) * 100, 2), round(avg(CASE WHEN s_first >= 1800 THEN 1 ELSE 0 END) * 100, 2),
+  round(quantile_cont(s_first, 0.99), 0), round(max(s_first), 0)
+FROM base WHERE rk <= 3 GROUP BY 1 ORDER BY 1`},
 		{"entry_secs", "発見 3: 9:00 から X 秒後に成行を出したときの建値→15:20（上位 10、群別）。0 = 板寄せ", `
 WITH u AS (
   SELECT leg, CASE WHEN s_first < 1 THEN 'opened' ELSE 'delayed' END AS grp, sgn, f_1520, p_first,
-    f_5, f_10, f_20, f_30, f_45, f_60, f_90, f_120, f_180, f_300, f_600
+    f_5, f_10, f_20, f_30, f_45, f_60, f_90, f_120, f_180, f_300, f_600, f_900, f_1200, f_1800
   FROM base WHERE rk <= 10 AND f_1520 IS NOT NULL
 ),
 x AS (
   SELECT leg, grp, k, round(avg(sgn * (f_1520 / v - 1) * 1e4), 1) AS mean_bp, count(v) AS n
-  FROM u UNPIVOT (v FOR k IN (p_first AS s0, f_5 AS s5, f_10 AS s10, f_20 AS s20, f_30 AS s30, f_45 AS s45, f_60 AS s60, f_90 AS s90, f_120 AS s120, f_180 AS s180, f_300 AS s300, f_600 AS s600))
+  FROM u UNPIVOT (v FOR k IN (p_first AS s0, f_5 AS s5, f_10 AS s10, f_20 AS s20, f_30 AS s30, f_45 AS s45, f_60 AS s60, f_90 AS s90, f_120 AS s120, f_180 AS s180, f_300 AS s300, f_600 AS s600, f_900 AS s900, f_1200 AS s1200, f_1800 AS s1800))
   GROUP BY 1, 2, 3
 )
 SELECT leg, grp, k, mean_bp, n FROM x ORDER BY leg, grp, CAST(substr(k, 2) AS INT)`},
