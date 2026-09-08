@@ -258,7 +258,9 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
   - 月次の `jquants backfill` は 2〜5 日の 4 回。成功していれば 2 回目以降は
     更新された一括ファイル（過誤訂正、月末数日の取り漏れ）だけを取り直す
 - 平日 20:00 の `jquants check --notify` は欠けの監視。当日ぶん（16:30〜18:00 公開）が
-  取れていなければ Discord（`WBJP_ALERT_CHANNEL_ID`）に通知する（未設定ならログのみ）
+  取れていなければ Discord（`WBJP_ALERT_CHANNEL_ID`）に通知する（未設定ならログのみ）。
+  通知が来たら `jquants repair --dry-run` で対象を見て、`jquants repair` で取り直す
+  （分足・ティックも見るなら check と同じく `JQUANTS_MINUTE_BARS=1 JQUANTS_TICKS=1` を付ける）
 
 - `accum backup` は `state/` の全 SQLite（積立台帳 `accum-prod.db` とスイング売買の記録
   `wbjp-prod.db`）を `state/backup/<名前>-YYYYMMDD.db` に複製する（各 30 世代、SQLite の
