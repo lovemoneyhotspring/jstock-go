@@ -181,7 +181,7 @@ crontab -l | grep -cF 'env $JQ_MEM'    # 上限が全行に渡っているか
 
    | 変数 | 送るもの |
    |---|---|
-   | `WBJP_ALERT_CHANNEL_ID` | 異常（`jquants check --notify`、`daytrade close` の失敗など） |
+   | `WBJP_ALERT_CHANNEL_ID` | 異常（`jquants repair --notify`、`daytrade close` の失敗など） |
    | `WBJP_REPORT_CHANNEL_ID` | 21:00 の日次レポート。無ければ `WBJP_ALERT_CHANNEL_ID` に流れる |
 
    送るたびに新しいスレッドを作り、本文はその中に入る（1 通知 1 スレッド）。本文が
@@ -257,10 +257,11 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
     1 回失敗しても 1 時間後に取り直し、失敗が続けば毎時通知が来る
   - 月次の `jquants backfill` は 2〜5 日の 4 回。成功していれば 2 回目以降は
     更新された一括ファイル（過誤訂正、月末数日の取り漏れ）だけを取り直す
-- 平日 20:00 の `jquants check --notify` は欠けの監視。当日ぶん（16:30〜18:00 公開）が
-  取れていなければ Discord（`WBJP_ALERT_CHANNEL_ID`）に通知する（未設定ならログのみ）。
-  通知が来たら `jquants repair --dry-run` で対象を見て、`jquants repair` で取り直す
-  （分足・ティックも見るなら check と同じく `JQUANTS_MINUTE_BARS=1 JQUANTS_TICKS=1` を付ける）
+- 平日 20:00 の `jquants repair --notify` は欠けの監視と自動修復。当日ぶん（16:30〜18:00 公開）が
+  取れていなければその場で取り直し、それでも埋まらなかった日だけ Discord（`WBJP_ALERT_CHANNEL_ID`）に
+  通知する（未設定ならログのみ）。通知が来たら手で `jquants repair --dry-run` → `jquants repair`
+  （分足・ティックも見るなら cron と同じく `JQUANTS_MINUTE_BARS=1 JQUANTS_TICKS=1` を付ける）。
+  `jquants check` は取り直さずに見るだけ
 
 - `accum backup` は `state/` の全 SQLite（積立台帳 `accum-prod.db` とスイング売買の記録
   `wbjp-prod.db`）を `state/backup/<名前>-YYYYMMDD.db` に複製する（各 30 世代、SQLite の

@@ -49,9 +49,9 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 2026-09-07 の検証（vault 2026-09-jp-gap-ticks）で残す窓を 09:00-09:31 に決め、溜めたぶんも同じ窓で刈った。
 # 窓を変えるならこの行と `jquants prune` の両方を同じ値にする
 40 17 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_TICKS=1 JQUANTS_TICKS_WINDOWS="09:00-09:31" flock -n /tmp/jquants.lock $WBJP_BIN/jquants sync --only equities_trades >> state/logs/jquants-ticks.log 2>&1
-# 営業日ごとの欠けを監視（WBJP_ALERT_CHANNEL_ID があれば Discord に通知）。
+# 営業日ごとの欠けを探し、その場で取り直す（埋まらなければ WBJP_ALERT_CHANNEL_ID に通知）。ティックの窓は sync と同じ値。
 # 分足・ティックも見るので JQUANTS_MINUTE_BARS / JQUANTS_TICKS が要る（無いと ActiveEndpoints に載らず、欠けても黙る）
-0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_MINUTE_BARS=1 JQUANTS_TICKS=1 $WBJP_BIN/jquants check --notify                   >> state/logs/jquants-check.log    2>&1
+0 20 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM JQUANTS_MINUTE_BARS=1 JQUANTS_TICKS=1 JQUANTS_TICKS_WINDOWS="09:00-09:31" flock -w 600 /tmp/jquants.lock $WBJP_BIN/jquants repair --notify >> state/logs/jquants-check.log    2>&1
 # スイング売買の銘柄の日足を J-Quants アーカイブから揃える（wbjp screen / backtest の材料）
 5 19 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/wbjp-data.lock $WBJP_BIN/wbjp data sync --config-dir config               >> state/logs/wbjp-data-sync.log   2>&1
 10 19 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM                  $WBJP_BIN/wbjp data check --config-dir config --notify     >> state/logs/wbjp-data-check.log  2>&1

@@ -458,6 +458,7 @@ JQUANTS_TICKS=1 jquants sync --only equities_trades
   `repair` は同じ判定で見つけた日だけ取り直す。API のある端点は 1 日ずつ `date=`（0 行でも台帳に残るので、
   信用残高のような週次の端点は金曜以外を次から欠けと数えない）。ティックは一括の日次ファイルを欠けの月から。
   全期間（2015-09〜）を確認し、実際の欠けは信用残高の 2026-08 の 11 営業日（すべて 0 行の日）だけだった。
+  同日、cron の 20:00 を `check --notify` から `repair --notify` に替えた（自動修復。埋まらなかった日だけ通知）。
 - 2026-09-07: ティック（アドオン）の**取り込み経路を実装**。`Endpoint` に `BulkOnly`（API 無し）・`NoRaw`・`EnableEnv` を足し、
   `Sync()` が一括の日次ファイルで増分を取る（`SyncBulk`）。有効化は `JQUANTS_TICKS=1`。
   時間帯で絞る仕組み（`JQUANTS_TICKS_WINDOWS`・`jquants prune`）も入れた。分析後に寄り・引けだけ残す想定。
