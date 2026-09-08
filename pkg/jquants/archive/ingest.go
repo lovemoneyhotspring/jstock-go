@@ -580,9 +580,16 @@ func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]tim
 	} else {
 		days = weekdays(start, end)
 	}
+	// 最初に持っている日より前は数えない。端点によってデータの始まりが違う
+	// （EDINET は 2016-09、アドオンは直近 2 年）ので、そこより前を「欠け」と
+	// 呼んでも埋めようが無い。何も持っていなければ全期間が対象
+	first := firstKnown(dates, targets)
 	var missing []time.Time
 	for _, d := range days {
 		iso := d.Format(dateLayout)
+		if first != "" && iso < first {
+			continue
+		}
 		if have[iso] || fetched[iso] || covers(covered, d) {
 			continue
 		}
@@ -592,6 +599,108 @@ func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]tim
 		missing = append(missing, d)
 	}
 	return missing, nil
+}
+
+// firstKnown は端点が最初に持っている日（"2006-01-02"）。データの日付と台帳の
+// 対象（日付、または一括ファイルの覆う月・日）のうち最も古いもの。無ければ空文字。
+// 月次の一括（"2026-08"）はその月の 1 日として扱う。
+func firstKnown(dates []time.Time, targets []string) string {
+	first := ""
+	take := func(iso string) {
+		if iso != "" && (first == "" || iso < first) {
+			first = iso
+		}
+	}
+	for _, d := range dates {
+		take(d.Format(dateLayout))
+	}
+	for _, t := range targets {
+		switch {
+		case len(t) > 5 && t[:5] == "bulk:":
+			if c := coverageIn(t); len(c) == 7 {
+				take(c + "-01")
+			} else {
+				take(c)
+			}
+		case len(t) == len(dateLayout):
+			take(t)
+		}
+	}
+	return first
+}
+
+// RepairPlan は端点 1 つぶんの「埋めるべき日」。
+type RepairPlan struct {
+	Endpoint Endpoint
+	Days     []time.Time
+}
+
+// RepairResult は Repair の結果。Remaining は取り直した後にまだ欠けている日。
+type RepairResult struct {
+	Plans     []RepairPlan
+	Ingests   []Ingest
+	Failures  []Failure
+	Remaining []RepairPlan
+}
+
+// PlanRepair は check と同じ判定（Gaps）で、端点ごとの欠けを集める。
+func (i *Ingestor) PlanRepair(eps []Endpoint, start, end, now time.Time) ([]RepairPlan, error) {
+	var plans []RepairPlan
+	for _, ep := range eps {
+		if ep.Mode != ModeDate {
+			continue
+		}
+		gaps, err := i.Gaps(ep, start, end, now)
+		if err != nil {
+			return nil, fmt.Errorf("%s の欠けを調べられません: %w", ep.Path, err)
+		}
+		if len(gaps) > 0 {
+			plans = append(plans, RepairPlan{Endpoint: ep, Days: gaps})
+		}
+	}
+	return plans, nil
+}
+
+// Repair は欠けている日を取り直す。
+//
+// API のある端点は 1 日ずつ date= で取る（0 行でも台帳に残るので、週次のように
+// 行の無い日は次から欠けと数えない）。API の無い端点（ティック）は一括の日次
+// ファイルを、欠けの最も古い月から取り直す。終わったら同じ範囲をもう一度調べ、
+// 埋まらなかった日を Remaining に返す。
+func (i *Ingestor) Repair(eps []Endpoint, start, end, now time.Time) (*RepairResult, error) {
+	plans, err := i.PlanRepair(eps, start, end, now)
+	if err != nil {
+		return nil, err
+	}
+	result := &RepairResult{Plans: plans}
+	sync := &SyncResult{}
+	for _, plan := range plans {
+		ep := plan.Endpoint
+		if ep.BulkOnly {
+			since := plan.Days[0].Format("2006-01")
+			bulk, err := i.Backfill(ep, since, true)
+			if err != nil {
+				i.errorLog("jquants.ingest_failed", fmt.Sprintf("一括の一覧の取得に失敗 %s", ep.Path),
+					map[string]any{"endpoint": ep.Path, "target": "bulk:list", "error": err.Error()})
+				result.Failures = append(result.Failures, Failure{ep.Path, "bulk:list", err.Error()})
+				continue
+			}
+			sync.Ingests = append(sync.Ingests, bulk.Ingests...)
+			sync.Failures = append(sync.Failures, bulk.Failures...)
+			continue
+		}
+		for _, d := range plan.Days {
+			iso := d.Format(dateLayout)
+			i.try(sync, ep, iso, map[string]string{ep.DateParam: iso})
+		}
+	}
+	result.Ingests, result.Failures = sync.Ingests, sync.Failures
+	remaining, err := i.PlanRepair(eps, start, end, now)
+	if err != nil {
+		return result, err
+	}
+	result.Remaining = remaining
+	return result, nil
 }
 
 // -- 小物 ---------------------------------------------------------------

@@ -14,6 +14,7 @@ func main() {
 
 	rootCmd.AddCommand(newStatusCmd())
 	rootCmd.AddCommand(newCheckCmd())
+	rootCmd.AddCommand(newRepairCmd())
 	rootCmd.AddCommand(newSyncCmd())
 	rootCmd.AddCommand(newBackfillCmd())
 	rootCmd.AddCommand(newPruneCmd())

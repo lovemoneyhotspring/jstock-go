@@ -22,7 +22,8 @@ func newCheckCmd() *cobra.Command {
 		Use:   "check",
 		Short: "営業日ごとの欠けを探す（欠けがあれば終了コード 2）",
 		Long: "監視用。cron から回すときは --notify を付けると、ログを開かなくても気づける。\n" +
-			"確認そのものに失敗したときも通知する（監視役が黙って死ぬのを防ぐ）。",
+			"確認そのものに失敗したときも通知する（監視役が黙って死ぬのを防ぐ）。\n" +
+			"欠けを埋めるには `jquants repair`（同じ判定で、その日だけ取り直す）。",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			end := clock.TodayUTC()
@@ -60,17 +61,7 @@ func newCheckCmd() *cobra.Command {
 					continue
 				}
 				missingTotal += len(gaps)
-				shown := make([]string, 0, 8)
-				for i, d := range gaps {
-					if i >= 8 {
-						break
-					}
-					shown = append(shown, d.Format("2006-01-02"))
-				}
-				text := strings.Join(shown, ", ")
-				if len(gaps) > 8 {
-					text += fmt.Sprintf(" …（計 %d）", len(gaps))
-				}
+				text := joinDays(gaps)
 				fmt.Fprintf(w, "%s\t%s\n", ep.Path, text)
 				lines = append(lines, fmt.Sprintf("%s: %s", ep.Path, text))
 			}

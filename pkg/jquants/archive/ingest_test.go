@@ -680,3 +680,145 @@ func TestPruneKeepsOnlyWindows(t *testing.T) {
 		t.Error("月分割の端点を刈ろうとしている")
 	}
 }
+
+func TestGapsSkipsBeforeFirstKnownDay(t *testing.T) {
+	// EDINET やアドオンのように途中から始まる端点は、最初に持っている日より前を欠けと数えない
+	ep := bars()
+	ing := newTestIngestor(t, &stubClient{})
+	if err := ing.Ledger.Record(IngestRecord{
+		Endpoint: ep.Path, Target: "bulk:equities_bars_daily_202502.csv.gz", Source: "bulk",
+		FetchedUTC: jstAt(2025, 3, 1, 12, 0), Digest: "stamp",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gaps, err := ing.Gaps(ep,
+		time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2025, 3, 5, 0, 0, 0, 0, time.UTC),
+		jstAt(2025, 3, 6, 12, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1 月は始まる前なので数えず、3 月（一括に無い）だけ欠け
+	for _, g := range gaps {
+		if g.Month() != time.March {
+			t.Fatalf("始まる前の日を欠けと数えている: %v", gaps)
+		}
+	}
+	if len(gaps) == 0 {
+		t.Fatal("一括の後の欠けを見落としている")
+	}
+}
+
+func TestFirstKnown(t *testing.T) {
+	cases := []struct {
+		dates   []string
+		targets []string
+		want    string
+	}{
+		{nil, nil, ""},
+		{[]string{"2025-01-08"}, []string{"2025-01-07"}, "2025-01-07"},
+		{nil, []string{"bulk:equities_bars_daily_202501.csv.gz"}, "2025-01-01"},
+		{nil, []string{"bulk:equities_trades_20250107.csv.gz", "2025-01-09"}, "2025-01-07"},
+		{[]string{"2024-12-30"}, []string{"bulk:x_202501.csv.gz"}, "2024-12-30"},
+	}
+	for _, c := range cases {
+		var dates []time.Time
+		for _, d := range c.dates {
+			parsed, _ := time.Parse(dateLayout, d)
+			dates = append(dates, parsed)
+		}
+		if got := firstKnown(dates, c.targets); got != c.want {
+			t.Errorf("firstKnown(%v, %v) = %q, want %q", c.dates, c.targets, got, c.want)
+		}
+	}
+}
+
+func TestRepairFillsGapsAndRecordsEmptyDays(t *testing.T) {
+	cal := CalendarEndpoint()
+	ep := bars()
+	client := &stubClient{rows: map[string][]map[string]any{
+		ep.Path: {{"Date": "2025-01-08", "Code": "1", "C": "1"}},
+	}}
+	ing := newTestIngestor(t, client)
+	f, _ := RowsToFrame([]map[string]any{
+		{"Date": "2025-01-06", "HolDiv": "1"},
+		{"Date": "2025-01-07", "HolDiv": "1"},
+		{"Date": "2025-01-08", "HolDiv": "1"},
+	}, cal)
+	if _, err := ing.Archive.Upsert(cal, f); err != nil {
+		t.Fatal(err)
+	}
+	bars6, _ := RowsToFrame([]map[string]any{{"Date": "2025-01-06", "Code": "1", "C": "1"}}, ep)
+	if _, err := ing.Archive.Upsert(ep, bars6); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2025, 1, 8, 0, 0, 0, 0, time.UTC)
+	now := jstAt(2025, 1, 9, 12, 0)
+
+	plans, err := ing.PlanRepair([]Endpoint{cal, ep}, start, end, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || len(plans[0].Days) != 2 {
+		t.Fatalf("計画 = %+v, want bars の 1/7 と 1/8", plans)
+	}
+
+	result, err := ing.Repair([]Endpoint{cal, ep}, start, end, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// スタブは date= を見ないので両日とも同じ 1/8 の行が返るが、
+	// 1/7 の取り込みも台帳に残る（週次で 0 行の日と同じ扱い）
+	if len(result.Ingests) != 2 || len(result.Failures) != 0 {
+		t.Fatalf("結果 = %+v", result)
+	}
+	if len(result.Remaining) != 0 {
+		t.Fatalf("埋めた後にまだ欠けている: %+v", result.Remaining)
+	}
+	if len(client.calls) != 2 || client.calls[0] != ep.Path+"?2025-01-07" || client.calls[1] != ep.Path+"?2025-01-08" {
+		t.Fatalf("呼び出し = %v", client.calls)
+	}
+}
+
+func TestRepairBulkOnlyUsesDailyFiles(t *testing.T) {
+	t.Setenv("JQUANTS_TICKS", "1")
+	cal := CalendarEndpoint()
+	ep := ticks()
+	key := "equities/trades/live/equities_trades_20250107.csv.gz"
+	client := &stubClient{
+		bulk:  map[string][]map[string]any{ep.Path: {{"Key": key, "LastModified": "2025-01-08T00:00:00Z"}}},
+		files: map[string][]byte{key: gzipped("Date,Code,Time,SessionDistinction,Price,TradingVolume,TransactionId\n2025-01-07,1,09:00:00.000000,01,1,1,1\n")},
+	}
+	ing := newTestIngestor(t, client)
+	f, _ := RowsToFrame([]map[string]any{
+		{"Date": "2025-01-06", "HolDiv": "1"},
+		{"Date": "2025-01-07", "HolDiv": "1"},
+	}, cal)
+	if _, err := ing.Archive.Upsert(cal, f); err != nil {
+		t.Fatal(err)
+	}
+	// 1/6 は一括で取り込み済み、1/7 が欠け
+	if err := ing.Ledger.Record(IngestRecord{
+		Endpoint: ep.Path, Target: "bulk:equities_trades_20250106.csv.gz", Source: "bulk",
+		FetchedUTC: jstAt(2025, 1, 7, 12, 0), Digest: "stamp",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2025, 1, 7, 0, 0, 0, 0, time.UTC)
+	now := jstAt(2025, 1, 8, 12, 0)
+	result, err := ing.Repair([]Endpoint{ep}, start, end, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Plans) != 1 || len(result.Plans[0].Days) != 1 {
+		t.Fatalf("計画 = %+v", result.Plans)
+	}
+	if len(result.Ingests) != 1 || result.Ingests[0].Target != "bulk:"+key {
+		t.Fatalf("取り込み = %+v, 失敗 = %+v", result.Ingests, result.Failures)
+	}
+	if len(result.Remaining) != 0 || len(client.calls) != 0 {
+		t.Fatalf("残り = %+v, API 呼び出し = %v", result.Remaining, client.calls)
+	}
+}

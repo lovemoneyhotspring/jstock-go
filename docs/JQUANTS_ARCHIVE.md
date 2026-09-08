@@ -147,6 +147,8 @@ jquants sync [--days N] [--only 端点]   台帳を見て必要な端点・日�
 jquants backfill [--since 2016-09]     一括ダウンロードで初回取り込み。再実行は更新ファイルだけ
 jquants status                         端点ごとの月数・最古・最新・最終取得
 jquants check [--date D] [--days 30]   営業日の欠けを探す（あれば非 0 で終了。監視用）
+jquants repair [--days 30] [--only 端点] [--dry-run]
+                                       check と同じ判定で欠けを探し、その日だけ取り直す（埋まらなければ非 0）
 jquants query "SELECT …"               DuckDB で端点名のビューを張って SQL（研究用）
 ```
 
@@ -451,6 +453,11 @@ JQUANTS_TICKS=1 jquants sync --only equities_trades
 
 ## 状態
 
+- 2026-09-08: **欠けの確認と修復をコマンドにした**。`check` は端点が最初に持っている日より前を欠けと数えない
+  （EDINET は 2016-09、アドオンは直近 2 年から始まるので、`--days` を広げても誤検知しない）。
+  `repair` は同じ判定で見つけた日だけ取り直す。API のある端点は 1 日ずつ `date=`（0 行でも台帳に残るので、
+  信用残高のような週次の端点は金曜以外を次から欠けと数えない）。ティックは一括の日次ファイルを欠けの月から。
+  全期間（2015-09〜）を確認し、実際の欠けは信用残高の 2026-08 の 11 営業日（すべて 0 行の日）だけだった。
 - 2026-09-07: ティック（アドオン）の**取り込み経路を実装**。`Endpoint` に `BulkOnly`（API 無し）・`NoRaw`・`EnableEnv` を足し、
   `Sync()` が一括の日次ファイルで増分を取る（`SyncBulk`）。有効化は `JQUANTS_TICKS=1`。
   時間帯で絞る仕組み（`JQUANTS_TICKS_WINDOWS`・`jquants prune`）も入れた。分析後に寄り・引けだけ残す想定。
