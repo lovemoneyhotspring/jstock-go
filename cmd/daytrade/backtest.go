@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
+	"os"
+	"strconv"
 	"time"
 
 	dtbacktest "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/backtest"
@@ -14,6 +17,7 @@ import (
 func newBacktestCmd() *cobra.Command {
 	var sinceFlag, untilFlag, fillEntryFlag, fillExitFlag string
 	var tradesFlag bool
+	var tradesCSVFlag string
 	cmd := &cobra.Command{
 		Use:   "backtest",
 		Short: "アーカイブで同じ規則を検証する（資金固定・100 株単位・段階手数料）",
@@ -42,10 +46,14 @@ func newBacktestCmd() *cobra.Command {
 			}
 			build := minuteOptions(cfg, start, end, fillEntryFlag, fillExitFlag)
 			if cfg.Margin.Enabled {
+				tradesCSVPath = tradesCSVFlag
 				return runMarginBacktest(cfg, start, end, fetcher, cache, tradesFlag, build)
 			}
 			result, err := dtbacktest.RunWith(openArchive(), cfg, start, end, fetcher, cache, build)
 			if err != nil {
+				return err
+			}
+			if err := writeTradesCSV(tradesCSVFlag, result.Trades, nil); err != nil {
 				return err
 			}
 			printBacktest(cfg, result, start, end, tradesFlag)
@@ -55,6 +63,7 @@ func newBacktestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sinceFlag, "since", "2017-01-01", "開始日")
 	cmd.Flags().StringVar(&untilFlag, "until", "", "終了日（既定は最新）")
 	cmd.Flags().BoolVar(&tradesFlag, "trades", false, "個別の取引も出す")
+	cmd.Flags().StringVar(&tradesCSVFlag, "trades-csv", "", "全取引（ロング・ショート）を CSV に書く（研究用。板の厚みとの突き合わせなど）")
 	cmd.Flags().StringVar(&fillEntryFlag, "fill-entry", "",
 		"建値を分足で取る時刻（HH:MM。例 09:01。空なら日足の寄付）")
 	cmd.Flags().StringVar(&fillExitFlag, "fill-exit", "",
@@ -181,7 +190,38 @@ func runMarginBacktest(cfg dtconfig.Config, start, end time.Time, fetcher usmark
 	if showTrades {
 		printTrades(result.ShortTrades)
 	}
-	return nil
+	return writeTradesCSV(tradesCSVPath, result.LongTrades, result.ShortTrades)
+}
+
+// tradesCSVPath は --trades-csv の出力先（信用の経路に渡すためのパッケージ変数）。
+var tradesCSVPath string
+
+// writeTradesCSV は全取引を side 列付きで CSV に書く。path が空なら何もしない。
+// 株数・損益は縮めた日の倍率を掛けた後の値（printTrades と同じ）。
+func writeTradesCSV(path string, long, short []dtbacktest.Trade) error {
+	if path == "" {
+		return nil
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	_ = w.Write([]string{"date", "side", "code", "rank", "gap", "shares", "entry", "exit", "amount", "fees", "pnl", "scale", "carried"})
+	write := func(side string, ts []dtbacktest.Trade) {
+		for _, t := range ts {
+			_ = w.Write([]string{t.Date.Format(DateLayout), side, t.Code, strconv.Itoa(t.Rank),
+				strconv.FormatFloat(t.Gap, 'f', 6, 64), strconv.FormatFloat(t.Shares, 'f', 0, 64),
+				strconv.FormatFloat(t.Entry, 'f', 2, 64), strconv.FormatFloat(t.Exit, 'f', 2, 64),
+				strconv.FormatFloat(t.Amount, 'f', 0, 64), strconv.FormatFloat(t.Fees, 'f', 0, 64),
+				strconv.FormatFloat(t.PnL, 'f', 0, 64), strconv.FormatFloat(t.Scale, 'f', 2, 64), strconv.FormatBool(t.Carried)})
+		}
+	}
+	write("long", long)
+	write("short", short)
+	w.Flush()
+	return w.Error()
 }
 
 // printTrades は直近 30 件の取引。全部出すと端末が流れるだけなので末尾に絞る。
