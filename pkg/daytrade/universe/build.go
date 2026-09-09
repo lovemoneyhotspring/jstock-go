@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/archsql"
@@ -75,6 +76,11 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 	if err != nil {
 		return nil, err
 	}
+	// 直近の本決算の当期純利益。益回り（NP ÷ 時価総額）と赤字の判定に使う
+	netProfit, err := loadLatestNetProfit(arch, prevDay)
+	if err != nil {
+		return nil, err
+	}
 
 	// 分位は「株式かつ流動性の下限を満たす全銘柄」で切る（研究と同じ）
 	minTurnover, _ := cfg.MinTurnover.Float64()
@@ -108,6 +114,14 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 	terciles := CapTerciles(caps, mask)
 	for i := range rows {
 		rows[i].CapTercile = terciles[i]
+		if np, ok := netProfit[rows[i].Code]; ok {
+			rows[i].Loss = np <= 0
+			// MktCap は百万円。益回りは円どうしで割る
+			if rows[i].MktCap > 0 {
+				y := np / (rows[i].MktCap * 1e6)
+				rows[i].EarnYield = &y
+			}
+		}
 		rows[i].Eligible = Eligible(rows[i], cfg)
 		rows[i].ShortEligible = ShortEligible(rows[i], margin)
 	}
@@ -307,6 +321,51 @@ func loadMarginRatio(arch *archive.Archive, day time.Time) (map[string]*float64,
 	out := make(map[string]*float64, len(latest))
 	for code, e := range latest {
 		out[code] = e.ratio
+	}
+	return out, nil
+}
+
+// loadLatestNetProfit は prevDay までに開示された**最新の本決算**の当期純利益を銘柄ごとに返す。
+//
+// 本決算は年 1 回なので 400 日遡る（決算期がずれても 1 期は拾える）。四半期は使わない
+// ——益回りの検定を年次の本決算で行ったため（研究ノート 2026-09-jp-value-signal）。
+func loadLatestNetProfit(arch *archive.Archive, prevDay time.Time) (map[string]float64, error) {
+	frame, err := arch.ReadWhere(EPFins, archive.ReadOptions{
+		Start:   prevDay.AddDate(0, 0, -400),
+		End:     prevDay,
+		Columns: []string{"Code", "DocType", "CurPerType", "NP"},
+	})
+	if err != nil || frame == nil {
+		return map[string]float64{}, err
+	}
+	limit := prevDay.Format(archsql.DateLayout)
+	type entry struct {
+		date string
+		np   float64
+	}
+	latest := make(map[string]entry, frame.Height())
+	for i := range frame.Rows {
+		date := text(frame.Get(i, "DiscDate"))
+		code := text(frame.Get(i, "Code"))
+		if code == "" || date == "" || date > limit {
+			continue
+		}
+		if text(frame.Get(i, "CurPerType")) != "FY" ||
+			!strings.HasPrefix(text(frame.Get(i, "DocType")), "FYFinancialStatements") {
+			continue
+		}
+		np, ok := parseFloat(text(frame.Get(i, "NP")))
+		if !ok {
+			continue
+		}
+		if prev, exists := latest[code]; exists && prev.date > date {
+			continue
+		}
+		latest[code] = entry{date: date, np: np}
+	}
+	out := make(map[string]float64, len(latest))
+	for code, e := range latest {
+		out[code] = e.np
 	}
 	return out, nil
 }

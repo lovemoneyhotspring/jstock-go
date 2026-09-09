@@ -36,7 +36,9 @@ type Row struct {
 	// NextOpen は翌営業日の寄付。ショートが引けストップ高で返済できなかったときの返済値。
 	NextOpen *float64
 	Vol20    *float64
-	Gap      float64
+	// EarnYield は益回り（直近の本決算の当期純利益 ÷ 前日の時価総額）。無ければ nil。
+	EarnYield *float64
+	Gap       float64
 	// LimitLow / LimitHigh は前日終値を基準値段とする制限値幅（ストップ安・高）。
 	LimitLow      float64
 	LimitHigh     float64
@@ -71,7 +73,9 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 	}
 	defer db.Close()
 
-	finsSrc, hasFins := archsql.Source(arch, universe.EPFins, start.AddDate(0, 0, -7), end)
+	// 本決算は年 1 回なので 420 日遡る（益回り・赤字の判定。前日引け後の決算フラグは
+	// 直近 1 日しか見ないので、同じ読み込みで足りる）
+	finsSrc, hasFins := archsql.Source(arch, universe.EPFins, start.AddDate(0, 0, -420), end)
 	schedSrc, hasSched := archsql.Source(arch, universe.EPEarningsDate, start.AddDate(0, 0, -120), end)
 	alertSrc, hasAlert := archsql.Source(arch, universe.EPMarginAlert, start.AddDate(0, 0, -7), end)
 
@@ -93,10 +97,11 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 		var (
 			r                 Row
 			nextOpen, vol20   sql.NullFloat64
+			earnYield         sql.NullFloat64
 			limitLow, limitHi sql.NullFloat64
 		)
 		if err := rows.Scan(&r.Date, &r.Code, &r.Open, &r.Close, &r.PrevClose,
-			&nextOpen, &vol20, &r.Gap, &limitLow, &limitHi,
+			&nextOpen, &vol20, &earnYield, &r.Gap, &limitLow, &limitHi,
 			&r.Eligible, &r.ShortEligible); err != nil {
 			return nil, err
 		}
@@ -108,6 +113,10 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 		if vol20.Valid {
 			v := vol20.Float64
 			r.Vol20 = &v
+		}
+		if earnYield.Valid {
+			v := earnYield.Float64
+			r.EarnYield = &v
 		}
 		r.LimitLow, r.LimitHigh = limitLow.Float64, limitHi.Float64
 		panel.Rows = append(panel.Rows, r)
@@ -229,6 +238,23 @@ joined AS (
 		b.WriteString("earn AS (SELECT NULL::VARCHAR AS code, NULL::BIGINT AS di WHERE false),\n")
 	}
 
+	// 直近の本決算の当期純利益（益回り・赤字の判定）。開示日**より後**の日から効かせる
+	// ——前夜の plan が使えるのは前日までに開示されたものだけ（universe.loadLatestNetProfit と同じ）。
+	if src.hasFins {
+		fmt.Fprintf(&b, `finsfy AS (
+  SELECT CAST(f."Code" AS VARCHAR) AS code, f."DiscDate" AS fd,
+         arg_max(TRY_CAST(f."NP" AS DOUBLE), CAST(f."DiscNo" AS VARCHAR)) AS np
+  FROM %s f
+  WHERE CAST(f."CurPerType" AS VARCHAR) = 'FY'
+    AND CAST(f."DocType" AS VARCHAR) LIKE 'FYFinancialStatements%%'
+    AND TRY_CAST(f."NP" AS DOUBLE) IS NOT NULL
+  GROUP BY 1, 2
+),
+`, src.fins)
+	} else {
+		b.WriteString("finsfy AS (SELECT NULL::VARCHAR AS code, NULL::DATE AS fd, NULL::DOUBLE AS np WHERE false),\n")
+	}
+
 	// 当日開示の予定（SchDate）。予定が当日に出たものは前夜の判断材料にならない
 	if src.hasSched {
 		fmt.Fprintf(&b, `sched AS (
@@ -275,14 +301,20 @@ tercile AS (
            ) AS INTEGER)))
          ELSE 0 END AS cap_tercile
   FROM flagged f
+),
+valued AS (
+  SELECT t.*,
+         fy.np / nullif(t.mkt_cap * 1e6, 0) AS earn_yield,
+         coalesce(fy.np <= 0, false) AS is_loss
+  FROM tercile t ASOF LEFT JOIN finsfy fy ON fy.code = t.code AND fy.fd < t.d
 )
-SELECT d, code, o, c, prev_close, next_open, vol20,
+SELECT d, code, o, c, prev_close, next_open, vol20, earn_yield,
        o / prev_close - 1 AS gap,
        prev_close - (%s) AS limit_low,
        prev_close + (%s) AS limit_high,
        (%s) AS eligible,
        (%s) AS short_eligible
-FROM tercile
+FROM valued
 WHERE prev_close IS NOT NULL AND prev_close > 0
   AND ((%s) OR (%s))
 ORDER BY d, code`,
@@ -342,6 +374,9 @@ func eligibleSQL(cfg config.Universe) string {
 	}
 	if cfg.ExcludeMarginAlert {
 		parts = append(parts, "NOT alert")
+	}
+	if cfg.ExcludeLoss {
+		parts = append(parts, "NOT is_loss")
 	}
 	return strings.Join(parts, " AND ")
 }

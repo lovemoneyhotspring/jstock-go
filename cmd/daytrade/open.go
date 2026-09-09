@@ -413,7 +413,7 @@ func runOpen(opts openOptions) error {
 	ranking := selection.Rank(eligible, rankQuotes, cfg.Signal)
 	picks := selection.PickFrom(ranking, selection.PickOptions{
 		N: n, Budget: budget, Weighting: weighting, Side: domain.SideBuy,
-		MaxAmount: cfg.Capital.MaxOrder,
+		MaxAmount: cfg.Capital.MaxOrder, ValuePool: cfg.Signal.ValuePool,
 	})
 	longPicks := len(picks)
 	frames := []history.Frame{dthistory.RankingFrame(ranking, picks, "BUY", n, budget)}

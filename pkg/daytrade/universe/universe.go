@@ -50,6 +50,12 @@ type Candidate struct {
 	// MarginRatio は信用倍率（買残 ÷ 売残。週末残高の最新）。**記録だけで選定には使わない**
 	// （研究ノート 2026-09-jp-gap-minute の発見 6）。残高の報告が無い銘柄は nil。
 	MarginRatio *float64
+	// EarnYield は益回り（直近の本決算の当期純利益 ÷ 前日の時価総額）。本決算が
+	// 見つからない銘柄は nil。**選定の 2 段階目**（config.Signal.ValuePool）で使う。
+	EarnYield *float64
+	// Loss は直近の本決算が赤字（当期純利益 ≤ 0）。EarnYield が nil なら偽
+	// （判定できない銘柄を赤字扱いにして落とさない）。
+	Loss bool
 	// Eligible が真ならロングの対象、ShortEligible が真ならショートの対象。
 	Eligible      bool
 	ShortEligible bool
@@ -123,6 +129,9 @@ func Eligible(c Candidate, cfg config.Universe) bool {
 		return false
 	}
 	if cfg.ExcludeMarginAlert && c.Alert {
+		return false
+	}
+	if cfg.ExcludeLoss && c.Loss {
 		return false
 	}
 	return true

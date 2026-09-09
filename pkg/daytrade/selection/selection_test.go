@@ -282,3 +282,49 @@ func TestRankKeyRejectsMissingVol(t *testing.T) {
 		t.Errorf("ボラは VolFloor で下から押さえる: %g", k)
 	}
 }
+
+func yieldOf(v float64) *float64 { return &v }
+
+func TestByEarnYieldPicksCheapestFromPool(t *testing.T) {
+	// ギャップ順に A B C D（A が最も深い）。益回りは D > B > A > C。
+	// value_pool = 2 なら母数は上位 4 の A〜D で、そこから益回り上位 2 の D B を採る。
+	pool := []Ranked{
+		{Symbol: "A", EarnYield: yieldOf(0.03)},
+		{Symbol: "B", EarnYield: yieldOf(0.06)},
+		{Symbol: "C", EarnYield: yieldOf(0.01)},
+		{Symbol: "D", EarnYield: yieldOf(0.09)},
+	}
+	got := ByEarnYield(pool, 2, 2)
+	if len(got) != 2 || got[0].Symbol != "D" || got[1].Symbol != "B" {
+		t.Fatalf("ByEarnYield = %v, want D B", symbolsOf(got))
+	}
+	// value_pool が 0 / 1 ならギャップ順のまま先頭 2 件
+	for _, vp := range []int{0, 1} {
+		got := ByEarnYield(pool, 2, vp)
+		if len(got) != 2 || got[0].Symbol != "A" || got[1].Symbol != "B" {
+			t.Errorf("value_pool=%d: %v, want A B", vp, symbolsOf(got))
+		}
+	}
+}
+
+func TestByEarnYieldPutsUnknownLast(t *testing.T) {
+	// 益回りが取れない銘柄は末尾（判定できない銘柄を優先しない）。同値は元の順位を保つ。
+	pool := []Ranked{
+		{Symbol: "A"},
+		{Symbol: "B", EarnYield: yieldOf(0.02)},
+		{Symbol: "C", EarnYield: yieldOf(0.02)},
+		{Symbol: "D", EarnYield: yieldOf(0.05)},
+	}
+	got := ByEarnYield(pool, 3, 2)
+	if len(got) != 3 || got[0].Symbol != "D" || got[1].Symbol != "B" || got[2].Symbol != "C" {
+		t.Fatalf("ByEarnYield = %v, want D B C", symbolsOf(got))
+	}
+}
+
+func symbolsOf(rows []Ranked) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Symbol)
+	}
+	return out
+}
