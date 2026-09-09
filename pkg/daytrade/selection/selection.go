@@ -70,6 +70,9 @@ type Ranked struct {
 	Gap       decimal.Decimal
 	// Vol は 20 日の日次ボラ（無ければ nil）。
 	Vol *float64
+	// EarnYield は益回り（直近の本決算の当期純利益 ÷ 前日の時価総額。無ければ nil）。
+	// 2 段階選定（PickOptions.ValuePool）の並べ替えの鍵。
+	EarnYield *float64
 }
 
 // LimitDownPrice は前日終値を基準値段とするストップ安の値段。
@@ -178,6 +181,7 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 			Price:     quote.Price,
 			Gap:       gap.Round(4),
 			Vol:       c.Vol20,
+			EarnYield: c.EarnYield,
 		})
 	}
 	// 同じ鍵なら銘柄コード順（順位を実行ごとに揺らさない）。鍵の無い銘柄は末尾。
@@ -200,6 +204,34 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 		scored[i].Rank = i + 1
 	}
 	return scored
+}
+
+// ByEarnYield は 2 段階選定。ギャップ順に並んだ pool（既に N × valuePool 以下に切ってある）を
+// 益回りの高い順に並べ替えて先頭 n 件を返す。valuePool が 0 / 1 なら先頭 n 件をそのまま返す。
+//
+// 益回りが取れない銘柄は末尾に置く（判定できない銘柄を「割高」扱いで落とさず、
+// 割安と分かっている銘柄を優先するだけ）。同値は元の順位（＝ギャップ順）を保つ。
+// backtest.pickDay も同じ関数を使う——検証と実運用で選定がずれないため。
+func ByEarnYield(pool []Ranked, n, valuePool int) []Ranked {
+	if valuePool > 1 && len(pool) > n {
+		sorted := make([]Ranked, len(pool))
+		copy(sorted, pool)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			a, b := sorted[i].EarnYield, sorted[j].EarnYield
+			if (a == nil) != (b == nil) {
+				return b == nil
+			}
+			if a == nil || *a == *b {
+				return false
+			}
+			return *a > *b
+		})
+		pool = sorted
+	}
+	if len(pool) > n {
+		pool = pool[:n]
+	}
+	return pool
 }
 
 // Weights は N 銘柄への配分比（合計 1）。inverse_vol は 20 日ボラの逆数、equal は等分。
@@ -243,6 +275,9 @@ type PickOptions struct {
 	// MaxAmount は 1 銘柄の金額の上限（候補が N に満たない日に総予算を 1 銘柄に寄せない）。
 	// ゼロなら上限なし＝総予算 Budget × N を按分する（既定）。
 	MaxAmount decimal.Decimal
+	// ValuePool は 2 段階選定の母数の倍率（config.Signal.ValuePool）。
+	// 0 / 1 なら無効。
+	ValuePool int
 }
 
 // Pick は順位表の上位 N 銘柄を選び、株数を決める。
@@ -262,15 +297,21 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 	if side == "" {
 		side = domain.SideBuy
 	}
-	var chosen []Ranked
+	// 1 単元が予算に収まる銘柄だけを順位順に残す（届かない銘柄は次点が繰り上がる）
+	var affordable []Ranked
+	limit := opts.N
+	if opts.ValuePool > 1 {
+		limit = opts.N * opts.ValuePool
+	}
 	for _, r := range ranked {
-		if len(chosen) >= opts.N {
+		if len(affordable) >= limit {
 			break
 		}
 		if SharesFor(opts.Budget, r.Price, lotOf(opts.LotSizes, r.Symbol)).GreaterThan(decimal.Zero) {
-			chosen = append(chosen, r)
+			affordable = append(affordable, r)
 		}
 	}
+	chosen := ByEarnYield(affordable, opts.N, opts.ValuePool)
 	total := opts.Budget.Mul(decimal.NewFromInt(int64(opts.N)))
 	weights := Weights(chosen, opts.Weighting)
 	var picks []Pick

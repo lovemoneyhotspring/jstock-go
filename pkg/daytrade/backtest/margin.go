@@ -64,6 +64,7 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 		weighting: cfg.Capital.Weighting, sign: 1,
 		minGap: longMinGap, maxGap: longMaxGap, fill: fill,
 		rankBy: cfg.Signal.RankBy, maxAmount: longMaxOrder,
+		valuePool: cfg.Signal.ValuePool,
 		// 信用買い（日計り）なら手数料 0 円。金利・滑りは long_extra_cost_bp で見る
 		commission: !cfg.Margin.LongViaMargin,
 	}

@@ -129,6 +129,10 @@ type Universe struct {
 	ExcludeEarningsToday bool `toml:"exclude_earnings_today"`
 	// ExcludeMarginAlert は前日に日々公表信用残の対象だった銘柄を外す（全条件で負ける）。
 	ExcludeMarginAlert bool `toml:"exclude_margin_alert"`
+	// ExcludeLoss は直近の本決算が赤字（当期純利益 ≤ 0）の銘柄を外す。
+	// 赤字銘柄のギャップは個別の悪材料で戻らない（10 年 216 件・平均 −11.9 bp・
+	// 損益 −21 万円。研究ノート 2026-09-jp-value-signal）。
+	ExcludeLoss bool `toml:"exclude_loss"`
 }
 
 // Signal は 9:00 に決める条件（[signal]）。
@@ -163,6 +167,15 @@ type Signal struct {
 	// 気配値を返す」ことを実機で確かめてから——返らないなら利益源の銘柄はギャップ 0 と
 	// 見えて候補に載らず、これを真にすると候補が 1 つも残らない（毎日 no_picks になる）。
 	SkipOpened bool `toml:"skip_opened"`
+	// ValuePool は 2 段階選定。0 / 1 なら無効（ギャップ順のまま上位 N）。
+	// 2 以上なら「ギャップ順の上位 N × ValuePool を母数にして、その中の益回り
+	// （直近の本決算の当期純利益 ÷ 前日の時価総額）が高い順に N 銘柄」を選ぶ。
+	//
+	// ギャップ逆張りは割安な銘柄ほど強い（益回り 3 分位で 割高 +16.7 / 中位 +31.6 /
+	// 割安 +40.9 bp、差 +24.3 bp・t 2.7。IS +26.5 / OOS +22.2 と両半期で同じ大きさ）。
+	// 割高・赤字銘柄のギャップは個別のニュースで戻らず、割安銘柄のギャップは市場の
+	// 振れなので戻る、という読み（研究ノート 2026-09-jp-value-signal）。
+	ValuePool int `toml:"value_pool"`
 }
 
 // Regime は危険信号（[regime]）。詳細と検証は daytrade/regime と研究ノート。
@@ -519,6 +532,9 @@ func (c Config) Validate() error {
 	}
 	if c.Signal.RankBy != RankByGap && c.Signal.RankBy != RankByGapVol {
 		return fmt.Errorf("signal.rank_by は %s / %s: %q", RankByGap, RankByGapVol, c.Signal.RankBy)
+	}
+	if c.Signal.ValuePool < 0 {
+		return fmt.Errorf("signal.value_pool は 0 以上（0 / 1 は無効）")
 	}
 	if err := validateGap(c.Signal.MaxGap, "signal.max_gap"); err != nil {
 		return err
