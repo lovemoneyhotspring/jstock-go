@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	accumcfg "github.com/lovemoneyhotspring/jstock-go/pkg/accum/config"
@@ -29,8 +30,14 @@ func newVerifyOrderCmd() *cobra.Command {
 			"買いだけ・現物だけ・1 単元だけ。**見積り金額が --max-yen を超えたら送らない**。\n" +
 			"台帳には検証の印が付き、成績の集計から外れる。",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run.Crash("発注経路の検証", "accum.crash",
-				runVerifyOrder(symbol, units, maxYen, liveFlag, yesFlag))
+			err := runVerifyOrder(symbol, units, maxYen, liveFlag, yesFlag)
+			// 上限超えは柵が働いただけで異常ではない。Crash に渡すと Discord に
+			// alert が飛び、夜間の自己修復と日次レポートが本当の異常として拾う
+			var overLimit *execute.ErrOverLimit
+			if errors.As(err, &overLimit) {
+				return err
+			}
+			return run.Crash("発注経路の検証", "accum.crash", err)
 		},
 	}
 	cmd.Flags().StringVar(&symbol, "symbol", "", "銘柄コード（例 563A。.T は付けない）")

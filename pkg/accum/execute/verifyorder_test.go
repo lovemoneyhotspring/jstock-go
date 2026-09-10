@@ -1,6 +1,7 @@
 package execute
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -43,6 +44,10 @@ func TestVerifyOrderRefusesOverMax(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("上限を超えたのにエラーにならない")
+	}
+	var overLimit *ErrOverLimit
+	if !errors.As(err, &overLimit) {
+		t.Errorf("ErrOverLimit で返っていない（異常として通知されてしまう）: %v", err)
 	}
 	if !strings.Contains(err.Error(), "上限") {
 		t.Errorf("理由が上限だと分からない: %v", err)

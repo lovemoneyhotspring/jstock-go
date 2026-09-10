@@ -44,6 +44,27 @@ type VerifyOrderOptions struct {
 	Live bool
 }
 
+// ErrOverLimit は見積りが上限を超えたので送らなかった、というエラー。
+//
+// これは**柵が正しく働いた結果**であって異常ではない。異常として扱うと
+// Discord に alert が飛び、ダイジェストにも異常として載る（実際に飛ばした）。
+// 呼び出し側はこの型だけ通常のエラー終了にする。
+type ErrOverLimit struct {
+	Symbol   string
+	Estimate decimal.Decimal
+	Max      decimal.Decimal
+	Lot      decimal.Decimal
+	Units    int
+	Price    decimal.Decimal
+}
+
+func (e *ErrOverLimit) Error() string {
+	return fmt.Sprintf(
+		"見積り %s 円が上限 %s 円を超えます（%s: 売買単位 %s × %d 単元 × %s 円）。"+
+			"銘柄を安いものに変えるか --max-yen を上げてください",
+		e.Estimate.Round(0), e.Max.Round(0), e.Symbol, e.Lot, e.Units, e.Price)
+}
+
 // VerifyOrderResult は送った注文と、その後の照会の結果。
 type VerifyOrderResult struct {
 	Request  domain.OrderRequest
@@ -99,10 +120,10 @@ func VerifyOrder(
 
 	// **上限の柵。** ここを越えたら何も送らない
 	if estimate.GreaterThan(opts.MaxYen) {
-		return result, fmt.Errorf(
-			"見積り %s 円が上限 %s 円を超えます（%s: 売買単位 %s × %d 単元 × %s 円）。"+
-				"銘柄を安いものに変えるか --max-yen を上げてください",
-			estimate.Round(0), opts.MaxYen.Round(0), opts.Symbol, lot, units, quote.Last)
+		return result, &ErrOverLimit{
+			Symbol: opts.Symbol, Estimate: estimate, Max: opts.MaxYen,
+			Lot: lot, Units: units, Price: quote.Last,
+		}
 	}
 
 	price := quote.Last
