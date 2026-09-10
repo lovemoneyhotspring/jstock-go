@@ -86,6 +86,31 @@ trap 'rm -f "$body"' EXIT
     problems=$((problems + 1))
   fi
 
+  # --- 気配の鮮度（本番でしか出ない数字）-----------------------------------------
+  #
+  # tDPP:T は時刻しか返らないので今日の日付を当てている。寄り前の銘柄が前日の 15:30 を
+  # 返すと「今日の 15:30」＝未来になり、鮮度の検査を素通りする（FutureStamped は数えるだけで
+  # 除外しない）。--live を開ける前に塞ぐ必要があるので、毎朝この数を目の前に出す。
+  JSONL="$HOME_DIR/state/logs/daytrade-prod.jsonl"
+  if [ -f "$JSONL" ]; then
+    freshness=$(jq -r --arg d "$TODAY" '
+      # 9:01〜9:13 JST は同じ UTC 日付の 00:01〜00:13。朝の回だけを拾う
+      select(.code == "daytrade.quotes" and (.ts_utc | startswith($d)) and .extra.future != null)
+      | "\(.ts_utc[11:16])Z  受信 \(.extra.stale + .extra.delayed + .extra.future) のうち stale \(.extra.stale) / delayed \(.extra.delayed) / **未来 \(.extra.future)**"
+    ' "$JSONL" 2>/dev/null | tail -6)
+    if [ -n "$freshness" ]; then
+      echo
+      echo "気配の鮮度（dry-run の open）:"
+      echo '```'
+      echo "$freshness"
+      echo '```'
+      if echo "$freshness" | grep -q "未来 [1-9]"; then
+        echo "※ 未来の時刻を持つ気配がある。寄り前に前日の 15:30 が返っている可能性。"
+        echo "  この数が寄り後（9:04 以降）も減らないなら、--live を開ける前に塞ぐこと"
+      fi
+    fi
+  fi
+
   # --- snap のログの警告 -------------------------------------------------------
   if [ -f "$SNAP_LOG" ]; then
     warns=$(grep "$TODAY" "$SNAP_LOG" 2>/dev/null | grep -cE "\[error\]|lock_busy" | head -1)
