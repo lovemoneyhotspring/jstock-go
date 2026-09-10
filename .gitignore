@@ -5,6 +5,8 @@
 .secrets/
 *.pem
 *.key
+# 立花証券の e支店が配る秘密鍵は DER（e_api_private_key.der）
+*.der
 
 # --- 生成データ ---
 # 先頭の / でリポジトリ直下だけを対象にする。付けないと pkg/wbcore/data/

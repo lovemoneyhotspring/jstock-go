@@ -13,6 +13,7 @@ package backtest
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -26,6 +27,10 @@ import (
 // TradingDays は 1 年の営業日数（年率換算）。
 const TradingDays = 245
 
+// PanelCacheEnabled は設定に依存しない部分の Parquet キャッシュを使うか
+// （backtest の --no-cache で切る）。詳細は panelcache.go。
+var PanelCacheEnabled = true
+
 // Row はパネルの 1 行（ある日・ある銘柄）。
 type Row struct {
 	Date      time.Time
@@ -38,6 +43,9 @@ type Row struct {
 	Vol20    *float64
 	// EarnYield は益回り（直近の本決算の当期純利益 ÷ 前日の時価総額）。無ければ nil。
 	EarnYield *float64
+	// Sector は 33 業種コード（equities/master の S33）。同じ業種に建玉を偏らせない
+	// 判定（signal.max_per_sector）に使う。取れなければ空。
+	Sector string
 	Gap       float64
 	// LimitLow / LimitHigh は前日終値を基準値段とする制限値幅（ストップ安・高）。
 	LimitLow      float64
@@ -86,6 +94,16 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 		alert: alertSrc, hasAlert: hasAlert,
 	}, start, end, cfg)
 
+	// キャッシュがあれば（作れれば）そちらから読む。作れなくても検証は続ける
+	// ——遅くなるだけで結果は同じなので、ここで止める理由が無い。
+	if PanelCacheEnabled {
+		if path, err := ensurePanelCache(db, arch, cfg, end); err != nil {
+			fmt.Fprintf(os.Stderr, "パネルのキャッシュを使えません（そのまま実行します）: %v\n", err)
+		} else {
+			query = buildCachedPanelQuery(path, start, end, cfg)
+		}
+	}
+
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("パネルの組み立てに失敗しました: %w", err)
@@ -98,10 +116,11 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 			r                 Row
 			nextOpen, vol20   sql.NullFloat64
 			earnYield         sql.NullFloat64
+			sector            sql.NullString
 			limitLow, limitHi sql.NullFloat64
 		)
 		if err := rows.Scan(&r.Date, &r.Code, &r.Open, &r.Close, &r.PrevClose,
-			&nextOpen, &vol20, &earnYield, &r.Gap, &limitLow, &limitHi,
+			&nextOpen, &vol20, &earnYield, &sector, &r.Gap, &limitLow, &limitHi,
 			&r.Eligible, &r.ShortEligible); err != nil {
 			return nil, err
 		}
@@ -118,6 +137,7 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 			v := earnYield.Float64
 			r.EarnYield = &v
 		}
+		r.Sector = sector.String
 		r.LimitLow, r.LimitHigh = limitLow.Float64, limitHi.Float64
 		panel.Rows = append(panel.Rows, r)
 	}
@@ -172,6 +192,27 @@ type panelSources struct {
 // なく営業日の連番（di）で 1 日ずらす。暦日で足すと連休明けに効かなくなる。
 func buildPanelQuery(src panelSources, start, end time.Time, cfg config.Config) string {
 	var b strings.Builder
+	b.WriteString(panelCTEs(src, start, end, cfg))
+	fmt.Fprintf(&b, `SELECT d, code, o, c, prev_close, next_open, vol20, earn_yield, sector,
+       o / prev_close - 1 AS gap,
+       prev_close - (%s) AS limit_low,
+       prev_close + (%s) AS limit_high,
+       (%s) AS eligible,
+       (%s) AS short_eligible
+FROM valued
+WHERE prev_close IS NOT NULL AND prev_close > 0
+  AND ((%s) OR (%s))
+ORDER BY d, code`,
+		limitWidthSQL("prev_close"), limitWidthSQL("prev_close"),
+		eligibleSQL(cfg.Universe), shortEligibleSQL(cfg.Margin),
+		eligibleSQL(cfg.Universe), shortEligibleSQL(cfg.Margin))
+	return b.String()
+}
+
+// panelCTEs は WITH 句（bars … valued）。直接の経路とキャッシュ作成で共有する。
+// start は joined の絞り込みにだけ効くので、キャッシュ作成では最古を渡す。
+func panelCTEs(src panelSources, start, end time.Time, cfg config.Config) string {
+	var b strings.Builder
 	fmt.Fprintf(&b, `
 WITH bars AS (
   SELECT "Date" AS d, CAST("Code" AS VARCHAR) AS code,
@@ -193,6 +234,9 @@ lagged AS (
   SELECT b.*,
          CASE WHEN b.af = 1 THEN lag(b.c) OVER w END AS prev_close,
          lead(b.o) OVER w / lead(b.af) OVER w AS next_open,
+         -- next_open_d は「次の足の日付」。キャッシュ経由で期間の終わりを再現するために要る
+         -- （キャッシュは全期間で作るので、end 以降の足を見た next_open を無効にする）。
+         lead(b.d) OVER w AS next_open_d,
          b.c / (lag(b.c) OVER w * b.af) - 1 AS ret,
          lag(b.cap) OVER w AS mkt_cap
   FROM bars b
@@ -209,12 +253,13 @@ rolled AS (
 master AS (
   SELECT "Date" AS d, CAST("Code" AS VARCHAR) AS code,
          %s AS segment,
+         CAST("S33" AS VARCHAR) AS sector,
          CAST("ProdCat" AS VARCHAR) AS product,
          CAST("Mrgn" AS VARCHAR) = '2' AS shortable
   FROM %s
 ),
 joined AS (
-  SELECT r.*, m.segment, m.shortable, dd.di
+  SELECT r.*, m.segment, m.shortable, m.sector, dd.di
   FROM rolled r
   JOIN master m ON m.d = r.d AND m.code = r.code
   JOIN days dd ON dd.d = r.d
@@ -302,27 +347,72 @@ tercile AS (
          ELSE 0 END AS cap_tercile
   FROM flagged f
 ),
+-- 本決算は「その日から %[4]d 日以内に開示されたもの」だけを見る。実運用の plan が
+-- 判定日から遡って探すのと同じ窓にする（universe.FinsLookbackDays）。絶対の窓で切ると
+-- --since によって同じ日の判定が変わり、キャッシュとも食い違う。
 valued AS (
   SELECT t.*,
-         fy.np / nullif(t.mkt_cap * 1e6, 0) AS earn_yield,
-         coalesce(fy.np <= 0, false) AS is_loss
-  FROM tercile t ASOF LEFT JOIN finsfy fy ON fy.code = t.code AND fy.fd < t.d
+         np_fy / nullif(t.mkt_cap * 1e6, 0) AS earn_yield,
+         coalesce(np_fy <= 0, false) AS is_loss
+  FROM (
+    SELECT t.*, CASE WHEN fy.fd >= t.d - INTERVAL %[4]d DAY THEN fy.np END AS np_fy
+    FROM tercile t ASOF LEFT JOIN finsfy fy ON fy.code = t.code AND fy.fd < t.d
+  ) t
 )
-SELECT d, code, o, c, prev_close, next_open, vol20, earn_yield,
-       o / prev_close - 1 AS gap,
-       prev_close - (%s) AS limit_low,
-       prev_close + (%s) AS limit_high,
-       (%s) AS eligible,
-       (%s) AS short_eligible
-FROM valued
-WHERE prev_close IS NOT NULL AND prev_close > 0
-  AND ((%s) OR (%s))
-ORDER BY d, code`,
-		minTurnover, minTurnover, minTurnover,
-		limitWidthSQL("prev_close"), limitWidthSQL("prev_close"),
-		eligibleSQL(cfg.Universe), shortEligibleSQL(cfg.Margin),
-		eligibleSQL(cfg.Universe), shortEligibleSQL(cfg.Margin))
+`,
+		minTurnover, minTurnover, minTurnover, universe.FinsLookbackDays)
 	return b.String()
+}
+
+// panelCacheColumns はキャッシュに落とす列。設定に依存しないものだけを持ち、
+// 設定に依存する判定（eligible / short_eligible・ギャップ・制限値幅）は読み出し側で当てる。
+const panelCacheColumns = `SELECT d, code, o, c, prev_close, next_open, next_open_d, vol20, earn_yield,
+       sector, segment, shortable, turnover_med, cap_tercile, earn_prev, disc_today, alert, jsf_stop, is_loss`
+
+// buildCacheQuery はキャッシュに落とす行を作る SQL。期間は切らず（読み出し側で切る）、
+// 流動性の下限だけで絞る——下限を満たさない行はどの設定でも母集団に入らないため。
+// ロングとショートで下限が違う設定もありうるので、小さい方で残す。
+func buildCacheQuery(src panelSources, end time.Time, cfg config.Config) string {
+	var b strings.Builder
+	b.WriteString(panelCTEs(src, time.Time{}, end, cfg))
+	fmt.Fprintf(&b, `%s
+FROM valued
+WHERE prev_close IS NOT NULL AND prev_close > 0 AND turnover_med >= %f`,
+		panelCacheColumns, cacheTurnoverFloor(cfg))
+	return b.String()
+}
+
+// cacheTurnoverFloor はキャッシュに残す売買代金の下限（ロング・ショートの小さい方）。
+func cacheTurnoverFloor(cfg config.Config) float64 {
+	floor, _ := cfg.Universe.MinTurnover.Float64()
+	if cfg.Margin.Enabled {
+		if m, _ := cfg.Margin.MinTurnover.Float64(); m < floor {
+			floor = m
+		}
+	}
+	return floor
+}
+
+// buildCachedPanelQuery はキャッシュから読む SQL。直接の経路と同じ行・同じ値を返す。
+//
+// next_open は「次の足が end より後なら NULL」にする。キャッシュは全期間で作るので、
+// そうしないと期間の終わりに未来の足が見えてしまう（上場廃止・売買停止で end より前に
+// 足が途切れる銘柄でも同じ。営業日で切ると取りこぼす）。
+func buildCachedPanelQuery(cachePath string, start, end time.Time, cfg config.Config) string {
+	return fmt.Sprintf(`SELECT d, code, o, c, prev_close,
+       CASE WHEN next_open_d > %[2]s THEN NULL ELSE next_open END AS next_open,
+       vol20, earn_yield, sector,
+       o / prev_close - 1 AS gap,
+       prev_close - (%[3]s) AS limit_low,
+       prev_close + (%[3]s) AS limit_high,
+       (%[4]s) AS eligible,
+       (%[5]s) AS short_eligible
+FROM read_parquet(%[6]s)
+WHERE d >= %[1]s AND d <= %[2]s
+  AND ((%[4]s) OR (%[5]s))
+ORDER BY d, code`,
+		archsql.Lit(start), archsql.Lit(end), limitWidthSQL("prev_close"),
+		eligibleSQL(cfg.Universe), shortEligibleSQL(cfg.Margin), archsql.LitString(cachePath))
 }
 
 // segmentSQL は市場区分名を prime / standard / growth / other に畳む

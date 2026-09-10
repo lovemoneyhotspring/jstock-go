@@ -106,6 +106,7 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 			Alert:       alert[f.code],
 			JsfStop:     jsfStop[f.code],
 			Shortable:   m.shortable,
+			Sector:      m.sector,
 			MarginRatio: marginRatio[f.code],
 		})
 		caps = append(caps, f.mktCap)
@@ -216,7 +217,7 @@ GROUP BY code`, source, archsql.Lit(prevDay), cfg.TurnoverDays, VolDays)
 		return nil, nil
 	}
 	if !sameDay(latest, prevDay) {
-		return nil, fmt.Errorf("前営業日 %s の足がありません（最新 %s）。jquants sync を先に",
+		return nil, fmt.Errorf("前営業日 %s の足がありません（最新 %s）。当日の日足が J-Quants に入るのは 16:43 頃（cron の sync は 16:13/16:43）。それより前なら待つ。過ぎているのに欠けていれば jquants sync を先に",
 			prevDay.Format(archsql.DateLayout), latest.Format(archsql.DateLayout))
 	}
 	for _, a := range all {
@@ -232,6 +233,7 @@ type masterRow struct {
 	segment   string
 	product   string
 	shortable bool
+	sector    string
 }
 
 // loadMaster は判定日以前の最新 1 日ぶんの銘柄一覧。
@@ -241,7 +243,7 @@ func loadMaster(arch *archive.Archive, day, prevDay time.Time) (map[string]maste
 	frame, err := arch.ReadWhere(EPMaster, archive.ReadOptions{
 		Start:   prevDay.AddDate(0, 0, -10),
 		End:     day,
-		Columns: []string{"Code", "CoName", "MktNm", "ProdCat", "Mrgn"},
+		Columns: []string{"Code", "CoName", "MktNm", "ProdCat", "Mrgn", "S33"},
 	})
 	if err != nil || frame == nil {
 		return nil, err
@@ -270,6 +272,7 @@ func loadMaster(arch *archive.Archive, day, prevDay time.Time) (map[string]maste
 			segment:   SegmentOf(text(frame.Get(i, "MktNm"))),
 			product:   text(frame.Get(i, "ProdCat")),
 			shortable: IsShortable(text(frame.Get(i, "Mrgn"))),
+			sector:    text(frame.Get(i, "S33")),
 		}
 	}
 	return out, nil
@@ -325,13 +328,18 @@ func loadMarginRatio(arch *archive.Archive, day time.Time) (map[string]*float64,
 	return out, nil
 }
 
+// FinsLookbackDays は本決算を遡って探す日数。年 1 回なので 400 日あれば 1 期は拾える
+// （決算期がずれても届く）。**検証（backtest.panelCTEs）も同じ日数で切る**——
+// ここだけ変えると実運用と検証で母集団がずれる。
+const FinsLookbackDays = 400
+
 // loadLatestNetProfit は prevDay までに開示された**最新の本決算**の当期純利益を銘柄ごとに返す。
 //
 // 本決算は年 1 回なので 400 日遡る（決算期がずれても 1 期は拾える）。四半期は使わない
 // ——益回りの検定を年次の本決算で行ったため（研究ノート 2026-09-jp-value-signal）。
 func loadLatestNetProfit(arch *archive.Archive, prevDay time.Time) (map[string]float64, error) {
 	frame, err := arch.ReadWhere(EPFins, archive.ReadOptions{
-		Start:   prevDay.AddDate(0, 0, -400),
+		Start:   prevDay.AddDate(0, 0, -FinsLookbackDays),
 		End:     prevDay,
 		Columns: []string{"Code", "DocType", "CurPerType", "NP"},
 	})

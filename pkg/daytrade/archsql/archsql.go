@@ -69,6 +69,9 @@ func truncate(t time.Time) time.Time {
 // Lit は日付を SQL のリテラルにする。
 func Lit(day time.Time) string { return "DATE '" + day.Format(DateLayout) + "'" }
 
+// LitString は SQL の文字列リテラル（パスなどを埋め込む）。単引用符は倍にして閉じる。
+func LitString(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + "'" }
+
 // MissingError は期間にアーカイブが無いときのエラー。
 func MissingError(ep archive.Endpoint) error {
 	return fmt.Errorf("%s のアーカイブがありません。jquants backfill / sync を先に", ep.Name())

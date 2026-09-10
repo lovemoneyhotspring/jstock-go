@@ -77,3 +77,36 @@ func TestScaleTradesAppliesDailyScale(t *testing.T) {
 		t.Errorf("倍率が掛かっていない: %+v", got[0])
 	}
 }
+
+// 同じ業種の上限を超えた銘柄は落ち、次点が繰り上がる（signal.max_per_sector）。
+// 業種が空の行は数に入れない——取れなかった銘柄どうしを同じ業種として束ねないため。
+func TestPickDayLimitsPerSector(t *testing.T) {
+	day := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	row := func(code, sector string, gap float64) Row {
+		return Row{Date: day, Code: code, Sector: sector, Open: 1000, Close: 1000,
+			PrevClose: 1000 / (1 + gap), Gap: gap, Eligible: true}
+	}
+	rows := []Row{
+		row("A", "2050", -0.05), // 建設
+		row("B", "2050", -0.04), // 建設（上限で落ちる）
+		row("C", "", -0.03),     // 業種が取れない
+		row("D", "3600", -0.02), // 機械（繰り上がる）
+	}
+	p := legParams{n: 3, budget: 1_000_000, weighting: "equal", sign: 1,
+		minGap: -1, maxGap: 0, maxPerSector: 1}
+	got := pickDay(rows, p, p.n, p.budget*float64(p.n))
+	var codes []string
+	for _, tr := range got {
+		codes = append(codes, tr.Code)
+	}
+	want := []string{"A", "C", "D"}
+	if len(codes) != len(want) {
+		t.Fatalf("選ばれた銘柄 = %v, 期待 %v", codes, want)
+	}
+	for i := range want {
+		if codes[i] != want[i] {
+			t.Errorf("選ばれた銘柄 = %v, 期待 %v", codes, want)
+			break
+		}
+	}
+}

@@ -18,6 +18,7 @@ func newBacktestCmd() *cobra.Command {
 	var sinceFlag, untilFlag, fillEntryFlag, fillExitFlag string
 	var tradesFlag bool
 	var tradesCSVFlag string
+	var noCacheFlag bool
 	cmd := &cobra.Command{
 		Use:   "backtest",
 		Short: "アーカイブで同じ規則を検証する（資金固定・100 株単位・段階手数料）",
@@ -31,6 +32,7 @@ func newBacktestCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			dtbacktest.PanelCacheEnabled = !noCacheFlag
 			start, err := parseDate(sinceFlag)
 			if err != nil {
 				return err
@@ -63,6 +65,8 @@ func newBacktestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sinceFlag, "since", "2017-01-01", "開始日")
 	cmd.Flags().StringVar(&untilFlag, "until", "", "終了日（既定は最新）")
 	cmd.Flags().BoolVar(&tradesFlag, "trades", false, "個別の取引も出す")
+	cmd.Flags().BoolVar(&noCacheFlag, "no-cache", false,
+		"パネルのキャッシュを使わない（毎回アーカイブから組み直す。結果は同じで遅いだけ）")
 	cmd.Flags().StringVar(&tradesCSVFlag, "trades-csv", "", "全取引（ロング・ショート）を CSV に書く（研究用。板の厚みとの突き合わせなど）")
 	cmd.Flags().StringVar(&fillEntryFlag, "fill-entry", "",
 		"建値を分足で取る時刻（HH:MM。例 09:01。空なら日足の寄付）")
@@ -117,7 +121,7 @@ func printBacktest(cfg dtconfig.Config, result *dtbacktest.Result, start, end ti
 			y.Year, y.Days, y.Traded, yen(y.PnL), yen(y.MeanDaily), y.WinRate*100)
 	}
 	if showTrades {
-		printTrades(result.Trades)
+		printTrades("直近の取引", result.Trades)
 	}
 }
 
@@ -188,7 +192,8 @@ func runMarginBacktest(cfg dtconfig.Config, start, end time.Time, fetcher usmark
 			y.Year, y.Days, y.Traded, yen(y.PnL), yen(y.LongPnL), yen(y.ShortPnL), y.WinRate*100)
 	}
 	if showTrades {
-		printTrades(result.ShortTrades)
+		printTrades("直近の取引（ロング）", result.LongTrades)
+		printTrades("直近の取引（ショート）", result.ShortTrades)
 	}
 	return writeTradesCSV(tradesCSVPath, result.LongTrades, result.ShortTrades)
 }
@@ -226,8 +231,13 @@ func writeTradesCSV(path string, long, short []dtbacktest.Trade) error {
 
 // printTrades は直近 30 件の取引。全部出すと端末が流れるだけなので末尾に絞る。
 // 縮めた日は株数・損益にその倍率を掛けた値（日次の集計と同じ）。
-func printTrades(trades []dtbacktest.Trade) {
-	fmt.Println("\n直近の取引")
+// label は脚の見出し——信用版はロングとショートを別々に出すので取り違えないように。
+func printTrades(label string, trades []dtbacktest.Trade) {
+	if len(trades) == 0 {
+		fmt.Printf("\n%s: 取引なし\n", label)
+		return
+	}
+	fmt.Printf("\n%s\n", label)
 	fmt.Printf("  %-11s %-7s %8s %9s %9s %9s %12s %5s %s\n", "日付", "銘柄", "ギャップ", "株数", "建値", "手仕舞", "損益", "倍率", "")
 	from := max(0, len(trades)-30)
 	for _, t := range trades[from:] {

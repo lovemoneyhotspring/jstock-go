@@ -47,6 +47,9 @@ type Candidate struct {
 	JsfStop bool
 	// Shortable は貸借銘柄（制度信用で新規売りができる）。
 	Shortable bool
+	// Sector は 33 業種コード（equities/master の S33）。同じ業種に建玉を偏らせない
+	// 判定（signal.max_per_sector）に使う。取れなければ空。
+	Sector string
 	// MarginRatio は信用倍率（買残 ÷ 売残。週末残高の最新）。**記録だけで選定には使わない**
 	// （研究ノート 2026-09-jp-gap-minute の発見 6）。残高の報告が無い銘柄は nil。
 	MarginRatio *float64

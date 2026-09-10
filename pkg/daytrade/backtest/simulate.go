@@ -167,8 +167,10 @@ type legParams struct {
 	rankBy string
 	// valuePool は 2 段階選定の母数の倍率（config.Signal.ValuePool。0 / 1 で無効）。
 	valuePool int
-	minGap    float64
-	maxGap    float64
+	// maxPerSector は同じ 33 業種から建てる銘柄数の上限（0 で無制限）。
+	maxPerSector int
+	minGap       float64
+	maxGap       float64
 	// maxShares は 1 銘柄の株数の上限（0 で無制限）。成行の信用新規売りは
 	// 空売り価格規制で 50 単元までなので、按分がそれを超える低位株はそこで頭打ち
 	// （selection.PickFrom と同じ）。
@@ -249,6 +251,22 @@ func pickDay(rows []Row, p legParams, n int, total float64) []Trade {
 			return *a > *b
 		})
 		pool = head
+	}
+	// 同じ業種に偏らせない（signal.max_per_sector）。上限を超えた銘柄は落とし、
+	// 次点が繰り上がる——「外す」のではなく「入れ替える」。業種が取れない行は数えない。
+	if p.maxPerSector > 0 {
+		perSector := make(map[string]int, len(pool))
+		kept := pool[:0]
+		for _, s := range pool {
+			if sec := s.row.Sector; sec != "" {
+				if perSector[sec] >= p.maxPerSector {
+					continue
+				}
+				perSector[sec]++
+			}
+			kept = append(kept, s)
+		}
+		pool = kept
 	}
 	if len(pool) > n {
 		pool = pool[:n]
@@ -489,7 +507,8 @@ func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options
 		n: n, budget: budget, weighting: cfg.Capital.Weighting,
 		sign: 1, commission: true, minGap: minGap, maxGap: maxGap, fill: opts.fill(),
 		rankBy: cfg.Signal.RankBy, maxAmount: longMaxOrder,
-		valuePool: cfg.Signal.ValuePool,
+		valuePool:    cfg.Signal.ValuePool,
+		maxPerSector: cfg.Signal.MaxPerSector,
 	})
 	trades = applyCarry(trades, rowsByKey(panel), 1, carryPenalty)
 

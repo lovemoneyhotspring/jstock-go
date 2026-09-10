@@ -180,6 +180,48 @@ func TestPickFromTakesTopNAndSizes(t *testing.T) {
 	}
 }
 
+// 同じ 33 業種は MaxPerSector 銘柄まで。超えた銘柄は落ちて次点が繰り上がる。
+// 業種が取れない銘柄（Sector が空）は数に入れない。
+func TestPickFromLimitsPerSector(t *testing.T) {
+	cfg := config.Default().Signal
+	sector := func(c universe.Candidate, s string) universe.Candidate { c.Sector = s; return c }
+	candidates := []universe.Candidate{
+		sector(candidate("1000", 1000, nil), "2050"), // 建設
+		sector(candidate("2000", 1000, nil), "2050"), // 建設（上限で落ちる）
+		sector(candidate("3000", 1000, nil), ""),     // 業種が取れない
+		sector(candidate("4000", 1000, nil), "3600"), // 機械（繰り上がる）
+	}
+	quotes := map[string]Quote{
+		"1000": quote("1000", 900), "2000": quote("2000", 920),
+		"3000": quote("3000", 940), "4000": quote("4000", 960),
+	}
+	ranked := Rank(candidates, quotes, cfg)
+	picks := PickFrom(ranked, PickOptions{
+		N: 3, Budget: decimal.NewFromInt(500_000), Weighting: "equal", Side: domain.SideBuy,
+		MaxPerSector: 1,
+	})
+	var got []string
+	for _, p := range picks {
+		got = append(got, p.Symbol)
+	}
+	want := []string{"1000", "3000", "4000"}
+	if len(got) != len(want) {
+		t.Fatalf("選定 = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("選定 = %v, want %v", got, want)
+		}
+	}
+	// 上限 0（既定）なら今までどおり上位から 3 銘柄
+	picks = PickFrom(ranked, PickOptions{
+		N: 3, Budget: decimal.NewFromInt(500_000), Weighting: "equal", Side: domain.SideBuy,
+	})
+	if len(picks) != 3 || picks[1].Symbol != "2000" {
+		t.Errorf("上限 0 で挙動が変わっている: %+v", picks)
+	}
+}
+
 func TestPickFromSkipsUnaffordable(t *testing.T) {
 	cfg := config.Default().Signal
 	// 1 単元 100 万円の銘柄は予算 10 万円では買えない → 次点が繰り上がる
