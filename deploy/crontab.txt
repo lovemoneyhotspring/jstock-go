@@ -11,7 +11,8 @@
 #   - 実行の要約は state/digest/<env>-<日付>.jsonl に 1 行ずつ溜まる（docs/FEEDBACK.md）
 #
 # 有効化の段階:
-#   1. 今: データ（J-Quants / FRED）・候補（daytrade plan）・監視だけ。発注経路は止めたまま
+#   1. 2026-09-11〜: データ・候補に加えて、**板の記録（snap）と dry-run の open** を回す。
+#      注文は出ない（--live 無し）。信用取引口座が未開設なのでそもそも発注できない
 #   2. 発注に関わる電文のうち注文照会・信用建玉・信用発注は**実機未検証**。
 #      docs/BROKER_VERIFY.md の手順を UAT で全部通すまで下の行は開けない
 #   3. .env に TACHIBANA_PROD_* を入れ `wbjp credentials check --env prod` が通ったら、
@@ -83,10 +84,10 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 9:00 の回はロックを取る前に 5 秒待つ。9:00:00 に始めると 31 バッチが板寄せの前後に
 # またがり、「板寄せの結果」の点にならない（寄り前は 8:59 の回が持つ）。ロックは寝ている間
 # 握らず、最悪でも 9:00:55 に終わるので 9:01 の open（30 秒待つ）は塞がない
-#30,45,55,59 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
-#0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
-#2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
-#0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+30,45,55,59 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 
 # --- 判断の妥当性（改善ループ。docs/FEEDBACK.md）---------------------------------
 # スイング: スクリーニングの結果に 20 営業日後の終値を当てる。採用・次点・圏外を比べる
@@ -129,6 +130,12 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 9:01・9:04・9:07・9:10・9:13: 気配でギャップ下位 N（ロング）／上位（ショート）を寄付で建てる。
 # 窓は 9:15 まで。前の回が全部建てていれば以降は何もしない（冪等）
 #1,4,7,10,13 9 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
+# --- dry-run の open（2026-09-11〜）。--live / --yes が無いので**注文は出ない**。
+# 実際の気配で銘柄選定・株数・鮮度判定まで通し、判断の記録（ranking / open_run）を残す。
+# 信用取引口座が未開設なので発注はそもそもできない。口座が開いて実機検証が済んだら
+# この行を消して上の --live 行を開ける（両方を同時に動かさない）。
+# dry-run は実行のたびに当日の古い dry_run を台帳から消して最新だけ残す（cmd/daytrade/open.go）
+1,4,7,10,13 9 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open-dryrun.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin
 # 15:20・15:24・15:28: 当日建てた分を返済（1 回目で済めば以降は何もしない）
 #20,24,28 15 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-close.log $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin --live --yes
 # 15:40: 返済が全部約定したかを照会し、持ち越しを通知
