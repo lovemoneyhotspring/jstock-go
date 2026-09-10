@@ -2,8 +2,12 @@
 # 寄り付きの記録（daytrade snap）と dry-run の open が、その朝ちゃんと回ったかを点検して
 # Discord に 1 通投げる。板は過去に遡れないので、**欠けたその日のうちに気づく**ためのもの。
 #
-#   deploy/morning-check.sh          # cron 用（9:20）
-#   QUIET=1 deploy/morning-check.sh  # 問題が無ければ Discord に投げない（ログには出す）
+#   deploy/morning-check.sh            # cron 用（9:22）。結果を必ず 1 通投げる
+#   QUIET=1 deploy/morning-check.sh    # 問題が**無ければ**投げない
+#   NO_POST=1 deploy/morning-check.sh  # 何があっても投げない（試験用）
+#
+# 試験は必ず NO_POST=1 で回すこと。QUIET=1 は「問題が 0 件のときだけ黙る」ので、
+# 開発中に問題を出しながら試すと毎回 Discord に飛ぶ（2026-09-11 に 6 通飛ばした）。
 #
 # 判断はしない・直さない。読んで人が気づくためだけの通知（docs/FEEDBACK.md の線引き）。
 # night-repair（6:00）はダイジェストの異常を見るが、こちらは「回るはずの回数が回ったか」を見る
@@ -134,6 +138,9 @@ trap 'rm -f "$body"' EXIT
 
 cat "$body"
 
+if [ "${NO_POST:-}" = "1" ]; then
+  exit 0
+fi
 if [ "${QUIET:-}" = "1" ] && [ "$problems" = "0" ]; then
   exit 0
 fi
