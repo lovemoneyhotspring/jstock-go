@@ -249,6 +249,31 @@ func (t *TachibanaBroker) clientOrderIDFor(number string) string {
 	return ""
 }
 
+// parseRSAPrivateKey は PEM でも DER でも RSA 秘密鍵を読む。
+//
+// 立花証券の e支店が配るのは DER（`e_api_private_key.der`。バイナリ）で、自分で
+// 作った鍵は PEM のことが多い。どちらで置かれても動くように両方を試す
+// ——変換し忘れが「PEMデコードに失敗」という分かりにくいエラーになるため。
+// PKCS#1（BEGIN RSA PRIVATE KEY）と PKCS#8（BEGIN PRIVATE KEY）の両方に対応する。
+func parseRSAPrivateKey(keyBytes []byte) (*rsa.PrivateKey, error) {
+	der := keyBytes
+	if block, _ := pem.Decode(keyBytes); block != nil {
+		der = block.Bytes
+	}
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return key, nil
+	}
+	pk8, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("RSA 秘密鍵として読めません（PEM / DER のどちらでも失敗）: %w", err)
+	}
+	key, ok := pk8.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("PKCS8 の鍵が RSA ではありません")
+	}
+	return key, nil
+}
+
 func NewTachibanaBroker(env settings.Environment, creds *credentials.TachibanaCredentials, stateDir string) (*TachibanaBroker, error) {
 	baseURL := BaseURLUAT
 	if env.IsProduction() {
@@ -260,23 +285,9 @@ func NewTachibanaBroker(env settings.Environment, creds *credentials.TachibanaCr
 		return nil, fmt.Errorf("秘密鍵ファイルの読込に失敗しました (%s): %w", creds.PrivateKeyFile, err)
 	}
 
-	block, _ := pem.Decode(keyBytes)
-	if block == nil {
-		return nil, fmt.Errorf("秘密鍵のPEMデコードに失敗しました: %s", creds.PrivateKeyFile)
-	}
-
-	privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	privKey, err := parseRSAPrivateKey(keyBytes)
 	if err != nil {
-		// PKCS8 の場合も試行
-		pk8, err2 := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if err2 != nil {
-			return nil, fmt.Errorf("RSA秘密鍵パース失敗: %v / %v", err, err2)
-		}
-		var ok bool
-		privKey, ok = pk8.(*rsa.PrivateKey)
-		if !ok {
-			return nil, fmt.Errorf("PKCS8の鍵がRSAではありません")
-		}
+		return nil, fmt.Errorf("%s: %w", creds.PrivateKeyFile, err)
 	}
 
 	return &TachibanaBroker{

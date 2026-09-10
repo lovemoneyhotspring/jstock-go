@@ -299,3 +299,35 @@ func TestDeadlinePreventsSending(t *testing.T) {
 		t.Fatalf("解除後に送れない: %v", err)
 	}
 }
+
+// 立花証券が配る秘密鍵は DER（e_api_private_key.der）。PEM に変換しなくても読めること。
+func TestParseRSAPrivateKeyAcceptsPEMAndDER(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs1 := x509.MarshalPKCS1PrivateKey(key)
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string][]byte{
+		"PKCS1 DER": pkcs1,
+		"PKCS8 DER": pkcs8,
+		"PKCS1 PEM": pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: pkcs1}),
+		"PKCS8 PEM": pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}),
+	}
+	for name, data := range cases {
+		got, err := parseRSAPrivateKey(data)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if !got.Equal(key) {
+			t.Errorf("%s: 読めた鍵が元と違う", name)
+		}
+	}
+	if _, err := parseRSAPrivateKey([]byte("これは鍵ではない")); err == nil {
+		t.Error("鍵でないデータが通ってしまう")
+	}
+}
