@@ -98,9 +98,19 @@ scope = "all"    # all（plan の全行 = 全上場）/ universe（母集団だ�
 # ロックを取れずに消える。全上場でも正常なら 10 秒で終わる（31 リクエスト × 4 回/秒）
 max_run_seconds = 50
 # columns は時価問合で取りに行く列（sTargetColumn）。空なら始値・現在値・現在値時刻・前日終値。
-# **板の列名は実機で確かめてから足す**: daytrade quotes --raw --columns "pDOP,pDPP,..." 7203
-# 応答に返った列は指定の有無にかかわらず全部記録するので、ここは「何を要求するか」だけ
-# columns = "pDOP,pDPP,tDPP:T,pPRP,..."
+# 応答に返った列は指定の有無にかかわらず全部記録するので、ここは「何を要求するか」だけ。
+#
+# 2026-09-11 に実機（本番）で確かめた列（`daytrade quotes --raw --columns ...` 7203）:
+#   値段  pDOP 始値 / pDPP 現在値 / tDPP:T 現在値時刻 / pPRP 前日終値（基準値段）/ pDHP 高値 / pDLP 安値 / pVWAP
+#   出来  pDV 出来高 / pDJ 売買代金
+#   気配  pQAS・pQBS 気配種類（0101 など）/ pQAP・pQBP 最良売買気配値 / pAV・pBV その数量
+#   板    pGAP1..10・pGAV1..10（売）、pGBP1..10・pGBV1..10（買）——**10 段とも値が返る**
+#   総量  pQOV（OVER）/ pQUV（UNDER）
+#   寄前  pIEP・pIEV・pIET（予想約定値段・数量・時刻）。引け後は空。板寄せ中に入るはずなので取る
+#   特別  pSAV・pSBV。引け後は空
+# pGAP0 / pGBP0 / pGAV0 / pGBV0 は空で返る（0 段は無い）。
+# 列は後から足しても過去は埋まらないので、空で返るものも含めて広く取る（docs/OPENING_DATA.md の原則 2）
+columns = "pDOP,pDPP,tDPP:T,pPRP,pDHP,pDLP,pDV,pDJ,pVWAP,pQAS,pQBS,pQAP,pQBP,pAV,pBV,pQOV,pQUV,pIEP,pIEV,pIET,pSAV,pSBV,pGAP1,pGAV1,pGBP1,pGBV1,pGAP2,pGAV2,pGBP2,pGBV2,pGAP3,pGAV3,pGBP3,pGBV3,pGAP4,pGAV4,pGBP4,pGBV4,pGAP5,pGAV5,pGBP5,pGBV5,pGAP6,pGAV6,pGBP6,pGBV6,pGAP7,pGAV7,pGBP7,pGBV7,pGAP8,pGAV8,pGBP8,pGBV8,pGAP9,pGAV9,pGBP9,pGBV9,pGAP10,pGAV10,pGBP10,pGBV10"
 
 [execution]
 broker = "tachibana"
