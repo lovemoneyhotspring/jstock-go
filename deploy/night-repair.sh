@@ -56,7 +56,11 @@ if [ ${#DIGESTS[@]} -eq 0 ]; then
   exit 0
 fi
 
-ANOMALY_COUNT="$(jq -c 'select(.anomalies or .outcome == "error")' "${DIGESTS[@]}" 2>/dev/null | wc -l | tr -d ' ')"
+# verify: true は人が --broker-verify を付けて走らせた発注経路の検証。日次レポート
+# （.claude/agents/daily-report.md）は既に除いているのに、ここだけ拾っていた
+# ——検証で出した「時間外の発注」「持ち越し」で claude が起動し、直す物が無いまま
+# 30 分ぶんのトリアージと PR が生まれる。同じ規則で除く。
+ANOMALY_COUNT="$(jq -c 'select((.anomalies or .outcome == "error") and (.verify | not))' "${DIGESTS[@]}" 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$ANOMALY_COUNT" = "0" ]; then
   echo "異常なし（$YESTERDAY 〜 $TODAY）。claude は起動しません"
   exit 0
