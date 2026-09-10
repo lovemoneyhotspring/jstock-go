@@ -60,6 +60,21 @@ func checkResult(res map[string]any, clmID string) error {
 	return nil
 }
 
+// checkResultOptional は sResultCode が**ある電文だけ**それを見る。
+//
+// マスタ系（CLMStkGetIssueMstKabu）は sResultCode を返さない——実機で確認した
+// （返るのは aCLMStkIssueMstKabu / p_errno / p_err / p_no / p_sd_date / p_rv_date / sCLMID）。
+// 基盤のエラーは p_errno を postTo が見ているので、ここで sResultCode を必須にすると
+// 正常な応答を捨ててしまう（売買単位が黙って空になり、既定の 100 株に落ちていた）。
+//
+// **配列のキーの検査は緩めない。** 項目名の取り違えは rowsOf が今までどおり捕まえる。
+func checkResultOptional(res map[string]any, clmID string) error {
+	if _, ok := res["sResultCode"]; !ok {
+		return nil
+	}
+	return checkResult(res, clmID)
+}
+
 // rowsOf は応答から配列を取り出す。
 //
 // キーが無ければ ErrUnverifiedResponse。キーはあるが空（または null）なら

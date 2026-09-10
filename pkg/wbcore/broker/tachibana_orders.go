@@ -298,7 +298,8 @@ func (t *TachibanaBroker) lotMaster() (map[string]decimal.Decimal, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkResult(res, clmStockMaster); err != nil {
+	// マスタは sResultCode を返さない（実機で確認）。あれば見る、無ければ通す
+	if err := checkResultOptional(res, clmStockMaster); err != nil {
 		return nil, err
 	}
 	rows, err := rowsOf(res, stockMasterKey, clmStockMaster)

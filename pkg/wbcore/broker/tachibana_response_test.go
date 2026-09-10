@@ -283,3 +283,16 @@ func TestRowsOfEmptyStringMeansNoRows(t *testing.T) {
 		t.Error("キーが無いのに通ってしまう")
 	}
 }
+
+// マスタ電文は sResultCode を返さない（実機で確認）。無ければ通し、あれば今までどおり見る。
+func TestCheckResultOptional(t *testing.T) {
+	if err := checkResultOptional(map[string]any{"aCLMStkIssueMstKabu": []any{}}, "CLMStkGetIssueMstKabu"); err != nil {
+		t.Errorf("sResultCode が無いのに落ちる: %v", err)
+	}
+	if err := checkResultOptional(map[string]any{"sResultCode": "0"}, "CLMTest"); err != nil {
+		t.Errorf("正常な sResultCode で落ちる: %v", err)
+	}
+	if err := checkResultOptional(map[string]any{"sResultCode": "1", "sResultText": "業務エラー"}, "CLMTest"); err == nil {
+		t.Error("業務エラーが通ってしまう")
+	}
+}
