@@ -29,12 +29,19 @@ type ErrUnverifiedResponse struct {
 	CLMID    string
 	Expected string
 	Got      []string
+	// GotType は期待した形と違ったときの実際の Go の型（項目名は合っているのに
+	// 形が違う場合に、何が返ったかが分かるように）。
+	GotType string
 }
 
 func (e *ErrUnverifiedResponse) Error() string {
+	suffix := ""
+	if e.GotType != "" {
+		suffix = fmt.Sprintf("（実際の型: %s）", e.GotType)
+	}
 	return fmt.Sprintf(
-		"%s の応答に %q がありません（実機で項目名を確認してください）。返ってきたキー: %s",
-		e.CLMID, e.Expected, strings.Join(e.Got, ", "))
+		"%s の応答に %q がありません%s（実機で項目名を確認してください）。返ってきたキー: %s",
+		e.CLMID, e.Expected, suffix, strings.Join(e.Got, ", "))
 }
 
 // checkResult は sResultCode を見る。"0" 以外は業務エラー。
@@ -65,9 +72,16 @@ func rowsOf(res map[string]any, key, clmID string) ([]map[string]any, error) {
 	if raw == nil {
 		return nil, nil
 	}
+	// 該当が 0 件のとき、立花は配列ではなく**空文字**を返す（実機で確認。
+	// 現物建玉の無い口座の aGenbutuKabuList が ""）。空白だけの文字列は「該当なし」
+	// として通す——中身のある文字列は形が違うということなので、今までどおり弾く。
+	if str, isStr := raw.(string); isStr && strings.TrimSpace(str) == "" {
+		return nil, nil
+	}
 	list, ok := raw.([]any)
 	if !ok {
-		return nil, &ErrUnverifiedResponse{CLMID: clmID, Expected: key + "（配列）", Got: keysOf(res)}
+		return nil, &ErrUnverifiedResponse{CLMID: clmID, Expected: key + "（配列）",
+			Got: keysOf(res), GotType: fmt.Sprintf("%T", raw)}
 	}
 	out := make([]map[string]any, 0, len(list))
 	for _, item := range list {
