@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -256,22 +257,45 @@ func (t *TachibanaBroker) clientOrderIDFor(number string) string {
 // ——変換し忘れが「PEMデコードに失敗」という分かりにくいエラーになるため。
 // PKCS#1（BEGIN RSA PRIVATE KEY）と PKCS#8（BEGIN PRIVATE KEY）の両方に対応する。
 func parseRSAPrivateKey(keyBytes []byte) (*rsa.PrivateKey, error) {
-	der := keyBytes
+	// 実際に配られるのは「拡張子は .der だが中身は base64 テキスト（PEM のヘッダ無し）」
+	// なので、PEM → 生の DER → base64 の 3 通りを試す。
+	candidates := [][]byte{keyBytes}
 	if block, _ := pem.Decode(keyBytes); block != nil {
-		der = block.Bytes
+		candidates = [][]byte{block.Bytes}
+	} else if decoded, err := decodeBase64Key(keyBytes); err == nil {
+		candidates = append(candidates, decoded)
 	}
-	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+	var lastErr error
+	for _, der := range candidates {
+		if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+			return key, nil
+		}
+		pk8, err := x509.ParsePKCS8PrivateKey(der)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		key, ok := pk8.(*rsa.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("PKCS8 の鍵が RSA ではありません")
+		}
 		return key, nil
 	}
-	pk8, err := x509.ParsePKCS8PrivateKey(der)
-	if err != nil {
-		return nil, fmt.Errorf("RSA 秘密鍵として読めません（PEM / DER のどちらでも失敗）: %w", err)
+	return nil, fmt.Errorf("RSA 秘密鍵として読めません（PEM / DER / base64 のどれでも失敗）: %w", lastErr)
+}
+
+// decodeBase64Key は改行を含む base64 テキストを DER に戻す。
+func decodeBase64Key(keyBytes []byte) ([]byte, error) {
+	text := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, string(keyBytes))
+	if text == "" {
+		return nil, fmt.Errorf("空のファイル")
 	}
-	key, ok := pk8.(*rsa.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("PKCS8 の鍵が RSA ではありません")
-	}
-	return key, nil
+	return base64.StdEncoding.DecodeString(text)
 }
 
 func NewTachibanaBroker(env settings.Environment, creds *credentials.TachibanaCredentials, stateDir string) (*TachibanaBroker, error) {
@@ -406,12 +430,22 @@ func (t *TachibanaBroker) decryptURL(encryptedBase64 string) (string, error) {
 	return string(plainBytes), nil
 }
 
+// sdDate は電文の p_sd_date。**日付ではなく送信時刻**で、書式は YYYY.MM.DD-HH:MM:SS.000
+// （移植元の Python 実装 _sd_date と同じ）。"20260910" のような日付を送ると
+// p_errno=-1「引数（p_sd_date:[...]）エラー」で拒否される。ミリ秒は常に .000 でよい。
+func sdDate() string {
+	return clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006.01.02-15:04:05") + ".000"
+}
+
 // login はログイン電文を送り、仮想URL を復号したセッションを返す（保存はしない）。
 func (t *TachibanaBroker) login() (*TachibanaSession, error) {
 	today := clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("20060102")
 	loginPayload := map[string]any{
-		"p_no":      1,
-		"p_sd_date": today,
+		// p_no は**文字列**で送る（数値で送ると p_errno=-1「引数（p_no:[1]）エラー」で
+		// 拒否される）。sJsonOfmt / p_sd_date も同じく文字列。移植元の Python 実装
+		// （git show ac1eb7a:src/wbcore/broker/tachibana.py の _post）と同じ形にする
+		"p_no":      "1",
+		"p_sd_date": sdDate(),
 		"sJsonOfmt": "5",
 		"sCLMID":    clmLogin,
 		"sAuthId":   t.creds.AuthID,
@@ -478,6 +512,9 @@ func (t *TachibanaBroker) login() (*TachibanaSession, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s 復号エラー: %w", key, err)
 		}
+		// 復号した仮想URL は末尾に改行が付いて返る。そのまま URL にすると
+		// net/url が「invalid control character」で落ちる
+		decoded = strings.TrimSpace(decoded)
 		if decoded == "" {
 			return nil, fmt.Errorf("%s がログイン応答にありません", key)
 		}
@@ -612,8 +649,9 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 // send は 1 電文を Shift_JIS で送り、応答を UTF-8 の map にする。
 func (t *TachibanaBroker) send(iface string, pNo int, clmID string, params map[string]any) (map[string]any, error) {
 	payload := map[string]any{
-		"p_no":      pNo,
-		"p_sd_date": t.session.Date,
+		// 文字列で送る（login と同じ。数値だと基盤エラーになる）
+		"p_no":      strconv.Itoa(pNo),
+		"p_sd_date": sdDate(),
 		"sJsonOfmt": "5",
 		"sCLMID":    clmID,
 	}

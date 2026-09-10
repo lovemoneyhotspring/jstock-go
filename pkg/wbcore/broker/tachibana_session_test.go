@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -76,8 +77,10 @@ func (f *fakeTachibana) handle(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	pNo, _ := req["p_no"].(float64)
-	f.pNos = append(f.pNos, int(pNo))
+	// p_no は文字列で送る決まり（数値だと本番の基盤が p_errno=-1 で弾く）。
+	// 控えが数値で来たらここで気づけるように、文字列以外は記録しない
+	pNo, _ := strconv.Atoi(text(req["p_no"]))
+	f.pNos = append(f.pNos, pNo)
 	f.clmIDs = append(f.clmIDs, text(req["sCLMID"]))
 	if r.URL.Path == "/price/" {
 		codes := strings.Split(text(req["sTargetIssueCode"]), ",")
@@ -316,6 +319,9 @@ func TestParseRSAPrivateKeyAcceptsPEMAndDER(t *testing.T) {
 		"PKCS8 DER": pkcs8,
 		"PKCS1 PEM": pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: pkcs1}),
 		"PKCS8 PEM": pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}),
+		// 立花証券が実際に配る形。拡張子は .der だが中身は base64 テキスト（ヘッダ無し）
+		"PKCS8 base64":    []byte(base64.StdEncoding.EncodeToString(pkcs8)),
+		"PKCS1 base64+改行": []byte(wrap76(base64.StdEncoding.EncodeToString(pkcs1))),
 	}
 	for name, data := range cases {
 		got, err := parseRSAPrivateKey(data)
@@ -330,4 +336,15 @@ func TestParseRSAPrivateKeyAcceptsPEMAndDER(t *testing.T) {
 	if _, err := parseRSAPrivateKey([]byte("これは鍵ではない")); err == nil {
 		t.Error("鍵でないデータが通ってしまう")
 	}
+}
+
+// wrap76 は 76 文字ごとに改行を入れる（配られるファイルは折り返してある）。
+func wrap76(text string) string {
+	var b strings.Builder
+	for i := 0; i < len(text); i += 76 {
+		end := min(i+76, len(text))
+		b.WriteString(text[i:end])
+		b.WriteString("\n")
+	}
+	return b.String()
 }

@@ -38,6 +38,10 @@ func newCredentialsCheckCmd() *cobra.Command {
 			fmt.Printf("%s: 認証情報を解決できました\n", target)
 			fmt.Printf("  %s\n", creds)
 			fmt.Printf("  取得元: %s\n", credentials.TachibanaCredentialSource(target, appSettings.DotenvMap))
+			// .env と秘密鍵が他ユーザーから読める状態なら知らせる。診断だけで、実行は止めない
+			for _, warning := range credentials.PermissionWarnings(target, appSettings.DotenvMap) {
+				fmt.Printf("  [warn] %s\n", warning)
+			}
 			return nil
 		},
 	}

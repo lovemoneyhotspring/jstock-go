@@ -264,3 +264,22 @@ func TestSplitBrokerOrderID(t *testing.T) {
 		}
 	}
 }
+
+// 該当 0 件のとき立花は配列ではなく空文字を返す（実機で確認）。空文字は「該当なし」、
+// 中身のある文字列は形が違うので弾く——ここを緩めると項目名の取り違えを見逃す。
+func TestRowsOfEmptyStringMeansNoRows(t *testing.T) {
+	rows, err := rowsOf(map[string]any{"aList": ""}, "aList", "CLMTest")
+	if err != nil || len(rows) != 0 {
+		t.Errorf("空文字が該当なしにならない: rows=%v err=%v", rows, err)
+	}
+	rows, err = rowsOf(map[string]any{"aList": "   "}, "aList", "CLMTest")
+	if err != nil || len(rows) != 0 {
+		t.Errorf("空白だけの文字列が該当なしにならない: rows=%v err=%v", rows, err)
+	}
+	if _, err := rowsOf(map[string]any{"aList": "1件あります"}, "aList", "CLMTest"); err == nil {
+		t.Error("中身のある文字列が通ってしまう")
+	}
+	if _, err := rowsOf(map[string]any{"other": ""}, "aList", "CLMTest"); err == nil {
+		t.Error("キーが無いのに通ってしまう")
+	}
+}
