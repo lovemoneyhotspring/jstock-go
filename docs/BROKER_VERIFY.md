@@ -131,8 +131,17 @@ WBJP_ENV=uat wbjp account
 WBJP_ENV=uat accum orders --check
 
 # 2. 現物を 1 単元だけ発注し、照会で拾えることを確かめる
-WBJP_ENV=uat accum run --live --ignore-window --broker-verify
-WBJP_ENV=uat accum orders --check      # 状態が SUBMITTED → FILLED に変わるか
+#
+# `accum run` が注文を作るのは月初の入金日と増額日だけなので、検証したい日に
+# 注文が出ないことがある（実際 2026-09-11 に踏んだ）。1 単元だけ出す口を別に用意した:
+#
+#   accum verify-order --symbol 563A --live -y     # 上限 2,000 円。超えたら送らない
+#
+# 買いだけ・現物だけ・1 単元だけ・指値（成行にしない）。台帳には検証の印が付く。
+# 銘柄は「売買単位 × 現在値」が小さいものを選ぶ（2026-09-11 時点: 563A 1,006 円、
+# 2621 が 993 円。1629 は単元 10 なので 2,766 円で上限に掛かる）。
+WBJP_ENV=prod accum verify-order --symbol 563A --live -y
+WBJP_ENV=prod accum orders --check      # 状態が SUBMITTED → FILLED に変わるか
 ```
 
 確認したいのはこの 4 点。

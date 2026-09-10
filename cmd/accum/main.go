@@ -32,6 +32,7 @@ func main() {
 	rootCmd.AddCommand(newBackupCmd())
 	rootCmd.AddCommand(newBacktestCmd())
 	rootCmd.AddCommand(newRunCmd())
+	rootCmd.AddCommand(newVerifyOrderCmd())
 	rootCmd.AddCommand(newHistoryCmd())
 	rootCmd.AddCommand(newEvaluateCmd())
 	rootCmd.AddCommand(newBasketCmd())
