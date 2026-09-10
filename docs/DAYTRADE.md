@@ -244,7 +244,26 @@ daytrade backtest --since 2017-01-01          # 設定どおり（資金固定�
 daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
 # 分足の約定値で（実運用の 9:01 の成行・15:20 の成行に近い）
 daytrade backtest --since 2024-11-05 --fill-entry 09:01 --fill-exit 15:20
+daytrade backtest --since 2017-01-01 --no-cache  # パネルのキャッシュを使わない（結果は同じ・遅い）
 ```
+
+### パネルのキャッシュ
+
+設定に依存しない部分（足の窓関数・銘柄一覧の結合・時価総額の分位・決算の突き合わせ）を
+`data/jquants/_panel_cache/panel-<鍵>.parquet` に落とし、2 回目以降はそこから読む。
+**10 年で 40.8 秒 → 13.9 秒・ピーク 5.31GB → 3.10GB**（損益は完全一致）。1 本 81MB。
+
+- **鍵**は「版・売買代金の下限・窓の日数・読む Parquet の一覧と大きさ・更新時刻」。
+  日次の `jquants sync` で足が増えれば鍵が変わり、作り直す（古いものは消す）
+- **期間は鍵に入れない。** 1 本で全期間・IS・OOS のどれにも使う。期間の終わりは
+  `next_open_d`（次の足の日付）で切る——「最終営業日で切る」では、上場廃止・売買停止で
+  期間末より前に足が途切れた銘柄の `next_open` を取りこぼす（実測で 1 件・205 円ずれた）
+- **SQL を変えたら `panelCacheVersion` を上げる**（`pkg/daytrade/backtest/panelcache.go`）。
+  上げれば鍵が変わって作り直される
+- 作れないときは警告を出して従来の経路で続ける（遅いだけで結果は同じ）
+- 1 回だけの実行は速くならない（作成ぶんを払う）。**格子を回す研究のための道具**
+
+根拠と実測は研究ノート 2026-09-daytrade-backtest-perf。
 
 前夜の `plan` と同じ式（`daytrade.universe.eligible_expr`）と 9:00 と同じ順位付け
 （`daytrade.select.gap_rank_expr`）をアーカイブのパネルに当てる。検証と実運用で条件が

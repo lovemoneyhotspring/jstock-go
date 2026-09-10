@@ -18,6 +18,7 @@ func newBacktestCmd() *cobra.Command {
 	var sinceFlag, untilFlag, fillEntryFlag, fillExitFlag string
 	var tradesFlag bool
 	var tradesCSVFlag string
+	var noCacheFlag bool
 	cmd := &cobra.Command{
 		Use:   "backtest",
 		Short: "アーカイブで同じ規則を検証する（資金固定・100 株単位・段階手数料）",
@@ -31,6 +32,7 @@ func newBacktestCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			dtbacktest.PanelCacheEnabled = !noCacheFlag
 			start, err := parseDate(sinceFlag)
 			if err != nil {
 				return err
@@ -63,6 +65,8 @@ func newBacktestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sinceFlag, "since", "2017-01-01", "開始日")
 	cmd.Flags().StringVar(&untilFlag, "until", "", "終了日（既定は最新）")
 	cmd.Flags().BoolVar(&tradesFlag, "trades", false, "個別の取引も出す")
+	cmd.Flags().BoolVar(&noCacheFlag, "no-cache", false,
+		"パネルのキャッシュを使わない（毎回アーカイブから組み直す。結果は同じで遅いだけ）")
 	cmd.Flags().StringVar(&tradesCSVFlag, "trades-csv", "", "全取引（ロング・ショート）を CSV に書く（研究用。板の厚みとの突き合わせなど）")
 	cmd.Flags().StringVar(&fillEntryFlag, "fill-entry", "",
 		"建値を分足で取る時刻（HH:MM。例 09:01。空なら日足の寄付）")
