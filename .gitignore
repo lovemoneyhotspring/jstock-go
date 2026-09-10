@@ -39,3 +39,7 @@ logs/
 # 運用設定（deploy/crontab.txt と同格）なので追跡する
 .claude/*
 !.claude/agents/
+
+# 検証スクリプトの出力（test/*.py が書く CSV・parquet）。大きく、再生成できる
+/test/out/
+__pycache__/
