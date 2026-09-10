@@ -73,6 +73,8 @@ type Ranked struct {
 	// EarnYield は益回り（直近の本決算の当期純利益 ÷ 前日の時価総額。無ければ nil）。
 	// 2 段階選定（PickOptions.ValuePool）の並べ替えの鍵。
 	EarnYield *float64
+	// Sector は 33 業種コード（PickOptions.MaxPerSector の判定に使う）。取れなければ空。
+	Sector string
 }
 
 // LimitDownPrice は前日終値を基準値段とするストップ安の値段。
@@ -182,6 +184,7 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 			Gap:       gap.Round(4),
 			Vol:       c.Vol20,
 			EarnYield: c.EarnYield,
+			Sector:    c.Sector,
 		})
 	}
 	// 同じ鍵なら銘柄コード順（順位を実行ごとに揺らさない）。鍵の無い銘柄は末尾。
@@ -278,6 +281,9 @@ type PickOptions struct {
 	// ValuePool は 2 段階選定の母数の倍率（config.Signal.ValuePool）。
 	// 0 / 1 なら無効。
 	ValuePool int
+	// MaxPerSector は同じ 33 業種から建ててよい銘柄数の上限（config.Signal.MaxPerSector）。
+	// 0 で無制限。上限を超えた銘柄は落ち、次点が繰り上がる。
+	MaxPerSector int
 }
 
 // Pick は順位表の上位 N 銘柄を選び、株数を決める。
@@ -297,19 +303,29 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 	if side == "" {
 		side = domain.SideBuy
 	}
-	// 1 単元が予算に収まる銘柄だけを順位順に残す（届かない銘柄は次点が繰り上がる）
+	// 1 単元が予算に収まる銘柄だけを順位順に残す（届かない銘柄は次点が繰り上がる）。
+	// 同じ業種の上限（MaxPerSector）を超えた銘柄もここで落とし、次点を繰り上げる
+	// ——業種が取れない銘柄（Sector が空）は数に入れない。
 	var affordable []Ranked
 	limit := opts.N
 	if opts.ValuePool > 1 {
 		limit = opts.N * opts.ValuePool
 	}
+	perSector := make(map[string]int, limit)
 	for _, r := range ranked {
 		if len(affordable) >= limit {
 			break
 		}
-		if SharesFor(opts.Budget, r.Price, lotOf(opts.LotSizes, r.Symbol)).GreaterThan(decimal.Zero) {
-			affordable = append(affordable, r)
+		if SharesFor(opts.Budget, r.Price, lotOf(opts.LotSizes, r.Symbol)).LessThanOrEqual(decimal.Zero) {
+			continue
 		}
+		if opts.MaxPerSector > 0 && r.Sector != "" {
+			if perSector[r.Sector] >= opts.MaxPerSector {
+				continue
+			}
+			perSector[r.Sector]++
+		}
+		affordable = append(affordable, r)
 	}
 	chosen := ByEarnYield(affordable, opts.N, opts.ValuePool)
 	total := opts.Budget.Mul(decimal.NewFromInt(int64(opts.N)))

@@ -29,7 +29,7 @@ import (
 
 // panelCacheVersion はキャッシュの中身の版。SQL（列・分位の式・決算の突き合わせ）を
 // 変えたら上げる。上げれば鍵が変わり、古いキャッシュは使われない。
-const panelCacheVersion = 2
+const panelCacheVersion = 3
 
 // panelCacheDir はキャッシュの置き場（保管庫の下。再生成できるので消してよい）。
 func panelCacheDir(arch *archive.Archive) string {

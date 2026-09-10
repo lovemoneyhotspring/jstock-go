@@ -106,6 +106,7 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 			Alert:       alert[f.code],
 			JsfStop:     jsfStop[f.code],
 			Shortable:   m.shortable,
+			Sector:      m.sector,
 			MarginRatio: marginRatio[f.code],
 		})
 		caps = append(caps, f.mktCap)
@@ -232,6 +233,7 @@ type masterRow struct {
 	segment   string
 	product   string
 	shortable bool
+	sector    string
 }
 
 // loadMaster は判定日以前の最新 1 日ぶんの銘柄一覧。
@@ -241,7 +243,7 @@ func loadMaster(arch *archive.Archive, day, prevDay time.Time) (map[string]maste
 	frame, err := arch.ReadWhere(EPMaster, archive.ReadOptions{
 		Start:   prevDay.AddDate(0, 0, -10),
 		End:     day,
-		Columns: []string{"Code", "CoName", "MktNm", "ProdCat", "Mrgn"},
+		Columns: []string{"Code", "CoName", "MktNm", "ProdCat", "Mrgn", "S33"},
 	})
 	if err != nil || frame == nil {
 		return nil, err
@@ -270,6 +272,7 @@ func loadMaster(arch *archive.Archive, day, prevDay time.Time) (map[string]maste
 			segment:   SegmentOf(text(frame.Get(i, "MktNm"))),
 			product:   text(frame.Get(i, "ProdCat")),
 			shortable: IsShortable(text(frame.Get(i, "Mrgn"))),
+			sector:    text(frame.Get(i, "S33")),
 		}
 	}
 	return out, nil

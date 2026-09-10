@@ -295,7 +295,7 @@ func ReconstructRanking(p plan.Plan, bars map[string]Bar, cfg config.Config, at 
 	longRanking := selection.Rank(p.Eligible(), quotes, cfg.Signal)
 	longPicks := selection.PickFrom(longRanking, selection.PickOptions{
 		N: n, Budget: budget, Weighting: cfg.Capital.Weighting, Side: domain.SideBuy,
-		ValuePool: cfg.Signal.ValuePool,
+		ValuePool: cfg.Signal.ValuePool, MaxPerSector: cfg.Signal.MaxPerSector,
 	})
 	return append(rowsOf(longRanking, longPicks, "BUY", n, budget), shortRows...)
 }

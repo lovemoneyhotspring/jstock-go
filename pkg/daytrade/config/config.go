@@ -176,6 +176,14 @@ type Signal struct {
 	// 割高・赤字銘柄のギャップは個別のニュースで戻らず、割安銘柄のギャップは市場の
 	// 振れなので戻る、という読み（研究ノート 2026-09-jp-value-signal）。
 	ValuePool int `toml:"value_pool"`
+	// MaxPerSector は同じ 33 業種から建ててよい銘柄数の上限。0 で無制限（既定）。
+	//
+	// 同じ日に同じ業種を 2 銘柄以上建てた取引は 10 年で平均 +6.4 bp、単独の +37.4 bp に
+	// 対して差 −31.0 bp（t −3.5）。IS −36.6（t −3.1）/ OOS −25.4（t −2.0）で両半期とも
+	// 劣り、市場のギャップ・銘柄のギャップのどの帯で見ても向きは同じ（交絡ではない）。
+	// 同業が揃って候補に載る日は業種まるごとの材料（セクター一括の格下げなど）で、
+	// 個別のパニック売りではないという読み（研究ノート 2026-09-jp-sector-crowding）。
+	MaxPerSector int `toml:"max_per_sector"`
 }
 
 // Regime は危険信号（[regime]）。詳細と検証は daytrade/regime と研究ノート。
@@ -535,6 +543,9 @@ func (c Config) Validate() error {
 	}
 	if c.Signal.ValuePool < 0 {
 		return fmt.Errorf("signal.value_pool は 0 以上（0 / 1 は無効）")
+	}
+	if c.Signal.MaxPerSector < 0 {
+		return fmt.Errorf("signal.max_per_sector は 0 以上（0 で無制限）")
 	}
 	if err := validateGap(c.Signal.MaxGap, "signal.max_gap"); err != nil {
 		return err

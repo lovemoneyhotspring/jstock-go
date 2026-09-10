@@ -27,6 +27,9 @@ type Symbol struct {
 	ProdCat string
 	// Mrgn は 2 が貸借銘柄（信用新規売りができる）。
 	Mrgn string
+	// Sector は 33 業種コード（S33）。空なら "9999"（その他）を書く
+	// ——列そのものが無いとパネルの SQL が S33 を引けない。
+	Sector string
 	// Base は始値・終値の基準。
 	Base float64
 	// Turnover は 1 日の売買代金。
@@ -39,6 +42,14 @@ type Symbol struct {
 	IntradayOn map[string]float64
 	// ListedOn を与えると、その日より前の足を書かない（上場間もない銘柄の再現）。
 	ListedOn time.Time
+}
+
+// sectorOf は 33 業種コード（未指定なら "9999"）。
+func sectorOf(s Symbol) string {
+	if s.Sector == "" {
+		return "9999"
+	}
+	return s.Sector
 }
 
 // Build は days の営業日ぶんのアーカイブを root に書く。
@@ -56,7 +67,7 @@ func Build(root string, days []time.Time, symbols []Symbol) (*archive.Archive, e
 		return nil, err
 	}
 
-	master := &archive.Frame{Columns: []string{"Date", "Code", "CoName", "MktNm", "ProdCat", "Mrgn"}}
+	master := &archive.Frame{Columns: []string{"Date", "Code", "CoName", "MktNm", "ProdCat", "Mrgn", "S33"}}
 	bars := &archive.Frame{Columns: []string{
 		"Date", "Code", "O", "H", "L", "C", "Va", "MktCap", "AdjFactor", "UL", "LL",
 	}}
@@ -82,6 +93,7 @@ func Build(root string, days []time.Time, symbols []Symbol) (*archive.Archive, e
 			master.AppendRow(map[string]*string{
 				"Date": ptr(key), "Code": ptr(s.Code), "CoName": ptr(s.Name),
 				"MktNm": ptr(s.Market), "ProdCat": ptr(s.ProdCat), "Mrgn": ptr(s.Mrgn),
+				"S33": ptr(sectorOf(s)),
 			})
 			prevClose = closePrice
 		}

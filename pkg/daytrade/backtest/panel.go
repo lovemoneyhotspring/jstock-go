@@ -43,6 +43,9 @@ type Row struct {
 	Vol20    *float64
 	// EarnYield は益回り（直近の本決算の当期純利益 ÷ 前日の時価総額）。無ければ nil。
 	EarnYield *float64
+	// Sector は 33 業種コード（equities/master の S33）。同じ業種に建玉を偏らせない
+	// 判定（signal.max_per_sector）に使う。取れなければ空。
+	Sector string
 	Gap       float64
 	// LimitLow / LimitHigh は前日終値を基準値段とする制限値幅（ストップ安・高）。
 	LimitLow      float64
@@ -113,10 +116,11 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 			r                 Row
 			nextOpen, vol20   sql.NullFloat64
 			earnYield         sql.NullFloat64
+			sector            sql.NullString
 			limitLow, limitHi sql.NullFloat64
 		)
 		if err := rows.Scan(&r.Date, &r.Code, &r.Open, &r.Close, &r.PrevClose,
-			&nextOpen, &vol20, &earnYield, &r.Gap, &limitLow, &limitHi,
+			&nextOpen, &vol20, &earnYield, &sector, &r.Gap, &limitLow, &limitHi,
 			&r.Eligible, &r.ShortEligible); err != nil {
 			return nil, err
 		}
@@ -133,6 +137,7 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 			v := earnYield.Float64
 			r.EarnYield = &v
 		}
+		r.Sector = sector.String
 		r.LimitLow, r.LimitHigh = limitLow.Float64, limitHi.Float64
 		panel.Rows = append(panel.Rows, r)
 	}
@@ -188,7 +193,7 @@ type panelSources struct {
 func buildPanelQuery(src panelSources, start, end time.Time, cfg config.Config) string {
 	var b strings.Builder
 	b.WriteString(panelCTEs(src, start, end, cfg))
-	fmt.Fprintf(&b, `SELECT d, code, o, c, prev_close, next_open, vol20, earn_yield,
+	fmt.Fprintf(&b, `SELECT d, code, o, c, prev_close, next_open, vol20, earn_yield, sector,
        o / prev_close - 1 AS gap,
        prev_close - (%s) AS limit_low,
        prev_close + (%s) AS limit_high,
@@ -248,12 +253,13 @@ rolled AS (
 master AS (
   SELECT "Date" AS d, CAST("Code" AS VARCHAR) AS code,
          %s AS segment,
+         CAST("S33" AS VARCHAR) AS sector,
          CAST("ProdCat" AS VARCHAR) AS product,
          CAST("Mrgn" AS VARCHAR) = '2' AS shortable
   FROM %s
 ),
 joined AS (
-  SELECT r.*, m.segment, m.shortable, dd.di
+  SELECT r.*, m.segment, m.shortable, m.sector, dd.di
   FROM rolled r
   JOIN master m ON m.d = r.d AND m.code = r.code
   JOIN days dd ON dd.d = r.d
@@ -361,7 +367,7 @@ valued AS (
 // panelCacheColumns はキャッシュに落とす列。設定に依存しないものだけを持ち、
 // 設定に依存する判定（eligible / short_eligible・ギャップ・制限値幅）は読み出し側で当てる。
 const panelCacheColumns = `SELECT d, code, o, c, prev_close, next_open, next_open_d, vol20, earn_yield,
-       segment, shortable, turnover_med, cap_tercile, earn_prev, disc_today, alert, jsf_stop, is_loss`
+       sector, segment, shortable, turnover_med, cap_tercile, earn_prev, disc_today, alert, jsf_stop, is_loss`
 
 // buildCacheQuery はキャッシュに落とす行を作る SQL。期間は切らず（読み出し側で切る）、
 // 流動性の下限だけで絞る——下限を満たさない行はどの設定でも母集団に入らないため。
@@ -395,7 +401,7 @@ func cacheTurnoverFloor(cfg config.Config) float64 {
 func buildCachedPanelQuery(cachePath string, start, end time.Time, cfg config.Config) string {
 	return fmt.Sprintf(`SELECT d, code, o, c, prev_close,
        CASE WHEN next_open_d > %[2]s THEN NULL ELSE next_open END AS next_open,
-       vol20, earn_yield,
+       vol20, earn_yield, sector,
        o / prev_close - 1 AS gap,
        prev_close - (%[3]s) AS limit_low,
        prev_close + (%[3]s) AS limit_high,
