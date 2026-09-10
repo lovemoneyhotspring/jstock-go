@@ -49,7 +49,7 @@ func newPlanCmd() *cobra.Command {
 	return cmd
 }
 
-// planDay は判定日。指定が無ければ「引け前なら今日、引け後なら次の営業日」。
+// planDay は判定日。指定が無ければ「当日の日足が入る前なら今日、入ったあとなら次の営業日」。
 func planDay(text string, now time.Time) (time.Time, error) {
 	day, err := parseDate(text)
 	if err != nil {
@@ -61,8 +61,10 @@ func planDay(text string, now time.Time) (time.Time, error) {
 	cal := calendar.FromArchive(openArchive())
 	local := clock.ToZone(now, jst)
 	today := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
-	// 15:30 は東証の引け。引ける前なら「今日ぶん」を作り直す余地がある
-	if local.Hour()*60+local.Minute() < 15*60+30 {
+	// 境目は引け（15:30）ではなく**当日の日足が J-Quants に入る時刻**（実測 16:43 頃、
+	// cron の sync は 16:13/16:43）。引けた直後に翌営業日ぶんを作ろうとしても前営業日＝今日の
+	// 足がまだ無く落ちるので、17:00 までは「今日ぶんの作り直し」に倒す
+	if local.Hour()*60+local.Minute() < 17*60 {
 		return cal.NextTradingDay(today, true)
 	}
 	return cal.NextTradingDay(today, false)
