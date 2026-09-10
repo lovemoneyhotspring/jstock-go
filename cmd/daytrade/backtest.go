@@ -117,7 +117,7 @@ func printBacktest(cfg dtconfig.Config, result *dtbacktest.Result, start, end ti
 			y.Year, y.Days, y.Traded, yen(y.PnL), yen(y.MeanDaily), y.WinRate*100)
 	}
 	if showTrades {
-		printTrades(result.Trades)
+		printTrades("直近の取引", result.Trades)
 	}
 }
 
@@ -188,7 +188,8 @@ func runMarginBacktest(cfg dtconfig.Config, start, end time.Time, fetcher usmark
 			y.Year, y.Days, y.Traded, yen(y.PnL), yen(y.LongPnL), yen(y.ShortPnL), y.WinRate*100)
 	}
 	if showTrades {
-		printTrades(result.ShortTrades)
+		printTrades("直近の取引（ロング）", result.LongTrades)
+		printTrades("直近の取引（ショート）", result.ShortTrades)
 	}
 	return writeTradesCSV(tradesCSVPath, result.LongTrades, result.ShortTrades)
 }
@@ -226,8 +227,13 @@ func writeTradesCSV(path string, long, short []dtbacktest.Trade) error {
 
 // printTrades は直近 30 件の取引。全部出すと端末が流れるだけなので末尾に絞る。
 // 縮めた日は株数・損益にその倍率を掛けた値（日次の集計と同じ）。
-func printTrades(trades []dtbacktest.Trade) {
-	fmt.Println("\n直近の取引")
+// label は脚の見出し——信用版はロングとショートを別々に出すので取り違えないように。
+func printTrades(label string, trades []dtbacktest.Trade) {
+	if len(trades) == 0 {
+		fmt.Printf("\n%s: 取引なし\n", label)
+		return
+	}
+	fmt.Printf("\n%s\n", label)
 	fmt.Printf("  %-11s %-7s %8s %9s %9s %9s %12s %5s %s\n", "日付", "銘柄", "ギャップ", "株数", "建値", "手仕舞", "損益", "倍率", "")
 	from := max(0, len(trades)-30)
 	for _, t := range trades[from:] {
