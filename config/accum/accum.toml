@@ -108,7 +108,7 @@ market = "JP"
 signal_symbol = "^IXIC"         # NASDAQ 総合指数（ウォッチリストの IXIC）
 signal_market = "US"
 multiplier = 4
-monthly_budget = 20_000
+monthly_budget = 15_000
 
 [[tactics]]
 id = "1629 配列4倍"
@@ -116,7 +116,18 @@ tactic = "bear_stack"
 symbols = ["1629.T"]          
 market = "JP"
 multiplier = 4
-monthly_budget = 20_000
+monthly_budget = 10_000
+
+# 2559 は上場が 2020-01 で自身の足に 200 日線が揃うので、判定も自身の足で行う
+# （563A / 452A のように本家指数を借りる必要がない）。売買単位は 1 株で、
+# ブローカーの銘柄情報から取れるので lot_size_overrides には書かない。
+[[tactics]]
+id = "2559 配列4倍"
+tactic = "bear_stack"
+symbols = ["2559.T"]            # MAXIS 全世界株式（オール・カントリー）上場投信
+market = "JP"
+multiplier = 4
+monthly_budget = 25_000
 
 # 以前の対象（1305 / 1591）。止めてあるが、戻すときは enabled を外す。
 [[tactics]]
