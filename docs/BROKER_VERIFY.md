@@ -23,6 +23,31 @@
 行が 1 つでもある場合の項目名（約定数量・建玉番号など）は、実際に注文を出すまで確かめられない。
 下の「未検証の電文」はその意味で残っている。
 
+## 実機で確かめた電文（2026-09-11 昼、本番口座・現物 1 株を発注）
+
+入金（3,000 円）後、ザラ場中に `accum verify-order --symbol 563A --live -y` で 1 株だけ買った。
+
+| 電文 | 結果 |
+|---|---|
+| `CLMZanKaiSummary`（残高） | ✅ 現金 3,000 円・買付余力 3,000 円。**0 円でない実数**で読めた |
+| `CLMKabuNewOrder`（現物買い・指値） | ✅ 受理。注文番号が返る |
+| `CLMOrderList`（注文照会・行あり） | ✅ 状態 PENDING・数量 1・約定数量 0 を読めた。**行がある場合の項目名が初めて確かめられた** |
+| `CLMAuthLoginAck` の口座区分 | ✅ `sSinyouKouzaKubun = 0`。**信用取引口座は今日も未開設** |
+
+口座区分はどの CLI にも出していなかったので、調べもののプローブを足した。
+
+```bash
+WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
+  TACHIBANA_PROD_PRIVATE_KEY_FILE=$PWD/e_api_private_key.der \
+  TACHIBANA_KOUZA_PROBE=1 go test ./pkg/wbcore/broker -run TestKouzaProbe -v
+```
+
+`go test` は .env と秘密鍵の相対パスを解決できない（作業ディレクトリがパッケージの側になる）ので、
+上のように絶対パスで渡す。
+
+**信用（`daytrade`）の検証は口座が開くまで進められない。** 信用新規・信用建玉の行あり・
+信用返済の逆指値は、どれも口座が要る。
+
 ## 未検証の電文
 
 | 電文 | 使うところ | 実装 |
@@ -184,6 +209,15 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 #    d. 取消できることを確かめる
 #    e. 信用建玉に対して返済の逆指値（建玉指定つき）が受け付けられるか確かめる
 #    f. 発火後に CorrectStop が拒否されること（sResultCode ≠ 0）を確かめる
+#
+# a〜d は口を用意した。**保有している現物**に対して発火しない水準の売り逆指値を置き、
+# 照会・訂正・取消まで順に通して、各段を ✅ / ❌ で並べる:
+#
+#   accum verify-stop --symbol 563A --live -y     # 条件は現在値 −3%。最後に必ず取消す
+#
+# 売りだけ・現物だけ・保有数量以内・発火しない水準。新規の買いは出さないので
+# お金は使わない。保有が足りなければ**何も送らずに止まる**（柵なので alert は飛ばさない）。
+# e（信用返済の逆指値）と f（発火後の訂正）は信用口座が開いてから。
 ```
 
 ## 既知の制約

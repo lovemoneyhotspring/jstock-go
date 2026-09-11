@@ -33,6 +33,7 @@ func main() {
 	rootCmd.AddCommand(newBacktestCmd())
 	rootCmd.AddCommand(newRunCmd())
 	rootCmd.AddCommand(newVerifyOrderCmd())
+	rootCmd.AddCommand(newVerifyStopCmd())
 	rootCmd.AddCommand(newHistoryCmd())
 	rootCmd.AddCommand(newEvaluateCmd())
 	rootCmd.AddCommand(newBasketCmd())
