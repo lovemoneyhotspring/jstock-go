@@ -92,19 +92,65 @@ func pagesOf(body string) []string {
 // 残っているので、配達の失敗で処理は止めない。
 //
 // 呼ぶたびに新しいスレッドを作り、その中に本文を入れる。スレッド名は title、
-// 無ければ本文の 1 行目。
+// 無ければ本文の 1 行目。節ごとに 1 通ずつ送りたいときは [PostSections]。
 func PostDocument(body, title string) (ok bool, err error) {
-	body = strings.TrimSpace(body)
-	if body == "" {
+	return PostSections([]string{body}, title)
+}
+
+// SectionSeparator は PostSections 用に節を区切る行（Markdown の水平線）。
+const SectionSeparator = "---"
+
+// SplitSections は "---" だけの行で本文を節に分ける。
+func SplitSections(body string) []string { return SplitSectionsWith(body, SectionSeparator) }
+
+// SplitSectionsWith は sep だけの行で本文を節に分ける。
+// 区切りが無ければ全体が 1 節。空の節は落とす。本文に "---" が出てくる
+// （水平線やコードブロック）なら、混ざらない区切り文字を渡す。
+func SplitSectionsWith(body, sep string) []string {
+	if sep == "" {
+		sep = SectionSeparator
+	}
+	var out []string
+	var buf []string
+	flush := func() {
+		if sec := strings.TrimSpace(strings.Join(buf, "\n")); sec != "" {
+			out = append(out, sec)
+		}
+		buf = buf[:0]
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == sep {
+			flush()
+			continue
+		}
+		buf = append(buf, line)
+	}
+	flush()
+	return out
+}
+
+// PostSections は節ごとに 1 通ずつ、同じスレッドに送る（レポートの配達係）。
+//
+// 節の切れ目でメッセージが変わるので、読む側は節を丸ごとコピーできる。
+// 見出しは 1 節目の先頭にだけ付く。上限を超える節は、その節の中で分割される。
+func PostSections(sections []string, title string) (ok bool, err error) {
+	var secs []string
+	for _, sec := range sections {
+		if sec = strings.TrimSpace(sec); sec != "" {
+			secs = append(secs, sec)
+		}
+	}
+	if len(secs) == 0 {
 		return false, fmt.Errorf("本文が空です")
 	}
 	channelID := ReportChannelID()
 	if title != "" {
-		body = fmt.Sprintf("**%s**\n%s", title, body)
+		secs[0] = fmt.Sprintf("**%s**\n%s", title, secs[0])
 	} else {
 		// 見出しが無ければ本文の 1 行目をスレッド名にする（"wbjp" だけの名前で並ばないように）
-		title = firstLine(body)
+		title = firstLine(secs[0])
 	}
+	body := strings.Join(secs, "\n\n"+SectionSeparator+"\n\n")
 	rec := Record{Kind: KindReport, Title: title, Body: body, ChannelID: channelID}
 
 	if reason := missingConfig(channelID, ReportChannelEnvVar); reason != "" {
@@ -114,7 +160,7 @@ func PostDocument(body, title string) (ok bool, err error) {
 		return false, err
 	}
 
-	threadID, err := PostThread(channelID, title, body)
+	threadID, err := PostThreadSections(channelID, title, secs)
 	rec.ThreadID = threadID
 	if err != nil {
 		rec.Error = err.Error()

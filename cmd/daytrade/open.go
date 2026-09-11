@@ -218,16 +218,19 @@ func runOpen(opts openOptions) error {
 		digest.Anomaly("daytrade.no_quotes", err.Error())
 		return nil
 	}
-	quotes, stale, delayed := dtquotes.Fresh(received, cfg.Execution.MaxQuoteAge, now, opts.allowDelayed)
+	quotes, stale, delayed, bookKept := dtquotes.Fresh(received, cfg.Execution.MaxQuoteAge, now, opts.allowDelayed)
 	// 気配の時刻（tDPP:T）には今日の日付を当てている。寄り前の銘柄で前日の時刻が返ると
 	// 「今日の 15:30」＝未来として鮮度の検査を素通りする。実機で確かめるまで、除外した
 	// 銘柄の時刻と年齢、未来の時刻を持つ銘柄の数を残す（docs/OPENING_DATA.md「実機で確かめること」）
 	future := dtquotes.FutureStamped(received, now, futureSlack)
-	if len(stale) > 0 || len(delayed) > 0 || len(future) > 0 {
+	if len(stale) > 0 || len(delayed) > 0 || len(future) > 0 || len(bookKept) > 0 {
 		logWarn("daytrade.quotes", "使えない気配を除外", map[string]any{
 			"stale": len(stale), "stale_sample": dtquotes.DescribeAges(received, sample(stale), now),
 			"delayed": len(delayed), "delayed_sample": sample(delayed),
 			"future": len(future), "future_sample": dtquotes.DescribeAges(received, sample(future), now),
+			// book_kept は現在値時刻が古くても板が返っていたので残した銘柄
+			// （tDPP:T は最後の約定時刻なので、約定の薄い銘柄はここに入る）
+			"book_kept": len(bookKept), "book_kept_sample": dtquotes.DescribeAges(received, sample(bookKept), now),
 			"max_age_sec": cfg.Execution.MaxQuoteAge,
 		})
 	}
@@ -240,6 +243,8 @@ func runOpen(opts openOptions) error {
 		"quotes_requested": len(symbols),
 		"quotes_received":  len(received),
 		"quotes_usable":    len(quotes),
+		// 現在値時刻は古いが板が返っていたので残した銘柄（寄付が遅れる＝利益源）
+		"quotes_book_kept": len(bookKept),
 		// signal.skip_opened で外した「既に寄っていた」銘柄の数（設定が偽なら null）
 		"quotes_opened": nil,
 		// margin.spill_to_long でロングに回したショートの余り（円。回さなかった日は null）

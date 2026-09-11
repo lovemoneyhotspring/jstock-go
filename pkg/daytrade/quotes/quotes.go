@@ -146,9 +146,11 @@ func (t *Tachibana) Fetch(symbols []string) (map[string]selection.Quote, error) 
 			continue
 		}
 		// 基準値段（前日終値）も渡す。分割・併合の日はアーカイブの終値と食い違う
+		hasBook := row.Bid.GreaterThan(decimal.Zero) || row.Ask.GreaterThan(decimal.Zero)
 		found[symbol] = selection.Quote{
 			Symbol: symbol, Price: price, At: row.At, Source: t.Name(),
-			PrevClose: row.PrevClose, Opened: opened, FromBook: fromBook,
+			PrevClose: row.PrevClose, Opened: opened,
+			FromBook: fromBook, HasBook: hasBook,
 		}
 	}
 	return found, nil
@@ -226,10 +228,14 @@ const MinuteRounding = time.Minute - time.Second
 // 満たしていない銘柄を買いに行く。allowDelayed は検証用の逃げ道。
 //
 // 年齢の上限には MinuteRounding を足す（丸めのぶんを気配に有利に読む）。これは
-// 時刻の精度の補正であって、鮮度そのものの判定ではない。tDPP:T が「板の時刻」では
-// なく「最後に約定した時刻」である件は別の穴で、ここでは塞げない
-// （docs/OPENING_DATA.md「実機で確かめること」）。
-func Fresh(received map[string]selection.Quote, maxAgeSeconds int, now time.Time, allowDelayed bool) (kept map[string]selection.Quote, stale, delayed []string) {
+// 時刻の精度の補正であって、鮮度そのものの判定ではない。
+//
+// **年齢で落とすのは板（最良気配）の返らなかった気配だけ。** 年齢の元になる tDPP:T は
+// 「板の時刻」ではなく「最後に約定した時刻」なので、約定の薄い銘柄は板が生きていても
+// 古いと判定される。落ちるのは寄付が遅れる銘柄＝ 2026-09-jp-gap-minute の利益源で、
+// 9:04 以降の欠けが 235 → 258 → 274 → 301 と増えていたのはこれ（2026-09-12 に切り分け）。
+// 板が返っているなら値段は問い合わせた時点のものなので、年齢では落とさず bookKept に数える。
+func Fresh(received map[string]selection.Quote, maxAgeSeconds int, now time.Time, allowDelayed bool) (kept map[string]selection.Quote, stale, delayed, bookKept []string) {
 	limit := time.Duration(maxAgeSeconds)*time.Second + MinuteRounding
 	kept = make(map[string]selection.Quote, len(received))
 	for symbol, quote := range received {
@@ -238,12 +244,18 @@ func Fresh(received map[string]selection.Quote, maxAgeSeconds int, now time.Time
 			continue
 		}
 		if now.Sub(quote.At) > limit && !allowDelayed {
-			stale = append(stale, symbol)
-			continue
+			if !quote.HasBook {
+				stale = append(stale, symbol)
+				continue
+			}
+			bookKept = append(bookKept, symbol)
 		}
 		kept[symbol] = quote
 	}
-	return kept, stale, delayed
+	sort.Strings(stale)
+	sort.Strings(delayed)
+	sort.Strings(bookKept)
+	return kept, stale, delayed, bookKept
 }
 
 // DropOpened は**もう寄っている**銘柄の気配を落とす（signal.skip_opened）。

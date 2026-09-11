@@ -44,3 +44,29 @@ func TestChunksEmpty(t *testing.T) {
 		t.Errorf("空文字 → %q", got)
 	}
 }
+
+func TestSplitSections(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"区切りなし", "本文だけ", []string{"本文だけ"}},
+		{"3 節", "①\n---\n②\n---\n③", []string{"①", "②", "③"}},
+		{"前後の空行と空の節は落とす", "\n①\n\n---\n\n---\n\n②\n", []string{"①", "②"}},
+		{"--- を含む行は区切りではない", "①\n--- 見出し\n②", []string{"①\n--- 見出し\n②"}},
+		{"空文字", "", nil},
+	}
+	for _, c := range cases {
+		got := SplitSections(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: %d 節 (want %d): %q", c.name, len(got), len(c.want), got)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: 節 %d = %q, want %q", c.name, i, got[i], c.want[i])
+			}
+		}
+	}
+}

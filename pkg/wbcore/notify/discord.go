@@ -160,7 +160,18 @@ func PostMessage(channelID, content string) error {
 // 本文が 1 通の上限を超えるときは分割して連投する（すべて同じスレッド）。
 // 送り先が既にスレッドなら、新しく作らずそこへ追記する（その ID をそのまま返す）。
 func PostThread(channelID, title, body string) (threadID string, err error) {
-	pages := pagesOf(body)
+	return PostThreadSections(channelID, title, []string{body})
+}
+
+// PostThreadSections は PostThread と同じだが、節ごとに 1 通ずつ送る。
+//
+// 節の切れ目でメッセージが変わるので、読む側は節を丸ごとコピーできる。
+// 1 通の上限を超える節だけ、その節の中でページ分割する。
+func PostThreadSections(channelID, title string, sections []string) (threadID string, err error) {
+	var pages []string
+	for _, sec := range sections {
+		pages = append(pages, pagesOf(sec)...)
+	}
 	if len(pages) == 0 {
 		return "", fmt.Errorf("本文が空です")
 	}

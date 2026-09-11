@@ -58,7 +58,7 @@ func TestFreshDropsStaleAndDelayed(t *testing.T) {
 		"stale":   {Symbol: "stale", At: now.Add(-10 * time.Minute)},
 		"delayed": {Symbol: "delayed", At: now, Delayed: true},
 	}
-	kept, stale, delayed := Fresh(received, 90, now, false)
+	kept, stale, delayed, _ := Fresh(received, 90, now, false)
 	if len(kept) != 1 || kept["fresh"].Symbol != "fresh" {
 		t.Errorf("残った気配 = %v", kept)
 	}
@@ -70,7 +70,7 @@ func TestFreshDropsStaleAndDelayed(t *testing.T) {
 		"in":  {Symbol: "in", At: now.Add(-149 * time.Second)},
 		"out": {Symbol: "out", At: now.Add(-150 * time.Second)},
 	}
-	kept, stale, _ = Fresh(edge, 90, now, false)
+	kept, stale, _, _ = Fresh(edge, 90, now, false)
 	if len(kept) != 1 || kept["in"].Symbol != "in" {
 		t.Errorf("分丸めの補正で残った気配 = %v", kept)
 	}
@@ -79,9 +79,38 @@ func TestFreshDropsStaleAndDelayed(t *testing.T) {
 	}
 
 	// 検証用の逃げ道: allow_delayed なら全部通す
-	kept, _, _ = Fresh(received, 90, now, true)
+	kept, _, _, _ = Fresh(received, 90, now, true)
 	if len(kept) != 3 {
 		t.Errorf("allow_delayed で %d 件しか通っていない", len(kept))
+	}
+}
+
+// 現在値時刻が古くても板が返っていれば落とさない。tDPP:T は最後に約定した時刻なので、
+// 約定の薄い銘柄は板が生きていても古いと判定される——落ちるのは寄付が遅れる銘柄＝利益源。
+func TestFreshKeepsStaleWhenBookIsPresent(t *testing.T) {
+	now := time.Date(2026, 9, 3, 0, 5, 0, 0, time.UTC)
+	received := map[string]selection.Quote{
+		// 板が返っているので、現在値時刻が 10 分前でも残す
+		"thin": {Symbol: "thin", At: now.Add(-10 * time.Minute), HasBook: true},
+		// 板が返らない古い気配は今までどおり落とす
+		"dead": {Symbol: "dead", At: now.Add(-10 * time.Minute)},
+	}
+	kept, stale, _, bookKept := Fresh(received, 90, now, false)
+	if len(kept) != 1 || kept["thin"].Symbol != "thin" {
+		t.Errorf("残った気配 = %v", kept)
+	}
+	if len(stale) != 1 || stale[0] != "dead" {
+		t.Errorf("板の無い古い気配が落ちていない: %v", stale)
+	}
+	if len(bookKept) != 1 || bookKept[0] != "thin" {
+		t.Errorf("板で残した銘柄が数えられていない: %v", bookKept)
+	}
+	// 遅延の気配は板があっても通さない（別の穴）
+	delayedQuote := map[string]selection.Quote{
+		"d": {Symbol: "d", At: now, Delayed: true, HasBook: true},
+	}
+	if kept, _, delayed, _ := Fresh(delayedQuote, 90, now, false); len(kept) != 0 || len(delayed) != 1 {
+		t.Errorf("遅延の気配が板で通ってしまう: kept=%v delayed=%v", kept, delayed)
 	}
 }
 

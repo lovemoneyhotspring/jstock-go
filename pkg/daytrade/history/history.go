@@ -102,6 +102,11 @@ var QuotesSchema = []history.Column{
 	// signal.skip_opened を使うかどうかに関係なく毎日記録する——「9:01 に何割が
 	// 寄っていたか」は後から取り直せない（docs/OPENING_DATA.md 原則 6）。
 	{Name: "opened", Type: history.TypeBool},
+	// has_book は応答に板（最良気配）が返っていたか。鮮度の判定はこれを見る
+	// （現在値時刻 tDPP:T は最後の約定時刻なので、約定の薄い銘柄は板が生きていても古く出る）。
+	{Name: "has_book", Type: history.TypeBool},
+	// from_book は値段そのものを板から取った（始値も現在値も空だった＝未寄付）。
+	{Name: "from_book", Type: history.TypeBool},
 	{Name: "prev_close", Type: history.TypeFloat64},
 	{Name: "gap", Type: history.TypeFloat64},
 }
@@ -226,7 +231,9 @@ func QuotesFrame(received map[string]selection.Quote, usable map[string]selectio
 		row := map[string]any{
 			"symbol": symbol, "price": price,
 			"quote_at": clock.EnsureUTC(q.At), "source": q.Source, "delayed": q.Delayed,
-			"usable": isUsable, "opened": q.Opened, "prev_close": nil, "gap": nil,
+			"usable": isUsable, "opened": q.Opened,
+			"has_book": q.HasBook, "from_book": q.FromBook,
+			"prev_close": nil, "gap": nil,
 		}
 		if prev, ok := prevClose[symbol]; ok && prev > 0 {
 			row["prev_close"] = prev

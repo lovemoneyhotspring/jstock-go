@@ -508,3 +508,54 @@ func TestThreadNameTruncatesAndFallsBack(t *testing.T) {
 		t.Errorf("%d 文字に切り詰められていない: %d 文字", threadNameLimit, n)
 	}
 }
+
+// 節ごとに 1 通ずつ、同じスレッドに入る。節の途中でメッセージが変わらないので、
+// 読む側は節を丸ごとコピーできる。
+func TestPostSectionsOneMessagePerSection(t *testing.T) {
+	f := (&fakeDiscord{}).start(t)
+
+	ok, err := PostSections([]string{"①の中身", "②の中身", "③の中身"}, "記事 3 本")
+	if err != nil || !ok {
+		t.Fatalf("PostSections failed: ok=%v err=%v", ok, err)
+	}
+	if len(f.threads) != 1 {
+		t.Fatalf("スレッドの作成回数 = %d, want 1", len(f.threads))
+	}
+	got := f.contents(f.threads[0].ID)
+	want := []string{"**記事 3 本**\n①の中身", "②の中身", "③の中身"}
+	if len(got) != len(want) {
+		t.Fatalf("メッセージ数 = %d, want %d: %q", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("%d 通目 = %q, want %q", i+1, got[i], want[i])
+		}
+	}
+}
+
+// 上限を超える節は、その節の中だけで分割される（隣の節と混ざらない）。
+func TestPostSectionsSplitsOnlyTheLongSection(t *testing.T) {
+	f := (&fakeDiscord{}).start(t)
+
+	long := strings.Repeat("あ\n", 1500)
+	ok, err := PostSections([]string{"短い節", long, "最後の節"}, "")
+	if err != nil || !ok {
+		t.Fatalf("PostSections failed: ok=%v err=%v", ok, err)
+	}
+	got := f.contents(f.threads[0].ID)
+	if len(got) < 4 {
+		t.Fatalf("メッセージ数 = %d, want 4 以上", len(got))
+	}
+	if got[0] != "短い節" {
+		t.Errorf("1 通目 = %q, want 短い節", got[0])
+	}
+	if last := got[len(got)-1]; last != "最後の節" {
+		t.Errorf("最後の通 = %q, want 最後の節", last)
+	}
+	if !strings.Contains(got[1], "_(1/") {
+		t.Errorf("長い節にページ番号が付いていない: %.40q", got[1])
+	}
+	if f.threads[0].Name != "短い節" {
+		t.Errorf("スレッド名 = %q, want 短い節（見出しが無ければ 1 行目）", f.threads[0].Name)
+	}
+}
