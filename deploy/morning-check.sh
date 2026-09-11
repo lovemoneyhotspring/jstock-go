@@ -92,15 +92,28 @@ trap 'rm -f "$body"' EXIT
 
   # --- 気配の鮮度（本番でしか出ない数字）-----------------------------------------
   #
-  # tDPP:T は時刻しか返らないので今日の日付を当てている。寄り前の銘柄が前日の 15:30 を
-  # 返すと「今日の 15:30」＝未来になり、鮮度の検査を素通りする（FutureStamped は数えるだけで
-  # 除外しない）。--live を開ける前に塞ぐ必要があるので、毎朝この数を目の前に出す。
+  # tDPP:T は「現在値時刻」＝最後に約定した時刻で、板の時刻ではない。約定の薄い銘柄は
+  # 板が生きていても数分前の約定時刻を返すので stale に落ちる（2026-09-11 の朝で 2 割）。
+  # 加えて秒が返らず分単位なので、年齢は最大 59 秒ぶん多く出る。数字はこの 2 つを
+  # 承知のうえで読むこと（docs/OPENING_DATA.md「実機で確かめること」）。
+  #
+  # 未来の件数は別の穴。寄り前の銘柄が前日の 15:30 を返すと「今日の 15:30」＝未来になり、
+  # 鮮度の検査を素通りする（FutureStamped は数えるだけで除外しない）。
   JSONL="$HOME_DIR/state/logs/daytrade-prod.jsonl"
   if [ -f "$JSONL" ]; then
-    freshness=$(jq -r --arg d "$TODAY" '
+    # 「気配を取得」（受信数）と「使えない気配を除外」（内訳）は別の行なので、
+    # 直前の取得の受信数を覚えておいて内訳の行に添える。足し算はしない——
+    # future は Fresh と無関係に受信ぜんぶを走査するので stale/delayed と重なる。
+    freshness=$(jq -sr --arg d "$TODAY" '
       # 9:01〜9:13 JST は同じ UTC 日付の 00:01〜00:13。朝の回だけを拾う
-      select(.code == "daytrade.quotes" and (.ts_utc | startswith($d)) and .extra.future != null)
-      | "\(.ts_utc[11:16])Z  受信 \(.extra.stale + .extra.delayed + .extra.future) のうち stale \(.extra.stale) / delayed \(.extra.delayed) / **未来 \(.extra.future)**"
+      [ .[] | select(.code == "daytrade.quotes" and (.ts_utc | startswith($d))) ]
+      | reduce .[] as $e ({recv: null, req: null, out: []};
+          if $e.extra.received != null then
+            .recv = $e.extra.received | .req = $e.extra.requested
+          elif $e.extra.future != null then
+            .out += [ "\(($e.ts_utc[11:13] | tonumber + 9)):\($e.ts_utc[14:16]) JST  受信 \(.recv // "?")/\(.req // "?")  使えない stale \($e.extra.stale) / delayed \($e.extra.delayed) / 未来 \($e.extra.future)" ]
+          else . end)
+      | .out[]
     ' "$JSONL" 2>/dev/null | tail -6)
     if [ -n "$freshness" ]; then
       echo
@@ -108,7 +121,7 @@ trap 'rm -f "$body"' EXIT
       echo '```'
       echo "$freshness"
       echo '```'
-      if echo "$freshness" | grep -q "未来 [1-9]"; then
+      if echo "$freshness" | grep -qE "未来 [1-9]"; then
         echo "※ 未来の時刻を持つ気配がある。寄り前に前日の 15:30 が返っている可能性。"
         echo "  この数が寄り後（9:04 以降）も減らないなら、--live を開ける前に塞ぐこと"
       fi
