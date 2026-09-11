@@ -34,6 +34,7 @@ func main() {
 	rootCmd.AddCommand(newRunCmd())
 	rootCmd.AddCommand(newVerifyOrderCmd())
 	rootCmd.AddCommand(newVerifyStopCmd())
+	rootCmd.AddCommand(newImportFillsCmd())
 	rootCmd.AddCommand(newHistoryCmd())
 	rootCmd.AddCommand(newEvaluateCmd())
 	rootCmd.AddCommand(newBasketCmd())
