@@ -184,3 +184,63 @@ func text(v any) string {
 		return fmt.Sprint(value)
 	}
 }
+
+// escapeRawControls は JSON の文字列の中に**生で**入っている制御文字を
+// エスケープする。立花証券の応答はここを守らないことがある。
+//
+//	"sResultText":"逆指値注文値段変更がありません<TAB>"
+//
+// Go の json.Unmarshal は文字列中の 0x20 未満のバイトを拒否するので、これが
+// 1 つ入るだけで応答全体が読めなくなる。**拒否理由（sResultCode / sResultText）が
+// 載る応答ほど起きやすい**ので、そのままでは「なぜ拒否されたか」が永久に読めない。
+// 2026-09-11 に逆指値の訂正（CLMKabuCorrectOrder）で実際に踏んだ。
+func escapeRawControls(body []byte) []byte {
+	// 先に走査して、直すものが無ければ元のまま返す（普通の応答では割当が増えない）
+	need := false
+	inString, escaped := false, false
+	for _, b := range body {
+		switch {
+		case escaped:
+			escaped = false
+		case b == '\\' && inString:
+			escaped = true
+		case b == '"':
+			inString = !inString
+		case inString && b < 0x20:
+			need = true
+		}
+		if need {
+			break
+		}
+	}
+	if !need {
+		return body
+	}
+
+	out := make([]byte, 0, len(body)+16)
+	inString, escaped = false, false
+	for _, b := range body {
+		switch {
+		case escaped:
+			escaped = false
+		case b == '\\' && inString:
+			escaped = true
+		case b == '"':
+			inString = !inString
+		case inString && b < 0x20:
+			switch b {
+			case '\t':
+				out = append(out, '\\', 't')
+			case '\n':
+				out = append(out, '\\', 'n')
+			case '\r':
+				out = append(out, '\\', 'r')
+			default:
+				out = append(out, fmt.Sprintf(`\u%04x`, b)...)
+			}
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
+}

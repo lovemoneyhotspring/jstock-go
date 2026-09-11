@@ -101,7 +101,8 @@ func TestOrderPayloadStop(t *testing.T) {
 	}
 }
 
-// 逆指値の訂正は条件価格と発火後の値段だけを変え、他は "*"（変更なし）。
+// 逆指値の訂正は条件価格だけを変え、他は "*"（変更なし）。発火後の値段に "0"（成行）を
+// 入れると、元から成行の逆指値では「変更が無い」として拒否される（sResultCode=12115）。
 func TestCorrectStopPayload(t *testing.T) {
 	params, err := correctStopPayload("9000015", "20260903", domain.StopSpec{Trigger: dec("2450")}, "pw")
 	if err != nil {
@@ -110,7 +111,7 @@ func TestCorrectStopPayload(t *testing.T) {
 	for key, want := range map[string]any{
 		"sOrderNumber": "9000015", "sEigyouDay": "20260903",
 		"sCondition": "*", "sOrderPrice": "*", "sOrderSuryou": "*", "sOrderExpireDay": "*",
-		"sGyakusasiZyouken": "2450", "sGyakusasiPrice": "0", "sSecondPassword": "pw",
+		"sGyakusasiZyouken": "2450", "sGyakusasiPrice": "*", "sSecondPassword": "pw",
 	} {
 		if params[key] != want {
 			t.Errorf("%s = %v, want %v", key, params[key], want)

@@ -488,7 +488,7 @@ func (t *TachibanaBroker) login() (*TachibanaSession, error) {
 	}
 
 	var res map[string]any
-	if err := json.Unmarshal(respBytes, &res); err != nil {
+	if err := json.Unmarshal(escapeRawControls(respBytes), &res); err != nil {
 		fields["body"] = snippet(respBytes)
 		t.logWarn("broker.request_failed", "立花証券ログイン応答が JSON でない", fields)
 		return nil, fmt.Errorf("立花証券ログインJSONパースエラー: %w", err)
@@ -725,7 +725,7 @@ func (t *TachibanaBroker) send(iface string, pNo int, clmID string, params map[s
 	}
 
 	var res map[string]any
-	if err := json.Unmarshal(respBytes, &res); err != nil {
+	if err := json.Unmarshal(escapeRawControls(respBytes), &res); err != nil {
 		fields["body"] = snippet(respBytes)
 		return fail("立花証券API 応答が JSON でない", fmt.Errorf("立花証券API JSONパースエラー: %w", err))
 	}
@@ -954,7 +954,10 @@ func correctStopPayload(number, day string, stop domain.StopSpec, password strin
 	if stop.Trigger.LessThanOrEqual(decimal.Zero) {
 		return nil, fmt.Errorf("逆指値の条件価格は正の数: %s", stop.Trigger)
 	}
-	price := "0" // 発火後は成行
+	// 発火後の値段は**変えないなら "*"**。ここに "0"（成行）を入れると、元から成行の
+	// 逆指値では「変更が無い」と見なされ、電文全体が拒否される
+	// （sResultCode=12115「逆指値注文値段変更がありません」。2026-09-11 に実機で踏んだ）
+	price := "*"
 	if stop.Price != nil {
 		if stop.Price.LessThanOrEqual(decimal.Zero) {
 			return nil, fmt.Errorf("逆指値の値段は正の数: %s", stop.Price)

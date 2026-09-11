@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -294,5 +295,38 @@ func TestCheckResultOptional(t *testing.T) {
 	}
 	if err := checkResultOptional(map[string]any{"sResultCode": "1", "sResultText": "業務エラー"}, "CLMTest"); err == nil {
 		t.Error("業務エラーが通ってしまう")
+	}
+}
+
+// 立花証券の応答は JSON の文字列に**生のタブ**を入れてくることがある（拒否理由の
+// sResultText で実際に起きた）。そのままでは応答全体が読めず、なぜ拒否されたかが
+// 分からなくなる。エスケープしてから渡す。
+func TestEscapeRawControls(t *testing.T) {
+	body := []byte("{\n\t\"sResultCode\":\"12115\",\n\t\"sResultText\":\"値段変更がありません\t\"\n}")
+	var res map[string]any
+	if err := json.Unmarshal(body, &res); err == nil {
+		t.Fatal("生のタブ入りがそのまま読めている（この前提が崩れたらこの細工は不要）")
+	}
+	if err := json.Unmarshal(escapeRawControls(body), &res); err != nil {
+		t.Fatalf("エスケープしても読めない: %v", err)
+	}
+	if res["sResultCode"] != "12115" {
+		t.Errorf("sResultCode = %v, want 12115", res["sResultCode"])
+	}
+	if res["sResultText"] != "値段変更がありません\t" {
+		t.Errorf("sResultText = %q（タブまで復元されるはず）", res["sResultText"])
+	}
+}
+
+// 普通の応答は触らない（同じ領域をそのまま返す）。
+func TestEscapeRawControlsLeavesCleanBody(t *testing.T) {
+	body := []byte(`{"sResultCode":"0","sResultText":"","a":["x\ty"]}`)
+	got := escapeRawControls(body)
+	if string(got) != string(body) {
+		t.Errorf("触ってしまっている: %s", got)
+	}
+	var res map[string]any
+	if err := json.Unmarshal(got, &res); err != nil {
+		t.Fatal(err)
 	}
 }
