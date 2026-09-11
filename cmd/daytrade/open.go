@@ -704,9 +704,18 @@ func fetchQuotes(cfg dtconfig.Config, b broker.Broker, symbols []string, sourceO
 			missing = append(missing, s)
 		}
 	}
+	// 値段を板（最良気配）から取った銘柄の数。**まだ寄っていない銘柄**で、始値も現在値も
+	// 空だったもの——利益源はここに集まる（docs/OPENING_DATA.md「実機で確かめること」3）。
+	fromBook := 0
+	for _, q := range found {
+		if q.FromBook {
+			fromBook++
+		}
+	}
 	logInfo("daytrade.quotes", "気配を取得", map[string]any{
 		"source": name, "requested": len(symbols), "received": len(found),
 		"missing": len(missing), "missing_sample": sample(missing), "elapsed_ms": elapsed,
+		"from_book": fromBook,
 	})
 	return found, nil
 }
