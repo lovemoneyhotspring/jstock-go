@@ -85,6 +85,27 @@ func TestFreshDropsStaleAndDelayed(t *testing.T) {
 	}
 }
 
+// 最良気配から値段を作る（両方あれば中値、片方だけならその値、無ければゼロ）。
+func TestBookPrice(t *testing.T) {
+	d := decimal.NewFromInt
+	cases := []struct {
+		name     string
+		bid, ask decimal.Decimal
+		want     string
+	}{
+		{"板寄せ中は同値", d(6710), d(6710), "6710"},
+		{"開いていれば中値", d(6512), d(6515), "6513.5"},
+		{"買いだけ", d(872), decimal.Zero, "872"},
+		{"売りだけ", decimal.Zero, d(900), "900"},
+		{"板が無い", decimal.Zero, decimal.Zero, "0"},
+	}
+	for _, c := range cases {
+		if got := bookPrice(c.bid, c.ask); got.String() != c.want {
+			t.Errorf("%s: bookPrice(%s, %s) = %s, want %s", c.name, c.bid, c.ask, got, c.want)
+		}
+	}
+}
+
 func TestNewRejectsUnknownSource(t *testing.T) {
 	if _, err := New("yahoo", Params{}); err == nil {
 		t.Error("未知の quote_source が通る")

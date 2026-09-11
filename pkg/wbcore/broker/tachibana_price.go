@@ -85,8 +85,13 @@ var priceLimiter = sync.OnceValue(func() *RateLimiter {
 const (
 	// MarketPriceBatch は時価問合 1 リクエストの銘柄数の上限。
 	MarketPriceBatch = 120
-	// MarketPriceColumns は取得する項目（始値・現在値・現在値時刻・前日終値）。
-	MarketPriceColumns = "pDOP,pDPP,tDPP:T,pPRP"
+	// MarketPriceColumns は取得する項目（始値・現在値・現在値時刻・前日終値・最良気配）。
+	//
+	// 気配（pQBP / pQAP）を取るのは、**寄り前と未寄付の銘柄は始値も現在値も空**で、
+	// 値段が気配にしか無いため（2026-09-11 に実機で確認。docs/OPENING_DATA.md
+	// 「実機で確かめること」3）。これを取らないと、寄りが遅れる銘柄＝利益源が
+	// 「値段が無い」として候補から消える。
+	MarketPriceColumns = "pDOP,pDPP,tDPP:T,pPRP,pQBP,pQAP"
 )
 
 // MarketPrice は 1 銘柄ぶんの時価。取れなかった値はゼロ。
@@ -100,6 +105,9 @@ type MarketPrice struct {
 	PrevClose decimal.Decimal
 	// At は現在値の時刻（UTC）。読めなければ取得時刻。
 	At time.Time
+	// Bid / Ask は最良買気配値・最良売気配値（無ければゼロ）。寄り前と未寄付の銘柄は
+	// ここにしか値段が無い。
+	Bid, Ask decimal.Decimal
 }
 
 // MarketPrices は時価問合（CLMMfdsGetMarketPrice）。銘柄 → 時価。
@@ -123,6 +131,8 @@ func (t *TachibanaBroker) MarketPrices(symbols []string) (map[string]MarketPrice
 			Last:      priceDecimal(row["pDPP"]),
 			PrevClose: priceDecimal(row["pPRP"]),
 			At:        priceTime(row["tDPP:T"]),
+			Bid:       priceDecimal(row["pQBP"]),
+			Ask:       priceDecimal(row["pQAP"]),
 		}
 	}
 	return found, nil

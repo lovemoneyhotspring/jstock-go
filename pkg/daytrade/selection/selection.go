@@ -38,6 +38,10 @@ type Quote struct {
 	// 寄り前の気配値で、成行はこれから始まる板寄せで約定する。
 	// signal.skip_opened の判定に使う（daytrade/quotes.DropOpened）。
 	Opened bool
+	// FromBook は値段を板（最良気配）から取った。寄り前と未寄付の銘柄は始値も現在値も
+	// 空なので、気配が唯一の値段になる（docs/OPENING_DATA.md「実機で確かめること」3）。
+	// 記録用——選定の規則には使わない。
+	FromBook bool
 }
 
 // Pick は建てる銘柄 1 つ。Side が BUY なら寄付で買う（ロング）、SELL なら売建てる（ショート）。

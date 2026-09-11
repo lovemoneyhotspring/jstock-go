@@ -126,11 +126,21 @@ func (t *Tachibana) Fetch(symbols []string) (map[string]selection.Quote, error) 
 	}
 	found := make(map[string]selection.Quote, len(rows))
 	for symbol, row := range rows {
-		// 寄付後は始値を使う。まだ寄っていなければ現在値（気配値）
+		// 寄付後は始値。まだ寄っていなければ現在値、それも無ければ板（最良気配）。
+		//
+		// **寄り前と未寄付の銘柄は始値も現在値も空で、値段は気配にしかない**
+		// （2026-09-11 の実機。9984 は 9:00〜9:05 が始値・現在値とも空で、買気配だけが
+		// 6710 → 6610 と動き 9:11 に 6410 で寄った）。板を見ないと、寄付が遅れる銘柄
+		// ＝ 2026-09-jp-gap-minute の利益源が「値段が無い」として丸ごと候補から消える。
 		opened := row.Open.GreaterThan(decimal.Zero)
 		price := row.Open
+		fromBook := false
 		if !opened {
 			price = row.Last
+			if price.LessThanOrEqual(decimal.Zero) {
+				price = bookPrice(row.Bid, row.Ask)
+				fromBook = price.GreaterThan(decimal.Zero)
+			}
 		}
 		if price.LessThanOrEqual(decimal.Zero) {
 			continue
@@ -138,10 +148,27 @@ func (t *Tachibana) Fetch(symbols []string) (map[string]selection.Quote, error) 
 		// 基準値段（前日終値）も渡す。分割・併合の日はアーカイブの終値と食い違う
 		found[symbol] = selection.Quote{
 			Symbol: symbol, Price: price, At: row.At, Source: t.Name(),
-			PrevClose: row.PrevClose, Opened: opened,
+			PrevClose: row.PrevClose, Opened: opened, FromBook: fromBook,
 		}
 	}
 	return found, nil
+}
+
+// bookPrice は最良気配から値段を 1 つ作る。両方あれば中値、片方しか無ければその値。
+//
+// 板寄せ中は買気配と売気配が同値になることが多い（特別気配は 1 つの値段を提示する）ので、
+// 中値は多くの場合そのまま気配値になる。片側だけの板（買いだけ・売りだけ）でも
+// 捨てないのは、そこが唯一の手掛かりだから。
+func bookPrice(bid, ask decimal.Decimal) decimal.Decimal {
+	switch {
+	case bid.GreaterThan(decimal.Zero) && ask.GreaterThan(decimal.Zero):
+		return bid.Add(ask).Div(decimal.NewFromInt(2))
+	case bid.GreaterThan(decimal.Zero):
+		return bid
+	case ask.GreaterThan(decimal.Zero):
+		return ask
+	}
+	return decimal.Zero
 }
 
 // Params は取得元を組み立てるのに必要な環境。
