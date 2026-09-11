@@ -186,12 +186,24 @@ func New(name string, params Params) (Source, error) {
 	}
 }
 
+// MinuteRounding は時刻が分単位でしか返らないことによる年齢の上振れ。
+//
+// 立花の現在値時刻（tDPP:T）は実データの秒が全部 :00 で返る（2026-09-11 の寄り）。
+// 09:02:59 の約定も 09:02:00 と読むので、年齢は最大 59 秒ぶん多く出る。これを
+// 引かないと max_quote_age = 90 の実効が 31〜90 秒になり、設定値の意味が壊れる。
+const MinuteRounding = time.Minute - time.Second
+
 // Fresh は古い気配・遅延の気配を落とす。
 //
 // 寄付の成行は「今の板」に当たる。数分前の気配で順位を付けると、実際には条件を
 // 満たしていない銘柄を買いに行く。allowDelayed は検証用の逃げ道。
+//
+// 年齢の上限には MinuteRounding を足す（丸めのぶんを気配に有利に読む）。これは
+// 時刻の精度の補正であって、鮮度そのものの判定ではない。tDPP:T が「板の時刻」では
+// なく「最後に約定した時刻」である件は別の穴で、ここでは塞げない
+// （docs/OPENING_DATA.md「実機で確かめること」）。
 func Fresh(received map[string]selection.Quote, maxAgeSeconds int, now time.Time, allowDelayed bool) (kept map[string]selection.Quote, stale, delayed []string) {
-	limit := time.Duration(maxAgeSeconds) * time.Second
+	limit := time.Duration(maxAgeSeconds)*time.Second + MinuteRounding
 	kept = make(map[string]selection.Quote, len(received))
 	for symbol, quote := range received {
 		if quote.Delayed && !allowDelayed {

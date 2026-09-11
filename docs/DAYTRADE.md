@@ -211,7 +211,7 @@ Sharpe の頂点（[research/2026-09-jp-shock-days.md](research/2026-09-jp-shock
 | | `shock_long_scale` / `shock_short_scale` | ショック日にロング／ショートの資金へ掛ける倍率（土台は 1 / 1 = 記録のみ、`config/daytrade_margin` は 1.5 / 0） |
 | `[execution]` | `quote_source` / `quote_file` | 気配の取得元 |
 | | `entry_window` / `exit_window` | 発注してよい時間帯（JST）。外なら何もしない。`exit_window` の既定は 15:20〜15:30（15:20 の成行はその場で約定、15:25 以降は引け値） |
-| | `max_quote_age` | 気配がこれより古ければ使わない（秒） |
+| | `max_quote_age` | 気配がこれより古ければ使わない（秒）。立花の時刻は分単位でしか返らないので、判定では 59 秒（丸めのぶん）を足して読む |
 | | `max_run_seconds` | 1 回の `open` / `close` に許す秒数（既定 150。cron の間隔より短く）。時間帯の終わりと合わせて締め切りになる。0 で時間帯の終わりだけ |
 | | `kill_switch` | true で発注を止める |
 | `[book]` | `max_run_seconds` | `snap` 1 回に許す秒数（既定 50）。`open` / `close` とロックを共有するので短く |

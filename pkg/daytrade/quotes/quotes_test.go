@@ -65,6 +65,19 @@ func TestFreshDropsStaleAndDelayed(t *testing.T) {
 	if len(stale) != 1 || len(delayed) != 1 {
 		t.Errorf("stale=%v delayed=%v", stale, delayed)
 	}
+	// 分丸めの補正: 149 秒前は 90 + 59 秒に収まるので通り、150 秒前は落ちる
+	edge := map[string]selection.Quote{
+		"in":  {Symbol: "in", At: now.Add(-149 * time.Second)},
+		"out": {Symbol: "out", At: now.Add(-150 * time.Second)},
+	}
+	kept, stale, _ = Fresh(edge, 90, now, false)
+	if len(kept) != 1 || kept["in"].Symbol != "in" {
+		t.Errorf("分丸めの補正で残った気配 = %v", kept)
+	}
+	if len(stale) != 1 || stale[0] != "out" {
+		t.Errorf("上限を超えた気配が落ちていない: %v", stale)
+	}
+
 	// 検証用の逃げ道: allow_delayed なら全部通す
 	kept, _, _ = Fresh(received, 90, now, true)
 	if len(kept) != 3 {
