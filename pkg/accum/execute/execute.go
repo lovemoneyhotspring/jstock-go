@@ -570,6 +570,15 @@ func UnrecordedFills(
 	if err != nil {
 		return nil, fmt.Errorf("台帳の注文 ID を読めません: %w", err)
 	}
+	// **注文番号でも突き合わせる。** 立花証券は client_order_id を持たないので、
+	// 注文一覧から返る Order.ClientOrderID には「注文番号/営業日」が入る
+	// （tachibana_orders.go の toOrder）。台帳が持つのは自分で作ったハッシュ ID なので、
+	// RecordedIDs だけで比べると**自分が出した注文も「台帳に無い」**ことになり、
+	// 当月に 1 件買ったら以降の run が毎回止まる。2026-09-11 の手動買付で踏んだ。
+	knownBroker, err := led.BrokerOrderIDs()
+	if err != nil {
+		return nil, fmt.Errorf("台帳の注文番号を読めません: %w", err)
+	}
 
 	wanted := make(map[string]struct{}, len(symbols))
 	for _, s := range symbols {
@@ -591,6 +600,14 @@ func UnrecordedFills(
 		}
 		if _, ok := known[o.ClientOrderID]; ok {
 			continue
+		}
+		if _, ok := knownBroker[o.ClientOrderID]; ok {
+			continue
+		}
+		if o.BrokerOrderID != nil {
+			if _, ok := knownBroker[*o.BrokerOrderID]; ok {
+				continue
+			}
 		}
 		if _, ok := wanted[o.Symbol]; !ok {
 			continue

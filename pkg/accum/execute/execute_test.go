@@ -137,6 +137,44 @@ func TestUnrecordedFillsIgnoresKnownOrders(t *testing.T) {
 	}
 }
 
+// 立花証券は client_order_id を持たない。注文一覧から返る Order.ClientOrderID には
+// 「注文番号/営業日」が入るので、台帳の client_order_id とは**絶対に一致しない**。
+// 注文番号でも突き合わせないと、自分が出した注文まで「台帳に無い」と数え、
+// 当月に 1 件買ったら以降の run が毎回止まる（2026-09-11 に実データで踏んだ）。
+func TestUnrecordedFillsIgnoresOwnOrdersMatchedByBrokerNumber(t *testing.T) {
+	led := newLedger(t)
+	now := time.Date(2026, 9, 15, 5, 0, 0, 0, time.UTC)
+	req := newRequest(t, "自分のハッシュID", "1306", 100)
+	month := "2026-09-01"
+	amount := dec(100000)
+	market := domain.MarketJP
+	brokerID := "11011835/20260911"
+	if err := led.Record(req, string(domain.OrderStatusFilled), &brokerID, &month, &amount, &market); err != nil {
+		t.Fatal(err)
+	}
+
+	price := dec(1000)
+	b := &stubBroker{history: []domain.Order{{
+		// 一覧はハッシュ ID を知らない。注文番号がここに入る
+		ClientOrderID:  brokerID,
+		BrokerOrderID:  &brokerID,
+		Symbol:         "1306",
+		Side:           domain.SideBuy,
+		Quantity:       dec(100),
+		FilledQuantity: dec(100),
+		AvgFillPrice:   &price,
+		Status:         domain.OrderStatusFilled,
+	}}}
+
+	found, err := UnrecordedFills(led, b, []string{"1306"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 0 {
+		t.Errorf("注文番号で突き合わせれば自分の注文は除ける: %v", found)
+	}
+}
+
 func TestUnrecordedFillsIgnoresSellsAndUnfilled(t *testing.T) {
 	led := newLedger(t)
 	now := time.Date(2026, 9, 15, 5, 0, 0, 0, time.UTC)
