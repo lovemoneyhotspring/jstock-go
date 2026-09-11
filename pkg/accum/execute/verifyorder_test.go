@@ -2,8 +2,12 @@ package execute
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/ledger"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
@@ -80,5 +84,46 @@ func TestVerifyOrderDryRunBuildsRequest(t *testing.T) {
 	}
 	if res.Request.OrderType != domain.OrderTypeLimit {
 		t.Errorf("成行になっている（板の薄い銘柄で値段を掴まないよう指値のはず）: %s", res.Request.OrderType)
+	}
+}
+
+// 同じ日に同じ内容で 2 度叩いたら送らない。client_order_id が一致して台帳の行が
+// 上書きされ、ブローカーには 2 件出るのに投下額は 1 件ぶんしか残らない（実際に踏んだ）。
+func TestVerifyOrderRefusesSameDayDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	led, err := ledger.OpenLedger(filepath.Join(dir, "accum.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer led.Close()
+
+	s := newStub(1, 998)
+	opts := VerifyOrderOptions{Symbol: "563A", MaxYen: decimal.NewFromInt(2000), Live: true}
+
+	// 1 回目と同じ client_order_id の行を台賬に置く
+	day := clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006-01-02")
+	qty := decimal.NewFromInt(1)
+	id := domain.MakeClientOrderID(day, "563A", domain.SideBuy, qty)
+	price := decimal.NewFromInt(998)
+	req, err := domain.NewOrderRequest(id, "563A", domain.SideBuy, domain.OrderTypeLimit, qty, &price,
+		domain.TaxAccountSpecific, "検証", domain.TradeTypeCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	month, amount, market := day[:8]+"01", price, domain.MarketJP
+	if err := led.Record(req, string(domain.OrderStatusFilled), nil, &month, &amount, &market); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = VerifyOrder(s, led, &logging.Logger{}, opts)
+	if err == nil {
+		t.Fatal("同じ注文を 2 度目も通している")
+	}
+	var already *ErrAlreadyPlaced
+	if !errors.As(err, &already) {
+		t.Errorf("ErrAlreadyPlaced で返っていない（異常として通知されてしまう）: %v", err)
+	}
+	if s.placed != 0 {
+		t.Errorf("送ってしまっている: %d 件", s.placed)
 	}
 }

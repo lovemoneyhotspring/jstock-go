@@ -34,7 +34,8 @@ func newVerifyOrderCmd() *cobra.Command {
 			// 上限超えは柵が働いただけで異常ではない。Crash に渡すと Discord に
 			// alert が飛び、夜間の自己修復と日次レポートが本当の異常として拾う
 			var overLimit *execute.ErrOverLimit
-			if errors.As(err, &overLimit) {
+			var already *execute.ErrAlreadyPlaced
+			if errors.As(err, &overLimit) || errors.As(err, &already) {
 				return err
 			}
 			return run.Crash("発注経路の検証", "accum.crash", err)

@@ -19,7 +19,7 @@ func newVerifyStopCmd() *cobra.Command {
 	var symbol string
 	var units int
 	var dropPct float64
-	var liveFlag, yesFlag bool
+	var liveFlag, yesFlag, fireFlag, alsoLimitFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "verify-stop",
@@ -28,9 +28,12 @@ func newVerifyStopCmd() *cobra.Command {
 			"売りの逆指値を置き、照会（sOrderGyakusasi* / sOrderTriggerType）・訂正\n" +
 			"（CLMKabuCorrectOrder）・取消が通るかを順に見る。\n\n" +
 			"条件価格は現在値の −--drop-pct%（既定 3%）で、発火しない水準に置く。\n" +
-			"最後に必ず取消す。新規の買いは出さないのでお金は使わない。",
+			"最後に必ず取消す。新規の買いは出さないのでお金は使わない。\n\n" +
+			"--fire を付けると条件価格を現在値の**上**に置いて発火させ、発火後の訂正が\n" +
+			"拒否されるか（手順 5 f）まで見る。**1 単元が実際に売れる**ので、売っていい\n" +
+			"玉のときだけ付ける。",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			err := runVerifyStop(symbol, units, dropPct, liveFlag, yesFlag)
+			err := runVerifyStop(symbol, units, dropPct, liveFlag, yesFlag, fireFlag, alsoLimitFlag)
 			// 保有不足は柵が働いただけで異常ではない（verify-order の上限超えと同じ）
 			var noPos *execute.ErrNoPosition
 			if errors.As(err, &noPos) {
@@ -41,14 +44,16 @@ func newVerifyStopCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&symbol, "symbol", "", "銘柄コード（保有していること。例 563A）")
 	cmd.Flags().IntVar(&units, "units", 1, "売買単位の何倍を売る逆指値にするか")
-	cmd.Flags().Float64Var(&dropPct, "drop-pct", 3, "条件価格を現在値から何 % 下に置くか")
+	cmd.Flags().Float64Var(&dropPct, "drop-pct", 3, "条件価格を現在値から何 % 離して置くか")
+	cmd.Flags().BoolVar(&fireFlag, "fire", false, "条件価格を現在値の上に置いて発火させる（1 単元が実際に売れる）")
+	cmd.Flags().BoolVar(&alsoLimitFlag, "also-limit", false, "「通常＋逆指値」にする（約定しない指値で板に出し、逆指値の条件を付ける）")
 	cmd.Flags().BoolVar(&liveFlag, "live", false, "実際に発注する（無ければ何を送るかだけ出す）")
 	cmd.Flags().BoolVarP(&yesFlag, "yes", "y", false, "本番発注時の確認プロンプトをスキップする")
 	_ = cmd.MarkFlagRequired("symbol")
 	return cmd
 }
 
-func runVerifyStop(symbol string, units int, dropPct float64, liveFlag, yesFlag bool) error {
+func runVerifyStop(symbol string, units int, dropPct float64, liveFlag, yesFlag, fireFlag, alsoLimitFlag bool) error {
 	// この経路は常に検証なので、印は自動で付ける
 	run.SetVerify(true)
 
@@ -57,8 +62,12 @@ func runVerifyStop(symbol string, units int, dropPct float64, liveFlag, yesFlag 
 		return err
 	}
 	canLive, reason := appSettings.CanExecuteLive(liveFlag, cfg.KillSwitch)
-	fmt.Printf("口座: %s  発注: %s（%s）  条件価格: 現在値 −%g%%\n\n",
-		appSettings.Env, map[bool]string{true: "する", false: "しない"}[canLive], reason, dropPct)
+	sign, note := "−", "（発火しない水準。最後に取消します）"
+	if fireFlag {
+		sign, note = "＋", "（**発火します**。1 単元が成行で売れます）"
+	}
+	fmt.Printf("口座: %s  発注: %s（%s）  条件価格: 現在値 %s%g%% %s\n\n",
+		appSettings.Env, map[bool]string{true: "する", false: "しない"}[canLive], reason, sign, dropPct, note)
 	if err := cli.ConfirmLive(appSettings, canLive, yesFlag); err != nil {
 		return err
 	}
@@ -75,11 +84,16 @@ func runVerifyStop(symbol string, units int, dropPct float64, liveFlag, yesFlag 
 
 	res, err := execute.VerifyStop(b, logger, execute.VerifyStopOptions{
 		Symbol: symbol, Units: units,
-		DropPct: decimal.NewFromFloat(dropPct), Live: canLive,
+		DropPct: decimal.NewFromFloat(dropPct), Live: canLive, Fire: fireFlag, AlsoLimit: alsoLimitFlag,
 	})
 	if res != nil && res.Trigger.IsPositive() {
-		fmt.Printf("%s: 売り逆指値 %s 株  条件 %s 円（発火後は成行）\n",
-			symbol, res.Request.Quantity, res.Trigger)
+		if res.Limit.IsPositive() {
+			fmt.Printf("%s: 通常＋逆指値 %s 株  指値 %s 円 / 条件 %s 円\n",
+				symbol, res.Request.Quantity, res.Limit, res.Trigger)
+		} else {
+			fmt.Printf("%s: 売り逆指値 %s 株  条件 %s 円（発火後は成行）\n",
+				symbol, res.Request.Quantity, res.Trigger)
+		}
 	}
 	if err != nil {
 		return err

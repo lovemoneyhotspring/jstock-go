@@ -37,10 +37,17 @@
 | `CLMOrderList` の逆指値項目 | ✅ 条件価格・発火フラグを読めた（`sOrderGyakusasi*` / `sOrderTriggerType`） |
 | `CLMKabuCorrectOrder`（条件の訂正） | ✅ 969 → 950 円。**2 つ直してから通った**（下記） |
 | 取消（`CLMKabuCancelOrder`） | ✅ 状態 CANCELLED |
+| `CLMKabuNewOrder`（逆指値の**発火**） | ✅ 条件を現在値の上（1,028 円）に置いて即発火。成行で約定（997 円）・`発火 true` を読めた |
+| 発火後の訂正 | ✅ 拒否された（`sResultCode=12050`「通常注文の逆指値条件は訂正できません」） |
+| `CLMKabuNewOrder`（通常＋逆指値） | ✅ 指値 1,028 円（約定しない水準）＋条件 969 円で受理。訂正・取消も通った |
 | `CLMAuthLoginAck` の口座区分 | ✅ `sSinyouKouzaKubun = 0`。**信用取引口座は今日も未開設** |
 
 確認したかった現物の 4 点はすべて取れた。台帳の投下額は想定 999 円 → 約定額 998 円に
 置き換わり、有効額も 998 円。残高は 3,000 → 1,925 円（= 手数料込み 1,075 円を引いた額）で一致。
+
+逆指値は**発注・照会・訂正・取消・発火・発火後の訂正の拒否・通常＋逆指値**まで全部通った。
+`accum verify-stop` の `--fire`（発火させる。1 単元が実際に売れる）と `--also-limit`
+（通常＋逆指値）で再現できる。
 
 **逆指値の訂正で 2 つ直した。**
 
@@ -50,6 +57,15 @@
    パース前にエスケープする（`escapeRawControls`）
 2. 訂正電文の発火後の値段に `"0"`（成行）を入れていた。元から成行の逆指値では
    「変更が無い」と見なされ拒否される（`sResultCode=12115`）。変えないなら `"*"` で送る
+
+**検証そのものが見つけたバグをもう 1 つ直した。** 同じ日に同じ内容（銘柄・売買・数量）で
+`verify-order` を 2 回叩くと、`client_order_id` が一致する（日付と注文内容から決まる）。
+台帳は同じ ID を上書きするので、**ブローカーには 2 件出るのに台帳は 1 行のまま**残り、
+投下額が過小になり、約定済みの行が PENDING に巻き戻った。`accum run` は `WasPlaced` で
+弾いているので、同じ柵を `verify-order` にも置いた（もう 1 単元出したいなら `--units 2`
+のように数量を変える）。
+
+**この日の検証で使った額は手数料 231 円（77 円 × 3 回）。** 563A 1 株（998 円）は保有したまま。
 
 口座区分はどの CLI にも出していなかったので、調べもののプローブを足した。
 
@@ -71,8 +87,7 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 |---|---|---|
 | `CLMShinyouTategyokuList` | 信用建玉の一覧・返済する玉の指定 | [pkg/wbcore/broker/tachibana_trade.go](../pkg/wbcore/broker/tachibana_trade.go) |
 | `CLMKabuNewOrder`（信用） | 信用新規・返済の発注 | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
-| `CLMKabuNewOrder`（通常＋逆指値） | 指値で出して発火したら切り替わる形（売りの「逆指値だけ」は確認済み） | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
-| 発火後の挙動（発火・発火後の訂正の拒否） | ストップが本当に効くか | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
+| 信用返済の逆指値（建玉指定つき） | 信用のストップ | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
 
 残高・現物建玉（`CLMZanKaiSummary` / `CLMGenbutuKabuList`）は 2026-09-11 に実数で確認済み。
 Go への移植時に項目名を取り違えていた（`aCLMKabuZan` / `sGenkinZandaka` などは実在しない）ので、
@@ -231,7 +246,13 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 #
 # 売りだけ・現物だけ・保有数量以内・発火しない水準。新規の買いは出さないので
 # お金は使わない。保有が足りなければ**何も送らずに止まる**（柵なので alert は飛ばさない）。
-# e（信用返済の逆指値）と f（発火後の訂正）は信用口座が開いてから。
+# 発火（a 以降の本番）と発火後の訂正（f）は --fire、通常＋逆指値は --also-limit:
+#
+#   accum verify-stop --symbol 563A --fire --live -y        # **1 単元が実際に売れる**
+#   accum verify-stop --symbol 563A --also-limit --live -y  # 約定しない指値＋条件
+#
+# a〜d・f と通常＋逆指値は 2026-09-11 に本番口座で確認済み。
+# e（信用返済の逆指値）だけが信用口座を待っている。
 ```
 
 ## 既知の制約
@@ -248,8 +269,8 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 
 ## 本番へ移すときの条件
 
-残っているのは**信用（`daytrade`）の 4 点と、逆指値の発火後の挙動**だけ。信用は
-口座が開設されるまで進められない（2026-09-11 時点で `sSinyouKouzaKubun = 0`）。
+**残っているのは信用（`daytrade`）だけ**で、口座が開設されるまで進められない
+（2026-09-11 時点で `sSinyouKouzaKubun = 0`）。現物と逆指値は同日に本番口座で全部通した。
 
 上の 8 点がすべて確認できるまで、`deploy/crontab.txt` の発注経路の行は開けない。
 開けるときも **まず `--live` 無しで数日**、次に `--live` の順にする。

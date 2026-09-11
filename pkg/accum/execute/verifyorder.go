@@ -65,6 +65,22 @@ func (e *ErrOverLimit) Error() string {
 		e.Estimate.Round(0), e.Max.Round(0), e.Symbol, e.Lot, e.Units, e.Price)
 }
 
+// ErrAlreadyPlaced は同じ注文が今日すでに台帳にあるので送らなかった、というエラー。
+//
+// ErrOverLimit と同じく**柵が働いた結果**なので、異常として通知しない。
+type ErrAlreadyPlaced struct {
+	Symbol        string
+	ClientOrderID string
+	Units         int
+}
+
+func (e *ErrAlreadyPlaced) Error() string {
+	return fmt.Sprintf("%s の同じ検証注文が今日すでに台帳にあります（client_order_id %s）。"+
+		"同じ ID で送ると台帳の行が上書きされ、投下額が過小になります。"+
+		"もう 1 単元出したいなら --units %d のように数量を変えてください",
+		e.Symbol, e.ClientOrderID, e.Units+1)
+}
+
 // VerifyOrderResult は送った注文と、その後の照会の結果。
 type VerifyOrderResult struct {
 	Request  domain.OrderRequest
@@ -130,6 +146,15 @@ func VerifyOrder(
 	orderID := domain.MakeClientOrderID(
 		clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006-01-02"),
 		opts.Symbol, domain.SideBuy, qty)
+
+	// **同じ日に同じ注文を 2 度出さない。** client_order_id は「日付・銘柄・売買・数量」
+	// から決まるので、同日に同じ内容で叩くと ID が一致する。台帳は同じ ID を上書きする
+	// （led.Record は UPSERT）ため、ブローカーには 2 件出るのに台帳は 1 行のまま残り、
+	// 投下額が過小に、約定済みの行が PENDING に巻き戻る。2026-09-11 の検証で実際に踏んだ。
+	// accum run は WasPlaced で弾いているので、同じ柵をここにも置く。
+	if opts.Live && led != nil && led.WasPlaced(orderID) {
+		return result, &ErrAlreadyPlaced{Symbol: opts.Symbol, ClientOrderID: orderID, Units: units}
+	}
 	req, err := domain.NewOrderRequest(
 		orderID, opts.Symbol, domain.SideBuy, domain.OrderTypeLimit, qty, &price,
 		domain.TaxAccountSpecific, "発注経路の実機検証（1 単元）", domain.TradeTypeCash)
