@@ -15,7 +15,7 @@ cd "$HOME_DIR"
 mkdir -p "$BIN_DIR"
 
 # -trimpath: 実行ファイルに開発機の絶対パスを埋めない
-for cmd in wbjp accum daytrade jquants discord-post; do
+for cmd in wbjp accum daytrade jquants discord-post rate; do
   echo "building $cmd..."
   go build -trimpath -o "$BIN_DIR/$cmd" "./cmd/$cmd"
 done

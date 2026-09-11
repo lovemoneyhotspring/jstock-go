@@ -11,6 +11,7 @@
 | 板・分足を集める理由と段階 | [OPENING_DATA.md](OPENING_DATA.md) | 14 KB |
 | 改善ループ（ダイジェスト → evaluate/review → レポート）と自動化の線引き | [FEEDBACK.md](FEEDBACK.md) | 12 KB |
 | 立花証券 API の未検証の電文と UAT の確認順 | [BROKER_VERIFY.md](BROKER_VERIFY.md) | 12 KB |
+| 証券会社のレーティングをいつ・どう溜めているか | [RATE.md](RATE.md) | 3 KB |
 
 節の見出しは各ファイルの先頭で `grep '^## '` すれば分かる。**必要な節だけ `sed -n` で読む。**
 

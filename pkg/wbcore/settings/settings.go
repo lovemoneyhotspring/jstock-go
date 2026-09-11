@@ -215,3 +215,8 @@ func (s *AppSettings) DescribeMode(liveFlag bool, killSwitch bool) string {
 	}
 	return "口座: " + account + "（WBJP_ENV=" + string(s.Env) + "）  発注: " + orders + "（" + reason + "）"
 }
+
+// RateDBPath はレーティング情報の記録簿。市場のデータなので data 配下に置く。
+func (s *AppSettings) RateDBPath() string {
+	return filepath.Join(s.DataDir, "rate", "rate.db")
+}
