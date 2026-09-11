@@ -35,6 +35,24 @@ export WBJP_DUCKDB_MEMORY_LIMIT="${WBJP_DUCKDB_MEMORY_LIMIT:-3GB}"
 POST_BIN="${POST_BIN:-$HOME_DIR/bin/discord-post}"
 QUERY_BIN="${QUERY_BIN:-$HOME_DIR/bin/jquants}"
 
+# --- 休場日なら何もしない -------------------------------------------------------
+#
+# cron は平日（1-5）にしか回らないので土日は来ないが、**祝日は来る**。snap も open も
+# 休場日は skipHoliday で何もしないので、点検すれば「板が 1 件も無い」で必ず ❌ になる。
+# 2026-09-21〜23 のような平日の 3 連休で 3 日続けて誤報が飛ぶ。
+#
+# 判定は Go と同じ取引カレンダー（J-Quants の HolDiv、1=営業日 2=半日）。カレンダーを
+# 引けないときは**点検を続ける**——黙って飛ばすと、本当に板が欠けた日まで見逃す。
+holdiv=$("$QUERY_BIN" query --limit 0 "
+  SELECT HolDiv FROM read_parquet('$HOME_DIR/data/jquants/markets_calendar/*.parquet')
+  WHERE Date = DATE '$TODAY'" 2>/dev/null | tail -1 | tr -d ' ')
+case "$holdiv" in
+  0|3)
+    echo "$TODAY は休場日（HolDiv=$holdiv）。点検しません"
+    exit 0
+    ;;
+esac
+
 # 朝に回るはずの snap の時刻帯（cron と同じ。15:00 / 15:19 は引け後なのでここでは見ない）
 EXPECTED_SLOTS=(0830 0845 0855 0859 0900 0902 0905 0911)
 
