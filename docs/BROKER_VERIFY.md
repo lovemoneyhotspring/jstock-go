@@ -31,8 +31,25 @@
 |---|---|
 | `CLMZanKaiSummary`（残高） | ✅ 現金 3,000 円・買付余力 3,000 円。**0 円でない実数**で読めた |
 | `CLMKabuNewOrder`（現物買い・指値） | ✅ 受理。注文番号が返る |
-| `CLMOrderList`（注文照会・行あり） | ✅ 状態 PENDING・数量 1・約定数量 0 を読めた。**行がある場合の項目名が初めて確かめられた** |
+| `CLMOrderList`（注文照会・行あり） | ✅ PENDING → **FILLED（1/1 約定・約定単価 998 円）**。行がある場合の項目名が初めて確かめられた |
+| `CLMGenbutuKabuList`（現物建玉・行あり） | ✅ 563A 1 株・取得単価 1,075 円（手数料込み）が返る |
+| `CLMKabuNewOrder`（逆指値・売り） | ✅ 受理。条件 969 円（現在値 −3%）の「逆指値だけ」 |
+| `CLMOrderList` の逆指値項目 | ✅ 条件価格・発火フラグを読めた（`sOrderGyakusasi*` / `sOrderTriggerType`） |
+| `CLMKabuCorrectOrder`（条件の訂正） | ✅ 969 → 950 円。**2 つ直してから通った**（下記） |
+| 取消（`CLMKabuCancelOrder`） | ✅ 状態 CANCELLED |
 | `CLMAuthLoginAck` の口座区分 | ✅ `sSinyouKouzaKubun = 0`。**信用取引口座は今日も未開設** |
+
+確認したかった現物の 4 点はすべて取れた。台帳の投下額は想定 999 円 → 約定額 998 円に
+置き換わり、有効額も 998 円。残高は 3,000 → 1,925 円（= 手数料込み 1,075 円を引いた額）で一致。
+
+**逆指値の訂正で 2 つ直した。**
+
+1. 応答の文字列に**生のタブ**が入る（`sResultText":"逆指値注文値段変更がありません<TAB>"`）。
+   Go の `json.Unmarshal` は文字列中の 0x20 未満を拒否するので、応答全体が読めなかった。
+   **拒否理由が載る応答ほど起きる**ので、直さないと「なぜ拒否されたか」が永久に分からない。
+   パース前にエスケープする（`escapeRawControls`）
+2. 訂正電文の発火後の値段に `"0"`（成行）を入れていた。元から成行の逆指値では
+   「変更が無い」と見なされ拒否される（`sResultCode=12115`）。変えないなら `"*"` で送る
 
 口座区分はどの CLI にも出していなかったので、調べもののプローブを足した。
 
@@ -52,17 +69,14 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 
 | 電文 | 使うところ | 実装 |
 |---|---|---|
-| `CLMOrderList` | 注文の照会（約定数量・状態） | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
 | `CLMShinyouTategyokuList` | 信用建玉の一覧・返済する玉の指定 | [pkg/wbcore/broker/tachibana_trade.go](../pkg/wbcore/broker/tachibana_trade.go) |
 | `CLMKabuNewOrder`（信用） | 信用新規・返済の発注 | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
-| `CLMStkGetIssueMstKabu` | 売買単位 | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
-| `CLMKabuNewOrder`（逆指値・通常＋逆指値） | ストップの発注（`OrderRequest.WithStop`） | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
-| `CLMKabuCorrectOrder` | 逆指値の条件の訂正（トレーリング） | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
-| `CLMOrderList` の逆指値項目（`sOrderGyakusasi*` / `sOrderTriggerType`） | 発火したかの照会 | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
+| `CLMKabuNewOrder`（通常＋逆指値） | 指値で出して発火したら切り替わる形（売りの「逆指値だけ」は確認済み） | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
+| 発火後の挙動（発火・発火後の訂正の拒否） | ストップが本当に効くか | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
 
-残高・現物建玉（`CLMZanKaiSummary` / `CLMGenbutuKabuList`）も**未検証**。Go への移植時に
-項目名を取り違えていた（`aCLMKabuZan` / `sGenkinZandaka` などは実在しない）ので、
-削除済み Python 実装から移植し直した。
+残高・現物建玉（`CLMZanKaiSummary` / `CLMGenbutuKabuList`）は 2026-09-11 に実数で確認済み。
+Go への移植時に項目名を取り違えていた（`aCLMKabuZan` / `sGenkinZandaka` などは実在しない）ので、
+削除済み Python 実装から移植し直してある。
 
 項目名と区分コードの出所は、**削除済みの Python 実装**（`git show ac1eb7a:src/wbcore/broker/tachibana.py`）。
 Go への初回移植で推定に頼って多数取り違えたため、そこから写し直してある。
@@ -233,6 +247,9 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 - 空売り価格規制により、**51 単元以上の信用新規売りは成行で出せない**（発注前に弾く）
 
 ## 本番へ移すときの条件
+
+残っているのは**信用（`daytrade`）の 4 点と、逆指値の発火後の挙動**だけ。信用は
+口座が開設されるまで進められない（2026-09-11 時点で `sSinyouKouzaKubun = 0`）。
 
 上の 8 点がすべて確認できるまで、`deploy/crontab.txt` の発注経路の行は開けない。
 開けるときも **まず `--live` 無しで数日**、次に `--live` の順にする。
