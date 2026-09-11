@@ -56,6 +56,7 @@ var PlanSchema = []history.Column{
 	{Name: "symbol", Type: history.TypeString},
 	{Name: "name", Type: history.TypeString},
 	{Name: "segment", Type: history.TypeString},
+	{Name: "sector", Type: history.TypeString},
 	{Name: "prev_close", Type: history.TypeFloat64},
 	{Name: "turnover_med", Type: history.TypeFloat64},
 	{Name: "mkt_cap", Type: history.TypeFloat64},
@@ -184,7 +185,7 @@ func PlanFrames(p plan.Plan) (frame, meta history.Frame) {
 	rows := make([]map[string]any, 0, len(p.Candidates))
 	for _, c := range p.Candidates {
 		rows = append(rows, map[string]any{
-			"Code": c.Code, "symbol": c.Symbol, "name": c.Name, "segment": c.Segment,
+			"Code": c.Code, "symbol": c.Symbol, "name": c.Name, "segment": c.Segment, "sector": c.Sector,
 			"prev_close": c.PrevClose, "turnover_med": c.TurnoverMed, "mkt_cap": c.MktCap,
 			"vol20": floatOrNil(c.Vol20), "cap_tercile": int64(c.CapTercile),
 			"earn_prev": c.EarnPrev, "disc_today": c.DiscToday, "alert": c.Alert,

@@ -147,10 +147,13 @@ func Build(arch *archive.Archive, cfg config.Config, day time.Time, cal *calenda
 // record は plan の parquet の 1 行。列名は Python 版と同じにして、
 // DuckDB や polars から同じ問い合わせが通るようにする。
 type record struct {
-	Code          string   `parquet:"Code"`
-	Symbol        string   `parquet:"symbol"`
-	Name          string   `parquet:"name"`
-	Segment       string   `parquet:"segment"`
+	Code    string `parquet:"Code"`
+	Symbol  string `parquet:"symbol"`
+	Name    string `parquet:"name"`
+	Segment string `parquet:"segment"`
+	// Sector は 33 業種コード。同じ業種に建玉を偏らせない判定（max_per_sector）が
+	// open / evaluate でも効くように、必ず書き出して読み戻す。
+	Sector        string   `parquet:"sector"`
 	PrevClose     float64  `parquet:"prev_close"`
 	TurnoverMed   float64  `parquet:"turnover_med"`
 	MktCap        float64  `parquet:"mkt_cap"`
@@ -177,6 +180,7 @@ func Save(p Plan, directory string) (parquetPath, metaPath string, err error) {
 	for _, c := range p.Candidates {
 		rows = append(rows, record{
 			Code: c.Code, Symbol: c.Symbol, Name: c.Name, Segment: c.Segment,
+			Sector:    c.Sector,
 			PrevClose: c.PrevClose, TurnoverMed: c.TurnoverMed, MktCap: c.MktCap,
 			Vol20: c.Vol20, CapTercile: int32(c.CapTercile),
 			EarnPrev: c.EarnPrev, DiscToday: c.DiscToday, Alert: c.Alert,
@@ -222,6 +226,7 @@ func Load(directory string, day time.Time) (Plan, bool, error) {
 	for _, r := range rows {
 		candidates = append(candidates, universe.Candidate{
 			Code: r.Code, Symbol: r.Symbol, Name: r.Name, Segment: r.Segment,
+			Sector:    r.Sector,
 			PrevClose: r.PrevClose, TurnoverMed: r.TurnoverMed, MktCap: r.MktCap,
 			Vol20: r.Vol20, CapTercile: int(r.CapTercile),
 			EarnPrev: r.EarnPrev, DiscToday: r.DiscToday, Alert: r.Alert,

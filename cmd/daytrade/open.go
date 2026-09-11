@@ -411,6 +411,23 @@ func runOpen(opts openOptions) error {
 	}
 
 	ranking := selection.Rank(eligible, rankQuotes, cfg.Signal)
+	// 業種の上限を掛ける設定なのに業種が取れていないと、判定は黙って素通りする
+	// （2026-09-12 に発覚：plan の parquet に sector 列が無く、本番だけ無制限だった）。
+	// 古い plan を読んだときも気付けるように、ここで鳴らす。
+	if cfg.Signal.MaxPerSector > 0 {
+		noSector := 0
+		for _, r := range ranking {
+			if r.Sector == "" {
+				noSector++
+			}
+		}
+		if noSector > 0 {
+			logWarn("daytrade.sector", "業種が取れない候補があるため max_per_sector が効かない",
+				map[string]any{"no_sector": noSector, "ranked": len(ranking), "max_per_sector": cfg.Signal.MaxPerSector})
+			fmt.Printf("業種の取れない候補 %d/%d 件——max_per_sector=%d はその分効きません\n",
+				noSector, len(ranking), cfg.Signal.MaxPerSector)
+		}
+	}
 	picks := selection.PickFrom(ranking, selection.PickOptions{
 		N: n, Budget: budget, Weighting: weighting, Side: domain.SideBuy,
 		MaxAmount: cfg.Capital.MaxOrder, ValuePool: cfg.Signal.ValuePool,

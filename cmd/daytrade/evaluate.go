@@ -148,7 +148,8 @@ func planFor(day time.Time) (dtplan.Plan, bool, error) {
 	for _, row := range frame.Rows {
 		candidates = append(candidates, universe.Candidate{
 			Code: strOf(row["Code"]), Symbol: strOf(row["symbol"]), Name: strOf(row["name"]),
-			Segment: strOf(row["segment"]), PrevClose: fOf(row["prev_close"]),
+			Segment: strOf(row["segment"]), Sector: strOf(row["sector"]),
+			PrevClose:   fOf(row["prev_close"]),
 			TurnoverMed: fOf(row["turnover_med"]), MktCap: fOf(row["mkt_cap"]),
 			Vol20: fPtrOf(row["vol20"]), CapTercile: int(iOf(row["cap_tercile"])),
 			EarnPrev: bOf(row["earn_prev"]), DiscToday: bOf(row["disc_today"]),

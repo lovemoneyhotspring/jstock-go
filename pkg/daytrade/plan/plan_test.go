@@ -8,6 +8,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/internal/fixture"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/plan"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/universe"
 	"github.com/shopspring/decimal"
 )
 
@@ -65,7 +66,7 @@ func TestBuildSaveLoadRoundTrip(t *testing.T) {
 		a, b := built.Candidates[i], loaded.Candidates[i]
 		if a.Code != b.Code || a.Symbol != b.Symbol || a.PrevClose != b.PrevClose ||
 			a.Eligible != b.Eligible || a.ShortEligible != b.ShortEligible ||
-			a.CapTercile != b.CapTercile || a.Shortable != b.Shortable {
+			a.CapTercile != b.CapTercile || a.Shortable != b.Shortable || a.Sector != b.Sector {
 			t.Errorf("往復で値が変わった:\n  %+v\n  %+v", a, b)
 		}
 	}
@@ -74,6 +75,32 @@ func TestBuildSaveLoadRoundTrip(t *testing.T) {
 	}
 	if !loaded.Day().Equal(day) {
 		t.Errorf("Day() = %v, want %v", loaded.Day(), day)
+	}
+}
+
+// 業種は parquet に書き出して読み戻せないと、max_per_sector が本番でだけ
+// 黙って効かなくなる（2026-09-12 に発覚）。往復を明示的に押さえておく。
+func TestSaveLoadKeepsSector(t *testing.T) {
+	day, _ := time.Parse(plan.DateLayout, "2026-09-14")
+	p := plan.Plan{
+		Meta: plan.Meta{Day: "2026-09-14", PrevDay: "2026-09-11", Positions: 3},
+		Candidates: []universe.Candidate{
+			{Code: "10000", Symbol: "1000", Sector: "3650", PrevClose: 1000, Eligible: true},
+			{Code: "20000", Symbol: "2000", Sector: "6100", PrevClose: 500, Eligible: true},
+		},
+	}
+	dir := t.TempDir()
+	if _, _, err := plan.Save(p, dir); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok, err := plan.Load(dir, day)
+	if err != nil || !ok {
+		t.Fatalf("読み戻せない: %v / %v", ok, err)
+	}
+	for i, c := range loaded.Candidates {
+		if c.Sector != p.Candidates[i].Sector {
+			t.Errorf("業種 %d = %q, want %q", i, c.Sector, p.Candidates[i].Sector)
+		}
 	}
 }
 

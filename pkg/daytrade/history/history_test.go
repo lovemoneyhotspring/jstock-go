@@ -21,7 +21,7 @@ func TestPlanFrames(t *testing.T) {
 			ShortEligible: 1, CreatedAt: "2026-09-02T11:30:00Z",
 		},
 		Candidates: []universe.Candidate{
-			{Code: "10000", Symbol: "1000", Name: "甲", Segment: "prime",
+			{Code: "10000", Symbol: "1000", Name: "甲", Segment: "prime", Sector: "3650",
 				PrevClose: 1000, TurnoverMed: 5e8, MktCap: 9e11, Vol20: &vol,
 				CapTercile: 3, Eligible: true, ShortEligible: true, Shortable: true},
 			{Code: "20000", Symbol: "2000", Name: "乙", Segment: "growth", PrevClose: 500},
@@ -36,6 +36,10 @@ func TestPlanFrames(t *testing.T) {
 		if !frame.Has(column.Name) {
 			t.Errorf("列 %s が無い", column.Name)
 		}
+	}
+	// 業種は max_per_sector の判定に使う。欠けると本番だけ上限が効かなくなる
+	if frame.Rows[0]["sector"] != "3650" {
+		t.Errorf("sector = %v", frame.Rows[0]["sector"])
 	}
 	if frame.Rows[0]["vol20"] != 0.02 {
 		t.Errorf("vol20 = %v", frame.Rows[0]["vol20"])
