@@ -46,7 +46,7 @@ type Row struct {
 	// Sector は 33 業種コード（equities/master の S33）。同じ業種に建玉を偏らせない
 	// 判定（signal.max_per_sector）に使う。取れなければ空。
 	Sector string
-	Gap       float64
+	Gap    float64
 	// LimitLow / LimitHigh は前日終値を基準値段とする制限値幅（ストップ安・高）。
 	LimitLow      float64
 	LimitHigh     float64
