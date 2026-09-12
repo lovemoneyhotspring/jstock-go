@@ -448,11 +448,19 @@ func RunAccumulation(
 	}
 
 	// 4. 発注処理
+	//
+	// 余力が分からないまま「余力不足」と記録すると、照会の失敗が資金の不足に化けて
+	// 切り分けられない。照会できない回は発注せず、理由をそのまま残す
 	bal, err := b.GetBalance()
-	buyingPower := decimal.Zero
-	if err == nil && bal != nil {
-		buyingPower = bal.BuyingPower
+	if err != nil || bal == nil {
+		if err == nil {
+			err = errors.New("応答が空")
+		}
+		logger.Warn("accum.balance_failed",
+			fmt.Sprintf("買付余力を照会できないため、この回は発注しません: %v", err))
+		return nil
 	}
+	buyingPower := bal.BuyingPower
 
 	for _, po := range planned {
 		if po.Request == nil {

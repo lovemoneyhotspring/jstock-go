@@ -118,7 +118,17 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 		return err
 	}
 	equity := bal.CashBalance.Add(bal.MarketValue)
-	posMap, _ := b.PositionsBySymbol()
+	// 建玉が見えないまま進むと、保有中の銘柄を「未保有」として買い足し、ストップも
+	// 現値で作り直してしまう。発注する回は照会に失敗した時点で止める
+	posMap, err := b.PositionsBySymbol()
+	if err != nil {
+		if canLive {
+			return fmt.Errorf("建玉を照会できないため発注を中止しました（二重に建てないため）: %w", err)
+		}
+		logger.Warn("run.positions_failed",
+			fmt.Sprintf("建玉を照会できません（dry-run のため未保有として続行）: %v", err))
+		posMap = map[string]domain.Position{}
+	}
 
 	// 1. 日足の収集と ATR / 直近終値
 	lastPrices := make(map[string]decimal.Decimal)
@@ -158,7 +168,12 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 	}
 
 	// 2. ストップロスの管理と更新
-	savedStops, _ := rep.GetStops()
+	// 保存済みのストップが読めないと、全銘柄のストップが現値から作り直される（建値・
+	// 最高値の履歴が消える）。読めない台帳で発注しない
+	savedStops, err := rep.GetStops()
+	if err != nil {
+		return fmt.Errorf("ストップの記録を読めません: %w", err)
+	}
 	stopObjMap := make(map[string]*risk.Stop)
 	for sym, st := range savedStops {
 		stopObjMap[sym] = &risk.Stop{

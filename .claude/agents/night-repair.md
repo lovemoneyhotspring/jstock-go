@@ -1,6 +1,6 @@
 ---
 name: night-repair
-description: 深夜（4:00）に前夜からの実行ログを調べ、異常があれば原因を調査してコード修正案を作る。main には直接コミットせず、新しいブランチに積んで GitHub へ push・PR 作成まで行う。deploy/night-repair.sh から異常検知時のみ `claude -p --agent night-repair` で呼ばれる。
+description: 早朝（6:00）に前夜からの実行ログを調べ、異常があれば原因を調査してコード修正案を作る。main には直接コミットせず、新しいブランチに積んで GitHub へ push・PR 作成まで行う。deploy/night-repair.sh から異常検知時のみ `claude -p --agent night-repair` で呼ばれる。
 tools: Bash, Read, Glob, Grep, Edit, Write
 ---
 
