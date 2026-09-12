@@ -107,14 +107,18 @@ func dayOrToday(text string, now time.Time) (time.Time, error) {
 }
 
 // inWindow は今が entry / exit の時間帯か（JST）。
+//
+// 終わりは RunDeadline と同じ「HH:MM:00」で、秒まで見て切る。分単位で両端を含めると
+// 9:15:30 が「窓の中」なのに締め切り済みになり、全候補が失敗として通知される。
 func inWindow(cfg dtconfig.Config, name string, now time.Time) bool {
 	sh, sm, eh, em, err := cfg.Execution.Window(name)
 	if err != nil {
 		return false
 	}
 	local := clock.ToZone(now, jst)
-	minutes := local.Hour()*60 + local.Minute()
-	return sh*60+sm <= minutes && minutes <= eh*60+em
+	start := time.Date(local.Year(), local.Month(), local.Day(), sh, sm, 0, 0, jst)
+	end := time.Date(local.Year(), local.Month(), local.Day(), eh, em, 0, 0, jst)
+	return !local.Before(start) && local.Before(end)
 }
 
 func describeWindow(cfg dtconfig.Config, name string) string {

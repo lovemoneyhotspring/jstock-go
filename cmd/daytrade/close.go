@@ -97,9 +97,14 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 			return err
 		}
 		broker.SetDeadline(b, deadline)
-		// 朝の建玉や前回の手仕舞いで送信結果が分からなかったものを判定してから、数量を決める
+		// 朝の建玉や前回の手仕舞いで送信結果が分からなかったものを判定してから、数量を決める。
+		// 判定できなくても**当日の手仕舞いは止めない**——ここで止めると一覧照会の一時的な
+		// 失敗だけで今日の建玉が丸ごと持ち越しになる。判定できなかった PENDING の建玉は
+		// RefreshEntries が銘柄ごとに unconfirmed へ積むので、数量を推測して売ることはない
 		if err := resolvePending(env, b); err != nil {
-			return err
+			fmt.Printf("送信結果不明の注文を判定できません。当日の手仕舞いは続けます: %v\n", err)
+			logError("daytrade.pending_unresolved", "送信結果不明の注文を判定できず当日の手仕舞いを続ける",
+				map[string]any{"error": err.Error()})
 		}
 		// 朝の返済が寄らずに失効した持ち越しがあれば、引けでもう一度。判定できなくても
 		// **当日の手仕舞いは止めない**——ここで止めると今日の建玉が丸ごと持ち越しになる
