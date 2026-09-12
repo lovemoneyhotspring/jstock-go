@@ -3,6 +3,11 @@ package backtest
 import (
 	"testing"
 	"time"
+
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
+	"github.com/shopspring/decimal"
 )
 
 func TestRecentWindowIgnoresUntradedWindow(t *testing.T) {
@@ -92,9 +97,15 @@ func TestPickDayLimitsPerSector(t *testing.T) {
 		row("C", "", -0.03),     // 業種が取れない
 		row("D", "3600", -0.02), // 機械（繰り上がる）
 	}
-	p := legParams{n: 3, budget: 1_000_000, weighting: "equal", sign: 1,
-		minGap: -1, maxGap: 0, maxPerSector: 1}
-	got := pickDay(rows, p, p.n, p.budget*float64(p.n))
+	p := legParams{n: 3, budget: decimal.NewFromInt(1_000_000), sign: 1,
+		side: domain.SideBuy,
+		signal: config.Signal{
+			MinGap: decimal.NewFromInt(-1), MaxGap: decimal.Zero, RankBy: config.RankByGap,
+			MaxPerSector: 1,
+		},
+		pick: selection.PickOptions{Weighting: "equal", Side: domain.SideBuy, MaxPerSector: 1},
+	}
+	got := pickDay(rows, p, p.n, p.budget)
 	var codes []string
 	for _, tr := range got {
 		codes = append(codes, tr.Code)

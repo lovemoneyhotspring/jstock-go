@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"sort"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/fees"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/regime"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/universe"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/shopspring/decimal"
 )
 
@@ -151,180 +152,91 @@ type Yearly struct {
 }
 
 // legParams は 1 レッグぶんの選定と価格付けの指定。
+//
+// 選定の規則そのもの（帯・順位・2 段階選定・業種上限・配分・株数）は持たない
+// ——本番の設定（signal / margin）と selection.PickOptions をそのまま渡し、
+// selection.Rank / RankShort / PickFrom に決めさせる。
 type legParams struct {
-	n         int
-	budget    float64
-	weighting string
+	n      int
+	budget decimal.Decimal
 	// sign は損益の向き（買い +1: C − O、売り −1: O − C）。
 	sign float64
 	// extraCostBP は約定代金に対する往復の概算コスト（貸株料・金利・滑り、bp）。
 	extraCostBP float64
 	// commission が偽なら現物の定額手数料を掛けない（立花証券の信用取引は 0 円）。
 	commission bool
-	// descending が真ならギャップの大きい順（ショート）。
-	descending bool
-	// rankBy は並べる鍵（config.Signal.RankBy。selection.RankKey と同じ）。
-	rankBy string
-	// valuePool は 2 段階選定の母数の倍率（config.Signal.ValuePool。0 / 1 で無効）。
-	valuePool int
-	// maxPerSector は同じ 33 業種から建てる銘柄数の上限（0 で無制限）。
-	maxPerSector int
-	minGap       float64
-	maxGap       float64
-	// maxShares は 1 銘柄の株数の上限（0 で無制限）。成行の信用新規売りは
-	// 空売り価格規制で 50 単元までなので、按分がそれを超える低位株はそこで頭打ち
-	// （selection.PickFrom と同じ）。
-	maxShares float64
-	fill      FillModel
-	// maxAmount は 1 銘柄の金額の上限（0 で無制限。selection.PickOptions.MaxAmount）。
-	maxAmount float64
+	fill       FillModel
+	// side は建てる向き。SELL なら RankShort と空売りの数量上限（PickFrom）。
+	side domain.Side
+	// signal / margin は順位付けの帯とストップの扱い（本番と同じ設定をそのまま渡す）。
+	signal config.Signal
+	margin config.Margin
+	// pick は株数の決め方（N と Budget は日ごとに入れる）。
+	pick selection.PickOptions
 }
 
 // pickAndPrice はランク付け・按分・価格付け。simulate のロング側の計算を一般化したもの。
-//
-// Python 版が polars の式で 1 度に書いていた部分を、日ごとのループに開いてある。
-// 順序（予算に収まる銘柄を順位順に N 個 → 按分 → 単元切り捨て）は selection.PickFrom と同じ。
 func pickAndPrice(byDay map[string][]Row, days []time.Time, p legParams) []Trade {
 	var trades []Trade
 	for _, day := range days {
-		trades = append(trades, pickDay(byDay[day.Format(dayLayout)], p, p.n, p.budget*float64(p.n))...)
+		trades = append(trades, pickDay(byDay[day.Format(dayLayout)], p, p.n, p.budget)...)
 	}
 	return trades
 }
 
-// pickDay は 1 日ぶんの選定と価格付け。n は銘柄数、total はその日の総予算
-// （既定は budget × n。ショートの余りをロングに回す日はそれより大きい——margin.spill_to_long）。
-func pickDay(rows []Row, p legParams, n int, total float64) []Trade {
+// pickDay は 1 日ぶんの選定と価格付け。n は銘柄数、budget は 1 注文の予算
+// （既定は p.budget。ショートの余りをロングに回す日はそれより大きい——margin.spill_to_long）。
+//
+// 選定は本番と同じ関数（selection.Rank / RankShort → PickFrom）。ここでするのは
+// パネルの行への変換と、建値・手仕舞い値・手数料の按分だけ。
+func pickDay(rows []Row, p legParams, n int, budget decimal.Decimal) []Trade {
+	if len(rows) == 0 || n < 1 {
+		return nil
+	}
 	fill := p.fill
 	if fill == nil {
 		fill = OpenCloseFill{}
 	}
-	var trades []Trade
-	if len(rows) == 0 {
-		return nil
-	}
-	// 条件に合う銘柄をギャップ順に並べる（selection.Rank と同じ帯 [min, max)）
-	type scored struct {
-		row Row
-	}
-	var pool []scored
+	cands := make([]universe.Candidate, 0, len(rows))
+	quotes := make(map[string]selection.Quote, len(rows))
+	byCode := make(map[string]Row, len(rows))
 	for _, r := range rows {
-		if r.Gap < p.minGap || r.Gap >= p.maxGap {
-			continue
-		}
-		// 予算で 1 単元も買えない銘柄は順位から外す（次点が繰り上がる）
-		if math.Floor(p.budget/(r.Open*100))*100 < 100 {
-			continue
-		}
-		pool = append(pool, scored{r})
+		cands = append(cands, candidateOf(r))
+		quotes[r.Code] = quoteOf(r)
+		byCode[r.Code] = r
 	}
-	sort.SliceStable(pool, func(i, j int) bool {
-		a, b := pool[i].row, pool[j].row
-		ka, oka := selection.RankKey(p.rankBy, a.Gap, a.Vol20)
-		kb, okb := selection.RankKey(p.rankBy, b.Gap, b.Vol20)
-		if oka != okb {
-			return oka
-		}
-		if ka != kb {
-			if p.descending {
-				return ka > kb
-			}
-			return ka < kb
-		}
-		return a.Code < b.Code
-	})
-	// 2 段階選定: ギャップ順の上位 n × valuePool から益回りの高い順に n 銘柄
-	// （selection.ByEarnYield と同じ規則）
-	if p.valuePool > 1 && len(pool) > n {
-		head := pool
-		if m := n * p.valuePool; len(head) > m {
-			head = head[:m]
-		}
-		sort.SliceStable(head, func(i, j int) bool {
-			a, b := head[i].row.EarnYield, head[j].row.EarnYield
-			if (a == nil) != (b == nil) {
-				return b == nil
-			}
-			if a == nil || *a == *b {
-				return false
-			}
-			return *a > *b
-		})
-		pool = head
+	var ranked []selection.Ranked
+	if p.side == domain.SideSell {
+		ranked = selection.RankShort(cands, quotes, p.margin)
+	} else {
+		ranked = selection.Rank(cands, quotes, p.signal)
 	}
-	// 同じ業種に偏らせない（signal.max_per_sector）。上限を超えた銘柄は落とし、
-	// 次点が繰り上がる——「外す」のではなく「入れ替える」。業種が取れない行は数えない。
-	if p.maxPerSector > 0 {
-		perSector := make(map[string]int, len(pool))
-		kept := pool[:0]
-		for _, s := range pool {
-			if sec := s.row.Sector; sec != "" {
-				if perSector[sec] >= p.maxPerSector {
-					continue
-				}
-				perSector[sec]++
-			}
-			kept = append(kept, s)
-		}
-		pool = kept
-	}
-	if len(pool) > n {
-		pool = pool[:n]
-	}
-	if len(pool) == 0 {
+	opts := p.pick
+	opts.N = n
+	opts.Budget = budget
+	picks := selection.PickFrom(ranked, opts)
+	if len(picks) == 0 {
 		return nil
-	}
-
-	// 総予算は 1 注文の予算 × N（selection.PickFrom と同じ）。候補が N に満たない日は
-	// 残った銘柄で総予算を分け合う——等金額でも 1 注文の予算に留めない。
-	// 実運用がそう建てるので、検証も同じ金額にする
-	shares := make([]float64, len(pool))
-	weights := make([]float64, len(pool))
-	weightSum := 0.0
-	for i, s := range pool {
-		weights[i] = 1.0
-		if p.weighting == "inverse_vol" {
-			vol := selection.VolFloor
-			if s.row.Vol20 != nil && *s.row.Vol20 > selection.VolFloor {
-				vol = *s.row.Vol20
-			}
-			weights[i] = 1.0 / vol
-		}
-		weightSum += weights[i]
-	}
-	for i, s := range pool {
-		amount := total * weights[i] / weightSum
-		if p.maxAmount > 0 && amount > p.maxAmount {
-			amount = p.maxAmount
-		}
-		shares[i] = math.Floor(amount/(s.row.Open*100)) * 100
-		if p.maxShares > 0 && shares[i] > p.maxShares {
-			shares[i] = math.Floor(p.maxShares/100) * 100
-		}
 	}
 
 	// 建値・手仕舞い値は約定モデルが決める。決まらない銘柄は建てない
-	entries := make([]float64, len(pool))
-	exits := make([]float64, len(pool))
-	for i, s := range pool {
-		if shares[i] < 100 {
-			continue
-		}
-		entry, exit, ok := fill.Fill(s.row)
+	shares := make([]float64, len(picks))
+	entries := make([]float64, len(picks))
+	exits := make([]float64, len(picks))
+	for i, pick := range picks {
+		entry, exit, ok := fill.Fill(byCode[pick.Code])
 		if !ok || entry <= 0 || exit <= 0 {
-			shares[i] = 0
 			continue
 		}
+		shares[i] = pick.Quantity.InexactFloat64()
 		entries[i], exits[i] = entry, exit
 	}
 
 	// 定額コースは 1 日の合計（買い＋売り）で段階が決まるので、
 	// その日の手数料を約定代金の比で各取引に配る
 	dayTotal := 0.0
-	for i := range pool {
-		if shares[i] >= 100 {
-			dayTotal += shares[i] * (entries[i] + exits[i])
-		}
+	for i := range picks {
+		dayTotal += shares[i] * (entries[i] + exits[i])
 	}
 	dayFee := 0.0
 	if p.commission && dayTotal > 0 {
@@ -332,12 +244,13 @@ func pickDay(rows []Row, p legParams, n int, total float64) []Trade {
 		dayFee = f
 	}
 
+	var trades []Trade
 	rank := 0
-	for i, s := range pool {
-		if shares[i] < 100 {
-			continue // 按分が 1 単元に届かない銘柄は落ちる（N が減る）
+	for i, pick := range picks {
+		if shares[i] <= 0 {
+			continue
 		}
-		rank++
+		rank++ // 順位表の番号ではなく「建てた順」（--trades-csv の互換）
 		amount := shares[i] * entries[i]
 		extra := amount * p.extraCostBP / 1e4
 		commission := 0.0
@@ -346,8 +259,9 @@ func pickDay(rows []Row, p legParams, n int, total float64) []Trade {
 		}
 		gross := shares[i] * p.sign * (exits[i] - entries[i])
 		fee := extra + commission
+		row := byCode[pick.Code]
 		trades = append(trades, Trade{
-			Date: s.row.Date, Code: s.row.Code, Rank: rank, Gap: s.row.Gap,
+			Date: row.Date, Code: pick.Code, Rank: rank, Gap: pick.Gap.InexactFloat64(),
 			Shares: shares[i], Entry: entries[i], Exit: exits[i],
 			Amount: amount, Fees: fee, Commission: commission,
 			Gross: gross, PnL: gross - fee, Scale: 1,
@@ -495,20 +409,21 @@ func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options
 	if n == 0 {
 		return nil, fmt.Errorf("max_capital が 0 のため検証できません（買わない設定）")
 	}
-	budget, _ := cfg.Capital.BudgetPerOrder().Float64()
+	budget := cfg.Capital.BudgetPerOrder()
 	capital, _ := cfg.Capital.MaxCapital.Float64()
 	carryPenalty, _ := cfg.Margin.CarryPenalty.Float64()
 
 	longRows := groupByDay(panel, longKeep(cfg, opts))
-	minGap, _ := cfg.Signal.MinGap.Float64()
-	maxGap, _ := cfg.Signal.MaxGap.Float64()
-	longMaxOrder, _ := cfg.Capital.MaxOrder.Float64()
 	trades := pickAndPrice(longRows, panel.Days, legParams{
-		n: n, budget: budget, weighting: cfg.Capital.Weighting,
-		sign: 1, commission: true, minGap: minGap, maxGap: maxGap, fill: opts.fill(),
-		rankBy: cfg.Signal.RankBy, maxAmount: longMaxOrder,
-		valuePool:    cfg.Signal.ValuePool,
-		maxPerSector: cfg.Signal.MaxPerSector,
+		n: n, budget: budget, sign: 1, commission: true, fill: opts.fill(),
+		side: domain.SideBuy, signal: cfg.Signal, margin: cfg.Margin,
+		pick: selection.PickOptions{
+			Weighting:    cfg.Capital.Weighting,
+			Side:         domain.SideBuy,
+			MaxAmount:    cfg.Capital.MaxOrder,
+			ValuePool:    cfg.Signal.ValuePool,
+			MaxPerSector: cfg.Signal.MaxPerSector,
+		},
 	})
 	trades = applyCarry(trades, rowsByKey(panel), 1, carryPenalty)
 
@@ -526,18 +441,30 @@ func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options
 	return &Result{Daily: series, Trades: trades, Summary: summarize(series, capital, legAll)}, nil
 }
 
-// longKeep はロングの母集団: eligible で、寄付がストップ安以下でない
-// （実運用の signal.skip_limit_down と同じ条件）。
+// longKeep はロングの母集団: eligible で、寄付の遅れで外れていない。
+// ストップ安の除外（signal.skip_limit_down）と帯の判定は selection.Rank が見る。
 func longKeep(cfg config.Config, opts Options) func(Row) bool {
 	skipOpened := openedFilter(cfg, opts)
+	outside := outsideGap(cfg.Signal.MinGap, cfg.Signal.MaxGap)
 	return func(r Row) bool {
-		if !r.Eligible {
-			return false
-		}
-		if cfg.Signal.SkipLimitDown && r.Open <= math.Max(r.LimitLow, 1.0) {
-			return false
-		}
-		return !skipOpened(r)
+		return r.Eligible && !outside(r) && !skipOpened(r)
+	}
+}
+
+// gapSlack は粗ふるいの余裕。パネルの gap（SQL）と selection の gap（decimal）は
+// 同じ式なので差は倍精度の丸めだけ。帯の境界を挟んで判定が食い違わない幅を取る。
+const gapSlack = 1e-9
+
+// outsideGap は「帯 [min, max) に**どう転んでも入らない**」行を落とす粗ふるい。
+//
+// 帯の判定そのものは selection.Rank / RankShort が持つ（規則は 1 箇所）。ここで削るのは
+// 10 年ぶんの候補を decimal に変換する手間で、境界の銘柄は余裕を付けて必ず残す
+// ——これを入れないと 1 本 14 秒が 34 秒になる。
+func outsideGap(min, max decimal.Decimal) func(Row) bool {
+	lo, _ := min.Float64()
+	hi, _ := max.Float64()
+	return func(r Row) bool {
+		return r.Gap < lo-gapSlack || r.Gap >= hi+gapSlack
 	}
 }
 

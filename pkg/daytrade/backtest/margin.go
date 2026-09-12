@@ -2,13 +2,12 @@ package backtest
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/regime"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/shopspring/decimal"
 )
 
@@ -45,28 +44,23 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 
 	longCapital, _ := cfg.Capital.MaxCapital.Float64()
 	shortCapital, _ := cfg.Margin.MaxCapital.Float64()
-	longBudget, _ := cfg.Capital.BudgetPerOrder().Float64()
-	shortBudget, _ := cfg.Margin.BudgetPerOrder().Float64()
 	longExtra, _ := cfg.Margin.LongExtraCostBP.Float64()
 	shortExtra, _ := cfg.Margin.ExtraCostBP.Float64()
 	carryPenalty, _ := cfg.Margin.CarryPenalty.Float64()
-	longMinGap, _ := cfg.Signal.MinGap.Float64()
-	longMaxGap, _ := cfg.Signal.MaxGap.Float64()
-	shortMinGap, _ := cfg.Margin.MinGap.Float64()
-	shortMaxGap, _ := cfg.Margin.MaxGap.Float64()
-	shortMaxOrder, _ := cfg.Margin.MaxOrder.Float64()
-	longMaxOrder, _ := cfg.Capital.MaxOrder.Float64()
 	fill := opts.fill()
 	byKey := rowsByKey(panel)
 
 	longRows := groupByDay(panel, longKeep(cfg, opts))
 	longParams := legParams{
-		n: nLong, budget: longBudget,
-		weighting: cfg.Capital.Weighting, sign: 1,
-		minGap: longMinGap, maxGap: longMaxGap, fill: fill,
-		rankBy: cfg.Signal.RankBy, maxAmount: longMaxOrder,
-		valuePool:    cfg.Signal.ValuePool,
-		maxPerSector: cfg.Signal.MaxPerSector,
+		n: nLong, budget: cfg.Capital.BudgetPerOrder(), sign: 1, fill: fill,
+		side: domain.SideBuy, signal: cfg.Signal, margin: cfg.Margin,
+		pick: selection.PickOptions{
+			Weighting:    cfg.Capital.Weighting,
+			Side:         domain.SideBuy,
+			MaxAmount:    cfg.Capital.MaxOrder,
+			ValuePool:    cfg.Signal.ValuePool,
+			MaxPerSector: cfg.Signal.MaxPerSector,
+		},
 		// 信用買い（日計り）なら手数料 0 円。金利・滑りは long_extra_cost_bp で見る
 		commission: !cfg.Margin.LongViaMargin,
 	}
@@ -78,33 +72,30 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 
 	// ショートの母集団はロングと別（[margin] の segments / 除外。前夜の plan と同じ条件）
 	skipOpened := openedFilter(cfg, opts)
+	outsideShortGap := outsideGap(cfg.Margin.MinGap, cfg.Margin.MaxGap)
 	shortRows := groupByDay(panel, func(r Row) bool {
-		if !r.ShortEligible {
-			return false
-		}
-		if cfg.Margin.SkipLimitUp && r.Open >= r.LimitHigh {
-			return false
-		}
-		return !skipOpened(r)
+		return r.ShortEligible && !outsideShortGap(r) && !skipOpened(r)
 	})
 	shortTrades := pickAndPrice(shortRows, panel.Days, legParams{
-		n: nShort, budget: shortBudget,
-		weighting: cfg.Margin.Weighting, sign: -1, descending: true,
+		n: nShort, budget: cfg.Margin.BudgetPerOrder(), sign: -1,
 		extraCostBP: shortExtra,
 		commission:  false, // 立花証券の信用取引は手数料 0 円
-		minGap:      shortMinGap, maxGap: shortMaxGap,
-		// 成行の新規売りは 50 単元まで（空売り価格規制）。実運用の selection も同じ上限で切る。
+		fill:        fill,
+		side:        domain.SideSell, signal: cfg.Signal, margin: cfg.Margin,
+		// 成行の新規売りは 50 単元まで（空売り価格規制）。PickFrom が同じ上限で切る。
 		// パネルに売買単位は無いので 100 株単位とみなす
-		maxShares: broker.ShortSaleMarketShares(marketrules.DefaultLotSize).InexactFloat64(),
-		fill:      fill,
-		maxAmount: shortMaxOrder,
+		pick: selection.PickOptions{
+			Weighting: cfg.Margin.Weighting,
+			Side:      domain.SideSell,
+			MaxAmount: cfg.Margin.MaxOrder,
+		},
 	})
 	shortTrades = applyCarry(shortTrades, byKey, -1, carryPenalty)
 
 	if cfg.Margin.SpillToLong {
 		return simulateMarginSpill(panel, cfg, signals, spillInputs{
 			longParams: longParams, longRows: longRows, shortTrades: shortTrades, byKey: byKey,
-			shortTotal: shortBudget * float64(nShort), carryPenalty: carryPenalty,
+			shortTotal: cfg.Margin.BudgetPerOrder().Mul(decimal.NewFromInt(int64(nShort))).InexactFloat64(), carryPenalty: carryPenalty,
 			longCapital: longCapital, shortCapital: shortCapital,
 		})
 	}
@@ -285,18 +276,9 @@ func simulateMarginSpill(panel *Panel, cfg config.Config, signals *Inputs, in sp
 		if shortMul > 0 && in.shortTotal > shortUsed[key] {
 			spill = shortMul * (in.shortTotal - shortUsed[key])
 		}
-		total := budget*float64(nLong) + spill
-		n := nLong
-		if spill > 0 {
-			n = int(math.Floor(total / budget))
-			if n < nLong {
-				n = nLong
-			}
-			if maxN > 0 && n > maxN {
-				n = maxN
-			}
-		}
-		dayTrades := pickDay(in.longRows[key], in.longParams, n, total)
+		// 銘柄数と 1 注文の予算は本番と同じ式（selection.SpillInto）。
+		n, dayBudget := selection.SpillInto(nLong, budget, budget, decimal.NewFromFloat(spill), maxN)
+		dayTrades := pickDay(in.longRows[key], in.longParams, n, dayBudget)
 		dayTrades = applyCarry(dayTrades, in.byKey, 1, in.carryPenalty)
 		long := sumDaily(day, dayTrades)
 

@@ -162,7 +162,14 @@ func RankKey(rankBy string, gap float64, vol *float64) (float64, bool) {
 }
 
 func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilter) []Ranked {
-	var scored []Ranked
+	// 並べ替えの鍵は先に 1 度だけ出す（sort の比較で毎回 InexactFloat64 を呼ぶと、
+	// 候補が数千件あるバックテストで効いてくる。並びの規則は変えていない）。
+	type scoredRow struct {
+		row Ranked
+		key float64
+		ok  bool
+	}
+	var scored []scoredRow
 	for _, c := range candidates {
 		quote, ok := quotes[c.Symbol]
 		if !ok || quote.Price.LessThanOrEqual(decimal.Zero) || c.PrevClose <= 0 {
@@ -185,7 +192,7 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 				continue
 			}
 		}
-		scored = append(scored, Ranked{
+		row := Ranked{
 			Symbol:    c.Symbol,
 			Code:      c.Code,
 			Name:      c.Name,
@@ -195,28 +202,30 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 			Vol:       c.Vol20,
 			EarnYield: c.EarnYield,
 			Sector:    c.Sector,
-		})
+		}
+		key, ok := RankKey(f.rankBy, row.Gap.InexactFloat64(), row.Vol)
+		scored = append(scored, scoredRow{row: row, key: key, ok: ok})
 	}
 	// 同じ鍵なら銘柄コード順（順位を実行ごとに揺らさない）。鍵の無い銘柄は末尾。
 	sort.SliceStable(scored, func(i, j int) bool {
 		a, b := scored[i], scored[j]
-		ka, oka := RankKey(f.rankBy, a.Gap.InexactFloat64(), a.Vol)
-		kb, okb := RankKey(f.rankBy, b.Gap.InexactFloat64(), b.Vol)
-		if oka != okb {
-			return oka
+		if a.ok != b.ok {
+			return a.ok
 		}
-		if ka != kb {
+		if a.key != b.key {
 			if f.descending {
-				return ka > kb
+				return a.key > b.key
 			}
-			return ka < kb
+			return a.key < b.key
 		}
-		return a.Symbol < b.Symbol
+		return a.row.Symbol < b.row.Symbol
 	})
+	out := make([]Ranked, len(scored))
 	for i := range scored {
-		scored[i].Rank = i + 1
+		out[i] = scored[i].row
+		out[i].Rank = i + 1
 	}
-	return scored
+	return out
 }
 
 // ByEarnYield は 2 段階選定。ギャップ順に並んだ pool（既に N × valuePool 以下に切ってある）を
