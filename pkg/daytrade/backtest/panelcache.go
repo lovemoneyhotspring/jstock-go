@@ -29,7 +29,7 @@ import (
 
 // panelCacheVersion はキャッシュの中身の版。SQL（列・分位の式・決算の突き合わせ）を
 // 変えたら上げる。上げれば鍵が変わり、古いキャッシュは使われない。
-const panelCacheVersion = 4
+const panelCacheVersion = 5
 
 // panelCacheDir はキャッシュの置き場（保管庫の下。再生成できるので消してよい）。
 func panelCacheDir(arch *archive.Archive) string {
@@ -63,19 +63,21 @@ func cacheSources(arch *archive.Archive, end time.Time) (panelSources, bool) {
 
 // panelCacheKey は「同じ鍵なら中身が同じ」ことを保証する材料のハッシュ。
 //
-// 材料は (1) 版、(2) 設定のうちキャッシュの中身を変えるもの、(3) 読む Parquet の
+// 材料は (1) 版、(2) パネルの中身を変える設定（窓の長さだけ。母集団の判定は
+// 読み出し側が Go で当てるのでキャッシュの中身を変えない）、(3) 読む Parquet の
 // 一覧とその大きさ・更新時刻。日次の sync でファイルが変われば鍵も変わって作り直す。
+//
+// 売買代金の下限は設定ではなく固定値（PanelTurnoverFloor）なので鍵にはその定数を入れる
+// ——おかげで設定違いの検証が同じキャッシュを使える（格子を 1 回の読み込みで回せる）。
 func panelCacheKey(arch *archive.Archive, cfg config.Config, end time.Time) (string, error) {
 	src, ok := cacheSources(arch, end)
 	if !ok {
 		return "", fmt.Errorf("キャッシュの元になる足・銘柄一覧がありません")
 	}
-	minTurnover, _ := cfg.Universe.MinTurnover.Float64()
-	marginTurnover, _ := cfg.Margin.MinTurnover.Float64()
 	h := sha256.New()
-	fmt.Fprintf(h, "v%d|turnover_days=%d|vol_days=%d|min_turnover=%f|margin_min_turnover=%f|margin_enabled=%v|product=%s\n",
+	fmt.Fprintf(h, "v%d|turnover_days=%d|vol_days=%d|turnover_floor=%f|product=%s\n",
 		panelCacheVersion, cfg.Universe.TurnoverDays, universe.VolDays,
-		minTurnover, marginTurnover, cfg.Margin.Enabled, universe.StockProduct)
+		PanelTurnoverFloor, universe.StockProduct)
 	for _, path := range sourceFiles(src) {
 		info, err := os.Stat(path)
 		if err != nil {

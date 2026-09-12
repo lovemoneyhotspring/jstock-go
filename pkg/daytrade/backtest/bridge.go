@@ -11,7 +11,8 @@ import (
 // 検証の選定は selection.Rank / RankShort / PickFrom をそのまま呼ぶ。ここが唯一の
 // 変換点で、順位付け・2 段階選定・業種上限・配分・株数の規則は backtest には無い。
 
-// candidateOf はパネルの 1 行を前夜の plan と同じ候補にする（selection.Rank の入力）。
+// candidateOf はパネルの 1 行を前夜の plan と同じ候補にする
+// （universe.Eligible / ShortEligible と selection.Rank の入力）。
 // パネルに銘柄名は無いので Name は空、発注記号は 5 桁コードのまま（気配の鍵にしか使わない）。
 func candidateOf(r Row) universe.Candidate {
 	return universe.Candidate{
@@ -22,6 +23,16 @@ func candidateOf(r Row) universe.Candidate {
 		EarnYield:     r.EarnYield,
 		Sector:        r.Sector,
 		ShortInterest: r.ShortInterest,
+		Segment:       r.Segment,
+		Shortable:     r.Shortable,
+		TurnoverMed:   r.TurnoverMed,
+		MktCap:        r.MktCap,
+		CapTercile:    r.CapTercile,
+		EarnPrev:      r.EarnPrev,
+		DiscToday:     r.DiscToday,
+		Alert:         r.Alert,
+		JsfStop:       r.JsfStop,
+		Loss:          r.Loss,
 		Eligible:      r.Eligible,
 		ShortEligible: r.ShortEligible,
 	}

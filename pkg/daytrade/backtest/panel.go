@@ -50,6 +50,19 @@ type Row struct {
 	// ShortInterest は空売り残高（発行済に対する比。報告が無ければ nil）。
 	// ショートの母集団の条件（margin.max_short_interest）に使う。
 	ShortInterest *float64
+	// ここから下は母集団の判定（universe.Eligible / ShortEligible）の材料。
+	// 判定そのものは SQL ではなく Go で当てる——前夜の plan と同じ関数にするため。
+	Segment     string
+	Shortable   bool
+	TurnoverMed float64
+	// MktCap は前日の時価総額（百万円）。時価総額の 3 分位を出すのに使う。
+	MktCap     float64
+	CapTercile int
+	EarnPrev   bool
+	DiscToday  bool
+	Alert      bool
+	JsfStop    bool
+	Loss       bool
 	// LimitLow / LimitHigh は前日終値を基準値段とする制限値幅（ストップ安・高）。
 	LimitLow      float64
 	LimitHigh     float64
@@ -63,6 +76,13 @@ type Panel struct {
 	// Days は期間の営業日（取引が無い日も日次の統計に並べるため）。
 	Days []time.Time
 }
+
+// panelSelectColumns はパネルの列。**設定に依存しない特徴量だけ**を返し、
+// 母集団の判定（eligible / short_eligible）と時価総額の 3 分位は Go 側で当てる
+// ——前夜の plan と同じ関数（universe）を使うため。
+const panelSelectColumns = `d, code, o, c, prev_close, next_open, vol20, earn_yield, sector,
+       segment, shortable, turnover_med, mkt_cap, earn_prev, disc_today, alert, jsf_stop, is_loss,
+       short_interest`
 
 // LoadPanel は (Date, Code) ごとの特徴量と当日の寄付・終値を作る。
 // eligible / short_eligible のどちらかに入る行だけを返す（全銘柄 × 10 年を持つと
@@ -101,58 +121,107 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 
 	// キャッシュがあれば（作れれば）そちらから読む。作れなくても検証は続ける
 	// ——遅くなるだけで結果は同じなので、ここで止める理由が無い。
+	queries := []string{query}
 	if PanelCacheEnabled {
 		if path, err := ensurePanelCache(db, arch, cfg, end); err != nil {
 			fmt.Fprintf(os.Stderr, "パネルのキャッシュを使えません（そのまま実行します）: %v\n", err)
 		} else {
-			query = buildCachedPanelQuery(path, start, end, cfg)
+			queries = cachedPanelQueries(path, start, end)
 		}
 	}
-
-	rows, err := db.Query(query)
-	if err != nil {
-		return nil, fmt.Errorf("パネルの組み立てに失敗しました: %w", err)
-	}
-	defer rows.Close()
 
 	panel := &Panel{}
-	for rows.Next() {
-		var (
-			r                 Row
-			nextOpen, vol20   sql.NullFloat64
-			earnYield         sql.NullFloat64
-			sector            sql.NullString
-			shortInterest     sql.NullFloat64
-			limitLow, limitHi sql.NullFloat64
-		)
-		if err := rows.Scan(&r.Date, &r.Code, &r.Open, &r.Close, &r.PrevClose,
-			&nextOpen, &vol20, &earnYield, &sector, &shortInterest, &r.Gap, &limitLow, &limitHi,
-			&r.Eligible, &r.ShortEligible); err != nil {
+	minTurnover, _ := cfg.Universe.MinTurnover.Float64()
+	// 同じ日の行をためて、その日の時価総額の 3 分位を前夜の plan と同じ関数で出す
+	// （universe.CapTerciles。母数は売買代金が min_turnover 以上の銘柄）。
+	var day []Row
+	flush := func() {
+		if len(day) == 0 {
+			return
+		}
+		caps := make([]float64, len(day))
+		mask := make([]bool, len(day))
+		for i, r := range day {
+			caps[i], mask[i] = r.MktCap, r.TurnoverMed >= minTurnover
+		}
+		for i, tercile := range universe.CapTerciles(caps, mask) {
+			day[i].CapTercile = tercile
+		}
+		for _, r := range day {
+			// 分割・併合の日（前日終値を調整前のまま使えない）は建てない。
+			// 3 分位の母数には入れてから捨てる（前夜の plan と同じ母数にするため）。
+			if r.PrevClose <= 0 {
+				continue
+			}
+			c := candidateOf(r)
+			r.Eligible = universe.Eligible(c, cfg.Universe)
+			r.ShortEligible = universe.ShortEligible(c, cfg.Margin)
+			// どちらにも入らない行は持たない（全銘柄 × 10 年はメモリを食うだけ）
+			if !r.Eligible && !r.ShortEligible {
+				continue
+			}
+			panel.Rows = append(panel.Rows, r)
+		}
+		day = day[:0]
+	}
+	scan := func(rows *sql.Rows) error {
+		for rows.Next() {
+			var (
+				r                 Row
+				prevClose         sql.NullFloat64
+				nextOpen, vol20   sql.NullFloat64
+				earnYield         sql.NullFloat64
+				sector, segment   sql.NullString
+				mktCap            sql.NullFloat64
+				shortInterest     sql.NullFloat64
+				gap               sql.NullFloat64
+				limitLow, limitHi sql.NullFloat64
+			)
+			if err := rows.Scan(&r.Date, &r.Code, &r.Open, &r.Close, &prevClose,
+				&nextOpen, &vol20, &earnYield, &sector, &segment, &r.Shortable,
+				&r.TurnoverMed, &mktCap, &r.EarnPrev, &r.DiscToday, &r.Alert, &r.JsfStop, &r.Loss,
+				&shortInterest, &gap, &limitLow, &limitHi); err != nil {
+				return err
+			}
+			r.Date = r.Date.UTC()
+			if len(day) > 0 && !r.Date.Equal(day[0].Date) {
+				flush()
+			}
+			r.PrevClose, r.MktCap, r.Gap = prevClose.Float64, mktCap.Float64, gap.Float64
+			if nextOpen.Valid {
+				v := nextOpen.Float64
+				r.NextOpen = &v
+			}
+			if vol20.Valid {
+				v := vol20.Float64
+				r.Vol20 = &v
+			}
+			if earnYield.Valid {
+				v := earnYield.Float64
+				r.EarnYield = &v
+			}
+			if shortInterest.Valid {
+				v := shortInterest.Float64
+				r.ShortInterest = &v
+			}
+			r.Sector, r.Segment = sector.String, segment.String
+			r.LimitLow, r.LimitHigh = limitLow.Float64, limitHi.Float64
+			day = append(day, r)
+		}
+		return rows.Err()
+	}
+	// 読み出しは 1 年ずつ（cachedPanelQueries）。日ごとの判定は 1 日で閉じている。
+	for _, q := range queries {
+		rows, err := db.Query(q)
+		if err != nil {
+			return nil, fmt.Errorf("パネルの組み立てに失敗しました: %w", err)
+		}
+		err = scan(rows)
+		rows.Close()
+		if err != nil {
 			return nil, err
 		}
-		r.Date = r.Date.UTC()
-		if nextOpen.Valid {
-			v := nextOpen.Float64
-			r.NextOpen = &v
-		}
-		if vol20.Valid {
-			v := vol20.Float64
-			r.Vol20 = &v
-		}
-		if earnYield.Valid {
-			v := earnYield.Float64
-			r.EarnYield = &v
-		}
-		if shortInterest.Valid {
-			v := shortInterest.Float64
-			r.ShortInterest = &v
-		}
-		r.Sector = sector.String
-		r.LimitLow, r.LimitHigh = limitLow.Float64, limitHi.Float64
-		panel.Rows = append(panel.Rows, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		flush()
 	}
 
 	days, err := tradingDays(db, barsSrc, start, end)
@@ -218,19 +287,15 @@ type panelSources struct {
 func buildPanelQuery(src panelSources, start, end time.Time, cfg config.Config) string {
 	var b strings.Builder
 	b.WriteString(panelCTEs(src, start, end, cfg))
-	fmt.Fprintf(&b, `SELECT d, code, o, c, prev_close, next_open, vol20, earn_yield, sector, short_interest,
+	fmt.Fprintf(&b, `SELECT %s,
        o / prev_close - 1 AS gap,
        prev_close - (%s) AS limit_low,
-       prev_close + (%s) AS limit_high,
-       (%s) AS eligible,
-       (%s) AS short_eligible
+       prev_close + (%s) AS limit_high
 FROM valued
-WHERE prev_close IS NOT NULL AND prev_close > 0
-  AND ((%s) OR (%s))
+WHERE turnover_med >= %f
 ORDER BY d, code`,
-		limitWidthSQL("prev_close"), limitWidthSQL("prev_close"),
-		eligibleSQL(cfg.Universe), shortEligibleSQL(cfg.Margin),
-		eligibleSQL(cfg.Universe), shortEligibleSQL(cfg.Margin))
+		panelSelectColumns, limitWidthSQL("prev_close"), limitWidthSQL("prev_close"),
+		PanelTurnoverFloor)
 	return b.String()
 }
 
@@ -362,7 +427,6 @@ joined AS (
 		b.WriteString("ssr AS (SELECT NULL::VARCHAR AS code, NULL::DATE AS cd, NULL::DOUBLE AS si WHERE false),\n")
 	}
 
-	minTurnover, _ := cfg.Universe.MinTurnover.Float64()
 	fmt.Fprintf(&b, `flagged AS (
   SELECT j.*,
          coalesce(e.code IS NOT NULL, false) AS earn_prev,
@@ -376,18 +440,7 @@ joined AS (
   LEFT JOIN alerts al ON al.code = j.code AND al.di = j.di
   ASOF LEFT JOIN ssr ss ON ss.code = j.code AND ss.cd < j.d
 ),
-tercile AS (
-  SELECT f.*,
-         CASE WHEN f.turnover_med >= %f THEN
-           least(3, greatest(1, CAST(ceil(
-             row_number() OVER (PARTITION BY f.d
-               ORDER BY CASE WHEN f.turnover_med >= %f THEN f.mkt_cap END NULLS LAST, f.code)
-             * 3.0 / nullif(count(*) FILTER (WHERE f.turnover_med >= %f) OVER (PARTITION BY f.d), 0)
-           ) AS INTEGER)))
-         ELSE 0 END AS cap_tercile
-  FROM flagged f
-),
--- 本決算は「その日から %[4]d 日以内に開示されたもの」だけを見る。実運用の plan が
+-- 本決算は「その日から %[1]d 日以内に開示されたもの」だけを見る。実運用の plan が
 -- 判定日から遡って探すのと同じ窓にする（universe.FinsLookbackDays）。絶対の窓で切ると
 -- --since によって同じ日の判定が変わり、キャッシュとも食い違う。
 valued AS (
@@ -395,65 +448,76 @@ valued AS (
          np_fy / nullif(t.mkt_cap * 1e6, 0) AS earn_yield,
          coalesce(np_fy <= 0, false) AS is_loss
   FROM (
-    SELECT t.*, CASE WHEN fy.fd >= t.d - INTERVAL %[4]d DAY THEN fy.np END AS np_fy
-    FROM tercile t ASOF LEFT JOIN finsfy fy ON fy.code = t.code AND fy.fd < t.d
+    SELECT t.*, CASE WHEN fy.fd >= t.d - INTERVAL %[1]d DAY THEN fy.np END AS np_fy
+    FROM flagged t ASOF LEFT JOIN finsfy fy ON fy.code = t.code AND fy.fd < t.d
   ) t
 )
 `,
-		minTurnover, minTurnover, minTurnover, universe.FinsLookbackDays)
+		universe.FinsLookbackDays)
 	return b.String()
 }
 
 // panelCacheColumns はキャッシュに落とす列。設定に依存しないものだけを持ち、
 // 設定に依存する判定（eligible / short_eligible・ギャップ・制限値幅）は読み出し側で当てる。
 const panelCacheColumns = `SELECT d, code, o, c, prev_close, next_open, next_open_d, vol20, earn_yield,
-       sector, segment, shortable, turnover_med, cap_tercile, earn_prev, disc_today, alert, jsf_stop, is_loss,
+       sector, segment, shortable, turnover_med, mkt_cap, earn_prev, disc_today, alert, jsf_stop, is_loss,
        short_interest`
 
 // buildCacheQuery はキャッシュに落とす行を作る SQL。期間は切らず（読み出し側で切る）、
 // 流動性の下限だけで絞る——下限を満たさない行はどの設定でも母集団に入らないため。
-// ロングとショートで下限が違う設定もありうるので、小さい方で残す。
+// 下限は設定によらない固定値（PanelTurnoverFloor）。
+//
+// **prev_close が無い行（分割・併合の日）も残す**。建てる対象にはならないが、
+// 時価総額の 3 分位の母数には入る（前夜の plan と同じ母数にするため）。読み出し側で捨てる。
 func buildCacheQuery(src panelSources, end time.Time, cfg config.Config) string {
 	var b strings.Builder
 	b.WriteString(panelCTEs(src, time.Time{}, end, cfg))
 	fmt.Fprintf(&b, `%s
 FROM valued
-WHERE prev_close IS NOT NULL AND prev_close > 0 AND turnover_med >= %f`,
-		panelCacheColumns, cacheTurnoverFloor(cfg))
+WHERE turnover_med >= %f`, panelCacheColumns, PanelTurnoverFloor)
 	return b.String()
 }
 
-// cacheTurnoverFloor はキャッシュに残す売買代金の下限（ロング・ショートの小さい方）。
-func cacheTurnoverFloor(cfg config.Config) float64 {
-	floor, _ := cfg.Universe.MinTurnover.Float64()
-	if cfg.Margin.Enabled {
-		if m, _ := cfg.Margin.MinTurnover.Float64(); m < floor {
-			floor = m
-		}
-	}
-	return floor
-}
+// PanelTurnoverFloor はパネルに残す売買代金 20 日中央値の下限（円）。設定の
+// min_turnover（両設定とも 1 億円）より低ければよく、設定に依存しない値にすることで
+// パネルとそのキャッシュが設定に依存しなくなる（格子を 1 回の読み込みで回せる）。
+const PanelTurnoverFloor = 5e7
 
 // buildCachedPanelQuery はキャッシュから読む SQL。直接の経路と同じ行・同じ値を返す。
 //
 // next_open は「次の足が end より後なら NULL」にする。キャッシュは全期間で作るので、
 // そうしないと期間の終わりに未来の足が見えてしまう（上場廃止・売買停止で end より前に
 // 足が途切れる銘柄でも同じ。営業日で切ると取りこぼす）。
-func buildCachedPanelQuery(cachePath string, start, end time.Time, cfg config.Config) string {
+func buildCachedPanelQuery(cachePath string, start, end time.Time) string {
 	return fmt.Sprintf(`SELECT d, code, o, c, prev_close,
        CASE WHEN next_open_d > %[2]s THEN NULL ELSE next_open END AS next_open,
-       vol20, earn_yield, sector, short_interest,
+       vol20, earn_yield, sector, segment, shortable, turnover_med, mkt_cap,
+       earn_prev, disc_today, alert, jsf_stop, is_loss, short_interest,
        o / prev_close - 1 AS gap,
        prev_close - (%[3]s) AS limit_low,
-       prev_close + (%[3]s) AS limit_high,
-       (%[4]s) AS eligible,
-       (%[5]s) AS short_eligible
-FROM read_parquet(%[6]s)
+       prev_close + (%[3]s) AS limit_high
+FROM read_parquet(%[4]s)
 WHERE d >= %[1]s AND d <= %[2]s
-  AND ((%[4]s) OR (%[5]s))
 ORDER BY d, code`,
 		archsql.Lit(start), archsql.Lit(end), limitWidthSQL("prev_close"),
-		eligibleSQL(cfg.Universe), shortEligibleSQL(cfg.Margin), archsql.LitString(cachePath))
+		archsql.LitString(cachePath))
+}
+
+// cachedPanelQueries はキャッシュから読む SQL を 1 年ずつに割ったもの。
+//
+// 日ごとの判定（3 分位）は 1 日で閉じているので、年で割っても結果は同じ。割るのは
+// 並べ替えのピークを下げるため——10 年ぶん（490 万行）を 1 度に並べると 2.5GB 増える
+// （2026-09-12 の実測。このマシンはメモリが制約側）。
+func cachedPanelQueries(cachePath string, start, end time.Time) []string {
+	var out []string
+	for from := start; !from.After(end); from = time.Date(from.Year()+1, 1, 1, 0, 0, 0, 0, time.UTC) {
+		to := time.Date(from.Year(), 12, 31, 0, 0, 0, 0, time.UTC)
+		if to.After(end) {
+			to = end
+		}
+		out = append(out, buildCachedPanelQuery(cachePath, from, to))
+	}
+	return out
 }
 
 // segmentSQL は市場区分名を prime / standard / growth / other に畳む
@@ -486,69 +550,4 @@ func limitWidthSQL(column string) string {
 		fmt.Fprintf(&b, "WHEN %s < %s THEN %s ", column, bound.String(), width.String())
 	}
 	return b.String()
-}
-
-func eligibleSQL(cfg config.Universe) string {
-	minTurnover, _ := cfg.MinTurnover.Float64()
-	parts := []string{
-		fmt.Sprintf("segment IN (%s)", quoteList(cfg.Segments)),
-		fmt.Sprintf("turnover_med >= %f", minTurnover),
-	}
-	if cfg.ExcludeCapTerciles > 0 {
-		parts = append(parts, fmt.Sprintf("cap_tercile > %d", cfg.ExcludeCapTerciles))
-	}
-	if cfg.ExcludeEarningsPrev {
-		parts = append(parts, "NOT earn_prev")
-	}
-	if cfg.ExcludeEarningsToday {
-		parts = append(parts, "NOT disc_today")
-	}
-	if cfg.ExcludeMarginAlert {
-		parts = append(parts, "NOT alert")
-	}
-	if cfg.ExcludeLoss {
-		parts = append(parts, "NOT is_loss")
-	}
-	return strings.Join(parts, " AND ")
-}
-
-func shortEligibleSQL(m config.Margin) string {
-	if !m.Enabled {
-		return "false"
-	}
-	minTurnover, _ := m.MinTurnover.Float64()
-	parts := []string{
-		"shortable",
-		fmt.Sprintf("segment IN (%s)", quoteList(m.Segments)),
-		fmt.Sprintf("turnover_med >= %f", minTurnover),
-	}
-	if m.ExcludeCapTerciles > 0 {
-		parts = append(parts, fmt.Sprintf("cap_tercile > %d", m.ExcludeCapTerciles))
-	}
-	if m.ExcludeEarningsPrev {
-		parts = append(parts, "NOT earn_prev")
-	}
-	if m.ExcludeEarningsToday {
-		parts = append(parts, "NOT disc_today")
-	}
-	if m.ExcludeMarginAlert {
-		parts = append(parts, "NOT alert")
-	}
-	if m.ExcludeJsfStop {
-		parts = append(parts, "NOT jsf_stop")
-	}
-	// 空売り残高の上限。報告の無い銘柄（NULL）は通す（＝軽い）
-	if max := m.MaxShortInterest; max.IsPositive() {
-		limit, _ := max.Float64()
-		parts = append(parts, fmt.Sprintf("coalesce(short_interest, 0) <= %f", limit))
-	}
-	return strings.Join(parts, " AND ")
-}
-
-func quoteList(values []string) string {
-	quoted := make([]string, 0, len(values))
-	for _, v := range values {
-		quoted = append(quoted, "'"+strings.ReplaceAll(v, "'", "''")+"'")
-	}
-	return strings.Join(quoted, ", ")
 }

@@ -9,19 +9,30 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-func TestCacheTurnoverFloorTakesTheSmaller(t *testing.T) {
+// パネルの下限は設定より低い固定値。低くないと、設定によっては母集団の行が
+// パネルから落ちてしまう（判定は読み出し側の Go が当てるので、SQL は削りすぎない）。
+func TestPanelTurnoverFloorIsBelowEverySetting(t *testing.T) {
 	cfg := config.Default()
-	cfg.Universe.MinTurnover = decimal.NewFromInt(300_000_000)
-	cfg.Margin.Enabled = false
-	cfg.Margin.MinTurnover = decimal.NewFromInt(100_000_000)
-	// ショートが無効なら見るのはロング側だけ
-	if got := cacheTurnoverFloor(cfg); got != 3e8 {
-		t.Errorf("ショート無効: %v, want 3e8", got)
+	for name, v := range map[string]decimal.Decimal{
+		"universe.min_turnover": cfg.Universe.MinTurnover,
+		"margin.min_turnover":   cfg.Margin.MinTurnover,
+	} {
+		if f, _ := v.Float64(); f < PanelTurnoverFloor {
+			t.Errorf("%s = %v がパネルの下限 %v を下回る", name, f, PanelTurnoverFloor)
+		}
 	}
-	// 有効なら小さい方（キャッシュから落とすと母集団が欠ける）
-	cfg.Margin.Enabled = true
-	if got := cacheTurnoverFloor(cfg); got != 1e8 {
-		t.Errorf("ショート有効: %v, want 1e8", got)
+}
+
+// キャッシュは設定に依存しない（格子を 1 本の読み込みで回せることの土台）。
+func TestPanelCacheQueryIgnoresUniverseSettings(t *testing.T) {
+	a := config.Default()
+	b := config.Default()
+	b.Universe.MinTurnover = decimal.NewFromInt(500_000_000)
+	b.Universe.ExcludeCapTerciles = 2
+	b.Margin.Enabled = !a.Margin.Enabled
+	src := panelSources{bars: "b", master: "m"}
+	if buildCacheQuery(src, time.Now(), a) != buildCacheQuery(src, time.Now(), b) {
+		t.Error("母集団の設定でキャッシュの中身が変わっている")
 	}
 }
 
@@ -46,19 +57,14 @@ func TestSourceFilesListsEveryParquet(t *testing.T) {
 // キャッシュに落とす列と、読み出し側が参照する列がずれると「無い列」で落ちる。
 // 版（panelCacheVersion）を上げ忘れる事故も防ぎたいので、名前の対応をここで押さえる。
 func TestCachedQueryOnlyUsesCachedColumns(t *testing.T) {
-	cfg := config.Default()
-	// 列がすべて参照される設定にする（除外条件は真のときだけ SQL に出る）
-	cfg.Universe.ExcludeLoss = true
-	cfg.Margin.Enabled = true
-	cfg.Margin.ExcludeJsfStop = true
-	q := buildCachedPanelQuery("/tmp/x.parquet", time.Now().AddDate(-1, 0, 0), time.Now(), cfg)
+	q := buildCachedPanelQuery("/tmp/x.parquet", time.Now().AddDate(-1, 0, 0), time.Now())
 	cached := map[string]bool{}
 	for _, c := range strings.Split(strings.TrimPrefix(panelCacheColumns, "SELECT "), ",") {
 		cached[strings.TrimSpace(c)] = true
 	}
 	for _, col := range []string{"d", "code", "o", "c", "prev_close", "next_open", "next_open_d", "vol20",
-		"earn_yield", "segment", "shortable", "turnover_med", "cap_tercile", "earn_prev", "disc_today",
-		"alert", "jsf_stop", "is_loss"} {
+		"earn_yield", "sector", "segment", "shortable", "turnover_med", "mkt_cap", "earn_prev",
+		"disc_today", "alert", "jsf_stop", "is_loss", "short_interest"} {
 		if !cached[col] {
 			t.Errorf("%s がキャッシュの列に無い", col)
 		}

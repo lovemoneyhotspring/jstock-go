@@ -98,6 +98,23 @@ func TestLoadPanelBuildsFeatures(t *testing.T) {
 	if !a.Eligible {
 		t.Error("ギャップ下げ銘柄が母集団に入っていない")
 	}
+	// 母集団の判定は Go 側（universe.Eligible）が当てるので、その材料が行に載っている
+	if a.Segment != "prime" {
+		t.Errorf("市場区分 = %q, want prime", a.Segment)
+	}
+	if a.TurnoverMed <= 0 {
+		t.Errorf("売買代金の中央値 = %v, want > 0", a.TurnoverMed)
+	}
+	if a.MktCap <= 0 {
+		t.Errorf("時価総額 = %v, want > 0", a.MktCap)
+	}
+	// 小型（下位 1/3）を外す設定で残っているので、分位は 2 以上
+	if a.CapTercile < 2 {
+		t.Errorf("時価総額の 3 分位 = %d, want >= 2", a.CapTercile)
+	}
+	if a.EarnPrev || a.DiscToday || a.Alert || a.Loss {
+		t.Errorf("除外のフラグが立っているのに母集団に入っている: %+v", a)
+	}
 }
 
 func TestSimulateProfitsFromGapDown(t *testing.T) {
