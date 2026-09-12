@@ -113,6 +113,22 @@ func (e *ErrDeadline) Error() string {
 		e.CLMID, clock.ToZone(e.Deadline, clock.Tokyo).Format("15:04:05"))
 }
 
+// ErrNotSent は注文の電文を**送る前に**失敗した（返済する建玉の照会が落ちた等）。
+//
+// 届いた可能性は無いので、呼び出し側は ErrDeadline と同じく「送っていない」として
+// 台帳を UNSENT にし、次の判断で送り直してよい。結果不明（PENDING）にすると、一覧照会で
+// 判定するまで再送できず、引けの締め切りに間に合わなくなる。
+type ErrNotSent struct {
+	ClientOrderID string
+	Err           error
+}
+
+func (e *ErrNotSent) Error() string {
+	return fmt.Sprintf("注文 %s は送っていません（送る前に失敗）: %v", e.ClientOrderID, e.Err)
+}
+
+func (e *ErrNotSent) Unwrap() error { return e.Err }
+
 type TachibanaSession struct {
 	PNo        int    `json:"p_no"`
 	URLRequest string `json:"url_request"`
@@ -809,12 +825,14 @@ func (t *TachibanaBroker) orderPayload(req domain.OrderRequest) (map[string]any,
 	}
 
 	isMarket := req.OrderType == domain.OrderTypeMarket
-	if req.Trade == domain.TradeTypeMarginOpen && req.Side == domain.SideSell && isMarket &&
-		req.Quantity.GreaterThan(decimal.NewFromInt(int64(ShortSaleMarketLimit))) {
-		// 空売り価格規制。個人は 50 単元以内なら適用除外だが、それを超えると成行で出せない
-		return nil, &OrderRejectedError{Message: fmt.Sprintf(
-			"%s: 51 単元以上の信用新規売りは成行では出せません（空売り価格規制）。"+
-				"数量 %s を減らすか指値にしてください", req.Symbol, req.Quantity)}
+	if req.Trade == domain.TradeTypeMarginOpen && req.Side == domain.SideSell && isMarket {
+		// 空売り価格規制。個人は 50 単元以内なら適用除外だが、それを超えると成行で出せない。
+		// 単元は取得済みのマスタから引く（ここで新たに電文は送らない。無ければ 100 株）
+		if limit := ShortSaleMarketShares(t.cachedLotSize(req.Symbol)); req.Quantity.GreaterThan(limit) {
+			return nil, &OrderRejectedError{Message: fmt.Sprintf(
+				"%s: %d 単元（%s 株）を超える信用新規売りは成行では出せません（空売り価格規制）。"+
+					"数量 %s を減らすか指値にしてください", req.Symbol, ShortSaleMarketUnits, limit, req.Quantity)}
+		}
 	}
 
 	price := "0"
@@ -870,11 +888,28 @@ func (t *TachibanaBroker) orderPayload(req domain.OrderRequest) (map[string]any,
 	if req.Trade == domain.TradeTypeMarginClose {
 		allocation, err := t.repaymentList(req)
 		if err != nil {
-			return nil, err
+			// 建玉の照会で落ちた。注文の電文はまだ組み立ててもいないので、届いた可能性は無い
+			var rejected *OrderRejectedError
+			var deadline *ErrDeadline
+			if errors.As(err, &rejected) || errors.As(err, &deadline) {
+				return nil, err
+			}
+			return nil, &ErrNotSent{ClientOrderID: req.ClientOrderID, Err: err}
 		}
 		params["aCLMKabuHensaiData"] = allocation
 	}
 	return params, nil
+}
+
+// cachedLotSize は取得済みのマスタにある売買単位。マスタを取っていなければ 0
+// （呼び出し側が既定に落とす）。発注の途中で全銘柄のマスタを取りに行かないため。
+func (t *TachibanaBroker) cachedLotSize(symbol string) decimal.Decimal {
+	t.masterMu.Lock()
+	defer t.masterMu.Unlock()
+	if t.lotSizeMaster == nil {
+		return decimal.Zero
+	}
+	return t.lotSizeMaster[symbol]
 }
 
 // orderNumberOf は取消・訂正に使う立花証券の注文番号と営業日。
@@ -912,10 +947,9 @@ func (t *TachibanaBroker) Cancel(clientOrderID string, brokerOrderID *string) er
 		return err
 	}
 
-	resCode, _ := res["sResultCode"].(string)
+	resCode := strings.TrimSpace(text(res["sResultCode"]))
 	if resCode != "0" {
-		resText, _ := res["sResultText"].(string)
-		return fmt.Errorf("立花取消拒否 [%s]: %s", resCode, resText)
+		return fmt.Errorf("立花取消拒否 [%s]: %s", resCode, strings.TrimSpace(text(res["sResultText"])))
 	}
 
 	return nil
@@ -941,10 +975,9 @@ func (t *TachibanaBroker) CorrectStop(clientOrderID string, brokerOrderID *strin
 		return err
 	}
 
-	resCode, _ := res["sResultCode"].(string)
+	resCode := strings.TrimSpace(text(res["sResultCode"]))
 	if resCode != "0" {
-		resText, _ := res["sResultText"].(string)
-		return fmt.Errorf("立花訂正拒否 [%s]: %s", resCode, resText)
+		return fmt.Errorf("立花訂正拒否 [%s]: %s", resCode, strings.TrimSpace(text(res["sResultText"])))
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
+	"github.com/shopspring/decimal"
 )
 
 // 発注ペイロードは取引種別・課税区分・数量の項目名を正しく埋める。
@@ -168,6 +169,17 @@ func TestOrderPayloadShortSaleMarketLimit(t *testing.T) {
 	if _, err := b.orderPayload(req); err != nil {
 		t.Errorf("50 単元が弾かれました: %v", err)
 	}
+	// 単元がマスタにあればそれで数える（単位 1 の銘柄は 50 株まで）
+	b.lotSizeMaster = map[string]decimal.Decimal{"7203": dec("1")}
+	req.Quantity = dec("51")
+	if _, err := b.orderPayload(req); err == nil {
+		t.Error("単位 1 の銘柄で 51 株の成行売建が通ってしまいました")
+	}
+	req.Quantity = dec("50")
+	if _, err := b.orderPayload(req); err != nil {
+		t.Errorf("単位 1 の銘柄で 50 株が弾かれました: %v", err)
+	}
+	b.lotSizeMaster = nil
 	// 指値なら単元数に関係なく通る
 	limit := dec("2500")
 	req.Quantity, req.OrderType, req.LimitPrice = dec("10000"), domain.OrderTypeLimit, &limit

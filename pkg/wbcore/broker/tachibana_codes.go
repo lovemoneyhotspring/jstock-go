@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
+	"github.com/shopspring/decimal"
 )
 
 // 立花証券 e支店 API（e_api_v4r10）のコード表。
@@ -37,11 +39,22 @@ const (
 	marketCodeTSE = "00"
 )
 
-// ShortSaleMarketLimit は成行で出せる信用新規売りの上限株数。
+// ShortSaleMarketUnits は成行で出せる信用新規売りの上限**単元数**。
 //
 // 空売り価格規制は個人の 50 単元以内を適用除外とする。それを超える新規売りは
 // 成行で出せないので、発注前に弾く（ブローカーに拒否させると理由が分かりにくい）。
-var ShortSaleMarketLimit = 50 * 100
+// 規制は株数ではなく単元で数えるので、株数の上限は売買単位を掛けて出す
+// （ShortSaleMarketShares）。単位 100 の銘柄で 5,000 株、単位 1 の ETF なら 50 株。
+const ShortSaleMarketUnits = 50
+
+// ShortSaleMarketShares は売買単位 lot の銘柄を成行で新規売りできる上限株数。
+// lot が正でなければ既定の 100 株単位で数える。
+func ShortSaleMarketShares(lot decimal.Decimal) decimal.Decimal {
+	if !lot.IsPositive() {
+		lot = marketrules.DefaultLotSize
+	}
+	return lot.Mul(decimal.NewFromInt(ShortSaleMarketUnits))
+}
 
 var (
 	sideCode = map[domain.Side]string{

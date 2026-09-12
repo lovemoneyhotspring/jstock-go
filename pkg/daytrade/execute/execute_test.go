@@ -304,6 +304,28 @@ func TestPlaceRecordedDeadlineFromBrokerIsUnsent(t *testing.T) {
 	}
 }
 
+// TestPlaceRecordedNotSentFromBrokerIsUnsent は、ブローカーが「送る前に失敗した」
+// （返済する建玉の照会が落ちた等）と返したら、結果不明（PENDING）ではなく UNSENT にすること。
+// 届いた可能性が無いのに PENDING にすると、一覧照会で判定するまで再送できない。
+func TestPlaceRecordedNotSentFromBrokerIsUnsent(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	b.place = func(req domain.OrderRequest) (*domain.OrderAck, error) {
+		return nil, &broker.ErrNotSent{ClientOrderID: req.ClientOrderID, Err: errors.New("建玉を照会できません")}
+	}
+	_, failures, _ := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if len(failures) != 1 {
+		t.Fatalf("failures=%v", failures)
+	}
+	if o := statusOf(t, env, "7203"); o.Status != string(domain.OrderStatusUnsent) {
+		t.Errorf("送る前の失敗が UNSENT になっていない: %s", o.Status)
+	}
+	b.place = nil
+	if orders, _, _ := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)}); orders != 1 {
+		t.Errorf("未送信の後に建てられない: orders=%d", orders)
+	}
+}
+
 // TestPlacedTodayCountsLiveEntriesOnly は、建玉の数に dry-run と拒否・失効を数えないこと。
 func TestPlacedTodayCountsLiveEntriesOnly(t *testing.T) {
 	env, _ := newEnv(t)

@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
+	"github.com/shopspring/decimal"
 )
 
 // fakeTachibana は立花 API の最小の模型。ログインで仮想URL を返し、以後の電文の
@@ -347,4 +349,33 @@ func wrap76(text string) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// TestRepaymentQueryFailureIsNotSent は、返済注文で建玉の照会が通信エラーになったら
+// 「送っていない」（ErrNotSent）として返すこと。結果不明にすると、届いてもいない注文を
+// 一覧照会で判定するまで送り直せない。
+func TestRepaymentQueryFailureIsNotSent(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, pub := writeTestKey(t, dir)
+	fake := newFakeTachibana(t, pub)
+	b := newSessionTestBroker(t, fake, keyPath, dir)
+
+	fake.failHTTPNext = 2 // 照会は 1 度送り直すので、2 回落とせば諦める
+	_, err := b.Place(domain.OrderRequest{
+		ClientOrderID: "c1", Symbol: "7203", Side: domain.SideBuy,
+		OrderType: domain.OrderTypeMarket, Quantity: decimal.NewFromInt(100),
+		Trade: domain.TradeTypeMarginClose,
+	})
+	if err == nil {
+		t.Fatal("建玉を照会できないのに発注が通った")
+	}
+	var notSent *ErrNotSent
+	if !errors.As(err, &notSent) {
+		t.Fatalf("送る前の失敗が ErrNotSent でない: %v", err)
+	}
+	for _, clm := range fake.clmIDs {
+		if clm == clmNewOrder {
+			t.Fatal("建玉を照会できないのに新規注文の電文を送った")
+		}
+	}
 }

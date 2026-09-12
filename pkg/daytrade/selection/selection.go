@@ -351,8 +351,8 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 		if quantity.LessThanOrEqual(decimal.Zero) {
 			continue
 		}
-		if limit := decimal.NewFromInt(int64(broker.ShortSaleMarketLimit)); side == domain.SideSell && quantity.GreaterThan(limit) {
-			quantity = limit.Div(lot).Floor().Mul(lot)
+		if limit := broker.ShortSaleMarketShares(lot); side == domain.SideSell && quantity.GreaterThan(limit) {
+			quantity = limit
 		}
 		picks = append(picks, Pick{
 			Symbol:    r.Symbol,

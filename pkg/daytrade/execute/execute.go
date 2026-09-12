@@ -222,15 +222,21 @@ func PlaceRecorded(env Env, b broker.Broker, request domain.OrderRequest, price 
 	ack, err := b.Place(request)
 	if err != nil {
 		var deadline *broker.ErrDeadline
-		if errors.As(err, &deadline) {
-			// 締め切りで**送っていない**。届いた可能性は無いので UNSENT にして次の回に譲る
-			// （PENDING のままだと次の回が一覧照会で判定するまで再送できない）
+		var notSent *broker.ErrNotSent
+		if errors.As(err, &deadline) || errors.As(err, &notSent) {
+			// 締め切り、または送る前の失敗（返済する建玉の照会が落ちた等）で**送っていない**。
+			// 届いた可能性は無いので UNSENT にして次の判断に譲る
+			// （PENDING のままだと一覧照会で判定するまで再送できず、引けの締め切りに間に合わない）
 			if uerr := env.Ledger.UpdateStatus(request.ClientOrderID, domain.OrderStatusUnsent, decimal.Zero, nil, nil); uerr != nil {
 				env.Report.Error("daytrade.ledger", "未送信を記録できません（台帳は送信中のまま）", map[string]any{
 					"client_order_id": request.ClientOrderID, "symbol": request.Symbol, "error": uerr.Error(),
 				})
 			}
-			intent(execution.ReasonWindowClosed, err.Error())
+			reason := execution.ReasonWindowClosed
+			if notSent != nil {
+				reason = execution.ReasonBrokerError
+			}
+			intent(reason, err.Error())
 			return err
 		}
 		var rejected *broker.OrderRejectedError
@@ -437,6 +443,7 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 				failures = append(failures, fmt.Sprintf("%s %s: %s", pick.Symbol, label, outcome))
 				env.printf("  %s: %s\n", pick.Symbol, outcome)
 				skipRow(pick, request, execution.ReasonInsufficientFunds, outcome)
+				logOrder(env, pick, request, b != nil, outcome)
 				continue
 			}
 			remaining[request.Trade] = remaining[request.Trade].Sub(need)
