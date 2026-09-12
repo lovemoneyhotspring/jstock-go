@@ -8,6 +8,8 @@
 package universe
 
 import (
+	"cmp"
+	"slices"
 	"strings"
 	"time"
 
@@ -265,7 +267,14 @@ func CapTerciles(values []float64, mask []bool) []int {
 		return out
 	}
 	// 順位は昇順の ordinal（同値は入力順）。polars の rank("ordinal") と同じ。
-	sortStable(pool, func(a, b entry) bool { return a.value < b.value })
+	// 同値を入力順（index）で決める全順序なので、安定ソートでなくても結果は同じ
+	// ——バックテストは 1 日ごとに数千件を 10 年ぶん並べるので、ここが効く。
+	slices.SortFunc(pool, func(a, b entry) int {
+		if a.value != b.value {
+			return cmp.Compare(a.value, b.value)
+		}
+		return cmp.Compare(a.index, b.index)
+	})
 	for rank, e := range pool {
 		tercile := ceilDiv((rank+1)*3, n)
 		out[e.index] = clamp(tercile, 1, 3)

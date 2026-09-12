@@ -6,8 +6,11 @@
 package selection
 
 import (
+	"cmp"
 	"math"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
@@ -207,18 +210,21 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 		scored = append(scored, scoredRow{row: row, key: key, ok: ok})
 	}
 	// 同じ鍵なら銘柄コード順（順位を実行ごとに揺らさない）。鍵の無い銘柄は末尾。
-	sort.SliceStable(scored, func(i, j int) bool {
-		a, b := scored[i], scored[j]
+	// 銘柄コードで最後まで決まる全順序なので、安定ソートでなくても並びは同じ。
+	slices.SortFunc(scored, func(a, b scoredRow) int {
 		if a.ok != b.ok {
-			return a.ok
+			if a.ok {
+				return -1
+			}
+			return 1
 		}
 		if a.key != b.key {
 			if f.descending {
-				return a.key > b.key
+				return cmp.Compare(b.key, a.key)
 			}
-			return a.key < b.key
+			return cmp.Compare(a.key, b.key)
 		}
-		return a.row.Symbol < b.row.Symbol
+		return strings.Compare(a.row.Symbol, b.row.Symbol)
 	})
 	out := make([]Ranked, len(scored))
 	for i := range scored {
