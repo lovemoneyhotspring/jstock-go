@@ -539,3 +539,51 @@ func TestSimulateMarginSpillsUnusedShortBudgetToLong(t *testing.T) {
 		t.Error("ショート側が変わっている")
 	}
 }
+
+// 格子（--grid）は設定ごとにパネルを読み直さない。1 本だけ渡したときの数字が
+// 単独で回したときと一致することを押さえる——一致しなければ母集団の当て直し
+// （UniverseView）が単独の経路とずれている。
+func TestRunGridMatchesSingleRun(t *testing.T) {
+	days := fixture.BusinessDays(start, 60)
+	arch := buildArchive(t, days)
+	long := baseConfig()
+	margin := baseConfig()
+	margin.Margin.Enabled = true
+	margin.Margin.MaxCapital = decimal.NewFromInt(2_000_000)
+	margin.Margin.OrderBudget = decimal.NewFromInt(670_000)
+	margin.Margin.Weighting = "equal"
+	from, to := days[30], days[len(days)-1]
+
+	single, err := backtest.Run(arch, long, from, to, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	singleMargin, err := backtest.RunMargin(arch, margin, from, to, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grid, err := backtest.RunGrid(arch, []backtest.GridEntry{
+		{Name: "long", Config: long},
+		{Name: "margin", Config: margin},
+	}, from, to, nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grid) != 2 {
+		t.Fatalf("格子の結果 %d 本, want 2", len(grid))
+	}
+	if got, want := grid[0].Summary().TotalPnL, single.Summary.TotalPnL; got != want {
+		t.Errorf("ロングの損益 = %v, want %v", got, want)
+	}
+	if got, want := grid[1].Summary().TotalPnL, singleMargin.Summary.TotalPnL; got != want {
+		t.Errorf("長短の損益 = %v, want %v", got, want)
+	}
+	if grid[0].Margin != nil || grid[1].Margin == nil {
+		t.Error("margin.enabled の有無で経路が分かれていない")
+	}
+	// 取引まで一致する（要約が偶然合っただけではない）
+	if len(grid[1].Margin.ShortTrades) != len(singleMargin.ShortTrades) {
+		t.Errorf("ショートの取引数 = %d, want %d",
+			len(grid[1].Margin.ShortTrades), len(singleMargin.ShortTrades))
+	}
+}

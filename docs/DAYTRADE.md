@@ -256,7 +256,24 @@ daytrade backtest --since 2022-01-01 --trades  # 直近と個別の取引
 # 分足の約定値で（実運用の 9:01 の成行・15:20 の成行に近い）
 daytrade backtest --since 2024-11-05 --fill-entry 09:01 --fill-exit 15:20
 daytrade backtest --since 2017-01-01 --no-cache  # パネルのキャッシュを使わない（結果は同じ・遅い）
+# 格子（複数の設定を 1 プロセスで）。パネルの読み込みは 1 回で済む
+daytrade backtest --grid config/daytrade_margin --grid config/試作A --since 2017-01-01 \
+  --csv /tmp/grid.csv --note 2026-09-なんとか
 ```
+
+### 格子（`--grid`）
+
+`--grid <dir>` を並べると、複数の設定を 1 プロセスで順に回す。パネルと危険信号の材料は
+設定に依存しないので**読み込みは 1 回**、2 本目からは母集団の当て直し（`UniverseView`）と
+`Simulate` だけになる。`extends` が使えるので、各 `<dir>` は既定の上に差分だけ書いた小さな
+toml でよい。
+
+- `--csv <path>` は `20-research/結果.csv` と同じ列（`note,system,market,kind,subject,period,
+  metric,value,unit,role`）で書く。`subject` は `<dir>` の名前、`note` は `--note` の値
+- **1 本だけなら `--grid` にする意味は無い**（`--config-dir` と同じ読み込みを 1 回払うだけ）。
+  効くのは 2 本目から
+- 10 年・設定 3 本の実測（2026-09-12）: 合計 70.7 秒（読み込み 18 秒 + 長短 22.2 / 17.9 秒・
+  ロングのみ 9.1 秒）。設定ごとに回すと 37 + 37 + 28 = 102 秒
 
 ### パネルのキャッシュ
 

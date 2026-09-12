@@ -57,7 +57,7 @@ func TestSourceFilesListsEveryParquet(t *testing.T) {
 // キャッシュに落とす列と、読み出し側が参照する列がずれると「無い列」で落ちる。
 // 版（panelCacheVersion）を上げ忘れる事故も防ぎたいので、名前の対応をここで押さえる。
 func TestCachedQueryOnlyUsesCachedColumns(t *testing.T) {
-	q := buildCachedPanelQuery("/tmp/x.parquet", time.Now().AddDate(-1, 0, 0), time.Now())
+	q := buildCachedPanelQuery("/tmp/x.parquet", time.Now().AddDate(-1, 0, 0), time.Now(), PanelTurnoverFloor)
 	cached := map[string]bool{}
 	for _, c := range strings.Split(strings.TrimPrefix(panelCacheColumns, "SELECT "), ",") {
 		cached[strings.TrimSpace(c)] = true

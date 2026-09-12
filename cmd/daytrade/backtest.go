@@ -19,6 +19,8 @@ func newBacktestCmd() *cobra.Command {
 	var tradesFlag bool
 	var tradesCSVFlag string
 	var noCacheFlag bool
+	var gridFlag []string
+	var csvFlag, noteFlag string
 	cmd := &cobra.Command{
 		Use:   "backtest",
 		Short: "アーカイブで同じ規則を検証する（資金固定・100 株単位・段階手数料）",
@@ -28,16 +30,19 @@ func newBacktestCmd() *cobra.Command {
 			"実運用の 9:01 / 15:20 の成行に近い。分足の履歴は 2 年なので、それより前の日は\n" +
 			"日足の寄付・引けのまま（どこからが分足かは出力の 1 行目に出る）。",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
-			if err != nil {
-				return err
-			}
 			dtbacktest.PanelCacheEnabled = !noCacheFlag
 			start, err := parseDate(sinceFlag)
 			if err != nil {
 				return err
 			}
 			end, err := dayOrToday(untilFlag, clock.NowUTC())
+			if err != nil {
+				return err
+			}
+			if len(gridFlag) > 0 {
+				return runGrid(gridFlag, start, end, csvFlag, noteFlag, fillEntryFlag, fillExitFlag)
+			}
+			cfg, err := loadConfig()
 			if err != nil {
 				return err
 			}
@@ -68,6 +73,10 @@ func newBacktestCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noCacheFlag, "no-cache", false,
 		"パネルのキャッシュを使わない（毎回アーカイブから組み直す。結果は同じで遅いだけ）")
 	cmd.Flags().StringVar(&tradesCSVFlag, "trades-csv", "", "全取引（ロング・ショート）を CSV に書く（研究用。板の厚みとの突き合わせなど）")
+	cmd.Flags().StringArrayVar(&gridFlag, "grid", nil,
+		"複数の設定ディレクトリを 1 プロセスで回す（パネルの読み込みは 1 回。--config-dir の代わり）")
+	cmd.Flags().StringVar(&csvFlag, "csv", "", "格子の結果を 20-research/結果.csv と同じ列で書く（--grid と一緒に）")
+	cmd.Flags().StringVar(&noteFlag, "note", "", "--csv の note 列に入れる研究ノートの名前")
 	cmd.Flags().StringVar(&fillEntryFlag, "fill-entry", "",
 		"建値を分足で取る時刻（HH:MM。例 09:01。空なら日足の寄付）")
 	cmd.Flags().StringVar(&fillExitFlag, "fill-exit", "",
@@ -80,7 +89,12 @@ func newBacktestCmd() *cobra.Command {
 // 分足を読むのは「時刻を指定したとき」と「signal.skip_opened が真のとき」だけ。
 // どちらでもなければアーカイブに分足が無くても検証は今までどおり動く。
 func minuteOptions(cfg dtconfig.Config, start, end time.Time, entryAt, exitAt string) dtbacktest.OptionsFor {
-	if entryAt == "" && exitAt == "" && !cfg.Signal.SkipOpened {
+	return minuteOptionsFor(cfg.Signal.SkipOpened, start, end, entryAt, exitAt)
+}
+
+// minuteOptionsFor は skip_opened を設定ではなく真偽で受ける（格子は設定が複数ある）。
+func minuteOptionsFor(skipOpened bool, start, end time.Time, entryAt, exitAt string) dtbacktest.OptionsFor {
+	if entryAt == "" && exitAt == "" && !skipOpened {
 		return nil
 	}
 	return func(panel *dtbacktest.Panel) (dtbacktest.Options, error) {
@@ -90,7 +104,7 @@ func minuteOptions(cfg dtconfig.Config, start, end time.Time, entryAt, exitAt st
 			return dtbacktest.Options{}, err
 		}
 		fmt.Println(minute.Describe())
-		if cfg.Signal.SkipOpened {
+		if skipOpened {
 			fmt.Printf("signal.skip_opened: 09:00 に寄った銘柄を候補から外す（分足のある %d 日だけ判定）\n",
 				minute.Days())
 		}

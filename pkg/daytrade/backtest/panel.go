@@ -77,6 +77,98 @@ type Panel struct {
 	Days []time.Time
 }
 
+// applyUniverse は 1 日ぶんの行に母集団の判定を当て、ロング・ショートどちらかに
+// 入る行だけを返す。判定は前夜の plan と同じ関数（universe）。
+//
+// 時価総額の 3 分位もここで出す（母数は売買代金が min_turnover 以上の銘柄。
+// 分割・併合の日の行も母数には入れてから捨てる——前夜の plan と同じ母数にするため）。
+func applyUniverse(day []Row, cfg config.Config, terciles []int) []Row {
+	if terciles == nil {
+		terciles = tercilesOf(day, cfg)
+	}
+	long, short := universe.NewFilter(cfg.Universe), universe.NewShortFilter(cfg.Margin)
+	out := make([]Row, 0, len(day))
+	for i, r := range day {
+		if r.PrevClose <= 0 {
+			continue
+		}
+		r.CapTercile = terciles[i]
+		c := candidateOf(r)
+		r.Eligible = long.Match(c)
+		r.ShortEligible = short.Match(c)
+		// どちらにも入らない行は持たない（全銘柄 × 10 年はメモリを食うだけ）
+		if !r.Eligible && !r.ShortEligible {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// tercilesOf は 1 日ぶんの時価総額の 3 分位（母数は売買代金が min_turnover 以上の銘柄）。
+func tercilesOf(day []Row, cfg config.Config) []int {
+	minTurnover, _ := cfg.Universe.MinTurnover.Float64()
+	caps := make([]float64, len(day))
+	mask := make([]bool, len(day))
+	for i, r := range day {
+		caps[i], mask[i] = r.MktCap, r.TurnoverMed >= minTurnover
+	}
+	return universe.CapTerciles(caps, mask)
+}
+
+// UniverseView は KeepAll で読んだパネルに 1 つの設定の母集団を当てた見え方を返す。
+// 元のパネルは変えない（格子は同じパネルを設定の数だけ当て直す）。
+//
+// 行は日ごとにまとまっている前提（LoadPanel は d, code 順に並べて返す）。
+func UniverseView(panel *Panel, cfg config.Config) *Panel {
+	return universeViewWith(panel, cfg, nil, 0)
+}
+
+// universeViewWith は 3 分位を外から渡せる UniverseView。terciles は全行ぶんを
+// 行の並びのまま並べたもの（min_turnover が同じ設定どうしで使い回す——格子で
+// 設定ごとに 490 万行を並べ替え直すと 1 本あたり数秒を無駄に払う）。
+// hint は結果の行数の見当（0 なら見当なし）。
+func universeViewWith(panel *Panel, cfg config.Config, terciles []int, hint int) *Panel {
+	out := &Panel{Days: panel.Days, Rows: make([]Row, 0, hint)}
+	eachDay(panel.Rows, func(from, to int) {
+		var t []int
+		if terciles != nil {
+			t = terciles[from:to]
+		}
+		out.Rows = append(out.Rows, applyUniverse(panel.Rows[from:to], cfg, t)...)
+	})
+	return out
+}
+
+// tercilesFor はパネル全体ぶんの 3 分位（行の並びのまま）。
+func tercilesFor(panel *Panel, cfg config.Config) []int {
+	out := make([]int, 0, len(panel.Rows))
+	eachDay(panel.Rows, func(from, to int) {
+		out = append(out, tercilesOf(panel.Rows[from:to], cfg)...)
+	})
+	return out
+}
+
+// eachDay は日ごとの区切り [from, to) を順に渡す（行は日ごとにまとまっている前提）。
+func eachDay(rows []Row, fn func(from, to int)) {
+	from := 0
+	for i := 1; i <= len(rows); i++ {
+		if i < len(rows) && rows[i].Date.Equal(rows[from].Date) {
+			continue
+		}
+		fn(from, i)
+		from = i
+	}
+}
+
+// floorOf はパネルに残す売買代金の下限。
+func floorOf(popts PanelOptions) float64 {
+	if popts.TurnoverFloor > 0 {
+		return popts.TurnoverFloor
+	}
+	return PanelTurnoverFloor
+}
+
 // panelSelectColumns はパネルの列。**設定に依存しない特徴量だけ**を返し、
 // 母集団の判定（eligible / short_eligible）と時価総額の 3 分位は Go 側で当てる
 // ——前夜の plan と同じ関数（universe）を使うため。
@@ -88,6 +180,21 @@ const panelSelectColumns = `d, code, o, c, prev_close, next_open, vol20, earn_yi
 // eligible / short_eligible のどちらかに入る行だけを返す（全銘柄 × 10 年を持つと
 // メモリを食うだけで、判断に使わない）。
 func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (*Panel, error) {
+	return LoadPanelWith(arch, start, end, cfg, PanelOptions{})
+}
+
+// PanelOptions はパネルの読み方。ゼロ値は「その設定の母集団だけを持つ」。
+type PanelOptions struct {
+	// KeepAll が真なら母集団の判定を当てず、下限を満たす行を全部返す。
+	// 格子（backtest --grid）が設定ごとに UniverseView で当て直すための形。
+	KeepAll bool
+	// TurnoverFloor は残す売買代金 20 日中央値の下限（円）。0 なら PanelTurnoverFloor。
+	// 格子では「並べた設定の min_turnover の最小値」を渡して行数を抑える。
+	TurnoverFloor float64
+}
+
+// LoadPanelWith は読み方を指定して LoadPanel する。
+func LoadPanelWith(arch *archive.Archive, start, end time.Time, cfg config.Config, popts PanelOptions) (*Panel, error) {
 	lookback := start.AddDate(0, 0, -(cfg.Universe.TurnoverDays*2 + 10))
 	barsSrc, ok := archsql.Source(arch, universe.EPBars, lookback, end)
 	if !ok {
@@ -117,7 +224,7 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 		sched: schedSrc, hasSched: hasSched,
 		alert: alertSrc, hasAlert: hasAlert,
 		ssr: ssrSrc, hasSSR: hasSSR,
-	}, start, end, cfg)
+	}, start, end, cfg, floorOf(popts))
 
 	// キャッシュがあれば（作れれば）そちらから読む。作れなくても検証は続ける
 	// ——遅くなるだけで結果は同じなので、ここで止める理由が無い。
@@ -126,41 +233,24 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 		if path, err := ensurePanelCache(db, arch, cfg, end); err != nil {
 			fmt.Fprintf(os.Stderr, "パネルのキャッシュを使えません（そのまま実行します）: %v\n", err)
 		} else {
-			queries = cachedPanelQueries(path, start, end)
+			queries = cachedPanelQueries(path, start, end, floorOf(popts))
 		}
 	}
 
 	panel := &Panel{}
-	minTurnover, _ := cfg.Universe.MinTurnover.Float64()
-	// 同じ日の行をためて、その日の時価総額の 3 分位を前夜の plan と同じ関数で出す
-	// （universe.CapTerciles。母数は売買代金が min_turnover 以上の銘柄）。
+	// 同じ日の行をためて、その日の母集団を前夜の plan と同じ関数で決める。
 	var day []Row
 	flush := func() {
 		if len(day) == 0 {
 			return
 		}
-		caps := make([]float64, len(day))
-		mask := make([]bool, len(day))
-		for i, r := range day {
-			caps[i], mask[i] = r.MktCap, r.TurnoverMed >= minTurnover
-		}
-		for i, tercile := range universe.CapTerciles(caps, mask) {
-			day[i].CapTercile = tercile
-		}
-		for _, r := range day {
-			// 分割・併合の日（前日終値を調整前のまま使えない）は建てない。
-			// 3 分位の母数には入れてから捨てる（前夜の plan と同じ母数にするため）。
-			if r.PrevClose <= 0 {
-				continue
-			}
-			c := candidateOf(r)
-			r.Eligible = universe.Eligible(c, cfg.Universe)
-			r.ShortEligible = universe.ShortEligible(c, cfg.Margin)
-			// どちらにも入らない行は持たない（全銘柄 × 10 年はメモリを食うだけ）
-			if !r.Eligible && !r.ShortEligible {
-				continue
-			}
-			panel.Rows = append(panel.Rows, r)
+		if popts.KeepAll {
+			// 分割・併合の日（prev_close が無い）の行も残す——3 分位の母数に入るので、
+			// ここで捨てると設定ごとに当て直したときの分位が単独実行とずれる。
+			// 建てる対象から外すのは applyUniverse。
+			panel.Rows = append(panel.Rows, day...)
+		} else {
+			panel.Rows = append(panel.Rows, applyUniverse(day, cfg, nil)...)
 		}
 		day = day[:0]
 	}
@@ -284,7 +374,7 @@ type panelSources struct {
 //
 // 決算・規制のフラグは「前営業日に起きたことが翌営業日に効く」ので、日付そのものでは
 // なく営業日の連番（di）で 1 日ずらす。暦日で足すと連休明けに効かなくなる。
-func buildPanelQuery(src panelSources, start, end time.Time, cfg config.Config) string {
+func buildPanelQuery(src panelSources, start, end time.Time, cfg config.Config, floor float64) string {
 	var b strings.Builder
 	b.WriteString(panelCTEs(src, start, end, cfg))
 	fmt.Fprintf(&b, `SELECT %s,
@@ -294,8 +384,7 @@ func buildPanelQuery(src panelSources, start, end time.Time, cfg config.Config) 
 FROM valued
 WHERE turnover_med >= %f
 ORDER BY d, code`,
-		panelSelectColumns, limitWidthSQL("prev_close"), limitWidthSQL("prev_close"),
-		PanelTurnoverFloor)
+		panelSelectColumns, limitWidthSQL("prev_close"), limitWidthSQL("prev_close"), floor)
 	return b.String()
 }
 
@@ -488,7 +577,7 @@ const PanelTurnoverFloor = 5e7
 // next_open は「次の足が end より後なら NULL」にする。キャッシュは全期間で作るので、
 // そうしないと期間の終わりに未来の足が見えてしまう（上場廃止・売買停止で end より前に
 // 足が途切れる銘柄でも同じ。営業日で切ると取りこぼす）。
-func buildCachedPanelQuery(cachePath string, start, end time.Time) string {
+func buildCachedPanelQuery(cachePath string, start, end time.Time, floor float64) string {
 	return fmt.Sprintf(`SELECT d, code, o, c, prev_close,
        CASE WHEN next_open_d > %[2]s THEN NULL ELSE next_open END AS next_open,
        vol20, earn_yield, sector, segment, shortable, turnover_med, mkt_cap,
@@ -497,10 +586,10 @@ func buildCachedPanelQuery(cachePath string, start, end time.Time) string {
        prev_close - (%[3]s) AS limit_low,
        prev_close + (%[3]s) AS limit_high
 FROM read_parquet(%[4]s)
-WHERE d >= %[1]s AND d <= %[2]s
+WHERE d >= %[1]s AND d <= %[2]s AND turnover_med >= %[5]f
 ORDER BY d, code`,
 		archsql.Lit(start), archsql.Lit(end), limitWidthSQL("prev_close"),
-		archsql.LitString(cachePath))
+		archsql.LitString(cachePath), floor)
 }
 
 // cachedPanelQueries はキャッシュから読む SQL を 1 年ずつに割ったもの。
@@ -508,14 +597,14 @@ ORDER BY d, code`,
 // 日ごとの判定（3 分位）は 1 日で閉じているので、年で割っても結果は同じ。割るのは
 // 並べ替えのピークを下げるため——10 年ぶん（490 万行）を 1 度に並べると 2.5GB 増える
 // （2026-09-12 の実測。このマシンはメモリが制約側）。
-func cachedPanelQueries(cachePath string, start, end time.Time) []string {
+func cachedPanelQueries(cachePath string, start, end time.Time, floor float64) []string {
 	var out []string
 	for from := start; !from.After(end); from = time.Date(from.Year()+1, 1, 1, 0, 0, 0, 0, time.UTC) {
 		to := time.Date(from.Year(), 12, 31, 0, 0, 0, 0, time.UTC)
 		if to.After(end) {
 			to = end
 		}
-		out = append(out, buildCachedPanelQuery(cachePath, from, to))
+		out = append(out, buildCachedPanelQuery(cachePath, from, to, floor))
 	}
 	return out
 }

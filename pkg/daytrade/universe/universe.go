@@ -118,70 +118,128 @@ func IsPostClose(discDate time.Time, discTime string) bool {
 }
 
 // Eligible はロングの母集団の条件。
-func Eligible(c Candidate, cfg config.Universe) bool {
-	if !contains(cfg.Segments, c.Segment) {
-		return false
-	}
+func Eligible(c Candidate, cfg config.Universe) bool { return NewFilter(cfg).Match(c) }
+
+// ShortEligible はショート（信用新規売り）の母集団。Eligible と同じ列に加えて
+// 貸借銘柄と売り禁を見る。ロングとは区分・分位・規制の扱いが違う（[margin] の各項目）。
+func ShortEligible(c Candidate, m config.Margin) bool { return NewShortFilter(m).Match(c) }
+
+// Filter はロングの母集団の条件を 1 度だけ展開したもの。
+//
+// 条件そのものは Match にしかない（Eligible もこれを呼ぶ）。展開して持つのは、
+// バックテストが同じ条件を 500 万行に当てるため——decimal から float への変換を
+// 行ごとに払うと 1 本で数秒になる。
+type Filter struct {
+	segments             []string
+	minTurnover          float64
+	excludeCapTerciles   int
+	excludeEarningsPrev  bool
+	excludeEarningsToday bool
+	excludeMarginAlert   bool
+	excludeLoss          bool
+}
+
+// NewFilter はロングの母集団の判定器。
+func NewFilter(cfg config.Universe) Filter {
 	minTurnover, _ := cfg.MinTurnover.Float64()
-	if c.TurnoverMed < minTurnover {
+	return Filter{
+		segments: cfg.Segments, minTurnover: minTurnover,
+		excludeCapTerciles:   cfg.ExcludeCapTerciles,
+		excludeEarningsPrev:  cfg.ExcludeEarningsPrev,
+		excludeEarningsToday: cfg.ExcludeEarningsToday,
+		excludeMarginAlert:   cfg.ExcludeMarginAlert,
+		excludeLoss:          cfg.ExcludeLoss,
+	}
+}
+
+// Match は候補がロングの母集団に入るか。
+func (f Filter) Match(c Candidate) bool {
+	if !contains(f.segments, c.Segment) {
 		return false
 	}
-	if cfg.ExcludeCapTerciles > 0 && c.CapTercile <= cfg.ExcludeCapTerciles {
+	if c.TurnoverMed < f.minTurnover {
 		return false
 	}
-	if cfg.ExcludeEarningsPrev && c.EarnPrev {
+	if f.excludeCapTerciles > 0 && c.CapTercile <= f.excludeCapTerciles {
 		return false
 	}
-	if cfg.ExcludeEarningsToday && c.DiscToday {
+	if f.excludeEarningsPrev && c.EarnPrev {
 		return false
 	}
-	if cfg.ExcludeMarginAlert && c.Alert {
+	if f.excludeEarningsToday && c.DiscToday {
 		return false
 	}
-	if cfg.ExcludeLoss && c.Loss {
+	if f.excludeMarginAlert && c.Alert {
+		return false
+	}
+	if f.excludeLoss && c.Loss {
 		return false
 	}
 	return true
 }
 
-// ShortEligible はショート（信用新規売り）の母集団。Eligible と同じ列に加えて
-// 貸借銘柄と売り禁を見る。ロングとは区分・分位・規制の扱いが違う（[margin] の各項目）。
-func ShortEligible(c Candidate, m config.Margin) bool {
-	if !m.Enabled {
-		return false
-	}
-	if !c.Shortable {
-		return false
-	}
-	if !contains(m.Segments, c.Segment) {
-		return false
-	}
+// ShortFilter はショートの母集団の条件を 1 度だけ展開したもの（Filter の鏡像）。
+type ShortFilter struct {
+	enabled              bool
+	segments             []string
+	minTurnover          float64
+	excludeCapTerciles   int
+	excludeEarningsPrev  bool
+	excludeEarningsToday bool
+	excludeMarginAlert   bool
+	excludeJsfStop       bool
+	// maxShortInterest は空売り残高の上限（0 なら上限なし）。
+	maxShortInterest float64
+}
+
+// NewShortFilter はショートの母集団の判定器。
+func NewShortFilter(m config.Margin) ShortFilter {
 	minTurnover, _ := m.MinTurnover.Float64()
-	if c.TurnoverMed < minTurnover {
+	maxSI := 0.0
+	if m.MaxShortInterest.IsPositive() {
+		maxSI, _ = m.MaxShortInterest.Float64()
+	}
+	return ShortFilter{
+		enabled: m.Enabled, segments: m.Segments, minTurnover: minTurnover,
+		excludeCapTerciles:   m.ExcludeCapTerciles,
+		excludeEarningsPrev:  m.ExcludeEarningsPrev,
+		excludeEarningsToday: m.ExcludeEarningsToday,
+		excludeMarginAlert:   m.ExcludeMarginAlert,
+		excludeJsfStop:       m.ExcludeJsfStop,
+		maxShortInterest:     maxSI,
+	}
+}
+
+// Match は候補がショートの母集団に入るか。
+func (f ShortFilter) Match(c Candidate) bool {
+	if !f.enabled || !c.Shortable {
 		return false
 	}
-	if m.ExcludeCapTerciles > 0 && c.CapTercile <= m.ExcludeCapTerciles {
+	if !contains(f.segments, c.Segment) {
 		return false
 	}
-	if m.ExcludeEarningsPrev && c.EarnPrev {
+	if c.TurnoverMed < f.minTurnover {
 		return false
 	}
-	if m.ExcludeEarningsToday && c.DiscToday {
+	if f.excludeCapTerciles > 0 && c.CapTercile <= f.excludeCapTerciles {
 		return false
 	}
-	if m.ExcludeMarginAlert && c.Alert {
+	if f.excludeEarningsPrev && c.EarnPrev {
 		return false
 	}
-	if m.ExcludeJsfStop && c.JsfStop {
+	if f.excludeEarningsToday && c.DiscToday {
+		return false
+	}
+	if f.excludeMarginAlert && c.Alert {
+		return false
+	}
+	if f.excludeJsfStop && c.JsfStop {
 		return false
 	}
 	// 空売り残高が重い銘柄は踏み上げの燃料を抱えている（張り付き率が 2 倍・寄→引も不利）。
 	// 報告の無い銘柄（nil）は 0 として通す——報告義務は 0.5% 以上なので、無い＝軽い。
-	if max := m.MaxShortInterest; max.IsPositive() && c.ShortInterest != nil {
-		limit, _ := max.Float64()
-		if *c.ShortInterest > limit {
-			return false
-		}
+	if f.maxShortInterest > 0 && c.ShortInterest != nil && *c.ShortInterest > f.maxShortInterest {
+		return false
 	}
 	return true
 }
