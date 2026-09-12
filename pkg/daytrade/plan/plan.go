@@ -168,6 +168,9 @@ type record struct {
 	ShortEligible bool     `parquet:"short_eligible"`
 	// MarginRatio は信用倍率（記録だけ。選定には使わない）。
 	MarginRatio *float64 `parquet:"margin_ratio,optional"`
+	// ShortInterest は空売り残高（発行済に対する比）。ショートの母集団の条件
+	// （margin.max_short_interest）に使うので、**必ず書き出して読み戻す**。
+	ShortInterest *float64 `parquet:"short_interest,optional"`
 }
 
 // Save は「最新」として plan-<日付> に置く（同じ日なら上書き。open はこれを読む）。
@@ -186,7 +189,7 @@ func Save(p Plan, directory string) (parquetPath, metaPath string, err error) {
 			EarnPrev: c.EarnPrev, DiscToday: c.DiscToday, Alert: c.Alert,
 			JsfStop: c.JsfStop, Shortable: c.Shortable,
 			Eligible: c.Eligible, ShortEligible: c.ShortEligible,
-			MarginRatio: c.MarginRatio,
+			MarginRatio: c.MarginRatio, ShortInterest: c.ShortInterest,
 		})
 	}
 	// 一時ファイルに書いて rename（途中で落ちても壊れた plan を open に読ませない）
@@ -232,7 +235,7 @@ func Load(directory string, day time.Time) (Plan, bool, error) {
 			EarnPrev: r.EarnPrev, DiscToday: r.DiscToday, Alert: r.Alert,
 			JsfStop: r.JsfStop, Shortable: r.Shortable,
 			Eligible: r.Eligible, ShortEligible: r.ShortEligible,
-			MarginRatio: r.MarginRatio,
+			MarginRatio: r.MarginRatio, ShortInterest: r.ShortInterest,
 		})
 	}
 	return Plan{Meta: meta, Candidates: candidates}, true, nil

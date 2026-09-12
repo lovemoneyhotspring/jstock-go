@@ -53,6 +53,10 @@ type Candidate struct {
 	// MarginRatio は信用倍率（買残 ÷ 売残。週末残高の最新）。**記録だけで選定には使わない**
 	// （研究ノート 2026-09-jp-gap-minute の発見 6）。残高の報告が無い銘柄は nil。
 	MarginRatio *float64
+	// ShortInterest は空売り残高（markets/short-sale-report の ShrtPosToSO を銘柄ごとに
+	// 合計した比）。報告の無い銘柄は nil（＝重い残高が無い。報告義務は 0.5% 以上）。
+	// ショートの母集団の条件（config.Margin.MaxShortInterest）に使う。
+	ShortInterest *float64
 	// EarnYield は益回り（直近の本決算の当期純利益 ÷ 前日の時価総額）。本決算が
 	// 見つからない銘柄は nil。**選定の 2 段階目**（config.Signal.ValuePool）で使う。
 	EarnYield *float64
@@ -170,6 +174,14 @@ func ShortEligible(c Candidate, m config.Margin) bool {
 	}
 	if m.ExcludeJsfStop && c.JsfStop {
 		return false
+	}
+	// 空売り残高が重い銘柄は踏み上げの燃料を抱えている（張り付き率が 2 倍・寄→引も不利）。
+	// 報告の無い銘柄（nil）は 0 として通す——報告義務は 0.5% 以上なので、無い＝軽い。
+	if max := m.MaxShortInterest; max.IsPositive() && c.ShortInterest != nil {
+		limit, _ := max.Float64()
+		if *c.ShortInterest > limit {
+			return false
+		}
 	}
 	return true
 }

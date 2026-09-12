@@ -156,6 +156,7 @@ func planFor(day time.Time) (dtplan.Plan, bool, error) {
 			Alert: bOf(row["alert"]), JsfStop: bOf(row["jsf_stop"]),
 			Shortable: bOf(row["shortable"]), Eligible: bOf(row["eligible"]),
 			ShortEligible: bOf(row["short_eligible"]),
+			ShortInterest: fPtrOf(row["short_interest"]),
 		})
 	}
 	prevDay := ""

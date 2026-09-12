@@ -20,6 +20,7 @@ var (
 	EPEarningsDate = archive.MustEndpoint("fins_earnings_date")
 	EPMarginAlert  = archive.MustEndpoint("markets_margin_alert")
 	EPMarginInt    = archive.MustEndpoint("markets_margin_interest")
+	EPShortSale    = archive.MustEndpoint("markets_short_sale_report")
 	EPOptions225   = archive.MustEndpoint("derivatives_bars_daily_options_225")
 	EPTopix        = archive.MustEndpoint("indices_bars_daily_topix")
 	// EPMinute は分足（アドオン。1 日 1 ファイル、履歴は 2 年）。母集団の判定には
@@ -72,6 +73,10 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 	}
 	// 信用倍率は**記録だけ**（母集団の条件には使わない）。効きが 2 年に偏っていて
 	// 10 年では再現しないため（研究ノート 2026-09-jp-gap-minute の発見 6）
+	shortInterest, err := loadShortInterest(arch, day)
+	if err != nil {
+		return nil, err
+	}
 	marginRatio, err := loadMarginRatio(arch, day)
 	if err != nil {
 		return nil, err
@@ -93,21 +98,22 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 			continue
 		}
 		rows = append(rows, Candidate{
-			Code:        f.code,
-			Symbol:      ToBrokerSymbol(f.code),
-			Name:        m.name,
-			Segment:     m.segment,
-			PrevClose:   f.prevClose,
-			TurnoverMed: f.turnoverMed,
-			MktCap:      f.mktCap,
-			Vol20:       f.vol20,
-			EarnPrev:    earnPrev[f.code],
-			DiscToday:   discToday[f.code],
-			Alert:       alert[f.code],
-			JsfStop:     jsfStop[f.code],
-			Shortable:   m.shortable,
-			Sector:      m.sector,
-			MarginRatio: marginRatio[f.code],
+			Code:          f.code,
+			Symbol:        ToBrokerSymbol(f.code),
+			Name:          m.name,
+			Segment:       m.segment,
+			PrevClose:     f.prevClose,
+			TurnoverMed:   f.turnoverMed,
+			MktCap:        f.mktCap,
+			Vol20:         f.vol20,
+			EarnPrev:      earnPrev[f.code],
+			DiscToday:     discToday[f.code],
+			Alert:         alert[f.code],
+			JsfStop:       jsfStop[f.code],
+			Shortable:     m.shortable,
+			Sector:        m.sector,
+			MarginRatio:   marginRatio[f.code],
+			ShortInterest: shortInterest[f.code],
 		})
 		caps = append(caps, f.mktCap)
 		mask = append(mask, f.turnoverMed >= minTurnover)
@@ -274,6 +280,49 @@ func loadMaster(arch *archive.Archive, day, prevDay time.Time) (map[string]maste
 			shortable: IsShortable(text(frame.Get(i, "Mrgn"))),
 			sector:    text(frame.Get(i, "S33")),
 		}
+	}
+	return out, nil
+}
+
+// loadShortInterest は空売り残高（markets/short-sale-report）。銘柄ごとに、**判定日より前**の
+// 最新の計算日（CalcDate）の報告を集め、報告者ぶんの ShrtPosToSO を合計する。
+//
+// 報告は 0.5% 以上の残高に義務があるので、報告の無い銘柄は「重い残高が無い」と読んで
+// nil を返す（0 として扱われ、上限では落ちない）。
+func loadShortInterest(arch *archive.Archive, day time.Time) (map[string]*float64, error) {
+	frame, err := arch.ReadWhere(EPShortSale, archive.ReadOptions{
+		Start:   day.AddDate(0, 0, -120),
+		End:     day.AddDate(0, 0, -1),
+		Columns: []string{"Code", "CalcDate", "ShrtPosToSO"},
+	})
+	if err != nil || frame == nil {
+		return map[string]*float64{}, err
+	}
+	limit := day.Format(archsql.DateLayout)
+	// 銘柄ごとに最新の計算日だけを残し、その日の報告者ぶんを足す
+	latest := map[string]string{}
+	for i := range frame.Rows {
+		code, date := text(frame.Get(i, "Code")), text(frame.Get(i, "CalcDate"))
+		if code == "" || date == "" || date >= limit {
+			continue
+		}
+		if latest[code] < date {
+			latest[code] = date
+		}
+	}
+	sum := map[string]float64{}
+	for i := range frame.Rows {
+		code, date := text(frame.Get(i, "Code")), text(frame.Get(i, "CalcDate"))
+		if code == "" || date != latest[code] {
+			continue
+		}
+		if v, ok := parseFloat(text(frame.Get(i, "ShrtPosToSO"))); ok {
+			sum[code] += v
+		}
+	}
+	out := make(map[string]*float64, len(sum))
+	for code, v := range sum {
+		out[code] = &v
 	}
 	return out, nil
 }

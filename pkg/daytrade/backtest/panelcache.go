@@ -29,7 +29,7 @@ import (
 
 // panelCacheVersion はキャッシュの中身の版。SQL（列・分位の式・決算の突き合わせ）を
 // 変えたら上げる。上げれば鍵が変わり、古いキャッシュは使われない。
-const panelCacheVersion = 3
+const panelCacheVersion = 4
 
 // panelCacheDir はキャッシュの置き場（保管庫の下。再生成できるので消してよい）。
 func panelCacheDir(arch *archive.Archive) string {
@@ -51,11 +51,13 @@ func cacheSources(arch *archive.Archive, end time.Time) (panelSources, bool) {
 	fins, hasFins := archsql.Source(arch, universe.EPFins, zero, end)
 	sched, hasSched := archsql.Source(arch, universe.EPEarningsDate, zero, end)
 	alert, hasAlert := archsql.Source(arch, universe.EPMarginAlert, zero, end)
+	ssr, hasSSR := archsql.Source(arch, universe.EPShortSale, zero, end)
 	return panelSources{
 		bars: bars, master: master,
 		fins: fins, hasFins: hasFins,
 		sched: sched, hasSched: hasSched,
 		alert: alert, hasAlert: hasAlert,
+		ssr: ssr, hasSSR: hasSSR,
 	}, true
 }
 

@@ -81,6 +81,19 @@ type Margin struct {
 	MaxGap decimal.Decimal `toml:"max_gap"`
 	// SkipLimitUp は寄付がストップ高の銘柄を売らない（踏み上げの初動を売る危険を避ける）。
 	SkipLimitUp bool `toml:"skip_limit_up"`
+	// MaxShortInterest は空売り残高（markets/short-sale-report の ShrtPosToSO を銘柄ごとに
+	// 合計した値。発行済株式数に対する比）の上限。これを**超える**銘柄は売らない。
+	// 0 なら無制限（既定）。
+	//
+	// 残高の重い銘柄は踏み上げ（ショートスクイーズ）の燃料を抱えている。10 年の横断では
+	// 残高 ≥ 2% の候補は張り付き率が 2 倍（6.7% → 13%〜15%）で、寄→引もマイナス
+	// （＝ショートに不利）——**張り付きやすさと不利さが同じ向きに出る唯一の要因**。
+	// 「余地」「過熱」「サイズ縮小」が効かなかったのは、それらが利益源と重なっていたため
+	// （研究ノート 2026-09-jp-short-squeeze-fuel）。
+	//
+	// 報告の無い銘柄は残高 0 として扱う（＝落とさない）。報告義務は 0.5% 以上なので、
+	// 報告が無い＝重い残高が無い、と読める。
+	MaxShortInterest decimal.Decimal `toml:"max_short_interest"`
 
 	// MultiplierNormal / MultiplierLongWeak はショート側の資金の倍率（シーソー）。
 	// 弱い日限定は Sharpe が高いが稼働が 1/3 に減るので既定は常時 1.0。

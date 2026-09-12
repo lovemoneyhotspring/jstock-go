@@ -47,6 +47,9 @@ type Row struct {
 	// 判定（signal.max_per_sector）に使う。取れなければ空。
 	Sector string
 	Gap    float64
+	// ShortInterest は空売り残高（発行済に対する比。報告が無ければ nil）。
+	// ショートの母集団の条件（margin.max_short_interest）に使う。
+	ShortInterest *float64
 	// LimitLow / LimitHigh は前日終値を基準値段とする制限値幅（ストップ安・高）。
 	LimitLow      float64
 	LimitHigh     float64
@@ -86,12 +89,14 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 	finsSrc, hasFins := archsql.Source(arch, universe.EPFins, start.AddDate(0, 0, -420), end)
 	schedSrc, hasSched := archsql.Source(arch, universe.EPEarningsDate, start.AddDate(0, 0, -120), end)
 	alertSrc, hasAlert := archsql.Source(arch, universe.EPMarginAlert, start.AddDate(0, 0, -7), end)
+	ssrSrc, hasSSR := archsql.Source(arch, universe.EPShortSale, start.AddDate(0, 0, -180), end)
 
 	query := buildPanelQuery(panelSources{
 		bars: barsSrc, master: masterSrc,
 		fins: finsSrc, hasFins: hasFins,
 		sched: schedSrc, hasSched: hasSched,
 		alert: alertSrc, hasAlert: hasAlert,
+		ssr: ssrSrc, hasSSR: hasSSR,
 	}, start, end, cfg)
 
 	// キャッシュがあれば（作れれば）そちらから読む。作れなくても検証は続ける
@@ -117,10 +122,11 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 			nextOpen, vol20   sql.NullFloat64
 			earnYield         sql.NullFloat64
 			sector            sql.NullString
+			shortInterest     sql.NullFloat64
 			limitLow, limitHi sql.NullFloat64
 		)
 		if err := rows.Scan(&r.Date, &r.Code, &r.Open, &r.Close, &r.PrevClose,
-			&nextOpen, &vol20, &earnYield, &sector, &r.Gap, &limitLow, &limitHi,
+			&nextOpen, &vol20, &earnYield, &sector, &shortInterest, &r.Gap, &limitLow, &limitHi,
 			&r.Eligible, &r.ShortEligible); err != nil {
 			return nil, err
 		}
@@ -137,6 +143,10 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 			v := earnYield.Float64
 			r.EarnYield = &v
 		}
+		if shortInterest.Valid {
+			v := shortInterest.Float64
+			r.ShortInterest = &v
+		}
 		r.Sector = sector.String
 		r.LimitLow, r.LimitHigh = limitLow.Float64, limitHi.Float64
 		panel.Rows = append(panel.Rows, r)
@@ -148,6 +158,19 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 	days, err := tradingDays(db, barsSrc, start, end)
 	if err != nil {
 		return nil, err
+	}
+	// 上限を掛ける設定なのに残高が 1 件も入っていなければ、判定は黙って素通りする
+	// （2026-09-12: キャッシュ側の経路に端点を足し忘れて、全行 NULL のまま通っていた）。
+	if cfg.Margin.MaxShortInterest.IsPositive() {
+		withSI := 0
+		for i := range panel.Rows {
+			if panel.Rows[i].ShortInterest != nil {
+				withSI++
+			}
+		}
+		if withSI == 0 {
+			return nil, fmt.Errorf("margin.max_short_interest を掛ける設定ですが、空売り残高が 1 件も取れていません（markets_short_sale_report の取り込みを確認してください）")
+		}
 	}
 	panel.Days = days
 	if len(panel.Days) == 0 {
@@ -184,6 +207,8 @@ type panelSources struct {
 	hasSched     bool
 	alert        string
 	hasAlert     bool
+	ssr          string
+	hasSSR       bool
 }
 
 // buildPanelQuery はパネルの SQL を組み立てる。
@@ -193,7 +218,7 @@ type panelSources struct {
 func buildPanelQuery(src panelSources, start, end time.Time, cfg config.Config) string {
 	var b strings.Builder
 	b.WriteString(panelCTEs(src, start, end, cfg))
-	fmt.Fprintf(&b, `SELECT d, code, o, c, prev_close, next_open, vol20, earn_yield, sector,
+	fmt.Fprintf(&b, `SELECT d, code, o, c, prev_close, next_open, vol20, earn_yield, sector, short_interest,
        o / prev_close - 1 AS gap,
        prev_close - (%s) AS limit_low,
        prev_close + (%s) AS limit_high,
@@ -324,17 +349,32 @@ joined AS (
 		b.WriteString("alerts AS (SELECT NULL::VARCHAR AS code, NULL::BIGINT AS di, false AS jsf_stop WHERE false),\n")
 	}
 
+	// 空売り残高（markets/short-sale-report）。計算日ごとに報告者ぶんを合計し、
+	// **判定日より前**の最新の計算日を ASOF で当てる（当日の報告は前夜には無い）。
+	if src.hasSSR {
+		fmt.Fprintf(&b, `ssr AS (
+  SELECT CAST(s."Code" AS VARCHAR) AS code, s."CalcDate" AS cd,
+         sum(TRY_CAST(s."ShrtPosToSO" AS DOUBLE)) AS si
+  FROM %s s GROUP BY 1, 2
+),
+`, src.ssr)
+	} else {
+		b.WriteString("ssr AS (SELECT NULL::VARCHAR AS code, NULL::DATE AS cd, NULL::DOUBLE AS si WHERE false),\n")
+	}
+
 	minTurnover, _ := cfg.Universe.MinTurnover.Float64()
 	fmt.Fprintf(&b, `flagged AS (
   SELECT j.*,
          coalesce(e.code IS NOT NULL, false) AS earn_prev,
          coalesce(s.code IS NOT NULL, false) AS disc_today,
          coalesce(al.code IS NOT NULL, false) AS alert,
-         coalesce(al.jsf_stop, false) AS jsf_stop
+         coalesce(al.jsf_stop, false) AS jsf_stop,
+         ss.si AS short_interest
   FROM joined j
   LEFT JOIN earn e ON e.code = j.code AND e.di = j.di
   LEFT JOIN sched s ON s.code = j.code AND s.d = j.d
   LEFT JOIN alerts al ON al.code = j.code AND al.di = j.di
+  ASOF LEFT JOIN ssr ss ON ss.code = j.code AND ss.cd < j.d
 ),
 tercile AS (
   SELECT f.*,
@@ -367,7 +407,8 @@ valued AS (
 // panelCacheColumns はキャッシュに落とす列。設定に依存しないものだけを持ち、
 // 設定に依存する判定（eligible / short_eligible・ギャップ・制限値幅）は読み出し側で当てる。
 const panelCacheColumns = `SELECT d, code, o, c, prev_close, next_open, next_open_d, vol20, earn_yield,
-       sector, segment, shortable, turnover_med, cap_tercile, earn_prev, disc_today, alert, jsf_stop, is_loss`
+       sector, segment, shortable, turnover_med, cap_tercile, earn_prev, disc_today, alert, jsf_stop, is_loss,
+       short_interest`
 
 // buildCacheQuery はキャッシュに落とす行を作る SQL。期間は切らず（読み出し側で切る）、
 // 流動性の下限だけで絞る——下限を満たさない行はどの設定でも母集団に入らないため。
@@ -401,7 +442,7 @@ func cacheTurnoverFloor(cfg config.Config) float64 {
 func buildCachedPanelQuery(cachePath string, start, end time.Time, cfg config.Config) string {
 	return fmt.Sprintf(`SELECT d, code, o, c, prev_close,
        CASE WHEN next_open_d > %[2]s THEN NULL ELSE next_open END AS next_open,
-       vol20, earn_yield, sector,
+       vol20, earn_yield, sector, short_interest,
        o / prev_close - 1 AS gap,
        prev_close - (%[3]s) AS limit_low,
        prev_close + (%[3]s) AS limit_high,
@@ -495,6 +536,11 @@ func shortEligibleSQL(m config.Margin) string {
 	}
 	if m.ExcludeJsfStop {
 		parts = append(parts, "NOT jsf_stop")
+	}
+	// 空売り残高の上限。報告の無い銘柄（NULL）は通す（＝軽い）
+	if max := m.MaxShortInterest; max.IsPositive() {
+		limit, _ := max.Float64()
+		parts = append(parts, fmt.Sprintf("coalesce(short_interest, 0) <= %f", limit))
 	}
 	return strings.Join(parts, " AND ")
 }

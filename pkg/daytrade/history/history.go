@@ -73,6 +73,8 @@ var PlanSchema = []history.Column{
 	// 母集団の条件には入っていない。evaluation と (day, symbol) で突き合わせて
 	// 効きが続くかを見るための列（研究ノート 2026-09-jp-gap-minute の発見 6）。
 	{Name: "margin_ratio", Type: history.TypeFloat64},
+	// short_interest は空売り残高（発行済に対する比）。margin.max_short_interest の判定に使う。
+	{Name: "short_interest", Type: history.TypeFloat64},
 }
 
 // PlanMetaSchema は plan 1 回の要約。
@@ -196,7 +198,7 @@ func PlanFrames(p plan.Plan) (frame, meta history.Frame) {
 			"earn_prev": c.EarnPrev, "disc_today": c.DiscToday, "alert": c.Alert,
 			"jsf_stop": c.JsfStop, "shortable": c.Shortable,
 			"eligible": c.Eligible, "short_eligible": c.ShortEligible,
-			"margin_ratio": floatOrNil(c.MarginRatio),
+			"margin_ratio": floatOrNil(c.MarginRatio), "short_interest": floatOrNil(c.ShortInterest),
 		})
 	}
 	prevDay, _ := time.Parse(plan.DateLayout, p.Meta.PrevDay)

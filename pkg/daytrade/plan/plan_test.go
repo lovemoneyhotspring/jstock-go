@@ -82,10 +82,11 @@ func TestBuildSaveLoadRoundTrip(t *testing.T) {
 // 黙って効かなくなる（2026-09-12 に発覚）。往復を明示的に押さえておく。
 func TestSaveLoadKeepsSector(t *testing.T) {
 	day, _ := time.Parse(plan.DateLayout, "2026-09-14")
+	si := 0.031
 	p := plan.Plan{
 		Meta: plan.Meta{Day: "2026-09-14", PrevDay: "2026-09-11", Positions: 3},
 		Candidates: []universe.Candidate{
-			{Code: "10000", Symbol: "1000", Sector: "3650", PrevClose: 1000, Eligible: true},
+			{Code: "10000", Symbol: "1000", Sector: "3650", PrevClose: 1000, Eligible: true, ShortInterest: &si},
 			{Code: "20000", Symbol: "2000", Sector: "6100", PrevClose: 500, Eligible: true},
 		},
 	}
@@ -101,6 +102,13 @@ func TestSaveLoadKeepsSector(t *testing.T) {
 		if c.Sector != p.Candidates[i].Sector {
 			t.Errorf("業種 %d = %q, want %q", i, c.Sector, p.Candidates[i].Sector)
 		}
+	}
+	// 空売り残高も往復する（margin.max_short_interest の判定に使うため）
+	if loaded.Candidates[0].ShortInterest == nil || *loaded.Candidates[0].ShortInterest != si {
+		t.Errorf("空売り残高が往復しない: %v", loaded.Candidates[0].ShortInterest)
+	}
+	if loaded.Candidates[1].ShortInterest != nil {
+		t.Errorf("報告の無い銘柄が nil でない: %v", loaded.Candidates[1].ShortInterest)
 	}
 }
 
