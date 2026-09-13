@@ -81,6 +81,34 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 **信用（`daytrade`）の検証は口座が開くまで進められない。** 信用新規・信用建玉の行あり・
 信用返済の逆指値は、どれも口座が要る。
 
+## 一般信用の在庫は API では取れない（2026-09-14、本番口座・照会のみ）
+
+優待クロス（つなぎ売り）を自動化できるかは「一般信用の売建可能数量が API で取れるか」で決まる。
+**取れない。** 参照系 2 電文を本番口座に投げて確認した
+（`TACHIBANA_MARGIN_PROBE=3197 go test ./pkg/wbcore/broker -run TestMarginProbe -v`）。
+
+| 電文 | 返る項目 | 一般信用の在庫 |
+|---|---|---|
+| `CLMStkGetIssueMstKabu`（銘柄マスタ） | **14 項目だけ** | 無い |
+| `CLMZanKaiSummary`（余力） | 62 項目 | 無い（口座単位の金額のみ） |
+
+銘柄マスタの全項目はこれだけで、**貸借区分も一般信用の可否も入っていない**:
+
+```
+sIssueCode sIssueName sIssueNameEizi sIssueNameKana sIssueNameRyaku
+sBaibaiTani sBaibaiTaniYoku sBaibaiTeisiC sGyousyuCode sYusenSizyou
+sDaiyouHyoukaTanka sHosyoukinDaiyouKakeme sTokuteiF sZyouzyouHakkouKabusu
+```
+
+余力側で信用に関わるのは `sLargeUridateYoryoku` / `sMiniUridateYoryoku`（売建余力・金額）、
+`sSinyouSinkidate`（信用新規建可能額）などで、**どれも口座単位**。銘柄ごとの在庫は無い。
+
+ついでに分かったこと: **`CLMStkGetIssueMstKabu` は `sIssueCode` を渡しても全銘柄（4,448 行）を返す。**
+先頭は 1301（極洋）で、指定した銘柄ではない。既存の実装が全件から引いているのはこのため。
+
+結論として、優待クロスの自動化はこの API の上では成立しない（在庫は Web 画面にしか無い）。
+記録: `~/obsidian-vault/20-research/2026-09-jp-institutional-arb-scan.md`
+
 ## 未検証の電文
 
 | 電文 | 使うところ | 実装 |
