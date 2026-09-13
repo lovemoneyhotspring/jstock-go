@@ -60,7 +60,9 @@ fi
 # （.claude/agents/daily-report.md）は既に除いているのに、ここだけ拾っていた
 # ——検証で出した「時間外の発注」「持ち越し」で claude が起動し、直す物が無いまま
 # 30 分ぶんのトリアージと PR が生まれる。同じ規則で除く。
-ANOMALY_COUNT="$(jq -c 'select((.anomalies or .outcome == "error") and (.verify | not))' "${DIGESTS[@]}" 2>/dev/null | wc -l | tr -d ' ')"
+# command == "backtest" も除く。研究で手で叩く検証で本番の売買経路ではなく、設定の置き忘れや
+# 試作の OOM で落ちても直す物が無い（2026-09-13 に 5 件でトリアージが起きた）。
+ANOMALY_COUNT="$(jq -c 'select((.anomalies or .outcome == "error") and (.verify | not) and .command != "backtest")' "${DIGESTS[@]}" 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$ANOMALY_COUNT" = "0" ]; then
   echo "異常なし（$YESTERDAY 〜 $TODAY）。claude は起動しません"
   exit 0

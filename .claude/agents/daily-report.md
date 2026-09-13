@@ -40,7 +40,7 @@ cat state/digest/prod-<日付>.jsonl
 検証があった日は、異常として扱わず「検証を N 回実施」と 1 行添えるだけでよい。
 
 ```bash
-jq -c 'select(.anomalies and (.verify | not))' state/digest/prod-<日付>.jsonl   # 本当の異常
+jq -c 'select(.anomalies and (.verify | not) and .command != "backtest")' state/digest/prod-<日付>.jsonl   # 本当の異常（backtest は研究用なので外す）
 jq -c 'select(.verify)' state/digest/prod-<日付>.jsonl                          # 手で走らせた検証
 ```
 

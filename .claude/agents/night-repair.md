@@ -33,13 +33,14 @@ tools: Bash, Read, Glob, Grep, Edit, Write
    **異常ではない**。時間外の発注・持ち越し・1 単元だけの建玉はどれも手順どおりの姿。
    `env` では切り分けられない（**本番口座で検証する**）ので、必ずこの印で見る。
    検証の実行しか無い日は「異常なし」として、コードを触らずに終える。
+   **`command == "backtest"` も同じく除く。** 研究で手で叩く検証で、本番の売買経路ではない。
 
 1. **異常を特定する**（`docs/FEEDBACK.md` の層構造）。
    ```bash
    TODAY=$(TZ=Asia/Tokyo date +%F)
    YESTERDAY=$(TZ=Asia/Tokyo date -d yesterday +%F)
-   # verify が付いた実行は検証なので外す
-   jq -c 'select((.anomalies or .outcome == "error") and (.verify | not))' state/digest/prod-$YESTERDAY.jsonl state/digest/prod-$TODAY.jsonl 2>/dev/null
+   # verify が付いた実行と backtest は検証なので外す
+   jq -c 'select((.anomalies or .outcome == "error") and (.verify | not) and .command != "backtest")' state/digest/prod-$YESTERDAY.jsonl state/digest/prod-$TODAY.jsonl 2>/dev/null
    ```
 2. **`run_id` を鍵に層 3（`state/logs/<app>-prod.jsonl`）へ降りて、何が起きたかを特定する。**
    ```bash
