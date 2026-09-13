@@ -34,6 +34,10 @@ func TestNewsProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantGenre := os.Getenv("TACHIBANA_NEWS_GENRE")
+	words := ratingWords
+	if w := os.Getenv("TACHIBANA_NEWS_WORDS"); w != "" {
+		words = strings.Split(w, ",")
+	}
 
 	for _, day := range days {
 		// ニュースは master 口（sUrlMaster）。price 口は「引数エラー」を返す
@@ -51,11 +55,18 @@ func TestNewsProbe(t *testing.T) {
 			for _, g := range strings.Split(text(row["p_GNL"]), "|") {
 				genres[g]++
 			}
-			for _, w := range ratingWords {
+			for _, w := range words {
 				if strings.Contains(head, w) {
 					hits = append(hits, fmt.Sprintf("%s GN=%-6s 銘柄%2d件 %s",
 						text(row["p_TM"]), text(row["p_GNL"]),
 						len(strings.Split(text(row["p_ISL"]), "|")), head))
+					if os.Getenv("TACHIBANA_NEWS_BODY") != "" {
+						body := DecodeNewsText(text(row["p_TX"]))
+						if len(body) > 600 {
+							body = body[:600] + "…"
+						}
+						hits = append(hits, "    本文: "+strings.ReplaceAll(body, "\n", " / "))
+					}
 					break
 				}
 			}
@@ -63,7 +74,7 @@ func TestNewsProbe(t *testing.T) {
 				t.Logf("=== %s %s\n%s", text(row["p_TM"]), head, DecodeNewsText(text(row["p_TX"])))
 			}
 		}
-		t.Logf("%s: %d 件 / レーティング関連 %d 件", day, len(list), len(hits))
+		t.Logf("%s: %d 件 / 該当 %d 件（語: %s）", day, len(list), len(hits), strings.Join(words, "|"))
 		for _, h := range hits {
 			t.Log("  ", h)
 		}
