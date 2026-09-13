@@ -15,10 +15,6 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 )
 
-// marginWords は一般信用・貸借・売建に関わる項目名を拾うための語。
-var marginWords = []string{"Sinyou", "Shinyou", "Sinyo", "Taisyaku", "Taishaku",
-	"Uri", "Ippan", "Zan", "Kasi", "Kashi", "Hosyo", "Seido"}
-
 func TestMarginProbe(t *testing.T) {
 	codes := strings.Split(os.Getenv("TACHIBANA_MARGIN_PROBE"), ",")
 	if codes[0] == "" {
@@ -75,13 +71,4 @@ func sortedKeys(m map[string]any) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func matchesAny(s string, words []string) bool {
-	for _, w := range words {
-		if strings.Contains(s, w) {
-			return true
-		}
-	}
-	return false
 }

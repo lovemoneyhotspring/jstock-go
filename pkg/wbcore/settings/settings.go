@@ -220,3 +220,9 @@ func (s *AppSettings) DescribeMode(liveFlag bool, killSwitch bool) string {
 func (s *AppSettings) RateDBPath() string {
 	return filepath.Join(s.DataDir, "rate", "rate.db")
 }
+
+// NewsDBPath は立花証券のニュース電文の記録簿。電文は 90 日しか遡れないので
+// 溜めておく（docs/NEWS.md）。市場のデータなので data 配下。
+func (s *AppSettings) NewsDBPath() string {
+	return filepath.Join(s.DataDir, "news", "news.db")
+}

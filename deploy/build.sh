@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 5 つの実行ファイルを bin/ に作る。cron（deploy/crontab.txt）はここを見る。
+# 7 つの実行ファイルを bin/ に作る。cron（deploy/crontab.txt）はここを見る。
 #
 #   deploy/build.sh          # $WBJP_HOME/bin に作る
 #   BIN_DIR=/tmp/bin deploy/build.sh
@@ -15,7 +15,7 @@ cd "$HOME_DIR"
 mkdir -p "$BIN_DIR"
 
 # -trimpath: 実行ファイルに開発機の絶対パスを埋めない
-for cmd in wbjp accum daytrade jquants discord-post rate; do
+for cmd in wbjp accum daytrade jquants discord-post rate news; do
   echo "building $cmd..."
   go build -trimpath -o "$BIN_DIR/$cmd" "./cmd/$cmd"
 done
