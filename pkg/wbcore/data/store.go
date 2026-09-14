@@ -171,29 +171,41 @@ func (s *BarStore) Write(symbol string, bars []domain.Bar) error {
 		}
 	}
 
-	tmpPath := path + ".tmp"
-	f, err := os.Create(tmpPath)
+	// 一時ファイルは呼び出しごとに別名にする。固定の <path>.tmp だと、同じ銘柄を
+	// 2 つのプロセスが同時に書いたとき（data sync と手動の取り直し）に互いの
+	// 書きかけを rename して壊れた Parquet が本体になる。同じディレクトリに作るのは
+	// rename をアトミックに保つため（別ファイルシステムだと copy になる）。
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("failed to create tmp parquet %s: %w", tmpPath, err)
+		return fmt.Errorf("failed to create tmp parquet for %s: %w", path, err)
+	}
+	tmpPath := f.Name()
+	fail := func(err error) error {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
 	}
 
 	writer := parquet.NewGenericWriter[BarRecord](f, parquet.Compression(&parquet.Zstd))
 	if _, err := writer.Write(records); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("failed to write parquet records: %w", err)
+		return fail(fmt.Errorf("failed to write parquet records: %w", err))
 	}
 	if err := writer.Close(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("failed to close parquet writer: %w", err)
+		return fail(fmt.Errorf("failed to close parquet writer: %w", err))
+	}
+	// rename の前に fsync。電源断で「名前は新しいのに中身が空」になるのを防ぐ
+	if err := f.Sync(); err != nil {
+		return fail(fmt.Errorf("failed to sync parquet %s: %w", tmpPath, err))
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("failed to replace parquet %s: %w", path, err)
+	}
+	return nil
 }
 
 // ReadMany は複数銘柄をまとめて読む。足が 1 本も無い銘柄は含めない

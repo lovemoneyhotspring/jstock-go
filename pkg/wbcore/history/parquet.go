@@ -90,6 +90,10 @@ func writeParquet(path string, frame Frame) error {
 	if err := writer.Close(); err != nil {
 		return fmt.Errorf("履歴の確定に失敗しました %s: %w", path, err)
 	}
+	// 呼び出し側が rename で本体にするので、その前にディスクへ落とす
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("履歴の同期に失敗しました %s: %w", path, err)
+	}
 	return nil
 }
 

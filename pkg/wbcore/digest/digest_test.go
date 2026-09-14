@@ -5,6 +5,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 )
 
 func start(t *testing.T, stateDir string) {
@@ -131,6 +134,37 @@ func TestNoRunIsHarmless(t *testing.T) {
 	Skipped("z")
 	if err := Flush(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ダイジェストの日付は JST。UTC で切ると 09:00 JST より前の実行が前日のファイルに入る。
+func TestDayOfIsJST(t *testing.T) {
+	// 2026-09-13 21:30 UTC = 2026-09-14 06:30 JST（night-repair の時間帯）
+	if got := DayOf(time.Date(2026, 9, 13, 21, 30, 0, 0, time.UTC)); got != "2026-09-14" {
+		t.Errorf("DayOf = %q, want 2026-09-14（JST）", got)
+	}
+	// 2026-09-14 14:59 UTC = 23:59 JST はまだ同じ日
+	if got := DayOf(time.Date(2026, 9, 14, 14, 59, 0, 0, time.UTC)); got != "2026-09-14" {
+		t.Errorf("DayOf = %q, want 2026-09-14", got)
+	}
+	// 15:00 UTC = 翌 0:00 JST
+	if got := DayOf(time.Date(2026, 9, 14, 15, 0, 0, 0, time.UTC)); got != "2026-09-15" {
+		t.Errorf("DayOf = %q, want 2026-09-15", got)
+	}
+}
+
+// Day を省いたときの書き出し先は JST の今日。
+func TestStartRunDefaultsToJSTDay(t *testing.T) {
+	dir := t.TempDir()
+	Reset()
+	t.Cleanup(Reset)
+	StartRun(StartOptions{App: "accum", Env: "uat", Command: "run", RunID: "r", StateDir: dir})
+	want := Path(dir, "uat", DayOf(clock.NowUTC()))
+	mu.Lock()
+	got := current.path
+	mu.Unlock()
+	if got != want {
+		t.Errorf("path = %s, want %s", got, want)
 	}
 }
 

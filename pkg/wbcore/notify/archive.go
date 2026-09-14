@@ -90,6 +90,10 @@ func archive(rec Record) {
 		fmt.Fprintf(os.Stderr, "通知の控えを書けません: %v\n", err)
 		return
 	}
+	// 通知は「送った」と「控えた」が食い違うと後から追えない。追記のたびに落とす
+	if err := file.Sync(); err != nil {
+		fmt.Fprintf(os.Stderr, "通知の控えを同期できません: %v\n", err)
+	}
 	pruneArchive(dir, rec.At)
 }
 

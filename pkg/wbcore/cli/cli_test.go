@@ -1,7 +1,12 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,10 +67,150 @@ func TestConfirmLiveSkipsWhenNotNeeded(t *testing.T) {
 	if err := ConfirmLive(prod, true, true); err != nil {
 		t.Errorf("--yes は聞かない: %v", err)
 	}
-	// 本番 × --live × --yes 無し × 非対話（テストの stdin）は止まる
-	if err := ConfirmLive(prod, true, false); err == nil {
-		t.Error("非対話の本番発注は --yes 無しで通ってはいけない")
+}
+
+// 本番 × --live × --yes 無しは、非対話なら止まり、対話なら y のときだけ通る。
+func TestConfirmLiveInteractive(t *testing.T) {
+	prod := &settings.AppSettings{Env: settings.EnvProd}
+	oldTTY, oldIn := stdinIsTerminal, confirmInput
+	t.Cleanup(func() { stdinIsTerminal, confirmInput = oldTTY, oldIn })
+
+	stdinIsTerminal = func() bool { return false }
+	if err := ConfirmLive(prod, true, false); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("非対話は --yes を求めるエラー: %v", err)
 	}
+
+	stdinIsTerminal = func() bool { return true }
+	confirmInput = strings.NewReader("y\n")
+	if err := ConfirmLive(prod, true, false); err != nil {
+		t.Errorf("y は通る: %v", err)
+	}
+	confirmInput = strings.NewReader("n\n")
+	if err := ConfirmLive(prod, true, false); err == nil {
+		t.Error("n は中止")
+	}
+	confirmInput = strings.NewReader("")
+	if err := ConfirmLive(prod, true, false); err == nil {
+		t.Error("空入力は中止")
+	}
+}
+
+// startRun はテスト用に一時ディレクトリで Run を起こし、ログとダイジェストの場所を返す。
+func startRun(t *testing.T, app string) (*Run, string, string) {
+	t.Helper()
+	t.Cleanup(digest.Reset)
+	t.Cleanup(logging.ResetRunContext)
+	s := &settings.AppSettings{Env: settings.EnvUAT, StateDir: t.TempDir(), LogDir: t.TempDir()}
+	run := StartRun(app, s, "run")
+	if run.RunID == "" || run.Logger == nil {
+		t.Fatal("run_id とロガーが要る")
+	}
+	return run, filepath.Join(s.LogDir, app+"-uat.jsonl"), filepath.Join(s.StateDir, "digest")
+}
+
+func readJSONL(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("%s を読めない: %v", path, err)
+	}
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("壊れた行 %q: %v", line, err)
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// Finish はダイジェストを 1 行書き、err があれば outcome を error にする。2 回呼んでも増えない。
+func TestFinishWritesDigest(t *testing.T) {
+	run, _, digestDir := startRun(t, "wbjp")
+	run.Finish(errors.New("boom"))
+	run.Finish(nil)
+
+	files, _ := filepath.Glob(filepath.Join(digestDir, "uat-*.jsonl"))
+	if len(files) != 1 {
+		t.Fatalf("ダイジェスト = %v, want 1 ファイル", files)
+	}
+	records := readJSONL(t, files[0])
+	if len(records) != 1 {
+		t.Fatalf("行数 = %d, want 1", len(records))
+	}
+	rec := records[0]
+	if rec["outcome"] != "error" || rec["run_id"] != run.RunID || rec["app"] != "wbjp" {
+		t.Errorf("ダイジェスト = %v", rec)
+	}
+	if anomalies, _ := rec["anomalies"].([]any); len(anomalies) != 1 || anomalies[0] != "wbjp.command_failed: boom" {
+		t.Errorf("anomalies = %v", rec["anomalies"])
+	}
+	if digest.Active() {
+		t.Error("Finish の後も記録中になっている")
+	}
+	// nil の Run は何もしない
+	var none *Run
+	none.Finish(errors.New("x"))
+}
+
+// Alert は届かなかったとき警告ログを残す。届けば残さない。
+func TestAlertLogsWhenUndelivered(t *testing.T) {
+	run, logPath, _ := startRun(t, "accum")
+	delivered := true
+	run.Alerter = func(_, _ string, _ *logging.Logger) bool { return delivered }
+	run.Alert("届く", "本文")
+	delivered = false
+	run.Alert("届かない", "本文")
+	run.Finish(nil)
+
+	var warned []string
+	for _, rec := range readJSONL(t, logPath) {
+		if rec["code"] == "cli.alert_undelivered" {
+			extra, _ := rec["extra"].(map[string]any)
+			warned = append(warned, fmt.Sprint(extra["title"]))
+		}
+	}
+	if len(warned) != 1 || warned[0] != "届かない" {
+		t.Errorf("届かなかった通知の警告 = %v, want [届かない]", warned)
+	}
+	// nil の Run は何もしない
+	var none *Run
+	none.Alert("x", "y")
+}
+
+// SetVerify は Run・ロガー・ダイジェストの 3 つに印を付ける。
+func TestSetVerifyMarksEverything(t *testing.T) {
+	run, logPath, digestDir := startRun(t, "daytrade")
+	run.SetVerify(true)
+	run.Info("daytrade.test", "印の確認")
+	run.Finish(nil)
+
+	if !run.Verify {
+		t.Error("Run に印が無い")
+	}
+	files, _ := filepath.Glob(filepath.Join(digestDir, "uat-*.jsonl"))
+	if len(files) != 1 {
+		t.Fatalf("ダイジェスト = %v", files)
+	}
+	if v, _ := readJSONL(t, files[0])[0]["verify"].(bool); !v {
+		t.Error("ダイジェストに verify が無い")
+	}
+	found := false
+	for _, rec := range readJSONL(t, logPath) {
+		if rec["code"] == "daytrade.test" {
+			found = true
+			if v, _ := rec["verify"].(bool); !v {
+				t.Errorf("ログの行に verify が無い: %v", rec)
+			}
+		}
+	}
+	if !found {
+		t.Error("ログに daytrade.test が無い")
+	}
+	// nil でも落ちない
+	var none *Run
+	none.SetVerify(true)
 }
 
 func TestCrashRecordsAndAlerts(t *testing.T) {

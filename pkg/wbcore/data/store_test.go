@@ -64,3 +64,45 @@ func TestBarStore(t *testing.T) {
 
 	_ = filepath.Join(tempDir, symbol)
 }
+
+func tmpFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	found, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return found
+}
+
+// 書き出しは一時ファイルを経由し、成功しても失敗しても一時ファイルを残さない。
+func TestBarStoreWriteLeavesNoTmp(t *testing.T) {
+	dir := t.TempDir()
+	store := NewBarStore(dir)
+	bar, _ := domain.NewBar("7203", "2026-08-01", decimal.NewFromInt(2500), decimal.NewFromInt(2550), decimal.NewFromInt(2490), decimal.NewFromInt(2530), decimal.NewFromInt(100000))
+
+	if err := store.Write("7203", []domain.Bar{bar}); err != nil {
+		t.Fatal(err)
+	}
+	if left := tmpFiles(t, dir); len(left) != 0 {
+		t.Errorf("成功後に一時ファイルが残っている: %v", left)
+	}
+	// 2 回目（上書き）も同じ
+	if err := store.Write("7203", []domain.Bar{bar}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.Read("7203", "", ""); len(got) != 1 {
+		t.Errorf("上書き後の本数 = %d, want 1", len(got))
+	}
+
+	// 失敗の経路: 本体の名前がディレクトリで rename できない
+	path, _ := store.PathFor("6758")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write("6758", []domain.Bar{bar}); err == nil {
+		t.Fatal("rename できないのに成功している")
+	}
+	if left := tmpFiles(t, dir); len(left) != 0 {
+		t.Errorf("失敗後に一時ファイルが残っている: %v", left)
+	}
+}

@@ -185,3 +185,25 @@ func TestIsTradingHours(t *testing.T) {
 		t.Errorf("Sunday should NOT be trading hours")
 	}
 }
+
+// 現物の差金決済: 当日買った銘柄の当日売りだけを止める。買いと、当日買っていない
+// 銘柄の売りは通す。信用（返済）はこの関数を通さない（呼び出し側の BlocksSameDaySale が偽）。
+func TestViolatesSameDaySettlement(t *testing.T) {
+	boughtToday := map[string]struct{}{"7203": {}}
+
+	if !ViolatesSameDaySettlement(domain.SideSell, "7203", boughtToday) {
+		t.Error("当日買った銘柄の当日売りは差金決済")
+	}
+	if ViolatesSameDaySettlement(domain.SideSell, "6758", boughtToday) {
+		t.Error("当日買っていない銘柄（前日以前の買い）の売りは通す")
+	}
+	if ViolatesSameDaySettlement(domain.SideBuy, "7203", boughtToday) {
+		t.Error("買いは差金決済にならない")
+	}
+	if ViolatesSameDaySettlement(domain.SideSell, "7203", nil) {
+		t.Error("当日の買いが無ければ通す（nil でも落ちない）")
+	}
+	if ViolatesSameDaySettlement(domain.SideSell, "7203", map[string]struct{}{}) {
+		t.Error("当日の買いが無ければ通す（空）")
+	}
+}

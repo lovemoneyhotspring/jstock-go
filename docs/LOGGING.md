@@ -19,12 +19,19 @@
 `thread_id` / `ok` / `error`。レポートの本文は `state/reports/`（日次 45 日・
 週次 180 日・月次は消さない）。
 
+ダイジェストの `<日付>` は **JST**（`digest.DayOf`）。読む側の `deploy/report.sh`・
+`night-repair.sh`・`morning-check.sh` が `TZ=Asia/Tokyo date +%F` で当日のファイルを選ぶので
+それに揃えてある——UTC で切ると 09:00 JST より前の実行（寄り前の snap、6:20 の news、
+6:00 の night-repair）が前日のファイルに入る。**2026-09-14 までのファイルは UTC の日付**で
+切られている（移し替えていない）。その期間を読むときは、朝 9 時前の実行が前日のファイルに
+入っていることに注意する。JSONL（層 3）のローテーションは別で、UTC の 0 時のまま。
+
 **どの置き場も日付でファイルが分かれている**ので、期間を指定すればその範囲の
 ファイルだけを開く。全部読まずに済む構造が、記録が増えても壊れないための前提:
 
 | 置き場 | 1 ファイルの単位 | 期間で絞る方法 |
 |---|---|---|
-| `state/digest/<env>-<日付>.jsonl` | 1 日 | ファイル名（`prod-2026-09-{01..30}.jsonl`） |
+| `state/digest/<env>-<日付>.jsonl` | 1 日（**JST** の日付） | ファイル名（`prod-2026-09-{01..30}.jsonl`） |
 | `state/notify/<日付>.jsonl` | 1 日 | ファイル名。Go からは `notify.ReadArchive(from, to)` |
 | `state/logs/<app>-<env>.jsonl.<日付>` | 1 日（退避後） | ファイル名。当日分だけ接尾辞なし |
 | `state/<app>/history/<種類>/*.parquet` | 1 実行（名前の先頭 10 文字が判定日） | `history.Store.Files(kind, Range)` が**開く前に**名前で選ぶ。SQL なら `WHERE day BETWEEN …` |
@@ -191,7 +198,9 @@ jq -c 'select(.verify)' state/digest/prod-2026-09-06.jsonl
 |---|---|---|
 | `broker.request` | 電文を送って応答を読めた（ログインも） | `clm`（電文の種類）, `iface`（`request` / `price` / `master` / `auth`）, `p_no`, `symbol`, `elapsed_ms`, `timeout_ms`, `http_status`, `p_errno`, `result_code`, `result_text`, `order_number` |
 | `broker.request_failed` | 通信エラー・HTTP エラー・JSON でない応答・締め切りで送らなかった（warning） | 同上＋ `error`, `body`（応答本文の先頭 300 文字。メンテ画面等の切り分け） |
-| `broker.retry` | 照会を送り直す（通信エラーで 1 度、セッション失効で 1 度）。新規注文は送り直さない | `clm`, `stage`（`login` / `send`）, `error` / `p_errno`, `backoff_ms` |
+| `broker.retry` | 照会を送り直す（通信エラーで 1 度、セッション失効 `p_errno=2` で 1 度）。新規注文は送り直さない。`-1`（引数エラー）・`-62`（時間外）はセッションを捨てず送り直さない | `clm`, `stage`（`login` / `send`）, `error` / `p_errno`, `backoff_ms` |
+| `broker.warning` | 応答に `sWarningCode` が付いた（受理されたうえでの注意書き。warning） | `clm`, `iface`, `p_no`, `warning_code`, `warning_text`, `order_number` |
+| `broker.duplicate_order` | 同じプロセスで同じ `client_order_id` を既に出していたので送らなかった（warning） | `client_order_id`, `broker_order_id`, `symbol` |
 | `broker.order_number_missing` | 発注は受理されたのに注文番号が無い（以後照会・取消できない。error） | `client_order_id`, `symbol` |
 | `broker.order_row_unreadable` / `broker.history_today_only` / `broker.lot_master_failed` | 注文一覧の 1 行を解釈できない／前日以前の注文は照会できない／売買単位のマスタを取れない（warning） | `order_number`, `error` / `start`, `today` / `error` |
 

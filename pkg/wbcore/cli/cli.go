@@ -8,6 +8,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -114,7 +115,8 @@ func (r *Run) Error(code, msg string, extra ...map[string]any) {
 	}
 }
 
-// Alert は運用通知。Webhook が未設定なら警告ログだけ。
+// Alert は運用通知。送り先が未設定か届かなかったときは警告ログに残す
+// （通知は「落ちた」ことを人に届ける最後の経路なので、届かなかった事実を黙らせない）。
 func (r *Run) Alert(title, body string) {
 	if r == nil {
 		return
@@ -123,7 +125,9 @@ func (r *Run) Alert(title, body string) {
 	if alerter == nil {
 		alerter = notify.Alert
 	}
-	alerter(title, body, r.Logger)
+	if !alerter(title, body, r.Logger) {
+		r.Warn("cli.alert_undelivered", "運用通知を届けられませんでした（state/notify の控えを確認）", map[string]any{"title": title})
+	}
 }
 
 // Crash は cron で誰も端末を見ていないときのために、落ちた理由を記録・通知してから返す。
@@ -172,6 +176,12 @@ func ConnectBroker(name string, s *settings.AppSettings) (broker.Broker, error) 
 	}
 }
 
+// 標準入力が端末かの判定と、確認の読み取り先。テストで差し替える。
+var (
+	stdinIsTerminal           = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+	confirmInput    io.Reader = os.Stdin
+)
+
 // ConfirmLive は本番発注の前に人に確かめる。
 //
 // 非対話（cron・パイプ）では確認を取れない。黙って通すと意図しない本番発注に
@@ -181,12 +191,12 @@ func ConfirmLive(s *settings.AppSettings, allowed, yes bool) error {
 		return nil
 	}
 	fmt.Println("本番環境で実際に発注します")
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !stdinIsTerminal() {
 		return fmt.Errorf("非対話環境では確認を取れません。cron から回すなら --yes を付けてください")
 	}
 	fmt.Print("続行しますか? [y/N]: ")
 	var input string
-	_, _ = fmt.Scanln(&input)
+	_, _ = fmt.Fscanln(confirmInput, &input)
 	if input != "y" && input != "Y" {
 		return fmt.Errorf("中止しました")
 	}

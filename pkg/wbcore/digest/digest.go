@@ -7,8 +7,8 @@
 // 行と、判断した行が同じ形で並んでいるから。
 //
 // そこでダイジェストは逆向きに作る。各実行が終わるときに、その実行を 1 行に畳んで
-// state/digest/<env>-<日付>.jsonl に足す。AI はまずこれを読み、異常（anomalies）が
-// 載っている実行だけ run_id でログに降りる。
+// state/digest/<env>-<日付>.jsonl（日付は JST）に足す。AI はまずこれを読み、
+// 異常（anomalies）が載っている実行だけ run_id でログに降りる。
 //
 //	# 今日の全実行（1 日あたり 50KB 程度）
 //	cat state/digest/prod-2026-09-03.jsonl
@@ -76,8 +76,19 @@ type StartOptions struct {
 	Command  string
 	RunID    string
 	StateDir string
-	// Day は書き出し先の日付（YYYY-MM-DD）。空なら UTC の今日。
+	// Day は書き出し先の日付（YYYY-MM-DD）。空なら JST の今日（DayOf）。
 	Day string
+}
+
+// DayOf はダイジェストの日付（YYYY-MM-DD、JST）。
+//
+// JST で切るのは、読む側（deploy/report.sh・night-repair.sh・morning-check.sh）が
+// `TZ=Asia/Tokyo date +%F` で当日のファイルを選ぶから。UTC で切ると 09:00 JST より
+// 前の実行（寄り前の snap 8:30〜、news 6:20、night-repair 6:00）が前日のファイルに
+// 入り、「今日の運用」から漏れる。2026-09-14 までのファイルは UTC の日付で
+// 切られている（移行はしない。読むときはその境界だけ注意する）。
+func DayOf(now time.Time) string {
+	return now.In(clock.Tokyo).Format("2006-01-02")
 }
 
 // StartRun は実行の記録を始める。CLI の入口から 1 回だけ呼ぶ。
@@ -88,7 +99,7 @@ type StartOptions struct {
 func StartRun(opts StartOptions) {
 	day := opts.Day
 	if day == "" {
-		day = clock.NowUTC().Format("2006-01-02")
+		day = DayOf(clock.NowUTC())
 	}
 	mu.Lock()
 	defer mu.Unlock()

@@ -15,6 +15,13 @@ import (
 )
 
 // closes は通常取引の引け（現地時刻）。
+//
+// 東証は 15:30 固定で、半日立会（HolDiv=2）は見ていない。手元の取引カレンダー
+// （J-Quants markets_calendar、2016-08〜2027-12）に HolDiv=2 の日は 1 日も無いので、
+// 今の暦では差が出ない。半日立会が復活したら、ここではなくカレンダー
+// （pkg/jquants/archive）を引く呼び出し側で扱う——このパッケージは設定の検証
+// （daytrade の entry_window / exit_window）と積立の判定順序にしか使わず、
+// wbcore から J-Quants のアーカイブに依存させるほどの利得が無い。
 var closes = map[domain.Market]struct{ hour, minute int }{
 	domain.MarketJP: {15, 30},
 	domain.MarketUS: {16, 0},
