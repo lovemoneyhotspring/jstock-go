@@ -15,30 +15,19 @@ import (
 
 	"golang.org/x/text/encoding/japanese"
 	"golang.org/x/text/transform"
-
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 )
 
 func TestKouzaProbe(t *testing.T) {
 	if os.Getenv("TACHIBANA_KOUZA_PROBE") == "" {
 		t.Skip("TACHIBANA_KOUZA_PROBE=1 を立てたときだけ動かす")
 	}
-	app := settings.LoadAppSettings()
-	creds, err := credentials.LoadTachibanaCredentials(app.Env, app.DotenvMap)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := NewTachibanaBroker(app.Env, creds, app.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := newProbeBroker(t)
 	payload := map[string]any{
 		"p_no":      "1",
 		"p_sd_date": sdDate(),
 		"sJsonOfmt": "5",
 		"sCLMID":    clmLogin,
-		"sAuthId":   creds.AuthID,
+		"sAuthId":   b.creds.AuthID,
 	}
 	body, _ := json.Marshal(payload)
 	resp, err := b.httpClient.Post(b.baseURL+"auth/", "application/json", bytes.NewReader(body))

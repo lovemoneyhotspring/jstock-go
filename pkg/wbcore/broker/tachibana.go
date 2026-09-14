@@ -52,6 +52,8 @@ const (
 	cashPositionsKey   = "aGenbutuKabuList"
 	marginPositionsKey = "aShinyouTategyokuList"
 	stockMasterKey     = "aCLMStkIssueMstKabu"
+	marketPriceKey     = "aCLMMfdsMarketPrice"
+	newsKey            = "aCLMMfdsNews"
 
 	// orderNotFoundCode は「その注文は無い」を表す結果コード。
 	orderNotFoundCode = "991005"
@@ -356,12 +358,27 @@ func (t *TachibanaBroker) AccountID() string {
 // を 1 つの区間にする。メモリ上の値だけを進めると、並走する 2 プロセスが同じ番号を
 // 送り、後に書いた方が相手の採番を巻き戻す。
 //
-// p_errno（電文の枠組みのエラー。セッション失効など）が返ったらファイルを捨て、
-// 照会系なら 1 度だけログインし直して送り直す。発注（CLMKabuNewOrder）は
-// 送り直さない——届いた上で失効の応答が来た可能性を否定できないため。
-// 呼び出し側は「結果不明」として台帳に PENDING を残す。
+// p_errno（電文の枠組みのエラー）は値で扱いを分ける（実機とリファレンスで確かめた範囲）。
+//
+//   - 2（セッション切断・失効）: ファイルを捨て、照会系なら 1 度だけログインし直して
+//     送り直す。発注（CLMKabuNewOrder）は送り直さない——届いた上で失効の応答が来た
+//     可能性を否定できないため。呼び出し側は「結果不明」として台帳に PENDING を残す
+//   - -1（引数エラー）: 基盤が受け付ける前に弾いた。電文は注文系に届いていないので、
+//     発注なら ErrNotSent に包んで「送っていない」と返す。セッションは生きているので捨てない
+//     （捨てると正しい電文まで再ログインの嵐になる）
+//   - -62（時間外）: 基盤が時間外として弾いた。セッションは捨てず、送り直しもしない
+//   - それ以外: 何が起きたか分からないので従来どおりセッションを捨てる（次で再ログイン）
+//
+// 以前はすべての p_errno を失効として扱い、引数エラーでもセッションを捨てていた。
 
-// ErrSession は p_errno が 0 以外だった応答。セッションは捨ててある。
+// p_errno の値。
+const (
+	pErrnoSessionLost  = "2"   // セッション切断・失効
+	pErrnoArgument     = "-1"  // 引数エラー（基盤が受け付ける前に弾いた）
+	pErrnoOutsideHours = "-62" // 時間外
+)
+
+// ErrSession は p_errno が失効（またはそれと区別できない値）だった応答。セッションは捨ててある。
 type ErrSession struct {
 	CLMID string
 	Errno string
@@ -372,6 +389,22 @@ func (e *ErrSession) Error() string {
 	return fmt.Sprintf("%s の電文が受け付けられませんでした p_errno=%s %s（セッションを破棄。再実行で再ログインします）",
 		e.CLMID, e.Errno, strings.TrimSpace(e.Text))
 }
+
+// ErrPlatform は基盤が電文を弾いた応答（p_errno = -1 引数エラー / -62 時間外）。
+// セッションは生きているので捨てていない。送り直しもしない。
+type ErrPlatform struct {
+	CLMID string
+	Errno string
+	Text  string
+}
+
+func (e *ErrPlatform) Error() string {
+	return fmt.Sprintf("%s の電文を基盤が弾きました p_errno=%s %s", e.CLMID, e.Errno, strings.TrimSpace(e.Text))
+}
+
+// NotAccepted は基盤が受け付ける前に弾いた（引数エラー）か。発注ならこの電文は
+// 注文系に届いていないので「送っていない」として扱える。
+func (e *ErrPlatform) NotAccepted() bool { return e.Errno == pErrnoArgument }
 
 func (t *TachibanaBroker) sessionFilePath() string {
 	today := clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("20060102")
@@ -517,6 +550,14 @@ func (t *TachibanaBroker) login() (*TachibanaSession, error) {
 		t.logWarn("broker.request_failed", "立花証券ログインが拒否された", fields)
 		return nil, fmt.Errorf("立花証券ログインエラー p_errno=%s %s", pErrno, strings.TrimSpace(text(res["p_err"])))
 	}
+	// 業務エラー（認証失敗など）は sResultCode に載る。先に見ないと、仮想URL が空のまま
+	// 復号に進んで「RSA OAEP decrypt error」という無関係なエラーになる
+	if code := strings.TrimSpace(text(res["sResultCode"])); code != "" && code != "0" {
+		fields["result_code"] = code
+		fields["result_text"] = strings.TrimSpace(text(res["sResultText"]))
+		t.logWarn("broker.request_failed", "立花証券ログインが業務エラー", fields)
+		return nil, fmt.Errorf("立花証券ログインエラー sResultCode=%s %s", code, strings.TrimSpace(text(res["sResultText"])))
+	}
 	t.logInfo("broker.request", "立花証券API 電文（ログイン）", fields)
 
 	// 3 つの仮想URL はどれも要る。復号できないものを空で通すと、postTo が
@@ -639,6 +680,12 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 			return nil, fmt.Errorf("セッションを保存できません: %w", err)
 		}
 
+		// 発注・照会の口は上限に当たったら待つ（時価の口は marketPriceBatch が同じことをする）
+		if iface == interfaceRequest {
+			if _, err := requestLimiter().Acquire(); err != nil {
+				return nil, fmt.Errorf("%s の送信待ちに失敗しました: %w", clmID, err)
+			}
+		}
 		res, err := t.send(iface, pNo, clmID, params)
 		if err != nil {
 			if retryNet("send", err) {
@@ -647,9 +694,14 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 			return nil, err
 		}
 		errno := strings.TrimSpace(text(res["p_errno"]))
-		if errno == "" || errno == "0" {
+		switch errno {
+		case "", "0":
 			return res, nil
+		case pErrnoArgument, pErrnoOutsideHours:
+			// 基盤が弾いた。セッションは生きているので捨てない。送り直しても同じ結果
+			return nil, &ErrPlatform{CLMID: clmID, Errno: errno, Text: text(res["p_err"])}
 		}
+		// 2（失効）と、それと区別できない値
 		t.invalidateSessionLocked(sessionPath)
 		if !sessionRetried && resendable(clmID) {
 			sessionRetried = true
@@ -756,7 +808,28 @@ func (t *TachibanaBroker) send(iface string, pNo int, clmID string, params map[s
 		fields["order_number"] = number
 	}
 	t.logInfo("broker.request", "立花証券API 電文", fields)
+	// 警告（sWarningCode / sWarningText）は受理されたうえで付く注意書き。捨てると
+	// 「受理されたのに約定しない」理由が後から追えないので、警告として残す
+	if code := strings.TrimSpace(text(res["sWarningCode"])); code != "" && code != "0" {
+		warn := map[string]any{"clm": clmID, "iface": iface, "p_no": pNo,
+			"warning_code": code, "warning_text": strings.TrimSpace(text(res["sWarningText"]))}
+		if number := fields["order_number"]; number != nil {
+			warn["order_number"] = number
+		}
+		t.logWarn("broker.warning", "立花証券API が警告を返した", warn)
+	}
 	return res, nil
+}
+
+// resultOf は sResultCode と sResultText。**キーが無ければ ErrUnverifiedResponse**——
+// 結果コードの無い応答を「拒否」と読むと、呼び出し側が REJECTED として送り直し、
+// 届いていた場合に二重発注になる。結果不明はそのまま結果不明（PENDING）で止める。
+func resultOf(res map[string]any, clmID string) (code, msg string, err error) {
+	raw, ok := res["sResultCode"]
+	if !ok {
+		return "", "", &ErrUnverifiedResponse{CLMID: clmID, Expected: "sResultCode", Got: keysOf(res)}
+	}
+	return strings.TrimSpace(text(raw)), strings.TrimSpace(text(res["sResultText"])), nil
 }
 
 // Place は 1 注文を出す。
@@ -768,6 +841,18 @@ func (t *TachibanaBroker) send(iface string, pNo int, clmID string, params map[s
 // 返済は建玉の指定が要る。指定できないときは**発注せずにエラーにする**——
 // 現物売りとして通すと、持っていない株を売ろうとすることになる。
 func (t *TachibanaBroker) Place(req domain.OrderRequest) (*domain.OrderAck, error) {
+	// 同一プロセスで同じ client_order_id を既に出していれば送らない（PaperBroker と同じ約束）。
+	// 立花は client_order_id を持たないので、ここで止めないと同じ注文が 2 件出る
+	if existing := t.nativeOrderID(req.ClientOrderID); existing != "" {
+		t.logWarn("broker.duplicate_order", "同じ client_order_id の注文は既に出しているので送らない",
+			map[string]any{"client_order_id": req.ClientOrderID, "broker_order_id": existing, "symbol": req.Symbol})
+		return &domain.OrderAck{
+			ClientOrderID: req.ClientOrderID,
+			BrokerOrderID: &existing,
+			Status:        domain.OrderStatusSubmitted,
+		}, nil
+	}
+
 	params, err := t.orderPayload(req)
 	if err != nil {
 		return nil, err
@@ -775,12 +860,21 @@ func (t *TachibanaBroker) Place(req domain.OrderRequest) (*domain.OrderAck, erro
 
 	res, err := t.postRequest(clmNewOrder, params)
 	if err != nil {
+		// 基盤が受け付ける前に弾いた（引数エラー）なら注文系に届いていない。
+		// 「送っていない」として返し、台帳を UNSENT に戻せるようにする
+		var platform *ErrPlatform
+		if errors.As(err, &platform) && platform.NotAccepted() {
+			return nil, &ErrNotSent{ClientOrderID: req.ClientOrderID, Err: err}
+		}
 		return nil, err
 	}
-	resCode := strings.TrimSpace(text(res["sResultCode"]))
+	resCode, resText, err := resultOf(res, clmNewOrder)
+	if err != nil {
+		// 結果コードが無い＝受理も拒否も分からない。拒否にすると送り直されて二重発注になる
+		return nil, err
+	}
 	if resCode != "0" {
-		return nil, &OrderRejectedError{Message: fmt.Sprintf(
-			"立花発注拒否 [%s]: %s", resCode, strings.TrimSpace(text(res["sResultText"])))}
+		return nil, &OrderRejectedError{Message: fmt.Sprintf("立花発注拒否 [%s]: %s", resCode, resText)}
 	}
 
 	number := strings.TrimSpace(text(res["sOrderNumber"]))
@@ -947,9 +1041,12 @@ func (t *TachibanaBroker) Cancel(clientOrderID string, brokerOrderID *string) er
 		return err
 	}
 
-	resCode := strings.TrimSpace(text(res["sResultCode"]))
+	resCode, resText, err := resultOf(res, clmCancelOrder)
+	if err != nil {
+		return err
+	}
 	if resCode != "0" {
-		return fmt.Errorf("立花取消拒否 [%s]: %s", resCode, strings.TrimSpace(text(res["sResultText"])))
+		return fmt.Errorf("立花取消拒否 [%s]: %s", resCode, resText)
 	}
 
 	return nil
@@ -975,9 +1072,12 @@ func (t *TachibanaBroker) CorrectStop(clientOrderID string, brokerOrderID *strin
 		return err
 	}
 
-	resCode := strings.TrimSpace(text(res["sResultCode"]))
+	resCode, resText, err := resultOf(res, clmCorrectOrder)
+	if err != nil {
+		return err
+	}
 	if resCode != "0" {
-		return fmt.Errorf("立花訂正拒否 [%s]: %s", resCode, strings.TrimSpace(text(res["sResultText"])))
+		return fmt.Errorf("立花訂正拒否 [%s]: %s", resCode, resText)
 	}
 	return nil
 }

@@ -10,9 +10,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 )
 
 func TestMarginProbe(t *testing.T) {
@@ -20,15 +17,7 @@ func TestMarginProbe(t *testing.T) {
 	if codes[0] == "" {
 		t.Skip("TACHIBANA_MARGIN_PROBE=7203[,9432...] を立てたときだけ動かす")
 	}
-	app := settings.LoadAppSettings()
-	creds, err := credentials.LoadTachibanaCredentials(app.Env, app.DotenvMap)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := NewTachibanaBroker(app.Env, creds, app.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := newProbeBroker(t)
 
 	// 1. 銘柄マスタ: 貸借区分・一般信用の可否がここに載っているか
 	for _, code := range codes {

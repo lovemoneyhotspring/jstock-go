@@ -82,6 +82,15 @@ var priceLimiter = sync.OnceValue(func() *RateLimiter {
 	return NewRateLimiter(Limit{Calls: 4, PerSeconds: 1.0})
 })
 
+// requestLimiter は発注・照会の口（sUrlRequest）の送信上限（2 回 / 秒）。
+//
+// 引けの手仕舞いは注文ごとに単品照会（CLMOrderListDetail）を送るので、銘柄数ぶん連射
+// することになる。移植元の Python 実装は残高 2 回/秒・発注 2 回/秒・注文照会 4 回/秒に
+// 分けていたが、口は 1 つなので最も厳しい 2 回/秒に揃える（上限に当たったら待つ）。
+var requestLimiter = sync.OnceValue(func() *RateLimiter {
+	return NewRateLimiter(Limit{Calls: 2, PerSeconds: 1.0})
+})
+
 const (
 	// MarketPriceBatch は時価問合 1 リクエストの銘柄数の上限。
 	MarketPriceBatch = 120
@@ -263,14 +272,12 @@ func (t *TachibanaBroker) marketPriceBatch(batch []string, columns string) ([]ma
 	if err != nil {
 		return nil, err
 	}
-	raw, _ := res["aCLMMfdsMarketPrice"].([]any)
-	rows := make([]map[string]any, 0, len(raw))
-	for _, item := range raw {
-		if row, ok := item.(map[string]any); ok {
-			rows = append(rows, row)
-		}
+	// 配列のキーが無い応答を「0 行」と読むと、全銘柄が「気配なし」として候補から黙って消える。
+	// 形が違えば止める（rowsOf）。sResultCode はこの電文に無いことがあるので、あれば見る
+	if err := checkResultOptional(res, clmMarketPrice); err != nil {
+		return nil, err
 	}
-	return rows, nil
+	return rowsOf(res, marketPriceKey, clmMarketPrice)
 }
 
 // priceDecimal は時価問合の値を Decimal にする。空・"*"（値無し）はゼロ。

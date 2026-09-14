@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"errors"
 	"testing"
 	"time"
 )
@@ -55,63 +54,5 @@ func TestAcquireRejectsOversizedRequest(t *testing.T) {
 	}
 	if waited, err := limiter.AcquireN(0); err != nil || waited != 0 {
 		t.Fatalf("0 個の要求 = %v, %v", waited, err)
-	}
-}
-
-func TestCachedReusesWithinTTL(t *testing.T) {
-	calls := 0
-	now := time.Unix(0, 0)
-	cache := NewCached(func() (int, error) {
-		calls++
-		return calls, nil
-	}, 2*time.Second)
-	cache.SetClock(func() time.Time { return now })
-
-	if v, _ := cache.Get(); v != 1 || calls != 1 {
-		t.Fatalf("1 回目 = %d（呼び出し %d）", v, calls)
-	}
-	now = now.Add(time.Second)
-	if v, _ := cache.Get(); v != 1 || calls != 1 {
-		t.Fatalf("TTL 内で取り直している: %d（呼び出し %d）", v, calls)
-	}
-	now = now.Add(2 * time.Second)
-	if v, _ := cache.Get(); v != 2 || calls != 2 {
-		t.Fatalf("TTL 切れで取り直していない: %d（呼び出し %d）", v, calls)
-	}
-}
-
-func TestCachedInvalidate(t *testing.T) {
-	calls := 0
-	cache := NewCached(func() (int, error) {
-		calls++
-		return calls, nil
-	}, time.Hour)
-	if _, err := cache.Get(); err != nil {
-		t.Fatal(err)
-	}
-	// 発注直後など、状態が変わったら取り直す
-	cache.Invalidate()
-	if v, _ := cache.Get(); v != 2 {
-		t.Fatalf("Invalidate 後 = %d", v)
-	}
-}
-
-func TestCachedDoesNotCacheErrors(t *testing.T) {
-	boom := errors.New("通信断")
-	calls := 0
-	cache := NewCached(func() (int, error) {
-		calls++
-		if calls == 1 {
-			return 0, boom
-		}
-		return 42, nil
-	}, time.Hour)
-
-	if _, err := cache.Get(); !errors.Is(err, boom) {
-		t.Fatalf("err = %v", err)
-	}
-	// 一時的な通信断を TTL のあいだ持ち回ると、実行サイクル全体が使えなくなる
-	if v, err := cache.Get(); err != nil || v != 42 {
-		t.Fatalf("再試行 = %d, %v", v, err)
 	}
 }

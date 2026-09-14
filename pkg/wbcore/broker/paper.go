@@ -8,6 +8,7 @@ import (
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
 	"github.com/shopspring/decimal"
 )
 
@@ -45,6 +46,31 @@ type PaperBroker struct {
 	boughtToday map[string]struct{}
 	// cashTradedToday はその日の現物約定代金の合計（定額コースの段階の基準）。
 	cashTradedToday decimal.Decimal
+	// lotSizes は銘柄ごとの売買単位（SetLotSizes で与える）。無い銘柄は既定の 100 株。
+	lotSizes map[string]decimal.Decimal
+}
+
+// SetLotSizes は銘柄ごとの売買単位を与える（無い銘柄は既定の 100 株のまま）。
+//
+// 実機は CLMStkGetIssueMstKabu から引く。ペーパーでも単元が分かっていないと、
+// 空売り価格規制（50 単元を超える信用新規売りは成行で出せない）を再現できない。
+func (p *PaperBroker) SetLotSizes(lots map[string]decimal.Decimal) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lotSizes = make(map[string]decimal.Decimal, len(lots))
+	for symbol, lot := range lots {
+		if lot.IsPositive() {
+			p.lotSizes[symbol] = lot
+		}
+	}
+}
+
+// lotSizeLocked は銘柄の売買単位。与えられていなければ既定の 100 株。
+func (p *PaperBroker) lotSizeLocked(symbol string) decimal.Decimal {
+	if lot, ok := p.lotSizes[symbol]; ok && lot.IsPositive() {
+		return lot
+	}
+	return marketrules.DefaultLotSize
 }
 
 func NewPaperBroker(initialCash decimal.Decimal, fillModel string) *PaperBroker {
@@ -206,8 +232,19 @@ func (p *PaperBroker) GetOrderHistory(start, end time.Time) ([]domain.Order, err
 	return history, nil
 }
 
+// LotSizes は売買単位。実機（立花証券）と同じく銘柄ごとに返す。与えられていない
+// 銘柄は既定の 100 株——以前は常に空で、呼び出し側の既定に黙って落ちていた。
 func (p *PaperBroker) LotSizes(symbols []string) map[string]decimal.Decimal {
-	return make(map[string]decimal.Decimal)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]decimal.Decimal, len(symbols))
+	for _, symbol := range symbols {
+		if symbol == "" {
+			continue
+		}
+		out[symbol] = p.lotSizeLocked(symbol)
+	}
+	return out
 }
 
 func (p *PaperBroker) Preview(req domain.OrderRequest) (*domain.OrderPreview, error) {
@@ -243,6 +280,15 @@ func (p *PaperBroker) Place(req domain.OrderRequest) (*domain.OrderAck, error) {
 	held := decimal.Zero
 	if exists {
 		held = h.quantity
+	}
+
+	// 空売り価格規制（実機の orderPayload と同じ柵）: 50 単元を超える信用新規売りは成行で出せない
+	if req.Side == domain.SideSell && req.Trade == domain.TradeTypeMarginOpen && req.OrderType == domain.OrderTypeMarket {
+		if limit := ShortSaleMarketShares(p.lotSizeLocked(req.Symbol)); req.Quantity.GreaterThan(limit) {
+			return nil, &OrderRejectedError{Message: fmt.Sprintf(
+				"%s: %d 単元（%s 株）を超える信用新規売りは成行では出せません（空売り価格規制）。"+
+					"数量 %s を減らすか指値にしてください", req.Symbol, ShortSaleMarketUnits, limit, req.Quantity)}
+		}
 	}
 
 	if req.Side == domain.SideSell && req.Trade != domain.TradeTypeMarginOpen {
@@ -308,7 +354,9 @@ func (p *PaperBroker) Cancel(clientOrderID string, brokerOrderID *string) error 
 		return fmt.Errorf("注文が見つかりません: %s", clientOrderID)
 	}
 	if order.Status.IsTerminal() {
-		return nil
+		// 実機は終わった注文の取消を業務エラーで返す。nil にすると「取消せた」と
+		// 読まれ、約定済みの玉が無いものとして扱われる
+		return fmt.Errorf("%s: 注文は既に %s なので取消できません", clientOrderID, order.Status)
 	}
 	order.Status = domain.OrderStatusCancelled
 	p.orders[clientOrderID] = order

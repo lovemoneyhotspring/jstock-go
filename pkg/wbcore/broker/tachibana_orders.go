@@ -83,6 +83,8 @@ var (
 		stopKubun: "sOrderGyakusasiKubun", stopPrice: "sOrderGyakusasiPrice",
 		triggerType: "sOrderTriggerType",
 	}
+	// 単品照会の注文数量は一覧と同じ sOrderOrderSuryou（リファレンスの CLMOrderListDetail
+	// の応答項目で確認。約定数量だけ sYakuzyouSuryou と接頭辞が無い）
 	detailFields = orderFields{
 		issue: fieldDetailIssue, quantity: fieldListQty,
 		filledQty: fieldDetailFilledQty, fillPrice: fieldDetailFillPrice,

@@ -47,13 +47,16 @@ func (t *TachibanaBroker) News(day string) ([]NewsItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, _ := res["aCLMMfdsNews"].([]any)
-	items := make([]NewsItem, 0, len(raw))
-	for _, entry := range raw {
-		row, ok := entry.(map[string]any)
-		if !ok {
-			continue
-		}
+	// 配列のキーが無ければ止める（0 件と読まない）。sResultCode はあれば見る
+	if err := checkResultOptional(res, clmGetNews); err != nil {
+		return nil, err
+	}
+	rows, err := rowsOf(res, newsKey, clmGetNews)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]NewsItem, 0, len(rows))
+	for _, row := range rows {
 		items = append(items, NewsItem{
 			ID:         text(row["p_ID"]),
 			Time:       text(row["p_TM"]),
@@ -86,6 +89,9 @@ func splitList(s string) []string {
 // DecodeNewsText は見出し・本文を戻す。
 // BASE64 を解くと %XX の URL エンコードが出てきて、その中身が Shift_JIS。
 // 順序を逆にすると（先に Shift_JIS として読むと）壊れる。
+//
+// %XX を戻すのは PathUnescape。QueryUnescape は「+」を空白にするので、
+// 本文の「+3%」「A+B」が「 3%」「A B」に化ける。
 func DecodeNewsText(s string) string {
 	if s == "" {
 		return ""
@@ -95,7 +101,7 @@ func DecodeNewsText(s string) string {
 		return s
 	}
 	unescaped := string(raw)
-	if u, err := url.QueryUnescape(unescaped); err == nil {
+	if u, err := url.PathUnescape(unescaped); err == nil {
 		unescaped = u
 	}
 	decoded, err := japanese.ShiftJIS.NewDecoder().String(unescaped)

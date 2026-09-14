@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
@@ -233,6 +234,83 @@ func TestPaperBrokerStopOrder(t *testing.T) {
 	fills = pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2300)}, nil, nil, nil)
 	if len(fills) != 1 || !fills[0].Price.Equal(decimal.NewFromInt(2300)) {
 		t.Fatalf("ギャップで抜けた逆指値の約定 = %+v, want 寄付 2300", fills)
+	}
+}
+
+// 終わった注文の取消は実機（立花証券）と同じく業務エラー。nil を返すと
+// 「取消せた」と読まれ、約定済みの玉が無いものとして扱われる。
+func TestPaperBrokerCancelTerminalOrderIsAnError(t *testing.T) {
+	pb := NewPaperBroker(decimal.NewFromInt(10_000_000), "open")
+	pb.Mark(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2000)})
+	req, _ := domain.NewOrderRequest("o-1", "7203", domain.SideBuy, domain.OrderTypeMarket,
+		decimal.NewFromInt(100), nil, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+	if _, err := pb.Place(req); err != nil {
+		t.Fatal(err)
+	}
+	// 生きている注文は取消せる
+	if err := pb.Cancel("o-1", nil); err != nil {
+		t.Fatalf("未約定の取消: %v", err)
+	}
+	// 取消済み（終局）の取消はエラー
+	if err := pb.Cancel("o-1", nil); err == nil {
+		t.Error("取消済みの注文の取消が nil で通った")
+	}
+	req2, _ := domain.NewOrderRequest("o-2", "7203", domain.SideBuy, domain.OrderTypeMarket,
+		decimal.NewFromInt(100), nil, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+	if _, err := pb.Place(req2); err != nil {
+		t.Fatal(err)
+	}
+	pb.Settle(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2000)}, nil, nil, nil)
+	if err := pb.Cancel("o-2", nil); err == nil {
+		t.Error("約定済みの注文の取消が nil で通った")
+	}
+	if err := pb.Cancel("none", nil); err == nil {
+		t.Error("無い注文の取消が nil で通った")
+	}
+}
+
+// 売買単位は既定 100 株、与えれば銘柄ごと。空売り価格規制（50 単元超の成行売建）を再現できる。
+func TestPaperBrokerLotSizesAndShortSaleRule(t *testing.T) {
+	pb := NewPaperBroker(decimal.NewFromInt(10_000_000), "open")
+	got := pb.LotSizes([]string{"7203", "1629", ""})
+	if len(got) != 2 || !got["7203"].Equal(decimal.NewFromInt(100)) || !got["1629"].Equal(decimal.NewFromInt(100)) {
+		t.Errorf("既定の売買単位 = %v", got)
+	}
+	pb.SetLotSizes(map[string]decimal.Decimal{"1629": decimal.NewFromInt(10), "bad": decimal.Zero})
+	got = pb.LotSizes([]string{"7203", "1629", "bad"})
+	if !got["7203"].Equal(decimal.NewFromInt(100)) || !got["1629"].Equal(decimal.NewFromInt(10)) || !got["bad"].Equal(decimal.NewFromInt(100)) {
+		t.Errorf("与えた売買単位 = %v", got)
+	}
+
+	pb.Mark(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2000), "1629": decimal.NewFromInt(2000)})
+	short := func(id, sym string, qty int64, typ domain.OrderType, limit *decimal.Decimal) error {
+		req, err := domain.NewOrderRequest(id, sym, domain.SideSell, typ, decimal.NewFromInt(qty), limit,
+			domain.TaxAccountSpecific, "test", domain.TradeTypeMarginOpen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = pb.Place(req)
+		return err
+	}
+	var rejected *OrderRejectedError
+	// 単位 100: 5,000 株までは成行で通り、5,100 株は拒否
+	if err := short("s1", "7203", 5000, domain.OrderTypeMarket, nil); err != nil {
+		t.Errorf("50 単元の成行売建が弾かれた: %v", err)
+	}
+	if err := short("s2", "7203", 5100, domain.OrderTypeMarket, nil); !errors.As(err, &rejected) {
+		t.Errorf("51 単元の成行売建が通った: %v", err)
+	}
+	// 単位 10: 50 単元 = 500 株まで（既定の 100 株単位で数えると 5,000 株まで通ってしまう）
+	if err := short("s3", "1629", 500, domain.OrderTypeMarket, nil); err != nil {
+		t.Errorf("単位 10 の銘柄で 500 株の成行売建が弾かれた: %v", err)
+	}
+	if err := short("s3b", "1629", 510, domain.OrderTypeMarket, nil); !errors.As(err, &rejected) {
+		t.Errorf("単位 10 の銘柄で 510 株の成行売建が通った: %v", err)
+	}
+	// 指値なら数量に関係なく通る
+	limit := decimal.NewFromInt(2000)
+	if err := short("s4", "7203", 10000, domain.OrderTypeLimit, &limit); err != nil {
+		t.Errorf("指値の売建が弾かれた: %v", err)
 	}
 }
 

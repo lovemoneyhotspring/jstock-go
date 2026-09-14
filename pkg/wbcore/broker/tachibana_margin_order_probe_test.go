@@ -19,6 +19,7 @@ package broker
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -68,17 +69,45 @@ func (p marginProbe) orderType() domain.OrderType {
 	return domain.OrderTypeLimit
 }
 
+// newProbeBroker は実機に繋ぐブローカー（プローブ共通）。
+//
+// セッションの控えは**リポジトリ root の state/** に置く（probeStateDir）。
+// app.StateDir は相対の "state" で、go test の作業ディレクトリはパッケージの側なので、
+// そのまま渡すと pkg/wbcore/broker/state/ に本番のセッションファイルができる
+// （2026-09-14 に実際にできて、公開リポジトリにコミットされた）。
 func newProbeBroker(t *testing.T) *TachibanaBroker {
+	t.Helper()
 	app := settings.LoadAppSettings()
 	creds, err := credentials.LoadTachibanaCredentials(app.Env, app.DotenvMap)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := NewTachibanaBroker(app.Env, creds, app.StateDir)
+	b, err := NewTachibanaBroker(app.Env, creds, probeStateDir(t, app.StateDir))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// probeStateDir は相対の state ディレクトリを go.mod のある階層（リポジトリ root）から解決する。
+// 絶対パス（WBJP_STATE_DIR で指定した等）はそのまま。
+func probeStateDir(t *testing.T, stateDir string) string {
+	t.Helper()
+	if filepath.IsAbs(stateDir) {
+		return stateDir
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for dir := cwd; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return filepath.Join(dir, stateDir)
+		}
+		if filepath.Dir(dir) == dir {
+			t.Fatalf("go.mod が見つかりません（%s から上へ辿った）。state の置き場を決められない", cwd)
+		}
+	}
 }
 
 func TestMarginOrderProbe(t *testing.T) {

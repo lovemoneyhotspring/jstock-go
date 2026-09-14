@@ -45,13 +45,48 @@ type fakeTachibana struct {
 	priceFail map[string]int
 	// priceBatches は時価問合で受け取ったバッチの先頭銘柄（送信順）。
 	priceBatches []string
+	// priceOmitRows は時価問合の応答から配列のキーを落とす（形が違う応答の模型）。
+	priceOmitRows bool
+	// responses は電文（sCLMID）ごとの応答の固定値。無ければ既定の {"p_errno":"0","sResultCode":"0"}。
+	// 実機で確かめた行の形（docs/BROKER_VERIFY.md）をここに仕込む。
+	responses map[string]map[string]any
+	// payloads は受け取った電文（ログイン以外・送信順）。発注の中身を確かめるのに使う。
+	payloads []map[string]any
+	// loginExtra はログイン応答に足す項目（sResultCode の業務エラーを仕込む等）。
+	loginExtra map[string]any
 }
 
 func newFakeTachibana(t *testing.T, pub *rsa.PublicKey) *fakeTachibana {
-	f := &fakeTachibana{t: t, pub: pub, failErrno: "-62"}
+	// 既定の p_errno は 2（セッション切断）。-1 / -62 はセッションを捨てない別の扱いになる
+	f := &fakeTachibana{t: t, pub: pub, failErrno: pErrnoSessionLost, responses: map[string]map[string]any{}}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.server.Close)
 	return f
+}
+
+// lastPayload は clmID の電文で最後に受け取ったもの。無ければ nil。
+func (f *fakeTachibana) lastPayload(clmID string) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.payloads) - 1; i >= 0; i-- {
+		if text(f.payloads[i]["sCLMID"]) == clmID {
+			return f.payloads[i]
+		}
+	}
+	return nil
+}
+
+// countCLM は clmID の電文を受け取った回数。
+func (f *fakeTachibana) countCLM(clmID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.clmIDs {
+		if c == clmID {
+			n++
+		}
+	}
+	return n
 }
 
 func (f *fakeTachibana) encrypt(url string) string {
@@ -71,12 +106,17 @@ func (f *fakeTachibana) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.URL.Path == "/auth/" {
 		f.logins++
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		login := map[string]any{
 			"p_errno":     "0",
+			"sResultCode": "0",
 			"sUrlRequest": f.encrypt(f.server.URL + "/request/"),
 			"sUrlPrice":   f.encrypt(f.server.URL + "/price/"),
 			"sUrlMaster":  f.encrypt(f.server.URL + "/master/"),
-		})
+		}
+		for k, v := range f.loginExtra {
+			login[k] = v
+		}
+		_ = json.NewEncoder(w).Encode(login)
 		return
 	}
 	// p_no は文字列で送る決まり（数値だと本番の基盤が p_errno=-1 で弾く）。
@@ -84,12 +124,17 @@ func (f *fakeTachibana) handle(w http.ResponseWriter, r *http.Request) {
 	pNo, _ := strconv.Atoi(text(req["p_no"]))
 	f.pNos = append(f.pNos, pNo)
 	f.clmIDs = append(f.clmIDs, text(req["sCLMID"]))
+	f.payloads = append(f.payloads, req)
 	if r.URL.Path == "/price/" {
 		codes := strings.Split(text(req["sTargetIssueCode"]), ",")
 		f.priceBatches = append(f.priceBatches, codes[0])
 		if f.priceFail[codes[0]] > 0 {
 			f.priceFail[codes[0]]--
 			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if f.priceOmitRows {
+			_ = json.NewEncoder(w).Encode(map[string]any{"p_errno": "0"})
 			return
 		}
 		rows := make([]map[string]any, 0, len(codes))
@@ -107,12 +152,62 @@ func (f *fakeTachibana) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if f.failNext > 0 {
 		f.failNext--
-		_ = json.NewEncoder(w).Encode(map[string]any{"p_errno": f.failErrno, "p_err": "session expired"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"p_errno": f.failErrno, "p_err": "platform error " + f.failErrno})
+		return
+	}
+	if res, ok := f.responses[text(req["sCLMID"])]; ok {
+		_ = json.NewEncoder(w).Encode(res)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"p_errno": "0", "sResultCode": "0", "path": r.URL.Path,
 	})
+}
+
+// recordingLogger は電文の記録を貯める Logger（警告が残ることを確かめる）。
+type recordingLogger struct {
+	mu      sync.Mutex
+	entries []logEntry
+}
+
+type logEntry struct {
+	level, code, msg string
+	extra            map[string]any
+}
+
+func (l *recordingLogger) record(level, code, msg string, extra []map[string]any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	merged := map[string]any{}
+	for _, m := range extra {
+		for k, v := range m {
+			merged[k] = v
+		}
+	}
+	l.entries = append(l.entries, logEntry{level: level, code: code, msg: msg, extra: merged})
+}
+
+func (l *recordingLogger) Info(code, msg string, extra ...map[string]any) {
+	l.record("info", code, msg, extra)
+}
+func (l *recordingLogger) Warn(code, msg string, extra ...map[string]any) {
+	l.record("warn", code, msg, extra)
+}
+func (l *recordingLogger) Error(code, msg string, extra ...map[string]any) {
+	l.record("error", code, msg, extra)
+}
+
+// find は level と code の一致する記録。
+func (l *recordingLogger) find(level, code string) []logEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []logEntry
+	for _, e := range l.entries {
+		if e.level == level && e.code == code {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // newSessionTestBroker は模型に繋ぐブローカー。stateDir を共有すると別プロセスの体になる。

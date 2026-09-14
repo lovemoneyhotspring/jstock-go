@@ -11,9 +11,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 )
 
 // ratingWords はレーティングに関わる見出しを拾うための語。
@@ -24,15 +21,7 @@ func TestNewsProbe(t *testing.T) {
 	if days[0] == "" {
 		t.Skip("TACHIBANA_NEWS_PROBE=YYYYMMDD[,YYYYMMDD...] を立てたときだけ動かす")
 	}
-	app := settings.LoadAppSettings()
-	creds, err := credentials.LoadTachibanaCredentials(app.Env, app.DotenvMap)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := NewTachibanaBroker(app.Env, creds, app.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := newProbeBroker(t)
 	wantGenre := os.Getenv("TACHIBANA_NEWS_GENRE")
 	words := ratingWords
 	if w := os.Getenv("TACHIBANA_NEWS_WORDS"); w != "" {

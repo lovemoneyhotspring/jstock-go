@@ -12,8 +12,8 @@ import (
 //
 // 証券会社の API には「残高照会は 2 回 / 2 秒」のような上限がある。銘柄ごとに
 // 残高を確認するような実装にすると即座に上限に当たるので、呼び出し側でまとめて
-// 取得し、Cached で短時間だけ使い回す。上限そのものは、それを知っている
-// Broker の実装が Limit で宣言する。
+// 取得する。上限そのものは、それを知っている Broker の実装が Limit で宣言する
+// （立花は requestLimiter / priceLimiter）。
 type Limit struct {
 	Calls      int
 	PerSeconds float64
