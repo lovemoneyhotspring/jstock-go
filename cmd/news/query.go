@@ -76,34 +76,10 @@ func newListCmd() *cobra.Command {
 		Short: "溜めた記事を銘柄・ジャンル・日付・語で引く",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			where := []string{"1=1"}
-			var params []any
-			from := "news n"
-			if code != "" {
-				from += " JOIN news_codes c ON c.feed_date = n.feed_date AND c.news_id = n.news_id"
-				where = append(where, "c.code = ?")
-				params = append(params, code)
-			}
-			if genre != "" {
-				from += " JOIN news_genres g ON g.feed_date = n.feed_date AND g.news_id = n.news_id"
-				where = append(where, "g.genre = ?")
-				params = append(params, genre)
-			}
-			if day != "" {
-				where = append(where, "n.feed_date = ?")
-				params = append(params, day)
-			}
-			if word != "" {
-				where = append(where, "(n.headline LIKE ? OR n.body LIKE ?)")
-				params = append(params, "%"+word+"%", "%"+word+"%")
-			}
-			params = append(params, limit)
+			query, params := news.ListQuery(news.ListFilter{Code: code, Genre: genre, Day: day, Word: word, Limit: limit})
 
 			return withStore(func(s *news.Store) error {
-				rows, err := s.DB().QueryContext(ctx, `
-                    SELECT n.feed_date, n.time, n.genres, n.codes, n.headline, n.body
-                    FROM `+from+` WHERE `+strings.Join(where, " AND ")+`
-                    ORDER BY n.feed_date DESC, n.time DESC LIMIT ?`, params...)
+				rows, err := s.DB().QueryContext(ctx, query, params...)
 				if err != nil {
 					return err
 				}

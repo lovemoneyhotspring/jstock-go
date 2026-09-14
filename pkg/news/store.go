@@ -101,6 +101,24 @@ func (s *Store) Save(ctx context.Context, day string, items []broker.NewsItem, a
 	}
 	defer func() { _ = insNews.Close() }()
 
+	// 転置は記事ごとに消してから入れ直す。訂正で銘柄やジャンルが外れた記事に、
+	// 古い行が残って引っかかり続けないように
+	delCodes, err := tx.PrepareContext(ctx, `DELETE FROM news_codes WHERE feed_date = ? AND news_id = ?`)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = delCodes.Close() }()
+	delGenres, err := tx.PrepareContext(ctx, `DELETE FROM news_genres WHERE feed_date = ? AND news_id = ?`)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = delGenres.Close() }()
+	exists, err := tx.PrepareContext(ctx, `SELECT COUNT(*) FROM news WHERE feed_date = ? AND news_id = ?`)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = exists.Close() }()
+
 	insCode, err := tx.PrepareContext(ctx,
 		`INSERT OR IGNORE INTO news_codes (feed_date, news_id, code) VALUES (?, ?, ?)`)
 	if err != nil {
@@ -121,20 +139,26 @@ func (s *Store) Save(ctx context.Context, day string, items []broker.NewsItem, a
 		if item.ID == "" {
 			continue
 		}
-		res, err := insNews.ExecContext(ctx, day, item.ID, item.Time,
+		// 初出かどうかは書く前に同じトランザクションの中で見る。saved_at が今回の時刻かで
+		// 見ると、同じ秒に 2 回保存したとき 2 回とも初出に数えてしまう。
+		// 同じ応答に同じ記事が 2 度あっても、2 度目は既にあるので数えない
+		var before int
+		if err := exists.QueryRowContext(ctx, day, item.ID).Scan(&before); err != nil {
+			return 0, err
+		}
+		if before == 0 {
+			newRows++
+		}
+		if _, err := insNews.ExecContext(ctx, day, item.ID, item.Time,
 			strings.Join(item.Genres, "|"), strings.Join(item.Categories, "|"),
-			strings.Join(item.Codes, "|"), item.Headline, item.Body, stamp)
-		if err != nil {
+			strings.Join(item.Codes, "|"), item.Headline, item.Body, stamp); err != nil {
 			return 0, fmt.Errorf("%s の記事 %s の保存に失敗: %w", day, item.ID, err)
 		}
-		// 上書きのときも RowsAffected は 1 を返すので、初出は別に数える
-		if n, err := res.RowsAffected(); err == nil && n > 0 {
-			var seen string
-			if err := tx.QueryRowContext(ctx,
-				`SELECT saved_at FROM news WHERE feed_date = ? AND news_id = ?`,
-				day, item.ID).Scan(&seen); err == nil && seen == stamp {
-				newRows++
-			}
+		if _, err := delCodes.ExecContext(ctx, day, item.ID); err != nil {
+			return 0, err
+		}
+		if _, err := delGenres.ExecContext(ctx, day, item.ID); err != nil {
+			return 0, err
 		}
 		for _, code := range item.Codes {
 			if _, err := insCode.ExecContext(ctx, day, item.ID, code); err != nil {
@@ -148,11 +172,13 @@ func (s *Store) Save(ctx context.Context, day string, items []broker.NewsItem, a
 		}
 	}
 
+	// items は取り直しで減らさない（一時的に短い応答が返っても、溜まった記事は消えない）。
+	// new_items は「この回に初めて見た件数」。足し込むと取り直すたびに膨らむ
 	if _, err := tx.ExecContext(ctx, `
         INSERT INTO news_days (feed_date, items, new_items, status, fetched_at)
         VALUES (?, ?, ?, 'ok', ?)
         ON CONFLICT(feed_date) DO UPDATE SET
-            items = excluded.items, new_items = news_days.new_items + excluded.new_items,
+            items = MAX(news_days.items, excluded.items), new_items = excluded.new_items,
             status = 'ok', fetched_at = excluded.fetched_at`,
 		day, len(items), newRows, stamp); err != nil {
 		return 0, err
@@ -171,9 +197,13 @@ func (s *Store) RecordFailure(ctx context.Context, day string, at time.Time, cau
 	return err
 }
 
-// DoneDays は「ok で取り込み済み」の日を返す。
+// DoneDays は「ok で取り込み済み」の日を返す。0 件の日（休日）も含む。
+//
+// 以前は items > 0 に絞っていたので、休日が 90 日ぶん毎回取り直されていた。
+// 配信の前に回して 0 件を掴んだ日の取り直しは、Sync が直近 recent 日を
+// 済みでも取り直すことで拾う（それより古い 0 件の日は本当に 0 件とみなす）。
 func (s *Store) DoneDays(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT feed_date FROM news_days WHERE status = 'ok' AND items > 0`)
+	rows, err := s.db.QueryContext(ctx, `SELECT feed_date FROM news_days WHERE status = 'ok'`)
 	if err != nil {
 		return nil, err
 	}
