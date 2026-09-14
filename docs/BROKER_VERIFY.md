@@ -120,8 +120,21 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 ```
 
 **実際に発注する**（[tachibana_margin_order_probe_test.go](../pkg/wbcore/broker/tachibana_margin_order_probe_test.go)）。
-買建だけ・1 単元・見積り 5,000 円まで・その銘柄に建玉があれば送らない・新規は売気配／返済は買気配の指値。
+1 単元・見積り 5,000 円まで・その銘柄に建玉があれば送らない・指値は約定する側の気配に置く。
 途中で落ちても、建った玉は最後に返済を試みる。
+`TACHIBANA_MARGIN_ORDER_SIDE=sell` で売建（空売り → 返済買い）、`TACHIBANA_MARGIN_ORDER_TYPE=market` で
+新規・返済とも成行（`daytrade open` / `close` と同じ種別）になる。
+
+同じ日に 3 通り回し、**3 回ともすべての段が ✅** だった。
+
+| 回 | 新規 → 返済 | 種別 | 建玉の数量 | 返済の逆指値 |
+|---|---|---|---|---|
+| 1 | 買建 → 返済売り | 指値 | +10 | 売り・気配 −3%（訂正でさらに下） |
+| 2 | **売建（空売り）→ 返済買い** | **成行** | **−10**（売建は負の約束どおり） | **買い・気配 +3%**（訂正でさらに上） |
+| 3 | 買建 → 返済売り | **成行** | +10 | 売り・気配 −3% |
+
+以下の表は 1 回目の電文ごとの結果。2・3 回目も同じ段がすべて通り、照会では
+`種別 MARKET`・`売買 SELL/BUY`・`取引 MARGIN_OPEN/MARGIN_CLOSE` がそれぞれ正しく読めた。
 
 | 電文 | 結果 |
 |---|---|
@@ -140,7 +153,25 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 - `sOrderTategyokuKizituDay`（期日）は建日の約 6 か月後。制度信用（`sGenkinShinyouKubun = 2`）で建っている
 - 定数に無い項目: `sOrderBensaiKubun`・`sOrderTateTesuryou`（建手数料 0）・`sOrderKanrihi`・`sOrderZyunHibu`・`sTategyokuDaikin` など
 
-**余力の動き**: 現物買付可能額が 1 円減った（= 気配の差 0.1 円 × 10 株）。信用の売買代金に新規と返済の 2 件ぶんが載り、
+成行の空売り（10 株）は空売り価格規制の適用除外（50 単元以内）で、そのまま受理された。
+
+**余力の動き**: 1 回目のあと、現物買付可能額が 1 円減った（= 気配の差 0.1 円 × 10 株）。
+2・3 回目の成行はそれぞれ 0.2 円 × 10 株 = 2 円の損で、3 回の合計は 5 円。
+
+**返済の単品照会（`CLMOrderListDetail`）に決済の明細が載る。** `aKessaiOrderTategyokuList` の 1 行に
+`sKessaiSoneki`（決済損益、例 `-2`）・`sKessaiTateTesuryou`・`sKessaiKanrihi`・`sKessaiKasikaburyou`・
+`sKessaiGyakuhibu`・`sKessaiKakikaeryou` などが入り、この日は損益以外すべて 0 だった（日計りなので当然）。
+新規の単品照会には無い。返済の約定代金の欄 `sGaisanDaikin` は損益（`-2`）で、新規は約定代金（`2345`）。
+信用の損益を台帳で持つなら、ここから引ける。
+
+余力の電文で使えたもの（照会のみ）: `CLMZanRealHosyoukinRitu` は当日（`sT0*`）と 5 営業日後（`sT5*`）の
+差入保証金・受入保証金・評価損益・委託保証金率を返す（`sT0HyoukaSonEki` が当日の損益）。
+`CLMZanKaiKanougaku` は現物買付可能額だけ、`CLMZanShinkiKanoIjiritu` は信用新規建可能額だけ。
+`CLMZanKaiSinyouSinkidateSyousai` はザラ場中に `991002`（一時的に利用不可）で返った。
+
+> **現物買付可能額が、テストの損 5 円とは別に 1,000 円減った**（2 回目と 3 回目の間、12:44 → 12:57 のどこか）。
+> 当日の注文はテストの 9 件だけで、決済明細の諸経費は 0、当日の評価損益は −5 円。**信用の取引からは説明できない。**
+> API からは原因が見えないので、Web 画面の入出金・取引履歴で確かめる（2026-09-14 時点で未解明）。信用の売買代金に新規と返済の 2 件ぶんが載り、
 現物の注文件数は 0 のまま。**信用の手数料は 0 円**で、受渡も信用として処理された。
 
 **逆指値だけの注文は、発火待ちの間 `PENDING` で読まれる**（現物の逆指値でも同じ）。`PENDING` は台帳側で
@@ -151,7 +182,15 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 - `daytrade open` / `close` / `verify` を通した経路（台帳への記録・close の数量・verify の「持ち越しなし」）。
   いまの設定は 1 注文 100 万円で、1 単元の検証には使えない。プローブは電文だけを直接叩いている
 - 前営業日の注文を `CLMOrderListDetail` で照会できるか。今日の新規・返済の注文番号は日誌
-  （`~/obsidian-vault/10-journal/2026-09-14.md`）に残したので、翌営業日に照会する
+  （`~/obsidian-vault/10-journal/2026-09-14.md`）に残したので、翌営業日に照会する（照会だけ・発注しない）:
+
+  ```bash
+  WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
+    TACHIBANA_PROD_PRIVATE_KEY_FILE=$PWD/e_api_private_key.der \
+    TACHIBANA_ORDER_DETAIL_PROBE=<注文番号/営業日>,... go test ./pkg/wbcore/broker -run TestOrderDetailProbe -v -count=1
+  ```
+- 寄付・引けの執行条件（`sCondition`）は使っていない。`daytrade` は `sCondition = 0`（条件なし）の成行を
+  時間帯の中で出すので、プローブと同じ電文になる
 
 ## 未検証の電文
 
@@ -342,7 +381,8 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 
 ## 本番へ移すときの条件
 
-現物と逆指値は 2026-09-11、信用の電文（新規・建玉・返済・返済の逆指値）は 2026-09-14 に本番口座で通した。
+現物と逆指値は 2026-09-11、信用の電文（買建・売建、指値・成行の新規と返済、返済の逆指値）は
+2026-09-14 に本番口座で通した。
 **残っているのは信用の 4 点のうち 3（`daytrade verify` の「持ち越しなし」）と 4（前営業日の単品照会）**。
 3 は `daytrade` の台帳を通して回す必要があり、1 単元で回せる設定がまだ無い。
 

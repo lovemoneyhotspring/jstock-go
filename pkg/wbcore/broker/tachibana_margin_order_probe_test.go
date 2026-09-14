@@ -1,22 +1,26 @@
 package broker
 
 // 信用の発注経路を実機で 1 周させる調べもの（docs/BROKER_VERIFY.md の信用 4 点と手順 5 e）。
-// **実際に発注する。** 1 単元を信用で買い建て、同じ実行の中で返済まで済ませる。
+// **実際に発注する。** 1 単元を信用で建て、同じ実行の中で返済まで済ませる。
 //
 //	WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 //	  TACHIBANA_PROD_PRIVATE_KEY_FILE=$PWD/e_api_private_key.der \
 //	  TACHIBANA_MARGIN_ORDER_PROBE=2012 go test ./pkg/wbcore/broker -run TestMarginOrderProbe -v -count=1
 //
+// TACHIBANA_MARGIN_ORDER_SIDE=sell で売建（空売り → 返済買い）、
+// TACHIBANA_MARGIN_ORDER_TYPE=market で新規・返済とも成行（daytrade の open / close と同じ）。
+//
 // 安全のための約束:
-//   - 買建だけ（空売りはしない）。1 単元・見積り 5,000 円まで（TACHIBANA_MARGIN_ORDER_MAX_YEN で変える）
+//   - 1 単元・見積り 5,000 円まで（TACHIBANA_MARGIN_ORDER_MAX_YEN で変える）
 //   - その銘柄に信用建玉が既にあれば何も送らない（他の玉を返済しないため）
-//   - 新規は売気配、返済は買気配の指値（成行にしない）
-//   - 返済の逆指値は発火しない水準（買気配 −3%）に置き、訂正して取消す
+//   - 指値のときは約定する側の気配に置く（買いは売気配、売りは買気配）
+//   - 返済の逆指値は発火しない水準（買建は買気配 −3%、売建は売気配 +3%）に置き、訂正して取消す
 //   - 途中で落ちても、建った玉は最後に必ず返済を試みる
 import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +31,55 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 	"github.com/shopspring/decimal"
 )
+
+// marginProbe は 1 回の検証の指定。
+type marginProbe struct {
+	b      *TachibanaBroker
+	symbol string
+	lot    decimal.Decimal
+	// open は新規の売買（買建なら Buy）。返済はその反対
+	open   domain.Side
+	market bool
+}
+
+func (p marginProbe) closeSide() domain.Side {
+	if p.open == domain.SideBuy {
+		return domain.SideSell
+	}
+	return domain.SideBuy
+}
+
+// limitFor は約定する側の気配（買いは売気配、売りは買気配）。成行なら nil。
+func (p marginProbe) limitFor(side domain.Side, q MarketPrice) *decimal.Decimal {
+	if p.market {
+		return nil
+	}
+	price := q.Bid
+	if side == domain.SideBuy {
+		price = q.Ask
+	}
+	return &price
+}
+
+func (p marginProbe) orderType() domain.OrderType {
+	if p.market {
+		return domain.OrderTypeMarket
+	}
+	return domain.OrderTypeLimit
+}
+
+func newProbeBroker(t *testing.T) *TachibanaBroker {
+	app := settings.LoadAppSettings()
+	creds, err := credentials.LoadTachibanaCredentials(app.Env, app.DotenvMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewTachibanaBroker(app.Env, creds, app.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
 
 func TestMarginOrderProbe(t *testing.T) {
 	symbol := os.Getenv("TACHIBANA_MARGIN_ORDER_PROBE")
@@ -41,19 +94,26 @@ func TestMarginOrderProbe(t *testing.T) {
 		}
 		maxYen = decimal.NewFromInt(n)
 	}
-	app := settings.LoadAppSettings()
-	creds, err := credentials.LoadTachibanaCredentials(app.Env, app.DotenvMap)
-	if err != nil {
-		t.Fatal(err)
+	p := marginProbe{b: newProbeBroker(t), symbol: symbol, open: domain.SideBuy}
+	switch side := os.Getenv("TACHIBANA_MARGIN_ORDER_SIDE"); side {
+	case "", "buy":
+	case "sell":
+		p.open = domain.SideSell
+	default:
+		t.Fatalf("TACHIBANA_MARGIN_ORDER_SIDE は buy か sell: %q", side)
 	}
-	b, err := NewTachibanaBroker(app.Env, creds, app.StateDir)
-	if err != nil {
-		t.Fatal(err)
+	switch typ := os.Getenv("TACHIBANA_MARGIN_ORDER_TYPE"); typ {
+	case "", "limit":
+	case "market":
+		p.market = true
+	default:
+		t.Fatalf("TACHIBANA_MARGIN_ORDER_TYPE は limit か market: %q", typ)
 	}
+	b := p.b
 
 	// 0. 売買単位・気配・既存の建玉
-	lot := b.LotSizes([]string{symbol})[symbol]
-	if !lot.IsPositive() {
+	p.lot = b.LotSizes([]string{symbol})[symbol]
+	if !p.lot.IsPositive() {
 		t.Fatalf("%s の売買単位が取れません", symbol)
 	}
 	quote, err := b.MarketPrices([]string{symbol})
@@ -64,8 +124,9 @@ func TestMarginOrderProbe(t *testing.T) {
 	if !q.Ask.IsPositive() || !q.Bid.IsPositive() {
 		t.Fatalf("%s の気配が無い（買 %s / 売 %s）。ザラ場中に回す", symbol, q.Bid, q.Ask)
 	}
-	estimate := lot.Mul(q.Ask)
-	t.Logf("%s 単元 %s  買気配 %s  売気配 %s  見積り %s 円（上限 %s 円）", symbol, lot, q.Bid, q.Ask, estimate, maxYen)
+	estimate := p.lot.Mul(q.Ask)
+	t.Logf("%s 単元 %s  買気配 %s  売気配 %s  見積り %s 円（上限 %s 円）  新規 %s  %s",
+		symbol, p.lot, q.Bid, q.Ask, estimate, maxYen, p.open, p.orderType())
 	if estimate.GreaterThan(maxYen) {
 		t.Fatalf("見積りが上限を超えるので送りません")
 	}
@@ -89,13 +150,13 @@ func TestMarginOrderProbe(t *testing.T) {
 			return
 		}
 		t.Logf("⚠ 後始末: %s の建玉が残っているので返済を試みる", symbol)
-		closeLong(t, b, symbol, lot, seed+"|cleanup")
+		p.closePosition(t, seed+"|cleanup")
 	}()
 
-	// 1. 信用新規買い（売気配の指値）
+	// 1. 信用新規
 	openReq, err := domain.NewOrderRequest(
-		domain.MakeClientOrderID(seed+"|open", symbol, domain.SideBuy, lot), symbol,
-		domain.SideBuy, domain.OrderTypeLimit, lot, &q.Ask,
+		domain.MakeClientOrderID(seed+"|open", symbol, p.open, p.lot), symbol,
+		p.open, p.orderType(), p.lot, p.limitFor(p.open, q),
 		domain.TaxAccountSpecific, "信用新規の実機検証", domain.TradeTypeMarginOpen)
 	if err != nil {
 		t.Fatal(err)
@@ -105,9 +166,8 @@ func TestMarginOrderProbe(t *testing.T) {
 		t.Fatalf("❌ 信用新規: %v", err)
 	}
 	opened = true
-	t.Logf("✅ 信用新規: 受理 注文番号 %s", deref(ack.BrokerOrderID))
-	order := waitFilled(t, b, openReq.ClientOrderID, ack.BrokerOrderID, lot)
-	if order == nil {
+	t.Logf("✅ 信用新規: 受理 %s %s 注文番号 %s", p.open, priceText(openReq.LimitPrice), deref(ack.BrokerOrderID))
+	if waitFilled(t, b, openReq.ClientOrderID, ack.BrokerOrderID, p.lot) == nil {
 		return
 	}
 
@@ -134,14 +194,19 @@ func TestMarginOrderProbe(t *testing.T) {
 	if pos == nil || pos.BrokerPositionID == "" {
 		t.Fatalf("❌ MarginPositions に %s が無いか建玉番号が空: %+v", symbol, positions)
 	}
+	// 売建は数量を負で返す約束
+	wantNegative := p.open == domain.SideSell
+	if pos.Quantity.IsNegative() != wantNegative {
+		t.Errorf("❌ MarginPositions の数量の符号が違う: %s（新規 %s）", pos.Quantity, p.open)
+	}
 	t.Logf("✅ MarginPositions: 数量 %s  返済可能 %s  建単価 %s  建玉番号 %s  取引 %s",
 		pos.Quantity, pos.AvailableQuantity, pos.CostPrice, pos.BrokerPositionID, pos.Trade)
 
 	// 3. 返済の逆指値（発火しない水準）→ 照会 → 訂正 → 取消
-	stopProbe(t, b, symbol, lot, q.Bid, seed)
+	p.stopProbe(t, q, seed)
 
-	// 4. 返済売り（買気配の指値）
-	closed := closeLong(t, b, symbol, lot, seed+"|close")
+	// 4. 返済
+	closed := p.closePosition(t, seed+"|close")
 	if closed == nil {
 		return
 	}
@@ -159,17 +224,25 @@ func TestMarginOrderProbe(t *testing.T) {
 	t.Logf("翌営業日の単品照会の確認用: 新規 %s / 返済 %s", deref(ack.BrokerOrderID), deref(closed.BrokerOrderID))
 }
 
-// stopProbe は信用買建に返済売りの逆指値を置き、照会・訂正・取消を通す。
-func stopProbe(t *testing.T, b *TachibanaBroker, symbol string, qty, bid decimal.Decimal, seed string) {
-	trigger, err := marketrules.SnapToTick(bid.Mul(decimal.RequireFromString("0.97")),
-		domain.SideSell, false, marketrules.RoundingConservative)
+// stopProbe は建玉に返済の逆指値を置き、照会・訂正・取消を通す。
+//
+// 買建の返済売りは「条件以下で発火」なので気配の下、売建の返済買いは「条件以上で発火」
+// なので気配の上に置く。訂正はさらに遠ざける。
+func (p marginProbe) stopProbe(t *testing.T, q MarketPrice, seed string) {
+	b, side := p.b, p.closeSide()
+	base, away, further := q.Bid, "0.97", "0.98"
+	if side == domain.SideBuy {
+		base, away, further = q.Ask, "1.03", "1.02"
+	}
+	trigger, err := marketrules.SnapToTick(base.Mul(decimal.RequireFromString(away)),
+		side, false, marketrules.RoundingConservative)
 	if err != nil {
 		t.Errorf("❌ 逆指値の条件: %v", err)
 		return
 	}
 	req, err := domain.NewOrderRequest(
-		domain.MakeClientOrderID(seed+"|stop", symbol, domain.SideSell, qty), symbol,
-		domain.SideSell, domain.OrderTypeMarket, qty, nil,
+		domain.MakeClientOrderID(seed+"|stop", p.symbol, side, p.lot), p.symbol,
+		side, domain.OrderTypeMarket, p.lot, nil,
 		domain.TaxAccountSpecific, "信用返済の逆指値の実機検証", domain.TradeTypeMarginClose)
 	if err != nil {
 		t.Error(err)
@@ -184,7 +257,7 @@ func stopProbe(t *testing.T, b *TachibanaBroker, symbol string, qty, bid decimal
 		t.Errorf("❌ 返済の逆指値: %v", err)
 		return
 	}
-	t.Logf("✅ 返済の逆指値: 受理 条件 %s 円 注文番号 %s", trigger, deref(ack.BrokerOrderID))
+	t.Logf("✅ 返済の逆指値: 受理 %s 条件 %s 円 注文番号 %s", side, trigger, deref(ack.BrokerOrderID))
 	defer func() {
 		if err := b.Cancel(req.ClientOrderID, ack.BrokerOrderID); err != nil {
 			t.Errorf("❌ 逆指値の取消: %v（手で取消すこと 注文番号 %s）", err, deref(ack.BrokerOrderID))
@@ -209,15 +282,19 @@ func stopProbe(t *testing.T, b *TachibanaBroker, symbol string, qty, bid decimal
 		t.Errorf("❌ 逆指値の照会: 状態 %s だが Stop が nil", o.Status)
 		return
 	}
-	t.Logf("✅ 逆指値の照会: 状態 %s  取引 %s  条件 %s  発火 %v", o.Status, o.Trade, o.Stop.Trigger, o.StopTriggered)
+	if o.StopTriggered {
+		t.Errorf("❌ 逆指値が発火している（発火しない水準のはず）: 条件 %s", o.Stop.Trigger)
+		return
+	}
+	t.Logf("✅ 逆指値の照会: 状態 %s  取引 %s  売買 %s  条件 %s  発火 %v", o.Status, o.Trade, o.Side, o.Stop.Trigger, o.StopTriggered)
 
-	lower, err := marketrules.SnapToTick(trigger.Mul(decimal.RequireFromString("0.98")),
-		domain.SideSell, false, marketrules.RoundingConservative)
+	moved, err := marketrules.SnapToTick(trigger.Mul(decimal.RequireFromString(further)),
+		side, false, marketrules.RoundingConservative)
 	if err != nil {
 		t.Errorf("❌ 訂正の条件: %v", err)
 		return
 	}
-	if err := b.CorrectStop(req.ClientOrderID, ack.BrokerOrderID, domain.StopSpec{Trigger: lower}); err != nil {
+	if err := b.CorrectStop(req.ClientOrderID, ack.BrokerOrderID, domain.StopSpec{Trigger: moved}); err != nil {
 		t.Errorf("❌ 逆指値の訂正: %v", err)
 		return
 	}
@@ -226,20 +303,20 @@ func stopProbe(t *testing.T, b *TachibanaBroker, symbol string, qty, bid decimal
 		t.Errorf("❌ 訂正後の照会: %v", err)
 		return
 	}
-	t.Logf("✅ 逆指値の訂正: 条件 %s → %s（照会 %s）", trigger, lower, o.Stop.Trigger)
+	t.Logf("✅ 逆指値の訂正: 条件 %s → %s（照会 %s）", trigger, moved, o.Stop.Trigger)
 }
 
-// closeLong は買建を買気配の指値で返済し、約定まで待つ。
-func closeLong(t *testing.T, b *TachibanaBroker, symbol string, qty decimal.Decimal, seed string) *domain.Order {
-	quote, err := b.MarketPrices([]string{symbol})
-	if err != nil || !quote[symbol].Bid.IsPositive() {
+// closePosition は建玉を返済し、約定まで待つ。指値なら約定する側の気配に置く。
+func (p marginProbe) closePosition(t *testing.T, seed string) *domain.Order {
+	b, side := p.b, p.closeSide()
+	quote, err := b.MarketPrices([]string{p.symbol})
+	if err != nil || !quote[p.symbol].Bid.IsPositive() || !quote[p.symbol].Ask.IsPositive() {
 		t.Errorf("❌ 返済の気配が取れません: %v（手で返済すること）", err)
 		return nil
 	}
-	bid := quote[symbol].Bid
 	req, err := domain.NewOrderRequest(
-		domain.MakeClientOrderID(seed, symbol, domain.SideSell, qty), symbol,
-		domain.SideSell, domain.OrderTypeLimit, qty, &bid,
+		domain.MakeClientOrderID(seed, p.symbol, side, p.lot), p.symbol,
+		side, p.orderType(), p.lot, p.limitFor(side, quote[p.symbol]),
 		domain.TaxAccountSpecific, "信用返済の実機検証", domain.TradeTypeMarginClose)
 	if err != nil {
 		t.Error(err)
@@ -250,8 +327,37 @@ func closeLong(t *testing.T, b *TachibanaBroker, symbol string, qty decimal.Deci
 		t.Errorf("❌ 信用返済: %v（手で返済すること）", err)
 		return nil
 	}
-	t.Logf("✅ 信用返済: 受理 指値 %s 円 注文番号 %s", bid, deref(ack.BrokerOrderID))
-	return waitFilled(t, b, req.ClientOrderID, ack.BrokerOrderID, qty)
+	t.Logf("✅ 信用返済: 受理 %s %s 注文番号 %s", side, priceText(req.LimitPrice), deref(ack.BrokerOrderID))
+	return waitFilled(t, b, req.ClientOrderID, ack.BrokerOrderID, p.lot)
+}
+
+// TestOrderDetailProbe は前営業日以前の注文を単品照会（CLMOrderListDetail）で引けるかを見る
+// （BROKER_VERIFY の信用 4 点目）。照会だけで発注はしない。
+//
+//	TACHIBANA_ORDER_DETAIL_PROBE=14012403/20260914,14012415/20260914 go test ./pkg/wbcore/broker -run TestOrderDetailProbe -v -count=1
+func TestOrderDetailProbe(t *testing.T) {
+	ids := os.Getenv("TACHIBANA_ORDER_DETAIL_PROBE")
+	if ids == "" {
+		t.Skip("TACHIBANA_ORDER_DETAIL_PROBE=<注文番号/営業日>[,...] を立てたときだけ動かす")
+	}
+	b := newProbeBroker(t)
+	for _, id := range strings.Split(ids, ",") {
+		id = strings.TrimSpace(id)
+		o, err := b.GetOrder("", &id)
+		switch {
+		case err != nil:
+			t.Errorf("❌ %s: %v", id, err)
+		case o == nil:
+			t.Errorf("❌ %s: 該当なし（前営業日の注文は単品照会でも返らない）", id)
+		default:
+			avg := "—"
+			if o.AvgFillPrice != nil {
+				avg = o.AvgFillPrice.String()
+			}
+			t.Logf("✅ %s: %s %s %s  状態 %s  数量 %s  約定 %s  約定単価 %s",
+				id, o.Symbol, o.Trade, o.Side, o.Status, o.Quantity, o.FilledQuantity, avg)
+		}
+	}
 }
 
 // waitFilled は約定まで最長 30 秒待つ。約定しなければ取消して nil。
@@ -268,7 +374,8 @@ func waitFilled(t *testing.T, b *TachibanaBroker, clientOrderID string, brokerOr
 			if o.AvgFillPrice != nil {
 				avg = o.AvgFillPrice.String()
 			}
-			t.Logf("✅ 約定: 状態 %s  取引 %s  売買 %s  約定 %s 株  約定単価 %s", o.Status, o.Trade, o.Side, o.FilledQuantity, avg)
+			t.Logf("✅ 約定: 状態 %s  取引 %s  売買 %s  種別 %s  約定 %s 株  約定単価 %s",
+				o.Status, o.Trade, o.Side, o.OrderType, o.FilledQuantity, avg)
 			return o
 		}
 		if o.Status.IsTerminal() {
@@ -290,6 +397,13 @@ func getOrder(b *TachibanaBroker, clientOrderID string, brokerOrderID *string) (
 		return nil, fmt.Errorf("注文番号 %s が照会で見つからない", deref(brokerOrderID))
 	}
 	return o, err
+}
+
+func priceText(p *decimal.Decimal) string {
+	if p == nil {
+		return "成行"
+	}
+	return "指値 " + p.String() + " 円"
 }
 
 func deref(s *string) string {
