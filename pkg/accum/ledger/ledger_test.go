@@ -3,6 +3,7 @@ package ledger
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,8 +30,8 @@ func TestLedger_Lifecycle(t *testing.T) {
 	price := decimal.NewFromInt(2500)
 	req, _ := domain.NewOrderRequest("order-accum-1", symbol, domain.SideBuy, domain.OrderTypeLimit, qty, &price, domain.TaxAccountSpecific, "accum test", domain.TradeTypeCash)
 
-	if l.WasPlaced(req.ClientOrderID) {
-		t.Fatalf("expected WasPlaced to be false before record")
+	if placed, err := l.WasPlaced(req.ClientOrderID); err != nil || placed {
+		t.Fatalf("expected WasPlaced to be false before record (err: %v)", err)
 	}
 
 	month := "2026-08-01"
@@ -43,8 +44,8 @@ func TestLedger_Lifecycle(t *testing.T) {
 		t.Fatalf("failed to record order: %v", err)
 	}
 
-	if !l.WasPlaced(req.ClientOrderID) {
-		t.Fatalf("expected WasPlaced to be true after record")
+	if placed, err := l.WasPlaced(req.ClientOrderID); err != nil || !placed {
+		t.Fatalf("expected WasPlaced to be true after record (err: %v)", err)
 	}
 
 	// 当月の発注済み額
@@ -76,5 +77,77 @@ func TestLedger_Lifecycle(t *testing.T) {
 	openOrders, _ = l.OpenOrders()
 	if len(openOrders) != 0 {
 		t.Errorf("expected 0 open orders after fill, got %d", len(openOrders))
+	}
+}
+
+// 拒否・未送信・dry-run は「出していない」。それ以外（送信中・受理・約定・取消・失効）は
+// 一度ブローカーに届いた（かもしれない）注文なので、同じ ID を再送させない。
+func TestWasPlacedByStatus(t *testing.T) {
+	l, err := OpenLedger(filepath.Join(t.TempDir(), "accum.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	cases := []struct {
+		status string
+		want   bool
+	}{
+		{string(domain.OrderStatusPending), true},
+		{string(domain.OrderStatusSubmitted), true},
+		{string(domain.OrderStatusFilled), true},
+		{string(domain.OrderStatusCancelled), true},
+		{string(domain.OrderStatusExpired), true},
+		{string(domain.OrderStatusRejected), false},
+		{string(domain.OrderStatusUnsent), false},
+		{DryRunStatus, false},
+	}
+	price := decimal.NewFromInt(1000)
+	for _, tc := range cases {
+		t.Run(tc.status, func(t *testing.T) {
+			id := "order-" + tc.status
+			req, err := domain.NewOrderRequest(id, "1306", domain.SideBuy, domain.OrderTypeLimit,
+				decimal.NewFromInt(100), &price, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.Record(req, tc.status, nil, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			placed, err := l.WasPlaced(id)
+			if err != nil {
+				t.Fatalf("台帳を読めません: %v", err)
+			}
+			if placed != tc.want {
+				t.Errorf("WasPlaced(%s) = %v, want %v", tc.status, placed, tc.want)
+			}
+		})
+	}
+
+	// 台帳に無い ID はエラーではなく「出していない」
+	if placed, err := l.WasPlaced("無い注文"); err != nil || placed {
+		t.Errorf("WasPlaced(無い注文) = (%v, %v), want (false, nil)", placed, err)
+	}
+}
+
+// 台帳が読めないときに「出していない」と答えると、プロセスをまたいだ二重発注の柵が外れる。
+func TestWasPlacedFailsClosedWhenLedgerUnreadable(t *testing.T) {
+	l, err := OpenLedger(filepath.Join(t.TempDir(), "accum.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	placed, err := l.WasPlaced("order-1")
+	if err == nil {
+		t.Fatal("閉じた台帳でもエラーにならない（読めないのを「出していない」と読んでいる）")
+	}
+	if placed {
+		t.Error("エラーのときに発注済みと答えている")
+	}
+	if !strings.Contains(err.Error(), "order-1") {
+		t.Errorf("どの注文か分からない: %v", err)
 	}
 }

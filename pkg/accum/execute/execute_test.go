@@ -78,6 +78,16 @@ func newRequest(t *testing.T, id, symbol string, qty int64) domain.OrderRequest 
 
 func dec(v int64) decimal.Decimal { return decimal.NewFromInt(v) }
 
+// wasPlaced は台帳の WasPlaced を引き、読めなければテストを止める。
+func wasPlaced(t *testing.T, led *ledger.Ledger, clientOrderID string) bool {
+	t.Helper()
+	placed, err := led.WasPlaced(clientOrderID)
+	if err != nil {
+		t.Fatalf("台帳を読めません: %v", err)
+	}
+	return placed
+}
+
 // --- UnrecordedFills ---------------------------------------------------
 
 func TestUnrecordedFillsDetectsLostLedger(t *testing.T) {
@@ -217,10 +227,10 @@ func TestPlaceRecordedWritesPendingBeforeSending(t *testing.T) {
 	// ときに次回の run が同じ注文を送り直してしまう。
 	var recordedWhenSent bool
 	b := &inspectingBroker{
-		onPlace: func() { recordedWhenSent = led.WasPlaced(req.ClientOrderID) },
+		onPlace: func() { recordedWhenSent = wasPlaced(t, led, req.ClientOrderID) },
 	}
 
-	if led.WasPlaced(req.ClientOrderID) {
+	if wasPlaced(t, led, req.ClientOrderID) {
 		t.Fatal("最初は記録されていないはず")
 	}
 
@@ -251,7 +261,7 @@ func TestPlaceRecordedKeepsPendingOnUnconfirmed(t *testing.T) {
 	if !errors.As(err, &unconfirmed) {
 		t.Fatalf("ErrUnconfirmedOrder を返すべき: %v", err)
 	}
-	if !led.WasPlaced(req.ClientOrderID) {
+	if !wasPlaced(t, led, req.ClientOrderID) {
 		t.Error("送信中の記録が残り、次回の再送が止まるべき")
 	}
 }
@@ -271,7 +281,7 @@ func TestPlaceRecordedMarksRejected(t *testing.T) {
 		t.Error("明確な拒否を「確認できず」に混ぜてはいけない")
 	}
 	// REJECTED は WasPlaced の対象外なので、次回もう一度出せる。
-	if led.WasPlaced(req.ClientOrderID) {
+	if wasPlaced(t, led, req.ClientOrderID) {
 		t.Error("拒否された注文は再送を妨げないべき")
 	}
 }

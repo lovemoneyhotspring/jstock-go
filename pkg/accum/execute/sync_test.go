@@ -225,6 +225,28 @@ func TestSyncOrderStatusHoldsUnqueryableOrders(t *testing.T) {
 	}
 }
 
+// 受理済みなのに注文番号の無い行（受理の応答に番号が無かった）をブローカーが知らないとき、
+// 番号を辿って落ちてはいけない。保留にして次の run に回す。
+func TestSyncOrderStatusHoldsUnknownSubmittedWithoutBrokerID(t *testing.T) {
+	led := openTestLedger(t)
+	req := recordPending(t, led, "order-1", "1306.T", 100, 250_000)
+	if err := led.UpdateStatus(req.ClientOrderID, string(domain.OrderStatusSubmitted), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	b := &lookupBroker{orders: map[string]*domain.Order{}} // ブローカーは知らない
+	synced, err := SyncOrderStatus(led, b, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("照会に失敗: %v", err)
+	}
+	if len(synced.Changes) != 0 {
+		t.Errorf("照会できていないのに台帳を変えました: %+v", synced.Changes)
+	}
+	if len(synced.Unresolved) != 1 || synced.Unresolved[0].ClientOrderID != req.ClientOrderID {
+		t.Fatalf("保留 = %+v, want order-1 の 1 件", synced.Unresolved)
+	}
+}
+
 // 送信結果不明の注文が当日の注文一覧にあれば、注文番号と約定を台帳に帰属させる。
 // 人が口座を見なくても「届いていた」が分かり、二重買付にも買い漏れにもならない。
 func TestSyncOrderStatusAttributesPendingFromHistory(t *testing.T) {

@@ -152,8 +152,15 @@ func VerifyOrder(
 	// （led.Record は UPSERT）ため、ブローカーには 2 件出るのに台帳は 1 行のまま残り、
 	// 投下額が過小に、約定済みの行が PENDING に巻き戻る。2026-09-11 の検証で実際に踏んだ。
 	// accum run は WasPlaced で弾いているので、同じ柵をここにも置く。
-	if opts.Live && led != nil && led.WasPlaced(orderID) {
-		return result, &ErrAlreadyPlaced{Symbol: opts.Symbol, ClientOrderID: orderID, Units: units}
+	if opts.Live && led != nil {
+		placed, err := led.WasPlaced(orderID)
+		if err != nil {
+			// 読めないなら 2 度目かどうか分からない。送らずに止める
+			return result, err
+		}
+		if placed {
+			return result, &ErrAlreadyPlaced{Symbol: opts.Symbol, ClientOrderID: orderID, Units: units}
+		}
 	}
 	req, err := domain.NewOrderRequest(
 		orderID, opts.Symbol, domain.SideBuy, domain.OrderTypeLimit, qty, &price,

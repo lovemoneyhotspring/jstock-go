@@ -255,9 +255,12 @@ func PlanOrders(
 				continue
 			}
 
+			// 成行に指値を付けると NewOrderRequest が弾く。株数は指値で見積もるが、注文には載せない
 			orderType := domain.OrderTypeLimit
+			requestPrice := &snappedPrice
 			if cfg.Execution.OrderType == "market" {
 				orderType = domain.OrderTypeMarket
+				requestPrice = nil
 			}
 
 			taxType := domain.TaxAccountSpecific
@@ -272,12 +275,19 @@ func PlanOrders(
 				domain.SideBuy,
 				orderType,
 				qty,
-				&snappedPrice,
+				requestPrice,
 				taxType,
 				reason,
 				domain.TradeTypeCash,
 			)
 			if err != nil {
+				// 黙って飛ばすと、その銘柄の積立が止まったことにログでも履歴でも気付けない
+				orders = append(orders, PlannedOrder{
+					Symbol: bSym,
+					Amount: due,
+					Reason: reason,
+					Note:   fmt.Sprintf("注文を組み立てられないため見送り: %v", err),
+				})
 				continue
 			}
 
@@ -471,7 +481,13 @@ func RunAccumulation(
 		}
 
 		req := *po.Request
-		if led.WasPlaced(req.ClientOrderID) {
+		placed, err := led.WasPlaced(req.ClientOrderID)
+		if err != nil {
+			// 台帳が読めないなら二重発注を否定できない。安全側に倒して以降を止める。
+			logger.Error("accum.ledger_read_failed", err.Error())
+			return fmt.Errorf("台帳を読めないため発注を中止しました: %w", err)
+		}
+		if placed {
 			logger.Info("accum.skip", fmt.Sprintf("%s: 既に発注済み (ID: %s)", po.Symbol, req.ClientOrderID))
 			continue
 		}

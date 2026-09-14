@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -120,11 +121,24 @@ func (l *Ledger) Close() error {
 	return l.db.Close()
 }
 
-func (l *Ledger) WasPlaced(clientOrderID string) bool {
+// WasPlaced はその注文 ID を既に発注済みかを返す。
+//
+// 送信後・記録前に落ちた場合の再送を止めるための鍵。拒否・未送信・dry-run の
+// 注文は「出していない」と同じ扱いにして、次回もう一度出せるようにする。
+//
+// 台帳が読めないときはエラー。「読めない」を「出していない」と読むと、
+// プロセスをまたいだ二重発注の唯一の柵が外れる。
+func (l *Ledger) WasPlaced(clientOrderID string) (bool, error) {
 	var dummy int
 	query := "SELECT 1 FROM orders WHERE client_order_id = ? AND status NOT IN (?, ?, ?);"
 	err := l.db.QueryRow(query, clientOrderID, DryRunStatus, string(domain.OrderStatusRejected), string(domain.OrderStatusUnsent)).Scan(&dummy)
-	return err == nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("注文 %s が発注済みかを確かめられません: %w", clientOrderID, err)
+	}
+	return true, nil
 }
 
 // BrokerOrderIDs は台帳が知っている注文番号（broker_order_id）の集合。

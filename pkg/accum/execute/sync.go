@@ -123,10 +123,16 @@ func SyncOrderStatus(led *ledger.Ledger, b broker.Broker, now time.Time) (SyncRe
 		}
 
 		if order == nil {
-			// 注文番号があるのにブローカーが知らない。勝手に失効へ倒さず保留にする
+			// ブローカーが知らない。勝手に失効へ倒さず保留にする。
+			// 受理済み（SUBMITTED 等）でも注文番号が無い行はありうる（受理の応答に番号が無かった）ので、
+			// 番号を前提に参照しない——nil を辿って run ごと落ちる
+			reason := "ブローカーの応答に無い（注文番号なし）"
+			if row.BrokerOrderID != nil {
+				reason = "注文番号 " + *row.BrokerOrderID + " がブローカーの応答に無い"
+			}
 			result.Unresolved = append(result.Unresolved, UnresolvedOrder{
 				ClientOrderID: row.ClientOrderID, Symbol: row.Symbol,
-				Status: row.Status, Reason: "注文番号 " + *row.BrokerOrderID + " がブローカーの応答に無い",
+				Status: row.Status, Reason: reason,
 			})
 			continue
 		}

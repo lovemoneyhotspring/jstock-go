@@ -63,8 +63,8 @@ func TestBackupCopiesTheLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer copied.Close()
-	if !copied.WasPlaced("order-1") {
-		t.Error("複製に注文が入っていない")
+	if placed, err := copied.WasPlaced("order-1"); err != nil || !placed {
+		t.Errorf("複製に注文が入っていない (err: %v)", err)
 	}
 }
 
