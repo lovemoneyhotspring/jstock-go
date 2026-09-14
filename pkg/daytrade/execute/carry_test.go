@@ -504,3 +504,99 @@ func TestPositionQueryFailuresAreIndependent(t *testing.T) {
 		t.Error("信用の障害で発注が止まらない")
 	}
 }
+
+// 持ち越しの返済が一部約定（300 のうち 200）で板に残っている朝の再実行。残り 100 株は
+// 注文 ID が変わるので冪等の柵をすり抜ける——生きている返済の上にもう 1 本送らない。
+func TestCarriedPositionsDoesNotStackRepaymentOnPartialFill(t *testing.T) {
+	env, _ := newEnv(t)
+	entryID, d := recordEntry(t, env, 1, "9984", domain.SideBuy, 300, 2000)
+	exitID := recordOpenExit(t, env, d, "9984", domain.SideSell, 300)
+	price := decimal.NewFromInt(2000)
+	exitStatus, exitFilled := domain.OrderStatusPartiallyFilled, int64(200)
+	b := &stubBroker{
+		getOrder: func(id string) (*domain.Order, error) {
+			if id == entryID {
+				return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled,
+					FilledQuantity: decimal.NewFromInt(300), AvgFillPrice: &price}, nil
+			}
+			if id == exitID {
+				return &domain.Order{ClientOrderID: id, Status: exitStatus,
+					FilledQuantity: decimal.NewFromInt(exitFilled), AvgFillPrice: &price}, nil
+			}
+			return nil, nil
+		},
+		positions: []domain.Position{margin("9984", 100)},
+		balance:   richBalance(),
+	}
+	carried, _, err := CarriedPositions(env, b, broker.PositionsByLeg(b))
+	if err != nil || len(carried) != 1 {
+		t.Fatalf("持ち越し 1 件のはず: %v %v", carried, err)
+	}
+	if !carried[0].ExitOpen || !carried[0].Target.Quantity.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("残り 100 株・返済注文が生きている印のはず: %+v", carried[0])
+	}
+	if failures := ReturnCarried(env, b, carried, "翌寄りで持ち越しを手仕舞い"); len(failures) != 0 || len(b.placed) != 0 {
+		t.Errorf("生きている返済の上に重ねて送った: placed=%d failures=%v", len(b.placed), failures)
+	}
+	// 建玉はまだあるので、拘束資金と台帳外の差し引きには数える
+	if long, _ := TiedCapital(carried); !long.Equal(decimal.NewFromInt(200_000)) {
+		t.Errorf("拘束 200,000 円のはず: %s", long)
+	}
+	if out, err := UnrecordedMargin(env, broker.PositionsByLeg(b), carried); err != nil || len(out) != 0 {
+		t.Errorf("返済待ちの建玉を台帳外として返済しようとした: %v %v", out, err)
+	}
+
+	// 返済が失効して終わった（照会で確定）→ 次の実行は残り 100 株を送る
+	exitStatus = domain.OrderStatusExpired
+	carried, _, _ = CarriedPositions(env, b, broker.PositionsByLeg(b))
+	if len(carried) != 1 || carried[0].ExitOpen {
+		t.Fatalf("失効した返済は生きていない: %+v", carried)
+	}
+	ReturnCarried(env, b, carried, "翌寄りで持ち越しを手仕舞い")
+	if len(b.placed) != 1 || !b.placed[0].Quantity.Equal(decimal.NewFromInt(100)) {
+		t.Errorf("残り 100 株の返済を送っていない: %+v", b.placed)
+	}
+}
+
+// 持ち越しの返済は建てた日（前日）の下に記録される。送信結果が分からず PENDING のまま残ったら、
+// 次の実行（判定日は今日）の冒頭で判定できる——台帳の日で引くと永久に拾えず、脚が止まる。
+func TestResolvePendingFindsCarryRepaymentUnderEntryDay(t *testing.T) {
+	env, _ := todayEnv(t)
+	entryID, d := recordEntry(t, env, 1, "7203", domain.SideSell, 300, 1000)
+	exitID := recordDeadExit(t, env, d, "7203", domain.SideBuy, 300)
+	b := &stubBroker{
+		getOrder:   filledLookup(map[string]int64{entryID: 300, exitID: 0}),
+		positions:  []domain.Position{margin("7203", -300)},
+		balance:    richBalance(),
+		historyErr: errors.New("down"),
+		place:      func(domain.OrderRequest) (*domain.OrderAck, error) { return nil, errors.New("timeout") },
+	}
+	carried, _, err := CarriedPositions(env, b, broker.PositionsByLeg(b))
+	if err != nil || len(carried) != 1 {
+		t.Fatalf("carried=%v err=%v", carried, err)
+	}
+	if failures := ReturnCarried(env, b, carried, "翌寄りで持ち越しを手仕舞い"); len(failures) != 1 {
+		t.Fatalf("結果不明が失敗として返っていない: %v", failures)
+	}
+	pendingID := b.placed[0].ClientOrderID
+	if o, ok, _ := env.Ledger.Get(pendingID); !ok || o.Status != string(domain.OrderStatusPending) || !o.Day.Equal(d) {
+		t.Fatalf("前日の下に PENDING が残るはず: %+v", o)
+	}
+
+	// 次の実行: 一覧が取れ、返済は届いていた
+	b.historyErr = nil
+	b.history = []domain.Order{
+		// 台帳の試験用の記録は発注時刻が「今」なので、建玉の注文番号も今日の一覧にあるはずのもの
+		brokerOrderOf("B/"+entryID, "7203", domain.SideSell, 300, domain.TradeTypeMarginOpen, domain.OrderStatusFilled),
+		brokerOrderOf("B/"+exitID, "7203", domain.SideBuy, 300, domain.TradeTypeMarginClose, domain.OrderStatusExpired),
+		brokerOrderOf("88/x", "7203", domain.SideBuy, 300, domain.TradeTypeMarginClose, domain.OrderStatusSubmitted),
+	}
+	summary, err := ResolvePending(env, b, 0)
+	if err != nil || summary.Attributed != 1 {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+	o, _, _ := env.Ledger.Get(pendingID)
+	if o.Status != string(domain.OrderStatusSubmitted) || o.BrokerOrderID == nil || *o.BrokerOrderID != "88/x" {
+		t.Errorf("前日の下の PENDING が帰属されていない: %+v", o)
+	}
+}

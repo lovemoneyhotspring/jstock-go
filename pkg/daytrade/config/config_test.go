@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -244,5 +245,66 @@ func TestMarginConfigMatchesBaseLongRules(t *testing.T) {
 	}
 	if !margin.Margin.Enabled || !margin.Capital.MaxCapital.Equal(decimal.NewFromInt(3_000_000)) {
 		t.Errorf("子の上書きが効いていない: %+v", margin.Capital)
+	}
+}
+
+func TestRunDeadline(t *testing.T) {
+	jst := time.FixedZone("JST", 9*3600)
+	at := func(y int, m time.Month, d, hh, mm, ss int) time.Time { return time.Date(y, m, d, hh, mm, ss, 0, jst) }
+	exec := Default().Execution // entry 09:00〜09:15、exit 15:20〜15:30、max_run_seconds 150
+	cases := []struct {
+		name      string
+		window    string
+		now       time.Time
+		useWindow bool
+		maxRun    int
+		want      time.Time
+	}{
+		{"時間帯の終わりが先", "entry", at(2026, 9, 14, 9, 14, 0), true, 150, at(2026, 9, 14, 9, 15, 0)},
+		{"max_run_seconds が先", "entry", at(2026, 9, 14, 9, 1, 0), true, 150, at(2026, 9, 14, 9, 3, 30)},
+		{"時間帯を見ない", "entry", at(2026, 9, 14, 9, 14, 0), false, 150, at(2026, 9, 14, 9, 16, 30)},
+		{"max_run_seconds = 0 は時間帯の終わり", "entry", at(2026, 9, 14, 9, 1, 0), true, 0, at(2026, 9, 14, 9, 15, 0)},
+		{"どちらも無ければ締め切りなし", "entry", at(2026, 9, 14, 9, 1, 0), false, 0, time.Time{}},
+		{"引け", "exit", at(2026, 9, 14, 15, 29, 0), true, 150, at(2026, 9, 14, 15, 30, 0)},
+		// UTC ではまだ前日（2026-09-13 23:30Z）。時間帯の終わりは JST の今日で組む
+		{"JST の日付の境目", "entry", time.Date(2026, 9, 13, 23, 30, 0, 0, time.UTC), true, 0, at(2026, 9, 14, 9, 15, 0)},
+	}
+	for _, c := range cases {
+		e := exec
+		e.MaxRunSeconds = c.maxRun
+		got := e.RunDeadline(c.window, c.now, c.useWindow, jst)
+		if !got.Equal(c.want) {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestInWindow(t *testing.T) {
+	jst := time.FixedZone("JST", 9*3600)
+	at := func(hh, mm, ss int) time.Time { return time.Date(2026, 9, 14, hh, mm, ss, 0, jst) }
+	exec := Default().Execution
+	cases := []struct {
+		name   string
+		window string
+		now    time.Time
+		want   bool
+	}{
+		{"開始ちょうど", "entry", at(9, 0, 0), true},
+		{"開始の 1 秒前", "entry", at(8, 59, 59), false},
+		{"終わりの 1 秒前", "entry", at(9, 14, 59), true},
+		{"終わりちょうどは外（締め切りと同じ）", "entry", at(9, 15, 0), false},
+		{"終わりの分の途中も外", "entry", at(9, 15, 30), false},
+		{"引け", "exit", at(15, 25, 0), true},
+		{"UTC では前日でも JST で判定", "entry", time.Date(2026, 9, 14, 0, 5, 0, 0, time.UTC), true},
+	}
+	for _, c := range cases {
+		if got := exec.InWindow(c.window, c.now, jst); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+	broken := exec
+	broken.EntryWindow = []string{"09:15"}
+	if broken.InWindow("entry", at(9, 5, 0), jst) {
+		t.Error("読めない時間帯を「中」とした")
 	}
 }

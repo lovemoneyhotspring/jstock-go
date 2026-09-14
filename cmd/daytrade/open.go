@@ -108,7 +108,7 @@ func runOpen(opts openOptions) error {
 	if skipHoliday(day, "open") {
 		return nil
 	}
-	if opts.live && !opts.ignoreWindow && !inWindow(cfg, "entry", now) {
+	if opts.live && !opts.ignoreWindow && !cfg.Execution.InWindow("entry", now, jst) {
 		fmt.Printf("発注時間帯の外（%s）。何もしません\n", describeWindow(cfg, "entry"))
 		logInfo("daytrade.skip", "発注時間帯の外",
 			map[string]any{"reason": "window", "window": describeWindow(cfg, "entry")})
@@ -163,9 +163,12 @@ func runOpen(opts openOptions) error {
 		// 前営業日以前の建玉が残っていれば（引けで返済できなかった持ち越し）、新規に建てる前に
 		// 寄付の成行で手仕舞う。検証は margin.carry_penalty で「翌寄りで返済」としているので同じにする。
 		// 判定できなければ止める——持ち越しを知らずに建てると二重になりうる
-		if carried, held, err = settleCarried(env, b, "翌寄りで持ち越しを手仕舞い"); err != nil {
+		settled, err := execute.SettleCarried(env, b, execute.SettleAtOpen)
+		noteSettlement(settled)
+		if err != nil {
 			return err
 		}
+		carried, held = settled.Carried, settled.Held
 	} else {
 		// dry-run は確認のたびに増える。その日の古い dry-run は消して最新だけ残す
 		if _, err := led.ClearDryRun(day); err != nil {
@@ -178,16 +181,14 @@ func runOpen(opts openOptions) error {
 	if err != nil {
 		return err
 	}
-	remainingLong, remainingShort := cfg.Capital.Positions()-placed.Long, 0
-	if cfg.Margin.Enabled && !watchOnly {
-		remainingShort = cfg.Margin.Positions() - placed.Short
-	}
+	remainingLong, remainingShort := execute.Remaining(cfg, placed, watchOnly)
 	// 持ち越しが拘束している資金（残り株数 × 建値）。返済注文は出したが、寄っていない銘柄は
 	// まだ約定しておらず資金は戻っていない。件数と予算への反映は、倍率を掛けた後の予算が
-	// 決まったところで行う（execute.CapByTied）
+	// 決まったところで行う（execute.SizeDay）
 	tiedLong, tiedShort := execute.TiedCapital(carried)
 	if placed.Total() > 0 {
-		if remainingLong <= 0 && remainingShort <= 0 {
+		// 余りをロングに回す設定では件数だけで「済み」と言わない（execute.DoneForToday）
+		if execute.DoneForToday(cfg, placed, watchOnly) {
 			fmt.Printf("今日の建玉は発注済み（ロング %d / ショート %d 件、冪等）。何もしません\n", placed.Long, placed.Short)
 			logInfo("daytrade.skip", "発注済み", map[string]any{
 				"reason": "already", "orders": placed.Total(), "long": placed.Long, "short": placed.Short})
@@ -302,60 +303,27 @@ func runOpen(opts openOptions) error {
 		return nil
 	}
 
-	// 様子見モードでは「買うとしたら」の上位を目安の予算で見せる
-	n := max(remainingLong, 0)
-	budget := cfg.Capital.BudgetPerOrder()
-	weighting := cfg.Capital.Weighting
-	if watchOnly {
-		n = watchRows
-		budget = cfg.Capital.OrderBudget
-		weighting = "equal"
-	}
-	weak := verdict.Weak()
-	if weak && (!cfg.Margin.Enabled || cfg.Margin.LongShrink) {
-		budget = budget.Mul(decimal.NewFromFloat(verdict.Scale)).Round(0)
-		fmt.Printf("%s（1 注文 %s 円）\n", verdict.ScaleReason, yen(budget))
-	} else if weak {
-		fmt.Println(strings.Split(verdict.ScaleReason, "→")[0] +
-			"→ ロングは縮めず、ショートを建てる合図にする")
-	}
-	// ショック日（regime.shock_*）: 縮小の後にロングの予算へ倍率を掛ける（検証と同じ順序）
-	if verdict.Shock && !watchOnly {
-		budget = budget.Mul(decimal.NewFromFloat(verdict.ShockLong)).Round(0)
-		fmt.Printf("%s（ロング 1 注文 %s 円）\n", verdict.ShockReason, yen(budget))
-		logInfo("daytrade.regime", "ショック日", map[string]any{
-			"reason": verdict.ShockReason, "long_scale": verdict.ShockLong, "short_scale": verdict.ShockShort,
-		})
-	}
+	// 件数と 1 注文の予算: 縮小 → ショック → 拘束 → ショートの倍率 → （選定の後に）余り。
+	// その日の全体で決めてから、今日すでに建てた件数と金額を引く（execute.SizeDay）
+	sizing := execute.SizeDay(execute.SizingInput{
+		Cfg: cfg, Verdict: verdict, Placed: placed, TiedLong: tiedLong, TiedShort: tiedShort,
+		WatchOnly: watchOnly, WatchRows: watchRows,
+	})
+	execute.EmitNotes(env, sizing.Notes)
+	weak := sizing.Weak
+	weighting := sizing.Long.Weighting
 
-	// 持ち越しの拘束: 残りの資金で建てられる件数に減らす。1 注文の予算に満たなくても残りがあれば
-	// 1 件を小さく建てる——一部が拘束されただけで一日を休むのは機会損失
-	if tiedLong.IsPositive() && !watchOnly {
-		before := n
-		n, budget = execute.CapByTied(n, placed.Long, cfg.Capital.MaxCapital, tiedLong, budget)
-		fmt.Printf("持ち越しがロングの資金 %s 円を拘束 → 今日は %d 件（1 注文 %s 円）\n", yen(tiedLong), n, yen(budget))
-		logWarn("daytrade.carry", "持ち越しの拘束資金でロングを縮める", map[string]any{
-			"tied": tiedLong.String(), "n_before": before, "n": n, "budget": budget.String()})
-	}
-
-	// signal.skip_opened: 9:01 の時点で既に寄っている銘柄を候補から外す。
-	// 順位付けの直前に気配そのものを落とすので、ロング・ショートの両方に効く
-	// （市場ギャップと危険信号は落とす前の気配で見る——候補全体の分布が変わるため）
-	rankQuotes := quotes
-	if len(placed.Symbols) > 0 {
-		// 同じ日に建てた銘柄は重ねて建てない（再実行は残りの枚数を別の銘柄で埋める）
-		rankQuotes = dtquotes.DropSymbols(rankQuotes, placed.Symbols)
-	}
-	if swept := execute.SweptSymbols(carried); len(swept) > 0 {
-		// 台帳外として返済に回した銘柄は今日は建てない。返済注文が今日の下に記録されるので、
-		// 同じ銘柄を今日建てると引けの手仕舞いがそれを「発注済み」と取り違えて当日の建玉を残す
-		rankQuotes = dtquotes.DropSymbols(rankQuotes, swept)
+	// 候補の気配: 今日建てた銘柄・台帳外として返済に回した銘柄を落とし、signal.skip_opened なら
+	// 9:01 の時点で既に寄っている銘柄も落とす。順位付けの直前に気配そのものを落とすので、
+	// ロング・ショートの両方に効く（市場ギャップと危険信号は落とす前の気配で見る——候補全体の
+	// 分布が変わるため）
+	swept := execute.SweptSymbols(carried)
+	if len(swept) > 0 {
 		logWarn("daytrade.sweep", "台帳外の返済に回した銘柄を今日の候補から外す",
 			map[string]any{"symbols": sortedKeys(swept)})
 	}
+	rankQuotes, dropped := execute.RankQuotes(quotes, placed.Symbols, swept, cfg.Signal.SkipOpened)
 	if cfg.Signal.SkipOpened {
-		kept, dropped := dtquotes.DropOpened(quotes)
-		rankQuotes = kept
 		summary["quotes_opened"] = int64(len(dropped))
 		fmt.Printf("既に寄っている %d 銘柄を候補から外しました（signal.skip_opened。残り %d）\n",
 			len(dropped), len(rankQuotes))
@@ -366,53 +334,30 @@ func runOpen(opts openOptions) error {
 
 	// ショートの脚（[margin]）を**先に**決める: 使わなかった資金をロングに回すため
 	// （margin.spill_to_long。検証の simulateMarginSpill と同じ順序）。資金はシーソー
-	shortMultiplier := decimal.Zero
-	if cfg.Margin.Enabled && cfg.Margin.Positions() > 0 && !watchOnly {
-		shortMultiplier = cfg.Margin.MultiplierNormal
-		if weak {
-			shortMultiplier = cfg.Margin.MultiplierLongWeak
-		}
-		if verdict.Shock {
-			shortMultiplier = shortMultiplier.Mul(decimal.NewFromFloat(verdict.ShockShort))
-		}
-	}
+	shortMultiplier := sizing.ShortMultiplier
 	var (
 		shortRanking []selection.Ranked
 		shortPicks   []selection.Pick
 		shortN       int
 		shortBudget  decimal.Decimal
 	)
-	if shortMultiplier.GreaterThan(decimal.Zero) && remainingShort > 0 {
-		shortN = remainingShort
-		shortBudget = cfg.Margin.BudgetPerOrder().Mul(shortMultiplier).Round(0)
-		if tiedShort.IsPositive() {
-			before := shortN
-			shortN, shortBudget = execute.CapByTied(shortN, placed.Short, cfg.Margin.MaxCapital, tiedShort, shortBudget)
-			fmt.Printf("持ち越しがショートの資金 %s 円を拘束 → 今日は %d 件（1 注文 %s 円）\n", yen(tiedShort), shortN, yen(shortBudget))
-			logWarn("daytrade.carry", "持ち越しの拘束資金でショートを縮める", map[string]any{
-				"tied": tiedShort.String(), "n_before": before, "n": shortN, "budget": shortBudget.String()})
-		}
+	if sizing.ShortOpen {
+		shortN, shortBudget = sizing.Short.N, sizing.Short.Budget
 		shortRanking = selection.RankShort(shortUniverse, rankQuotes, cfg.Margin)
 		shortPicks = selection.PickFrom(shortRanking, selection.PickOptions{
-			N: shortN, Budget: shortBudget, Weighting: cfg.Margin.Weighting, Side: domain.SideSell,
+			N: shortN, Budget: shortBudget, Weighting: sizing.Short.Weighting, Side: domain.SideSell,
 			MaxAmount: cfg.Margin.MaxOrder,
 		})
 	}
 
 	// ショートの余り（候補が無い・上限で頭打ち）をロングに回す。銘柄数は総予算 ÷ 1 注文の
-	// 予算（capital.max_positions が上限）。倍率 0 の日（ショック日）は回す元が無い
-	if cfg.Margin.SpillToLong && shortMultiplier.GreaterThan(decimal.Zero) && !watchOnly {
-		used := decimal.Zero
-		for _, pk := range shortPicks {
-			used = used.Add(pk.Amount())
-		}
-		if spill := shortBudget.Mul(decimal.NewFromInt(int64(shortN))).Sub(used); spill.GreaterThan(decimal.Zero) {
-			n, budget = selection.SpillInto(n, budget, cfg.Capital.BudgetPerOrder(), spill, cfg.Capital.MaxPositions)
-			fmt.Printf("ショートの余り %s 円をロングに回す → N=%d、1 注文 %s 円\n", yen(spill), n, yen(budget))
-			summary["spill"] = spill
-			logInfo("daytrade.regime", "ショートの余りをロングへ", map[string]any{
-				"spill": spill.String(), "n": n, "budget": budget.String()})
-		}
+	// 予算（capital.max_positions が上限）。倍率 0 の日（ショック日）は回す元が無い。
+	// 余りは今日のショートの総予算から、今日建てた分と今回の選定を引いたもの（再実行で数え直さない）
+	long, spill, spillNotes := sizing.WithSpill(shortPicks)
+	n, budget := long.N, long.Budget
+	if spill.IsPositive() {
+		execute.EmitNotes(env, spillNotes)
+		summary["spill"] = spill
 	}
 
 	ranking := selection.Rank(eligible, rankQuotes, cfg.Signal)
@@ -742,61 +687,22 @@ func fetchQuotes(cfg dtconfig.Config, b broker.Broker, symbols []string, sourceO
 	return found, nil
 }
 
-// settleCarried は前営業日以前の持ち越しと台帳外の信用建玉を判定し、成行で手仕舞う
-// （open / close 共用）。
-//
-// 信用はデイトレでしか使わないので、台帳が説明できない信用建玉も自分の玉として返済する
-// （UnrecordedMargin）。現物は積立の保有かもしれないので触らない。
-//
-// 照会できなかった注文がある銘柄は手仕舞わず、人に知らせる。通らなかった返済も知らせる
-// （次の実行が同じ判定でもう一度送る。台帳は建てた日の下に記録され、冪等）。
-//
-// 返す held は照会した建玉。発注直前の台帳外の検査（EnsureNoUnrecordedPositions）も
-// これを使い、1 実行の建玉照会を 1 回（現物と信用で 2 電文）にする。
-func settleCarried(env execute.Env, b broker.Broker, phrase string) ([]execute.Carried, broker.LegPositions, error) {
-	// 持ち越しと台帳外の判定は同じ建玉を見る
-	held := broker.PositionsByLeg(b)
-	carried, unconfirmed, err := execute.CarriedPositions(env, b, held)
-	if err != nil {
-		return nil, held, err
+// noteSettlement は持ち越しの片付け（execute.SettleCarried。open / close 共用）の結果を
+// ダイジェストの異常に残す。判定・返済・通知・ログは execute が行う。
+func noteSettlement(s execute.Settlement) {
+	if len(s.Unconfirmed) > 0 {
+		digest.Anomaly("daytrade.carry_unconfirmed", fmt.Sprintf("%d 件の注文を照会できず持ち越しを判定できません", len(s.Unconfirmed)))
 	}
-	if len(unconfirmed) > 0 {
-		alert("デイトレ: 持ち越しの建玉を照会できません。口座を確認してください", strings.Join(unconfirmed, "\n"))
-		digest.Anomaly("daytrade.carry_unconfirmed", fmt.Sprintf("%d 件の注文を照会できず持ち越しを判定できません", len(unconfirmed)))
+	if len(s.Unrecorded) > 0 {
+		digest.Anomaly("daytrade.sweep", fmt.Sprintf("台帳に無い信用建玉 %d 件を返済", len(s.Unrecorded)))
 	}
-	// 照会できなかった注文がある間は台帳外かどうかを決められない（建っていたかもしれない
-	// 玉を「台帳外」と読んで返済すると、建っていなかった場合に反対建玉を作る）
-	if len(unconfirmed) == 0 {
-		unrecorded, err := execute.UnrecordedMargin(env, held, carried)
-		if err != nil {
-			return nil, held, err
-		}
-		if len(unrecorded) > 0 {
-			alert(fmt.Sprintf("デイトレ: 台帳に無い信用建玉 %d 件を返済します", len(unrecorded)),
-				strings.Join(carriedLines(unrecorded), "\n"))
-			digest.Anomaly("daytrade.sweep", fmt.Sprintf("台帳に無い信用建玉 %d 件を返済", len(unrecorded)))
-			carried = append(carried, unrecorded...)
-		}
+	if len(s.Carried) > 0 {
+		digest.Anomaly("daytrade.carry", fmt.Sprintf("%d 件の持ち越しを手仕舞い", len(s.Carried)))
 	}
-	if len(carried) == 0 {
-		return nil, held, nil
+	if len(s.Failures) > 0 {
+		digest.Anomaly("daytrade.carry_failed", fmt.Sprintf("%d 件の持ち越しの手仕舞いが通らず", len(s.Failures)))
 	}
-	lines := carriedLines(carried)
-	fmt.Printf("持ち越し %d 件を成行で手仕舞います: %s\n", len(carried), strings.Join(lines, "、"))
-	logWarn("daytrade.carry", "持ち越しを手仕舞う", map[string]any{"count": len(carried), "positions": lines, "phrase": phrase})
-	digest.Anomaly("daytrade.carry", fmt.Sprintf("%d 件の持ち越しを手仕舞い", len(carried)))
-	if failures := execute.ReturnCarried(env, b, carried, phrase); len(failures) > 0 {
-		alert(fmt.Sprintf("デイトレ: %d 件の持ち越しの手仕舞いが通らず", len(failures)), strings.Join(failures, "\n"))
-		digest.Anomaly("daytrade.carry_failed", fmt.Sprintf("%d 件の持ち越しの手仕舞いが通らず", len(failures)))
+	if s.CheckErr != nil {
+		digest.Anomaly("daytrade.carry_check_failed", "持ち越しを判定できず当日の手仕舞いだけ行った: "+s.CheckErr.Error())
 	}
-	return carried, held, nil
-}
-
-// carriedLines は持ち越しを人向けの 1 行ずつにする。
-func carriedLines(carried []execute.Carried) []string {
-	lines := make([]string, 0, len(carried))
-	for _, c := range carried {
-		lines = append(lines, c.String())
-	}
-	return lines
 }

@@ -358,7 +358,8 @@ type actual struct {
 
 func actualsOf(orders []dtledger.Order) map[string]actual {
 	entries := map[string]dtledger.Order{}
-	exits := map[string]dtledger.Order{}
+	// 手仕舞いは複数本になりうる（引けの一部約定 + 翌寄りの持ち越し返済）。全部を約定数量で合わせる
+	exits := map[string][]dtledger.Order{}
 	for _, o := range orders {
 		if o.IsDryRun() || o.IsDead() {
 			continue
@@ -371,7 +372,7 @@ func actualsOf(orders []dtledger.Order) map[string]actual {
 		if o.IsEntry() {
 			entries[key] = o
 		} else {
-			exits[key] = o
+			exits[key] = append(exits[key], o)
 		}
 	}
 	out := map[string]actual{}
@@ -385,15 +386,10 @@ func actualsOf(orders []dtledger.Order) map[string]actual {
 			price, _ := entry.AvgFillPrice.Float64()
 			a.entry = &price
 		}
-		if exit, ok := exits[key]; ok && exit.AvgFillPrice != nil {
-			price, _ := exit.AvgFillPrice.Float64()
+		if avg, _, ok := dtledger.ExitAvgPrice(exits[key]); ok {
+			price, _ := avg.Float64()
 			a.exit = &price
-			if entry.AvgFillPrice != nil {
-				buy, sell := *entry.AvgFillPrice, *exit.AvgFillPrice
-				if entry.Side != domain.SideBuy {
-					buy, sell = *exit.AvgFillPrice, *entry.AvgFillPrice
-				}
-				pnl, _ := sell.Sub(buy).Mul(exit.FilledQuantity).Float64()
+			if pnl, ok := dtledger.RealizedOf(entry, exits[key]); ok {
 				a.pnl = &pnl
 			}
 		}

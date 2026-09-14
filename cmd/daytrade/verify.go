@@ -90,7 +90,9 @@ func runVerify(date string, brokerVerify bool) error {
 		logError("daytrade.carry", "持ち越し",
 			map[string]any{"day": day.Format(DateLayout), "positions": carried})
 		digest.Anomaly("daytrade.carry", fmt.Sprintf("%d 銘柄が未返済のまま", len(carried)))
-		alert("デイトレ: 売れ残りがあります（持ち越し）。翌朝に手で売ってください",
+		// 翌朝の open が寄付の成行で自動で返済する（execute.SettleCarried）。手で売ると
+		// 台帳と建玉が食い違い、open の返済が反対建玉になりうる
+		alert("デイトレ: 売れ残りがあります（持ち越し）。翌朝の open が自動で返済する。手で触らない",
 			strings.Join(carried, "\n"))
 		return nil
 	}

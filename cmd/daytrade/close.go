@@ -57,7 +57,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 	if skipHoliday(day, "close") {
 		return nil
 	}
-	if live && !ignoreWindow && !inWindow(cfg, "exit", now) {
+	if live && !ignoreWindow && !cfg.Execution.InWindow("exit", now, jst) {
 		fmt.Printf("手仕舞いの時間帯の外（%s）。何もしません\n", describeWindow(cfg, "exit"))
 		logInfo("daytrade.skip", "手仕舞いの時間帯の外",
 			map[string]any{"reason": "window", "window": describeWindow(cfg, "exit")})
@@ -92,6 +92,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 	}
 	var b broker.Broker
 	var carried []execute.Carried
+	var held broker.LegPositions
 	if allowed {
 		if b, err = connectBroker(cfg); err != nil {
 			return err
@@ -108,14 +109,13 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 		}
 		// 朝の返済が寄らずに失効した持ち越しがあれば、引けでもう一度。判定できなくても
 		// **当日の手仕舞いは止めない**——ここで止めると今日の建玉が丸ごと持ち越しになる
-		// （open は逆で、判定できなければ新規に建てない）
-		if carried, _, err = settleCarried(env, b, "引けで持ち越しを手仕舞い"); err != nil {
-			fmt.Printf("持ち越しを判定できません。当日の手仕舞いだけ行います: %v\n", err)
-			logError("daytrade.carry_check_failed", "持ち越しを判定できず当日の手仕舞いだけ行う",
-				map[string]any{"error": err.Error()})
-			digest.Anomaly("daytrade.carry_check_failed", "持ち越しを判定できず当日の手仕舞いだけ行った: "+err.Error())
-			carried = nil
+		// （open は逆で、判定できなければ新規に建てない。方針は execute.SettleAtClose）
+		settled, err := execute.SettleCarried(env, b, execute.SettleAtClose)
+		noteSettlement(settled)
+		if err != nil {
+			return err
 		}
+		carried, held = settled.Carried, settled.Held
 	}
 	entries, dryRun, err := execute.LiveEntries(env)
 	if err != nil {
@@ -125,7 +125,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 		fmt.Printf("今日の建玉が台帳にありません（dry-run %d 件）。何もしません\n", dryRun)
 		logInfo("daytrade.skip", "売る対象なし", map[string]any{"reason": "no_buys", "dry_run": dryRun})
 		if allowed {
-			warnUnrecordedPositions(cfg, day, b, carried)
+			warnUnrecordedPositions(cfg, day, held, carried)
 		}
 		return nil
 	}
@@ -181,10 +181,13 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 // warnUnrecordedPositions は台帳に今日の買いが無いのに、今日の候補だった銘柄を
 // ブローカーが**現物で**保有していれば知らせる。
 //
-// 信用建玉は settleCarried が返済するのでここには出ない（信用はデイトレでしか使わない）。
+// 信用建玉は execute.SettleCarried が返済するのでここには出ない（信用はデイトレでしか使わない）。
 // 現物はデイトレが現物で建てる構成（long_via_margin = false）でしか自分の玉にならず、
 // 積立の保有と口座からは見分けられないので、自動では売らずに人に知らせる。
-func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time, b broker.Broker, carried []execute.Carried) {
+//
+// positions は冒頭の持ち越しの判定（SettleCarried）で照会した建玉。照会し直すと 1 実行で
+// 2 電文増える。その後に送ったのは持ち越しの返済だけで、信用の脚しか動かさない。
+func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time, positions broker.LegPositions, carried []execute.Carried) {
 	p, ok, err := dtplan.Load(appSettings.DaytradeDir(), day)
 	if err != nil || !ok {
 		return
@@ -195,8 +198,7 @@ func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time, b broker.Broker
 			symbols[c.Symbol] = struct{}{}
 		}
 	}
-	// 脚ごとに数えるのは、積立が現物で持っている銘柄と相殺させないため（口座は共用、台帳は別）
-	positions := broker.PositionsByLeg(b)
+	// 脚ごとに数えるのは、積立が現物で持っている銘柄と相殺させないため（口座は共用、台帳は別）。
 	// 見るのは現物だけ。信用の照会が落ちていてもここの判断には要らない
 	if err := positions.CashErr; err != nil {
 		logWarn("daytrade.reconcile", "現物を照会できず保険の確認を省略", map[string]any{"error": err.Error()})
@@ -214,7 +216,7 @@ func warnUnrecordedPositions(cfg dtconfig.Config, day time.Time, b broker.Broker
 		}
 		for _, leg := range execute.CheckedLegs(symbol, cfg) {
 			if leg.Margin {
-				continue // settleCarried が返済済み（返済注文がまだ約定していないだけかもしれない）
+				continue // SettleCarried が返済済み（返済注文がまだ約定していないだけかもしれない）
 			}
 			position, _ := positions.At(leg)
 			if position.Quantity.IsPositive() {

@@ -286,6 +286,22 @@ func (e Execution) RunDeadline(name string, now time.Time, useWindow bool, jst *
 	return deadline
 }
 
+// InWindow は now が name（entry / exit）の時間帯か（JST）。
+//
+// 終わりは RunDeadline と同じ「HH:MM:00」で、秒まで見て切る。分単位で両端を含めると
+// 9:15:30 が「窓の中」なのに締め切り済みになり、全候補が失敗として通知される。
+// 時間帯の設定が読めなければ偽（外として何もしない）。
+func (e Execution) InWindow(name string, now time.Time, jst *time.Location) bool {
+	sh, sm, eh, em, err := e.Window(name)
+	if err != nil {
+		return false
+	}
+	local := now.In(jst)
+	start := time.Date(local.Year(), local.Month(), local.Day(), sh, sm, 0, 0, jst)
+	end := time.Date(local.Year(), local.Month(), local.Day(), eh, em, 0, 0, jst)
+	return !local.Before(start) && local.Before(end)
+}
+
 // Config はデイトレの設定ぜんぶ。
 type Config struct {
 	// Extends は土台にする設定ディレクトリ（この設定ディレクトリからの相対パス）。

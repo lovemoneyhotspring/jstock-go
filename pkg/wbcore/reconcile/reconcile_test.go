@@ -77,6 +77,43 @@ func TestResolveAssignsEachBrokerOrderOnce(t *testing.T) {
 	}
 }
 
+// 一覧が空で返っても、台帳が今日の注文番号を知っているなら一覧の方が壊れている。
+// 「該当なし」を NotSent と読むと、届いていた注文を種を変えて送り直す（二重発注）。
+func TestResolveEmptyListWithKnownOrdersIsNotTrusted(t *testing.T) {
+	pendings := []Pending{pending("a", "7203", domain.SideBuy, 100, t0)}
+	expected := map[string]struct{}{"1/x": {}}
+	opts := Options{Now: now, Known: expected, Expected: expected}
+
+	got := Resolve(pendings, nil, opts)
+	if got[0].Outcome != TooRecent {
+		t.Errorf("空の一覧で判定した: %+v", got[0])
+	}
+
+	// 知っている注文が載っていない一覧（別の銘柄だけ）も信用しない
+	created := t0.Add(time.Second)
+	other := []domain.Order{order("9/x", "9984", domain.SideBuy, 100, domain.TradeTypeCash, &created)}
+	if got = Resolve(pendings, other, opts); got[0].Outcome != TooRecent {
+		t.Errorf("知っている注文の無い一覧で判定した: %+v", got[0])
+	}
+
+	// 知っている注文が載っていれば一覧は生きている → 該当なしは NotSent
+	listed := append(other, order("1/x", "6758", domain.SideBuy, 100, domain.TradeTypeCash, &created))
+	if got = Resolve(pendings, listed, opts); got[0].Outcome != NotSent {
+		t.Errorf("生きている一覧で NotSent にならない: %+v", got[0])
+	}
+
+	// 今日の注文を 1 つも知らなければ（今日の最初の注文）、空の一覧は従来どおり NotSent
+	if got = Resolve(pendings, nil, Options{Now: now}); got[0].Outcome != NotSent {
+		t.Errorf("Expected なしの空の一覧: %+v", got[0])
+	}
+
+	// 一覧に完全一致があれば、一覧の信用とは関係なく帰属する
+	match := []domain.Order{order("2/x", "7203", domain.SideBuy, 100, domain.TradeTypeCash, &created)}
+	if got = Resolve(pendings, match, opts); got[0].Outcome != Attributed {
+		t.Errorf("一致があるのに帰属しない: %+v", got[0])
+	}
+}
+
 func TestResolveIgnoresOrdersFromLongBefore(t *testing.T) {
 	old := t0.Add(-time.Hour)
 	todays := []domain.Order{order("1/x", "7203", domain.SideBuy, 100, domain.TradeTypeCash, &old)}

@@ -1,12 +1,14 @@
 package quotes
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/shopspring/decimal"
 )
 
@@ -183,5 +185,65 @@ func TestFutureStampedAndDescribeAges(t *testing.T) {
 	kept := DropSymbols(quotes, map[string]struct{}{"7203": {}})
 	if _, ok := kept["7203"]; ok || len(kept) != 2 {
 		t.Errorf("DropSymbols: %v", kept)
+	}
+}
+
+// 寄付後は始値、寄っていなければ現在値、それも無ければ板（最良気配）。基準値段と寄りの印も渡す。
+func TestTachibanaFetchPriceFallbacks(t *testing.T) {
+	d := decimal.NewFromInt
+	at := time.Date(2026, 9, 14, 0, 1, 0, 0, time.UTC)
+	rows := map[string]broker.MarketPrice{
+		"open":  {Symbol: "open", Open: d(1000), Last: d(1010), PrevClose: d(990), At: at, Bid: d(1009), Ask: d(1011)},
+		"last":  {Symbol: "last", Last: d(1020), PrevClose: d(1000), At: at},
+		"board": {Symbol: "board", PrevClose: d(1000), At: at, Bid: d(980), Ask: d(990)},
+		"bid":   {Symbol: "bid", PrevClose: d(1000), At: at, Bid: d(970)},
+		"none":  {Symbol: "none", PrevClose: d(1000), At: at},
+	}
+	var asked []string
+	source := &Tachibana{Prices: func(symbols []string) (map[string]broker.MarketPrice, error) {
+		asked = symbols
+		return rows, nil
+	}}
+	got, err := source.Fetch([]string{"open", "last", "board", "bid", "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 5 {
+		t.Errorf("問い合わせた銘柄: %v", asked)
+	}
+	cases := []struct {
+		symbol           string
+		price            decimal.Decimal
+		opened, fromBook bool
+		hasBook          bool
+	}{
+		{"open", d(1000), true, false, true},
+		{"last", d(1020), false, false, false},
+		{"board", d(985), false, true, true},
+		{"bid", d(970), false, true, true},
+	}
+	for _, c := range cases {
+		q, ok := got[c.symbol]
+		if !ok {
+			t.Errorf("%s: 気配が無い", c.symbol)
+			continue
+		}
+		if !q.Price.Equal(c.price) || q.Opened != c.opened || q.FromBook != c.fromBook || q.HasBook != c.hasBook {
+			t.Errorf("%s: price=%s opened=%v fromBook=%v hasBook=%v, want %s/%v/%v/%v",
+				c.symbol, q.Price, q.Opened, q.FromBook, q.HasBook, c.price, c.opened, c.fromBook, c.hasBook)
+		}
+		if !q.PrevClose.Equal(rows[c.symbol].PrevClose) || !q.At.Equal(at) || q.Source != "tachibana" {
+			t.Errorf("%s: 基準値段・時刻・取得元が渡っていない: %+v", c.symbol, q)
+		}
+	}
+	if _, ok := got["none"]; ok {
+		t.Error("値段の無い銘柄を気配にした")
+	}
+
+	failing := &Tachibana{Prices: func([]string) (map[string]broker.MarketPrice, error) {
+		return nil, errors.New("down")
+	}}
+	if _, err := failing.Fetch([]string{"open"}); !errors.Is(err, ErrQuote) {
+		t.Errorf("取得の失敗が ErrQuote になっていない: %v", err)
 	}
 }

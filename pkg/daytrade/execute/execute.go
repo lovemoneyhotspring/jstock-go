@@ -72,24 +72,32 @@ func (e Env) deadlineText() string {
 }
 
 // boundedWait は d 待つ。締め切りが先に来るならそこまでしか待たない。
-func (e Env) boundedWait(d time.Duration) {
+// d を丸ごと待てたか（締め切りで縮めなかったか）を返す。
+func (e Env) boundedWait(d time.Duration) bool {
 	if d <= 0 {
-		return
+		return true
 	}
+	full := true
 	if !e.Deadline.IsZero() {
 		if remaining := e.Deadline.Sub(clock.NowUTC()); remaining < d {
-			d = remaining
+			d, full = remaining, false
 		}
 	}
 	if d > 0 {
 		time.Sleep(d)
 	}
+	return full
 }
 
 // Placed は今日すでに建てた（生きている／約定した）建玉の数。拒否・失効・dry-run は数えない。
 type Placed struct {
 	Long  int
 	Short int
+	// LongAmount / ShortAmount は建てた金額（株数 × 判断時の値段。値段が無ければ約定単価）。
+	// 再実行が「残りの資金」を件数ではなく金額で数えるために使う（SizeDay）——候補が N に
+	// 満たない日は 1 銘柄に 1 注文の予算を超えて入るので、件数だけでは使った資金が分からない。
+	LongAmount  decimal.Decimal
+	ShortAmount decimal.Decimal
 	// Symbols は建てた銘柄 → 向き。同じ銘柄を同じ日に重ねて建てないために使う。
 	Symbols map[string]domain.Side
 }
@@ -111,10 +119,18 @@ func PlacedToday(env Env) (Placed, error) {
 		if o.IsDryRun() || o.IsDead() {
 			continue
 		}
+		amount := decimal.Zero
+		if o.Price != nil {
+			amount = o.Quantity.Mul(*o.Price)
+		} else if o.AvgFillPrice != nil {
+			amount = o.Quantity.Mul(*o.AvgFillPrice)
+		}
 		if o.Side == domain.SideBuy {
 			placed.Long++
+			placed.LongAmount = placed.LongAmount.Add(amount)
 		} else {
 			placed.Short++
+			placed.ShortAmount = placed.ShortAmount.Add(amount)
 		}
 		placed.Symbols[o.Symbol] = o.Side
 	}
@@ -281,7 +297,13 @@ func placeResolving(env Env, b broker.Broker, build func(attempt int) domain.Ord
 	if !errors.As(err, &unconfirmed) {
 		return request, err
 	}
-	env.boundedWait(env.RetryWait)
+	if !env.boundedWait(env.RetryWait) {
+		// 締め切りで待ちを縮めた。受付が一覧に載る前に見ると「届いていない」と誤読して
+		// 種を変えて送り直す（二重発注）ので、判定は次の実行の冒頭（猶予つき）に回す
+		env.Report.Warn("daytrade.pending_unresolved", "締め切りで一覧の反映を待てないので送信結果不明の注文は次の実行で判定する",
+			map[string]any{"client_order_id": request.ClientOrderID, "retry_wait": env.RetryWait.String()})
+		return request, err
+	}
 	if _, rerr := ResolvePending(env, b, 0); rerr != nil {
 		env.Report.Warn("daytrade.pending_unresolved", "送信結果不明の注文を判定できません（次の実行で再判定）", map[string]any{
 			"client_order_id": request.ClientOrderID, "error": rerr.Error()})
@@ -312,39 +334,54 @@ func placeResolving(env Env, b broker.Broker, build func(attempt int) domain.Ord
 //   - 決められない → PENDING のまま残し、Error ログと通知（AI が読む）
 //
 // 一覧を照会できなければエラー。判定できないまま実弾を出さない。
-// 立花の一覧は当日分しか返らないので、判定日が今日（JST）でなければ何もしない。
+//
+// 対象は台帳の日（day）ではなく**発注時刻が今日（JST）**の PENDING。持ち越しの返済は
+// 建てた日の下に記録されるので、day で引くと翌日以降に送った返済の PENDING を永久に
+// 拾えず、その脚が止まったままになる。立花の一覧は当日分しか返らないので、前の日に
+// 送った PENDING は判定できない（警告だけ残す）。
+//
+// 今日送って注文番号まで分かっている注文が一覧に 1 つも無ければ、一覧が空で返った・
+// 反映が遅れていると読み、「該当なし」を「届いていない」とはしない（reconcile.Options.Expected）。
 func ResolvePending(env Env, b broker.Broker, grace time.Duration) (reconcile.Summary, error) {
 	var summary reconcile.Summary
 	if b == nil {
 		return summary, nil
 	}
-	orders, err := env.Ledger.OrdersOn(env.Day, nil)
+	open, err := env.Ledger.OpenOrders()
 	if err != nil {
 		return summary, err
 	}
+	now := clock.NowUTC()
+	todayJST := clock.ToZone(now, clock.Tokyo)
+	start := time.Date(todayJST.Year(), todayJST.Month(), todayJST.Day(), 0, 0, 0, 0, clock.Tokyo)
+	end := start.AddDate(0, 0, 1)
+
 	var pendings []reconcile.Pending
-	for _, o := range orders {
+	days := map[string]string{} // client_order_id → 台帳の日（ログ用）
+	var stale []string
+	for _, o := range open {
 		if o.Status != string(domain.OrderStatusPending) {
 			continue
 		}
-		placedAt, _ := time.Parse(time.RFC3339, o.PlacedAt)
+		placedAt, perr := time.Parse(time.RFC3339, o.PlacedAt)
+		if perr != nil || placedAt.Before(start) || !placedAt.Before(end) {
+			stale = append(stale, o.ClientOrderID)
+			continue
+		}
+		days[o.ClientOrderID] = o.Day.Format(cli.DateLayout)
 		pendings = append(pendings, reconcile.Pending{
 			ClientOrderID: o.ClientOrderID, Symbol: o.Symbol, Side: o.Side, Trade: o.Trade,
 			Quantity: o.Quantity, PlacedAt: placedAt,
 		})
 	}
+	if len(stale) > 0 {
+		env.Report.Warn("daytrade.pending_unresolved", "今日より前に送った送信結果不明の注文は判定しない（一覧は当日分のみ）",
+			map[string]any{"day": env.dayText(), "pending": len(stale), "client_order_ids": stale})
+	}
 	if len(pendings) == 0 {
 		return summary, nil
 	}
-	now := clock.NowUTC()
-	todayJST := clock.ToZone(now, clock.Tokyo)
-	if env.Day.Format(cli.DateLayout) != todayJST.Format(cli.DateLayout) {
-		env.Report.Warn("daytrade.pending_unresolved", "判定日が今日ではないので送信結果不明の注文は判定しない（一覧は当日分のみ）",
-			map[string]any{"day": env.dayText(), "pending": len(pendings)})
-		return summary, nil
-	}
-	start := time.Date(todayJST.Year(), todayJST.Month(), todayJST.Day(), 0, 0, 0, 0, clock.Tokyo)
-	todays, err := b.GetOrderHistory(start, start.Add(24*time.Hour-time.Second))
+	todays, err := b.GetOrderHistory(start, end.Add(-time.Second))
 	if err != nil {
 		return summary, fmt.Errorf("送信結果不明の注文 %d 件を判定できません（当日の注文一覧を照会できない）: %w", len(pendings), err)
 	}
@@ -352,11 +389,22 @@ func ResolvePending(env Env, b broker.Broker, grace time.Duration) (reconcile.Su
 	if err != nil {
 		return summary, err
 	}
-	resolutions := reconcile.Resolve(pendings, todays, reconcile.Options{Now: now, Grace: grace, Known: known})
+	placedToday, err := env.Ledger.PlacedBetween(start, end)
+	if err != nil {
+		return summary, err
+	}
+	expected := map[string]struct{}{}
+	for _, o := range placedToday {
+		if o.IsDryRun() || o.BrokerOrderID == nil || *o.BrokerOrderID == "" {
+			continue
+		}
+		expected[*o.BrokerOrderID] = struct{}{}
+	}
+	resolutions := reconcile.Resolve(pendings, todays, reconcile.Options{Now: now, Grace: grace, Known: known, Expected: expected})
 	var ambiguous []string
 	for _, r := range resolutions {
 		fields := r.Fields()
-		fields["day"] = env.dayText()
+		fields["day"] = days[r.Pending.ClientOrderID]
 		switch r.Outcome {
 		case reconcile.Attributed:
 			m := r.Match
@@ -399,7 +447,12 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 		if pick.Side == domain.SideSell {
 			label = "売建"
 		}
-		if env.Ledger.WasPlaced(request.ClientOrderID) {
+		already, err := env.Ledger.WasPlaced(request.ClientOrderID)
+		if err != nil {
+			// 発注済みか分からないまま送ると二重発注になりうる。この実行は止める
+			return orders, failures, err
+		}
+		if already {
 			env.printf("  %s: %sは発注済み（冪等）\n", pick.Symbol, label)
 			skipRow(pick, request, execution.ReasonIdempotent, "")
 			continue
@@ -619,7 +672,10 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 	for _, order := range entries {
 		filled := order.FilledQuantity
 		fillPrice := order.AvgFillPrice
-		if b != nil {
+		// 台帳で確定済み（約定・拒否・未送信・失効）の注文はブローカーに聞かず台帳の値を使う
+		// （queryFill と同じ）。もう変わらないうえ、未送信・拒否は注文番号が無く、聞くと
+		// 毎回エラーの警告になる（night-repair の雑音）
+		if b != nil && order.IsOpen() {
 			current, err := b.GetOrder(order.ClientOrderID, order.BrokerOrderID)
 			if err != nil {
 				env.printf("  %s: 照会に失敗: %v\n", order.Symbol, err)
@@ -661,7 +717,7 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 					"client_order_id": order.ClientOrderID, "filled": filled.String(),
 				})
 			}
-		} else if filled.IsZero() &&
+		} else if b == nil && filled.IsZero() &&
 			(order.Status == string(domain.OrderStatusSubmitted) || order.Status == string(domain.OrderStatusPending)) {
 			filled = order.Quantity // dry-run では全約定とみなして対象を示す
 		}
@@ -704,6 +760,8 @@ type fillResult struct {
 	// Err はその理由。該当が無いだけなら nil。
 	Unconfirmed bool
 	Err         error
+	// Open は照会の後もまだ終わっていない（送信済み・一部約定で板に残っている）。
+	Open bool
 }
 
 // queryFill は注文の約定数量と平均単価を出す。
@@ -723,6 +781,7 @@ func queryFill(env Env, b broker.Broker, order ledger.Order, msg string) fillRes
 		return result
 	}
 	result.Filled, result.Price = current.FilledQuantity, current.AvgFillPrice
+	result.Open = current.Status.IsOpen()
 	recordFill(env, order, current, result.Filled, result.Price, msg)
 	return result
 }
@@ -790,7 +849,12 @@ func PlaceExitAs(env Env, b broker.Broker, target ExitTarget, phrase string) (st
 		return req
 	}
 	request, action := ExitRequestAs(target, env.Day, env.Cfg, attempt, phrase)
-	if env.Ledger.WasPlaced(request.ClientOrderID) {
+	already, err := env.Ledger.WasPlaced(request.ClientOrderID)
+	if err != nil {
+		// 発注済みか分からないまま送ると二重の返済（反対建玉）になりうる
+		return "", err
+	}
+	if already {
 		env.printf("  %s: %s発注済み（冪等）\n", entry.Symbol, action)
 		return "冪等", nil
 	}

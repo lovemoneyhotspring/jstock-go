@@ -100,7 +100,11 @@ func (c *CSV) Fetch(symbols []string) (map[string]selection.Quote, error) {
 // Tachibana は立花証券 e支店 API の時価問合（CLMMfdsGetMarketPrice）。
 //
 // 寄付後は始値（pDOP）、無ければ現在値（pDPP）。ブローカーの接続をそのまま使う。
-type Tachibana struct{ Broker *broker.TachibanaBroker }
+type Tachibana struct {
+	Broker *broker.TachibanaBroker
+	// Prices は時価問合の差し替え口（試験用）。nil なら Broker.MarketPrices。
+	Prices func(symbols []string) (map[string]broker.MarketPrice, error)
+}
 
 // Name は取得元の識別子。
 func (t *Tachibana) Name() string { return "tachibana" }
@@ -120,7 +124,11 @@ func Connect(env settings.Environment, dotenv map[string]string, stateDir string
 
 // Fetch は時価問合で気配を取る。
 func (t *Tachibana) Fetch(symbols []string) (map[string]selection.Quote, error) {
-	rows, err := t.Broker.MarketPrices(symbols)
+	prices := t.Prices
+	if prices == nil {
+		prices = t.Broker.MarketPrices
+	}
+	rows, err := prices(symbols)
 	if err != nil {
 		return nil, fmt.Errorf("%w: 立花証券の時価取得に失敗: %v", ErrQuote, err)
 	}

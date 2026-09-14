@@ -8,6 +8,7 @@ package ledger
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -201,14 +202,23 @@ func (l *Ledger) ClearDryRun(day time.Time) (int, error) {
 //
 // dry-run は数えない。拒否・取消・失効で終わった注文も数えない——同じ判断を
 // もう一度送ってよい（再送は呼び出し側が ID の種を変える）。
-func (l *Ledger) WasPlaced(clientOrderID string) bool {
+//
+// 台帳を読めなければ error。「読めない」を「未発注」と読むと、既に送った注文を
+// もう一度送る（二重発注）。呼び出し側は error で止めること。
+func (l *Ledger) WasPlaced(clientOrderID string) (bool, error) {
 	var status string
 	err := l.db.QueryRow("SELECT status FROM orders WHERE client_order_id = ?", clientOrderID).Scan(&status)
-	if err != nil || status == DryRunStatus {
-		return false
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("台帳の読み出しに失敗しました（発注済みか判定できません）: %w", err)
+	}
+	if status == DryRunStatus {
+		return false, nil
 	}
 	_, dead := deadStatuses[status]
-	return !dead
+	return !dead, nil
 }
 
 // DeadCount はその日・その銘柄・その売買で、拒否・取消・失効に終わった注文の数
@@ -299,6 +309,18 @@ func (l *Ledger) OpenOrders() ([]Order, error) {
 	return filter(orders, Order.IsOpen), nil
 }
 
+// PlacedBetween は発注時刻（placed_at）が [start, end) の注文（dry-run を含む、全部の日）。
+//
+// 台帳の day は建てた日で、持ち越しの返済は前の日の下に積まれる。「今日送った注文」は
+// day ではなく placed_at で引く（ブローカーの当日の注文一覧と突き合わせるとき）。
+func (l *Ledger) PlacedBetween(start, end time.Time) ([]Order, error) {
+	// placed_at は RFC3339 の UTC（末尾 Z）で書いているので、文字列の比較が時刻の比較になる
+	return l.query("SELECT client_order_id, broker_order_id, day, symbol, side, quantity,"+
+		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify"+
+		" FROM orders WHERE placed_at >= ? AND placed_at < ? ORDER BY placed_at",
+		start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339))
+}
+
 // Recent は新しい順の注文。
 func (l *Ledger) Recent(limit int) ([]Order, error) {
 	return l.query("SELECT client_order_id, broker_order_id, day, symbol, side, quantity,"+
@@ -380,6 +402,9 @@ func (l *Ledger) Backup(destination string) error {
 //
 // dry-run は数えない。本発注で建てた注文が無い日は 0。建てて約定したのに手仕舞いの
 // 約定単価が無い（照会前・未約定・記録なし）日は **nil**——0 と混ぜると「負けた」と誤読する。
+//
+// 同じ銘柄・同じ脚の手仕舞いが複数本（引けの一部約定 + 翌寄りの持ち越し返済）あれば、
+// 約定数量で加重して合わせる。最後の 1 本だけを見ると残りの損益が落ちる。
 func (l *Ledger) RealizedPnL(days []time.Time, leg string) (map[string]*float64, error) {
 	result := make(map[string]*float64, len(days))
 	for _, day := range days {
@@ -404,7 +429,7 @@ func (l *Ledger) RealizedPnL(days []time.Time, leg string) (map[string]*float64,
 			orders = append(orders, o)
 		}
 		entries := map[string]Order{}
-		exits := map[string]Order{}
+		exits := map[string][]Order{}
 		for _, o := range orders {
 			if o.IsDead() {
 				continue
@@ -413,7 +438,7 @@ func (l *Ledger) RealizedPnL(days []time.Time, leg string) (map[string]*float64,
 			if o.IsEntry() {
 				entries[k] = o
 			} else {
-				exits[k] = o
+				exits[k] = append(exits[k], o)
 			}
 		}
 		if len(entries) == 0 {
@@ -427,16 +452,11 @@ func (l *Ledger) RealizedPnL(days []time.Time, leg string) (map[string]*float64,
 			if entry.FilledQuantity.LessThanOrEqual(decimal.Zero) {
 				continue // 約定していないなら手仕舞う物が無い
 			}
-			exit, ok := exits[k]
-			if !ok || exit.AvgFillPrice == nil || entry.AvgFillPrice == nil {
+			pnl, ok := RealizedOf(entry, exits[k])
+			if !ok {
 				complete = false
 				continue
 			}
-			buy, sell := *entry.AvgFillPrice, *exit.AvgFillPrice
-			if entry.Side != domain.SideBuy {
-				buy, sell = *exit.AvgFillPrice, *entry.AvgFillPrice
-			}
-			pnl, _ := sell.Sub(buy).Mul(exit.FilledQuantity).Float64()
 			total += pnl
 		}
 		if complete {
@@ -447,6 +467,103 @@ func (l *Ledger) RealizedPnL(days []time.Time, leg string) (map[string]*float64,
 		}
 	}
 	return result, nil
+}
+
+// RecentPnL は資産曲線ゲートの入力——leg の直近の日（days）の実現損益の合計。
+//
+// その脚を本発注で建てた日が 1 日も無ければ nil（始めたばかりの口座を「負けている」と
+// 誤読して縮めないため）。実機検証の注文は数えない（RealizedPnL と同じ）——検証だけの
+// 20 日を「建てた」と数えると、損益 0 で資金が半分に縮む。確定していない日は除いて合計し、
+// incomplete に返す（呼び出し側が警告する）。確定した日が 1 日も無ければ nil。
+func (l *Ledger) RecentPnL(days []time.Time, leg string) (total *float64, incomplete []string, err error) {
+	history, err := l.RealizedPnL(days, leg)
+	if err != nil {
+		return nil, nil, err
+	}
+	traded := false
+	for _, d := range days {
+		entries, err := l.EntriesOn(d)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, o := range entries {
+			if !o.IsDryRun() && !o.Verify && o.Leg() == leg {
+				traded = true
+				break
+			}
+		}
+		if traded {
+			break
+		}
+	}
+	sum := 0.0
+	known := 0
+	for _, d := range days {
+		v := history[d.Format(dayLayout)]
+		if v == nil {
+			incomplete = append(incomplete, d.Format(dayLayout))
+			continue
+		}
+		sum += *v
+		known++
+	}
+	if !traded || known == 0 {
+		return nil, incomplete, nil
+	}
+	return &sum, incomplete, nil
+}
+
+// RealizedOf は 1 建玉とその手仕舞い（複数本）の実現損益（円、手数料は含まない）。
+//
+// 「売り単価 − 買い単価」× 手仕舞いの約定数量を手仕舞いごとに足す——一部約定 200 株と
+// 持ち越しの返済 100 株が別の注文になっても、300 株ぶんの損益になる。手仕舞いが 1 本も
+// 無い、約定単価の無い手仕舞いがある（照会前・未約定）、または手仕舞いの約定が建玉の約定に
+// 届かない（持ち越しの残りをまだ返済していない）なら ok = false（未確定）。
+// 約定せずに終わった手仕舞い（照会済み）は数に入れない。
+func RealizedOf(entry Order, exits []Order) (pnl float64, ok bool) {
+	if entry.AvgFillPrice == nil {
+		return 0, false
+	}
+	total := decimal.Zero
+	closed := decimal.Zero
+	counted := 0
+	for _, exit := range exits {
+		if exit.FilledQuantity.LessThanOrEqual(decimal.Zero) && exit.AvgFillPrice == nil && !exit.IsOpen() {
+			continue // 何も約定せずに終わった手仕舞い（照会済み）
+		}
+		if exit.AvgFillPrice == nil {
+			return 0, false
+		}
+		buy, sell := *entry.AvgFillPrice, *exit.AvgFillPrice
+		if entry.Side != domain.SideBuy {
+			buy, sell = *exit.AvgFillPrice, *entry.AvgFillPrice
+		}
+		total = total.Add(sell.Sub(buy).Mul(exit.FilledQuantity))
+		closed = closed.Add(exit.FilledQuantity)
+		counted++
+	}
+	if counted == 0 || closed.LessThan(entry.FilledQuantity) {
+		return 0, false
+	}
+	pnl, _ = total.Float64()
+	return pnl, true
+}
+
+// ExitAvgPrice は手仕舞い（複数本）の約定数量で加重した平均単価と、約定数量の合計。
+// 約定した手仕舞いが無ければ ok = false。
+func ExitAvgPrice(exits []Order) (avg, filled decimal.Decimal, ok bool) {
+	amount := decimal.Zero
+	for _, exit := range exits {
+		if exit.AvgFillPrice == nil || exit.FilledQuantity.LessThanOrEqual(decimal.Zero) {
+			continue
+		}
+		amount = amount.Add(exit.AvgFillPrice.Mul(exit.FilledQuantity))
+		filled = filled.Add(exit.FilledQuantity)
+	}
+	if !filled.IsPositive() {
+		return decimal.Zero, decimal.Zero, false
+	}
+	return amount.Div(filled), filled, true
 }
 
 // boolToInt は SQLite に真偽を入れるための 0 / 1。

@@ -27,6 +27,11 @@ type Carried struct {
 	Day time.Time
 	// Target は手仕舞う対象。Quantity は残り（建玉の約定 − 手仕舞いの約定。ブローカーの建玉で頭打ち）。
 	Target ExitTarget
+	// ExitOpen はこの脚の手仕舞い（返済）注文がまだ板に残っている（送信済み・一部約定）。
+	// 返済は送らない（ReturnCarried）——残り株数は一部約定で減るので注文 ID が変わり、
+	// 冪等の柵をすり抜けて生きている返済の上にもう 1 本重なる（反対建玉になりうる）。
+	// 拘束資金と台帳外の差し引きには数える（建玉はまだある）。
+	ExitOpen bool
 }
 
 // Leg は long / short。
@@ -97,6 +102,7 @@ func CarriedPositions(env Env, b broker.Broker, held broker.LegPositions) (carri
 		first := map[string]ledger.Order{}
 		fillPrice := map[string]*decimal.Decimal{}
 		blocked := map[string]struct{}{}
+		exitOpen := map[string]bool{}
 		tally := func(orders []ledger.Order, isEntry bool) map[string]decimal.Decimal {
 			totals := map[string]decimal.Decimal{}
 			for _, order := range orders {
@@ -116,6 +122,9 @@ func CarriedPositions(env Env, b broker.Broker, held broker.LegPositions) (carri
 					blocked[key] = struct{}{}
 				}
 				totals[key] = totals[key].Add(fill.Filled)
+				if !isEntry && !fill.Unconfirmed && fill.Open {
+					exitOpen[key] = true
+				}
 				if isEntry {
 					if _, seen := first[key]; !seen {
 						first[key], fillPrice[key] = order, fill.Price
@@ -167,7 +176,13 @@ func CarriedPositions(env Env, b broker.Broker, held broker.LegPositions) (carri
 				remaining = available
 			}
 			consumed[positionLeg] = consumed[positionLeg].Add(remaining)
-			carried = append(carried, Carried{Day: day, Target: ExitTarget{
+			if exitOpen[key] {
+				env.printf("  %s: 返済注文がまだ板に残っている（残り %s 株）。重ねて送らない\n", symbol, cli.Yen(remaining))
+				env.Report.Warn("daytrade.carry", "返済注文が生きているので持ち越しの返済を重ねない", map[string]any{
+					"day": day.Format(cli.DateLayout), "symbol": symbol, "leg": leg, "remaining": remaining.String(),
+				})
+			}
+			carried = append(carried, Carried{Day: day, ExitOpen: exitOpen[key], Target: ExitTarget{
 				Entry: entry, Quantity: remaining, FillPrice: fillPrice[key],
 			}})
 		}
@@ -257,6 +272,14 @@ func carryQueryError(env Env, held broker.LegPositions, leg broker.PositionLeg) 
 // （寄付なら 9:15、引けなら 15:30）を使う。通らなかったものを返す。
 func ReturnCarried(env Env, b broker.Broker, carried []Carried, phrase string) (failures []string) {
 	for _, c := range carried {
+		if c.ExitOpen {
+			// 生きている返済の約定を待つ。重ねると一部約定の残りに対して二重に返済する
+			env.Report.Info("daytrade.order", "持ち越しの手仕舞い注文", map[string]any{
+				"day": env.dayText(), "entry_day": c.Day.Format(cli.DateLayout), "symbol": c.Target.Entry.Symbol,
+				"leg": c.Leg(), "quantity": c.Target.Quantity.String(), "live": b != nil, "outcome": "返済注文が生きている",
+			})
+			continue
+		}
 		envDay := env
 		envDay.Day = c.Day
 		reason := phrase
@@ -310,18 +333,23 @@ func PositionsWithin(capital, tied, budget decimal.Decimal) int {
 // 予算に満たなくても残りがあれば **1 件を残りの金額で**建てる——一部が拘束されただけで
 // 一日を休むのは機会損失。0 件になるのは残りが無いときだけ。
 func CapByTied(n, placed int, capital, tied, budget decimal.Decimal) (int, decimal.Decimal) {
+	spent := budget.Mul(decimal.NewFromInt(int64(max(placed, 0))))
+	return capByAmount(n, capital.Sub(tied).Sub(spent), budget)
+}
+
+// capByAmount は残りの資金 left で建てられる件数と 1 注文の予算（CapByTied の規則）。
+// 残りが予算以上なら floor(残り ÷ 予算) 件まで、予算に満たなければ 1 件を残りの金額で。
+func capByAmount(n int, left, budget decimal.Decimal) (int, decimal.Decimal) {
 	if n <= 0 || budget.LessThanOrEqual(decimal.Zero) {
 		return 0, budget
 	}
-	spent := budget.Mul(decimal.NewFromInt(int64(max(placed, 0))))
-	remaining := capital.Sub(tied).Sub(spent)
-	if remaining.LessThanOrEqual(decimal.Zero) {
+	if left.LessThanOrEqual(decimal.Zero) {
 		return 0, budget
 	}
-	if remaining.LessThan(budget) {
-		return 1, remaining.Floor()
+	if left.LessThan(budget) {
+		return 1, left.Floor()
 	}
-	return min(n, int(remaining.Div(budget).Floor().IntPart())), budget
+	return min(n, int(left.Div(budget).Floor().IntPart())), budget
 }
 
 // carriedByLeg は持ち越しを脚 → 株数（常に正）にする。

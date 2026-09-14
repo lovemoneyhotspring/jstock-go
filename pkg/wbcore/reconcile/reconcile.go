@@ -115,6 +115,13 @@ type Options struct {
 	Grace time.Duration
 	// Known は台帳が既に知っている broker_order_id。候補から外す。
 	Known map[string]struct{}
+	// Expected は台帳が「今日送って注文番号まで知っている」broker_order_id。
+	// これが 1 つも todays に無ければ（一覧が空で返った・まだ反映されていない）一覧は
+	// 信用できないので、「無い」を NotSent とは読まず TooRecent にする。一覧を信用して
+	// UNSENT にすると、届いていた注文を種を変えて送り直す（二重発注）。
+	// 1 つでも載っていれば一覧は生きているとみなす（取消済みの注文が一覧から消える等の
+	// 揺れで、判定が永久に止まらないように）。
+	Expected map[string]struct{}
 }
 
 // DefaultGrace は送信からこれだけ経てば一覧に載っているとみなす時間。
@@ -133,6 +140,7 @@ func Resolve(pending []Pending, todays []domain.Order, opts Options) []Resolutio
 	}
 	ordered := append([]Pending(nil), pending...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].PlacedAt.Before(ordered[j].PlacedAt) })
+	untrusted := listUntrusted(todays, opts.Expected)
 
 	out := make([]Resolution, 0, len(ordered))
 	for _, p := range ordered {
@@ -170,11 +178,32 @@ func Resolve(pending []Pending, todays []domain.Order, opts Options) []Resolutio
 		case len(similar) > 0:
 			out = append(out, Resolution{Pending: p, Outcome: Ambiguous, Candidates: similar,
 				Reason: fmt.Sprintf("同じ銘柄・売買で数量か区分の違う未帰属の注文が %d 件", len(similar))})
+		case untrusted:
+			// 一覧に「あるはず」の注文が 1 つも無い。一覧を信用して「届いていない」とは言えない
+			out = append(out, Resolution{Pending: p, Outcome: TooRecent,
+				Reason: fmt.Sprintf("当日の注文一覧を信用できない（台帳の知る今日の注文 %d 件がどれも無い。一覧 %d 件）",
+					len(opts.Expected), len(todays))})
 		default:
 			out = append(out, Resolution{Pending: p, Outcome: NotSent, Reason: "当日の注文一覧に該当なし"})
 		}
 	}
 	return out
+}
+
+// listUntrusted は一覧を信用できないか——expected があるのに、そのどれも todays に無い。
+func listUntrusted(todays []domain.Order, expected map[string]struct{}) bool {
+	if len(expected) == 0 {
+		return false
+	}
+	for _, o := range todays {
+		if o.BrokerOrderID == nil {
+			continue
+		}
+		if _, ok := expected[*o.BrokerOrderID]; ok {
+			return false
+		}
+	}
+	return true
 }
 
 // closest は発注時刻に最も近い（時刻が無ければ先頭の）注文。

@@ -76,21 +76,117 @@ func TestWasPlacedIgnoresDryRunAndDead(t *testing.T) {
 	led := openTest(t)
 	req := request("dry", "7203", domain.SideBuy, 100, domain.TradeTypeCash)
 	_ = led.Record(req, day, DryRunStatus, nil, nil)
-	if led.WasPlaced("dry") {
-		t.Error("dry-run を発注済みと数えている")
+	if placed, err := led.WasPlaced("dry"); err != nil || placed {
+		t.Errorf("dry-run を発注済みと数えている: %v %v", placed, err)
+	}
+	if placed, err := led.WasPlaced("none"); err != nil || placed {
+		t.Errorf("記録の無い注文: %v %v", placed, err)
 	}
 	req2 := request("live", "9984", domain.SideBuy, 100, domain.TradeTypeCash)
 	_ = led.Record(req2, day, string(domain.OrderStatusSubmitted), nil, nil)
-	if !led.WasPlaced("live") {
-		t.Error("本発注を発注済みと数えていない")
+	if placed, err := led.WasPlaced("live"); err != nil || !placed {
+		t.Errorf("本発注を発注済みと数えていない: %v %v", placed, err)
 	}
 	// 拒否で終わった注文は「送り直してよい」
 	_ = led.UpdateStatus("live", domain.OrderStatusRejected, decimal.Zero, nil, nil)
-	if led.WasPlaced("live") {
-		t.Error("拒否された注文を発注済みと数えている")
+	if placed, err := led.WasPlaced("live"); err != nil || placed {
+		t.Errorf("拒否された注文を発注済みと数えている: %v %v", placed, err)
 	}
 	if n := led.DeadCount(day, "9984", domain.SideBuy); n != 1 {
 		t.Errorf("DeadCount = %d, want 1", n)
+	}
+}
+
+// 台帳を読めないときに「未発注」と答えると、既に送った注文をもう一度送る（二重発注）。
+func TestWasPlacedFailsClosedOnDBError(t *testing.T) {
+	led := openTest(t)
+	_ = led.Record(request("live", "9984", domain.SideBuy, 100, domain.TradeTypeCash), day,
+		string(domain.OrderStatusSubmitted), nil, nil)
+	if err := led.Close(); err != nil {
+		t.Fatal(err)
+	}
+	placed, err := led.WasPlaced("live")
+	if err == nil {
+		t.Fatalf("閉じた台帳でエラーにならない（placed=%v）", placed)
+	}
+	if placed {
+		t.Error("エラーなのに発注済みと答えた")
+	}
+}
+
+// fillOrder は注文を記録して約定させる（数量と単価）。
+func fillOrder(t *testing.T, led *Ledger, id, symbol string, side domain.Side, trade domain.TradeType, d time.Time, qty, price int64) {
+	t.Helper()
+	p := decimal.NewFromInt(price)
+	if err := led.Record(request(id, symbol, side, qty, trade), d, string(domain.OrderStatusSubmitted), &p, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.UpdateStatus(id, domain.OrderStatusFilled, decimal.NewFromInt(qty), &p, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 引けの手仕舞いが 200 株だけ約定し、残り 100 株を翌寄りの持ち越し返済で手仕舞った。
+// 手仕舞いが 2 本になっても 300 株ぶんの損益になる（最後の 1 本だけを見ない）。
+func TestRealizedPnLAggregatesMultipleExits(t *testing.T) {
+	led := openTest(t)
+	fillOrder(t, led, "b", "7203", domain.SideBuy, domain.TradeTypeMarginOpen, day, 300, 1000)
+	fillOrder(t, led, "s1", "7203", domain.SideSell, domain.TradeTypeMarginClose, day, 200, 1010)
+
+	// 返済が 200 株だけの間は未確定（残り 100 株の損益が決まっていない）
+	pnl, err := led.RealizedPnL([]time.Time{day}, "long")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := pnl[day.Format(dayLayout)]; v != nil {
+		t.Errorf("持ち越しの残りがあるのに確定している: %v", *v)
+	}
+
+	// 翌寄りの返済（建てた日の下に記録される）で 100 株を 990 円
+	fillOrder(t, led, "s2", "7203", domain.SideSell, domain.TradeTypeMarginClose, day, 100, 990)
+	pnl, _ = led.RealizedPnL([]time.Time{day}, "long")
+	// 200 × (+10) + 100 × (−10) = +1,000 円
+	if v := pnl[day.Format(dayLayout)]; v == nil || *v != 1000 {
+		t.Errorf("300 株ぶんの損益 = %v, want 1000", v)
+	}
+
+	entry, _, _ := led.Get("b")
+	s1, _, _ := led.Get("s1")
+	s2, _, _ := led.Get("s2")
+	avg, filled, ok := ExitAvgPrice([]Order{s1, s2})
+	// (200 × 1010 + 100 × 990) ÷ 300 = 1003.33…
+	if !ok || !filled.Equal(decimal.NewFromInt(300)) || avg.Round(2).String() != "1003.33" {
+		t.Errorf("加重平均 = %s × %s（ok=%v）", avg, filled, ok)
+	}
+	if v, ok := RealizedOf(entry, []Order{s1, s2}); !ok || v != 1000 {
+		t.Errorf("RealizedOf = %v（ok=%v）", v, ok)
+	}
+}
+
+// 検証の注文だけの日々は「建てていない」。数えると損益 0 のまま資金が半分に縮む。
+func TestRecentPnLIgnoresVerifyOnlyHistory(t *testing.T) {
+	led := openTest(t)
+	led.Verify = true
+	days := []time.Time{day, day.AddDate(0, 0, 1)}
+	for i, d := range days {
+		fillOrder(t, led, "vb"+string(rune('0'+i)), "7203", domain.SideBuy, domain.TradeTypeCash, d, 100, 1000)
+		fillOrder(t, led, "vs"+string(rune('0'+i)), "7203", domain.SideSell, domain.TradeTypeCash, d, 100, 1000)
+	}
+	total, _, err := led.RecentPnL(days, "long")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != nil {
+		t.Errorf("検証の注文しか無いのにゲートが効く: %v", *total)
+	}
+
+	// 本番の往復が 1 本あれば数える
+	led.Verify = false
+	fillOrder(t, led, "b", "9984", domain.SideBuy, domain.TradeTypeCash, day, 100, 1000)
+	fillOrder(t, led, "s", "9984", domain.SideSell, domain.TradeTypeCash, day, 100, 900)
+	total, incomplete, err := led.RecentPnL(days, "long")
+	if err != nil || total == nil || *total != -10000 || len(incomplete) != 0 {
+		t.Errorf("本番の損益 = %v（incomplete %v, err %v）, want -10000", total, incomplete, err)
 	}
 }
 

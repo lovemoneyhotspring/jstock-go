@@ -144,6 +144,32 @@ func TestEvaluateJoinsLedger(t *testing.T) {
 	}
 }
 
+// 引けの手仕舞いが 60 株だけ約定し、残り 40 株を翌寄りの持ち越し返済で手仕舞った。
+// 手仕舞いが 2 本でも 100 株ぶんの損益と加重平均の単価になる（最後の 1 本で上書きしない）。
+func TestEvaluateJoinsLedgerWithMultipleExits(t *testing.T) {
+	buy := dec(1000)
+	closeSell := dec(1050)
+	carrySell := dec(1100)
+	orders := []dtledger.Order{
+		{Symbol: "1000", Side: "BUY", Trade: "MARGIN_OPEN", Status: "FILLED",
+			Quantity: dec(100), FilledQuantity: dec(100), AvgFillPrice: &buy},
+		{Symbol: "1000", Side: "SELL", Trade: "MARGIN_CLOSE", Status: "PARTIALLY_FILLED",
+			Quantity: dec(100), FilledQuantity: dec(60), AvgFillPrice: &closeSell},
+		{Symbol: "1000", Side: "SELL", Trade: "MARGIN_CLOSE", Status: "FILLED",
+			Quantity: dec(40), FilledQuantity: dec(40), AvgFillPrice: &carrySell},
+	}
+	result := evaluate.Evaluate(ranking(), "", bars(), baseConfig(), orders, evaluate.SourceQuotes)
+	for _, row := range result.Rows {
+		if row["symbol"] != "1000" {
+			continue
+		}
+		// 60 × 50 + 40 × 100 = 7,000 円（最後の 1 本だけなら 4,000 円）
+		if pnl, _ := row["actual_pnl"].(float64); pnl != 7000 {
+			t.Errorf("実現損益 = %v, want 7000", row["actual_pnl"])
+		}
+	}
+}
+
 func TestEvaluateSkipsBrokerVerify(t *testing.T) {
 	// 実機検証（--broker-verify）の約定は成績ではないので、候補の評価に混ぜない。
 	// env=prod で検証することがあるので、口座では切り分けられない

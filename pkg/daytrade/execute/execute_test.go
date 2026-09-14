@@ -635,3 +635,87 @@ func TestResolvePendingAmbiguousAlertsAndKeepsPending(t *testing.T) {
 		t.Errorf("決められないのに送り直した: %d", len(b.placed))
 	}
 }
+
+// 締め切りで待ちを縮めた回は、その場で一覧を見ない。受付が一覧に載る前に見ると
+// 「届いていない」と読んで種を変えて送り直す（二重発注）。判定は次の実行に回す。
+func TestUnconfirmedDefersWhenDeadlineShortensWait(t *testing.T) {
+	env, _ := todayEnv(t)
+	env.RetryWait = time.Hour
+	env.Deadline = time.Now().Add(100 * time.Millisecond)
+	b := &stubBroker{balance: richBalance()} // 一覧は空（まだ載っていない）
+	b.place = func(domain.OrderRequest) (*domain.OrderAck, error) { return nil, errors.New("timeout") }
+	_, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if err != nil || len(failures) != 1 {
+		t.Fatalf("failures=%v err=%v", failures, err)
+	}
+	if len(b.placed) != 1 {
+		t.Errorf("待ちきれないのに送り直した: %d", len(b.placed))
+	}
+	if o := statusOf(t, env, "7203"); o.Status != string(domain.OrderStatusPending) {
+		t.Errorf("次の実行に渡すため PENDING のまま: %s", o.Status)
+	}
+}
+
+// 一覧が空で返っても、今日送って注文番号の分かっている注文があるなら一覧の方を疑う。
+func TestUnconfirmedStaysPendingWhenListLacksKnownOrders(t *testing.T) {
+	env, _ := todayEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	picks := []selection.Pick{pick("7203", domain.SideBuy), pick("9984", domain.SideBuy)}
+	b.place = func(req domain.OrderRequest) (*domain.OrderAck, error) {
+		if req.Symbol == "9984" {
+			return nil, errors.New("timeout")
+		}
+		id := "N/" + req.Symbol
+		return &domain.OrderAck{ClientOrderID: req.ClientOrderID, BrokerOrderID: &id, Status: domain.OrderStatusSubmitted}, nil
+	}
+	_, failures, err := PlacePicks(env, b, picks)
+	if err != nil || len(failures) != 1 {
+		t.Fatalf("failures=%v err=%v", failures, err)
+	}
+	if len(b.placed) != 2 {
+		t.Errorf("空の一覧を信用して送り直した: placed=%d", len(b.placed))
+	}
+	if o := statusOf(t, env, "9984"); o.Status != string(domain.OrderStatusPending) {
+		t.Errorf("PENDING のまま: %s", o.Status)
+	}
+}
+
+// 台帳で確定済みの建玉（約定・拒否・未送信）はブローカーに聞かない。
+// 拒否・未送信は注文番号が無く、聞くと毎回エラーの警告になる。
+func TestRefreshEntriesDoesNotQueryFinalizedOrders(t *testing.T) {
+	env, _ := newEnv(t)
+	price := decimal.NewFromInt(990)
+	id := "B/filled"
+	for _, c := range []struct {
+		symbol string
+		status domain.OrderStatus
+	}{{"7203", domain.OrderStatusFilled}, {"9984", domain.OrderStatusRejected}, {"6758", domain.OrderStatusUnsent}} {
+		req := EntryRequest(pick(c.symbol, domain.SideBuy), env.Day, env.Cfg, 0)
+		if err := env.Ledger.Record(req, env.Day, string(domain.OrderStatusSubmitted), &price, nil); err != nil {
+			t.Fatal(err)
+		}
+		filled, fill, broker := decimal.Zero, (*decimal.Decimal)(nil), (*string)(nil)
+		if c.status == domain.OrderStatusFilled {
+			filled, fill, broker = decimal.NewFromInt(100), &price, &id
+		}
+		if err := env.Ledger.UpdateStatus(req.ClientOrderID, c.status, filled, fill, broker); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	b := &stubBroker{getOrder: func(string) (*domain.Order, error) {
+		calls++
+		return nil, errors.New("注文番号がありません")
+	}}
+	entries, _, _ := LiveEntries(env)
+	targets, unconfirmed, err := RefreshEntries(env, b, entries)
+	if err != nil || len(unconfirmed) != 0 {
+		t.Fatalf("unconfirmed=%v err=%v", unconfirmed, err)
+	}
+	if calls != 0 {
+		t.Errorf("確定済みの注文をブローカーに聞いた: %d 回", calls)
+	}
+	if len(targets) != 1 || targets[0].Entry.Symbol != "7203" || !targets[0].Quantity.Equal(decimal.NewFromInt(100)) {
+		t.Errorf("約定済みの 7203 だけを台帳の値で手仕舞うはず: %+v", targets)
+	}
+}
