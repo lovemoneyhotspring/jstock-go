@@ -137,6 +137,14 @@ case "$PERIOD" in
   monthly) TIMEOUT=2400 ;;
 esac
 
+# 起動時刻の印。claude -p は API のエラー（利用上限・認証切れ等）を stderr に出さずに
+# 終了コード 1 で終わることがあり（2026-09-14 の日次は rate_limit で .err が空だった）、
+# 原因はセッション記録（~/.claude/projects/<作業ディレクトリ>/*.jsonl）にしか残らない。
+# 失敗したら、この印より新しい記録から最後のエラーを拾って通知に添える
+SESSION_DIR="$HOME/.claude/projects/$(printf '%s' "$HOME_DIR" | tr '/.' '--')"
+STARTED_MARK="$(mktemp)"
+trap 'rm -f "$STARTED_MARK"' EXIT
+
 # プロンプトは**標準入力から渡す**。--disallowedTools は可変長引数なので、
 # 後ろに置いたプロンプトまでツール名として飲み込んでしまう。
 printf '%s' "$PROMPT" | timeout "$TIMEOUT" "$CLAUDE_BIN" -p \
@@ -155,6 +163,15 @@ if [ $STATUS -ne 0 ] || [ ! -s "$REPORT" ]; then
     echo '```'
     tail -c 800 "${REPORT%.md}.err" 2>/dev/null
     echo '```'
+    # stderr が空でも原因が分かるように、この実行より後に書かれたセッション記録の最後のエラー。
+    # 同じ時間帯の別の会話の記録を拾うこともあるが、利用上限はアカウント全体で効くので手掛かりになる
+    cause=$(find "$SESSION_DIR" -maxdepth 1 -name '*.jsonl' -newer "$STARTED_MARK" -print0 2>/dev/null \
+      | xargs -0 -r jq -r 'select(.error != null)
+          | "\(.timestamp // "") \(.error) \(.message.content | if type == "array" then map(.text? // empty) | join(" ") elif type == "string" then . else "" end)"' 2>/dev/null \
+      | sort | tail -1)
+    if [ -n "$cause" ]; then
+      echo "セッション記録の最後のエラー: ${cause:0:300}"
+    fi
     echo "サーバーで確認: \`$HOME_DIR/deploy/report.sh $PERIOD $ARG\`"
   } | "$POST_BIN"
   exit 1
