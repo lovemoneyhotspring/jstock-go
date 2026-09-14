@@ -18,6 +18,18 @@
 #   3. .env に TACHIBANA_PROD_* を入れ `wbjp credentials check --env prod` が通ったら、
 #      下の「発注経路」の行のコメントを外す（まず --live 無しで数日、次に --live）
 
+# 時刻はすべて JST（docs/DEPLOY.md「cron の環境」）。
+# CRON_TZ は cronie（RHEL 系）ならスケジュールの時刻帯になる。Ubuntu / Debian の cron
+# （3.0pl1）は CRON_TZ を読まず**システムの時刻帯**で回す——このマシンは Asia/Tokyo。
+# 時刻帯を変えたマシンに移すときは、先に `timedatectl` で Asia/Tokyo を確かめること。
+# TZ はコマンド側の date などが JST で動くように渡す（スケジュールには効かない）
+CRON_TZ=Asia/Tokyo
+TZ=Asia/Tokyo
+# Go が起動する前の失敗（cd の失敗、リダイレクト先が無い、bin/ が無い）はログに残らない。
+# cron はそれを MAILTO にメールで送る。**このマシンには MTA（sendmail）が無い**ので、
+# 宛先を入れるなら msmtp-mta などを先に入れる。宛先が決まったらコメントを外す
+# MAILTO=<宛先のメールアドレス>
+
 # 実行ファイルは deploy/build.sh が bin/ に作る（Go のみ。uv も Python も要らない）
 WBJP_HOME=/home/abobo/jstock-go
 WBJP_BIN=/home/abobo/jstock-go/bin
@@ -100,7 +112,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 板は遡れないので、欠けたその日のうちに気づくためのもの。判断も修正もしない。
 # night-repair（6:00）はダイジェストの異常を見るが、こちらは「回るはずの回数が回ったか」を見る
 # ——成功したまま回数が足りない（cron が動かない・ロックで見送り）を拾えるのはこちら
-22 9 * * 1-5          cd $WBJP_HOME && $WBJP_HOME/deploy/morning-check.sh >> state/logs/morning-check.log 2>&1
+22 9 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod $WBJP_HOME/deploy/morning-check.sh >> state/logs/morning-check.log 2>&1
 
 # --- 判断の妥当性（改善ループ。docs/FEEDBACK.md）---------------------------------
 # スイング: スクリーニングの結果に 20 営業日後の終値を当てる。採用・次点・圏外を比べる
@@ -118,21 +130,22 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 #
 # 21:00（平日）: その日の運用（.claude/agents/daily-report.md）。
 # 上の evaluate 群（20:20〜20:35）と plan（20:30）が出揃ってから回す
-0 21 * * 1-5    cd $WBJP_HOME && flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh daily   >> state/logs/report-daily.log   2>&1
+0 21 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh daily   >> state/logs/report-daily.log   2>&1
 # 21:30（金）: その週（月〜金）の傾向（.claude/agents/periodic-report.md）。
 # 同じ日の日次（21:00）が終わってから
-30 21 * * 5     cd $WBJP_HOME && flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh weekly  >> state/logs/report-weekly.log  2>&1
+30 21 * * 5     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh weekly  >> state/logs/report-weekly.log  2>&1
 # 毎月 1 日 22:00: 前月まるごと。曜日を問わない（前月の記録は出揃っている）
-0 22 1 * *      cd $WBJP_HOME && flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh monthly >> state/logs/report-monthly.log 2>&1
+0 22 1 * *      cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh monthly >> state/logs/report-monthly.log 2>&1
 
 # --- 夜間自己修復（Claude Code）------------------------------------------------
 # 6:00: 前夜からの実行ログに異常があれば、night-repair サブエージェント
 # （.claude/agents/night-repair.md）に原因調査とコード修正案の作成までやらせる。
 # 異常が無ければ claude は起動しない（deploy/night-repair.sh 側で判定）。
 # main への直接コミット・本番反映（bin/ の書き換え・crontab の変更）・--live
-# 実行は禁止（プロンプトと --disallowedTools の二重）。直せたら新しいブランチに
-# push して PR を作るところまで——マージは人が判断する。
-0 6 * * *       cd $WBJP_HOME && flock -n /tmp/night-repair.lock $WBJP_HOME/deploy/night-repair.sh >> state/logs/night-repair.log 2>&1
+# 実行は禁止（プロンプトと --disallowedTools の二重）。直すのは /tmp の git worktree の中で、
+# この作業ツリー（8:30〜 の cron が読む config/）のブランチは切り替えない。直せたら
+# 新しいブランチに push して PR を作るところまで——マージは人が判断する。
+0 6 * * *       cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/night-repair.lock $WBJP_HOME/deploy/night-repair.sh >> state/logs/night-repair.log 2>&1
 
 # --- 発注経路（立花証券の認証情報を入れたら有効化。まず --live 無しで数日回す）-------------
 # ロックは deploy/with-lock.sh で取る（取れずに見送った回もログに残る。flock -n は無言で消える）。

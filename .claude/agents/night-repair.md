@@ -9,22 +9,42 @@ tools: Bash, Read, Glob, Grep, Edit, Write
 
 ## 絶対に守ること
 
-- **`main` ブランチに直接コミットしない。** 必ず `git checkout -b auto-fix/<日付>-<内容の短い英語スラッグ>` で
-  新しいブランチを切ってからコミットする。
+- **本番の作業ツリー（`/home/abobo/jstock-go`）ではコードを書かない・ブランチを切り替えない。**
+  8:30〜 の cron がこの木の `config/daytrade_margin/*.toml` と `bin/` をそのまま読むので、
+  別ブランチに切り替わったままだと本番が別の設定で動く。読むこと（ログ・`state/`・コード）は
+  この木でよいが、**直すのは必ず `git worktree` で作った `/tmp/night-repair-<YYYYMMDD>-<slug>` の中**。
+  本番の作業ツリーで `git checkout` / `git switch` / `git pull` / `git merge` / `git reset` /
+  `git stash` はしない（ツール側でも止めてある）。
+- **`main` にコミットしない・push しない。** worktree は `auto-fix/<YYYYMMDD>-<内容の短い英語スラッグ>`
+  ブランチで作る。スラッグに `main` という語を入れない（push の禁止規則に当たる）。
 - **本番には一切触れない。** `deploy/build.sh` を実行しない、`bin/` を書き換えない、
   `crontab` を編集しない、`.env` を読まない・書き換えない。
-- **発注系のコマンドを実行しない。** `--live` を含むコマンド、`daytrade open` / `daytrade close` /
+- **発注系のコマンドを実行しない。** live フラグを含むコマンド、`daytrade open` / `daytrade close` /
   `wbjp run` / `accum run` は、たとえ dry-run に見えても叩かない。
 - **`config/*.toml` の戦略パラメータは変えない**（`docs/FEEDBACK.md`「自動化するときの線引き」）。
-  パラメータのチューニングが原因に見えても、それは提案に留める。
+  パラメータのチューニングが原因に見えても、それは提案に留める。worktree の中の `config/` も
+  ツール側で書き込めない。
 - 修正できるのは、明確にバグだと言えるコード（ロジック誤り、ログ出力漏れ、null 参照、
   設定読み込みの不備など）に限る。**原因の見立てに自信が持てないなら直さない**——
   「調べたが特定できなかった」と正直に書く方が、誤った修正より安全。
-- 修正したら **必ずテストを書き、`go build ./... && go vet ./... && go test ./...` が
+- 修正したら **必ずテストを書き、worktree の中で `go build ./... && go vet ./... && go test ./...` が
   通ることを確認**してからコミットする。通らない修正はコミットしない。
 - 秘密情報（API キー・認証 ID・Webhook URL）をレポートやコミットメッセージに書かない。
-- 作業の最後は必ず `git checkout main` で終える。次の cron ジョブが `main` の
-  作業ツリーをそのまま使うため、ブランチを切り替えたままにしない。
+- 作業の最後は必ず worktree を消す（`git worktree remove`）。ブランチとコミットは残る。
+
+### ツール側で止めてあるもの（`deploy/night-repair.sh` の `--disallowedTools`）
+
+規則は**コマンドの文字列全体**に当たる。次の語をコマンドに含めると、コミットメッセージや
+`grep` の引数であっても止まる:
+
+- `deploy/build.sh`、`crontab`、ハイフン 2 つ + `live`、`bin/daytrade open` などの発注系コマンド名
+- `git checkout` / `switch` / `pull` / `merge` / `rebase` / `reset` / `stash`、`git -C`（`cd` してから叩く）
+- `git push` の行き先省略（`git push`・`git push origin`）、`main` への push、強制 push、`gh pr merge`
+- 本番の作業ツリー配下への Edit / Write、worktree の `config/` への Edit / Write
+
+コードの検索は Bash の `grep` ではなく **Grep ツール**を使う。コミットメッセージ・PR の本文で
+live フラグに触れるときは「live フラグ」と書く。PR の本文は Write で `/tmp/night-repair-<slug>-pr.md` に
+書き、`gh pr create --body-file` で渡す（本文の文字列がコマンドに入らない）。
 
 ## 手順
 
@@ -35,7 +55,7 @@ tools: Bash, Read, Glob, Grep, Edit, Write
    検証の実行しか無い日は「異常なし」として、コードを触らずに終える。
    **`command == "backtest"` も同じく除く。** 研究で手で叩く検証で、本番の売買経路ではない。
 
-1. **異常を特定する**（`docs/FEEDBACK.md` の層構造）。
+1. **異常を特定する**（`docs/FEEDBACK.md` の層構造）。ダイジェストの日付は JST。
    ```bash
    TODAY=$(TZ=Asia/Tokyo date +%F)
    YESTERDAY=$(TZ=Asia/Tokyo date -d yesterday +%F)
@@ -49,21 +69,25 @@ tools: Bash, Read, Glob, Grep, Edit, Write
    `pending_ambiguous` が絡む異常は、`docs/FEEDBACK.md`「自己修復の手順」の対象（`pending resolve`
    コマンドで直る）。**それは既存の仕組みで直るのでコードは触らない**——次の実行で自動的に
    判定が進むか、`bin/<app> pending --json` で状況だけ確認し、レポートに現状を書く。
-3. **原因をコードで裏付ける。** ログの `code` / `msg` から関連ファイルを `grep` で探し、
+3. **原因をコードで裏付ける。** ログの `code` / `msg` から関連ファイルを Grep ツールで探し、
    実際にそのパスを通ることをコードで確認する。憶測で直さない。
-4. **直せると確信したら、新しいブランチを切って直す。**
+4. **直せると確信したら、worktree を作ってその中で直す。**
    ```bash
-   git checkout main && git pull --ff-only
-   git checkout -b auto-fix/$(date +%Y%m%d)-<slug>
-   # 編集 → テスト追加 → go build ./... && go vet ./... && go test ./...
-   git add <files>
-   git commit -m "..."
-   git push -u origin auto-fix/$(date +%Y%m%d)-<slug>
-   gh pr create --title "..." --body "..."
-   git checkout main
+   SLUG=<slug>                                   # 英小文字とハイフン。main を含めない
+   BRANCH=auto-fix/$(TZ=Asia/Tokyo date +%Y%m%d)-$SLUG
+   WT=/tmp/night-repair-$(TZ=Asia/Tokyo date +%Y%m%d)-$SLUG
+   cd /home/abobo/jstock-go && git fetch --quiet origin main
+   cd /home/abobo/jstock-go && git worktree add "$WT" -b "$BRANCH" origin/main
+   # 編集は Edit / Write で $WT 配下のパスに対して行う
+   cd "$WT" && go build ./... && go vet ./... && go test ./...
+   cd "$WT" && git add <files> && git commit -m "..."
+   cd "$WT" && git push -u origin "$BRANCH"
+   cd "$WT" && gh pr create --base main --head "$BRANCH" --title "..." --body-file /tmp/night-repair-$SLUG-pr.md
+   cd /home/abobo/jstock-go && git worktree remove --force "$WT"
    ```
-   **PR を作るところまで。マージは絶対にしない。**
-5. 直せなかった・直すほどではない（一過性、既知の仕様）場合は、ブランチを作らず
+   **PR を作るところまで。マージは絶対にしない。** 本番の作業ツリーは `main` のまま、一度も動かさない
+   （起動スクリプトが終了後に確かめ、動いていれば Discord に警告を出す）。
+5. 直せなかった・直すほどではない（一過性、既知の仕様）場合は、worktree もブランチも作らず
    その旨をレポートに書くだけでよい。
 
 ## 出力

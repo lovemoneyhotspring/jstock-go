@@ -40,7 +40,14 @@ if [ -f "$HOME_DIR/.env" ]; then
   . "$HOME_DIR/.env"
   set +a
 fi
-export WBJP_ENV="${WBJP_ENV:-prod}"
+# 口座（prod / uat）は明示させる。Go の既定は uat、以前のこのスクリプトの既定は prod で、
+# 食い違ったまま黙って別の口座のダイジェストを読むのを防ぐ（docs/DEPLOY.md「cron の環境」）。
+# cron の行は WBJP_ENV=prod を渡す。手で回すときも `WBJP_ENV=prod deploy/report.sh …`
+if [ -z "${WBJP_ENV:-}" ]; then
+  echo "WBJP_ENV が未設定です。prod か uat を明示してください（例: WBJP_ENV=prod $0 $PERIOD）" >&2
+  exit 2
+fi
+export WBJP_ENV
 
 # メモリの上限（deploy/crontab.txt と同じ値）。claude が子プロセスで daytrade / jquants を
 # 叩くので、ここで export しないと上限の無いまま DuckDB がシステムメモリの 80% を取りに行く
@@ -187,15 +194,30 @@ if [ "$PERIOD" != "daily" ] && [ -d "$VAULT_DIR/.git" ]; then
   # pull を先に置くと（VM 側で何か触りかけているだけで）毎回止まる。他人の変更が残っていても
   # 進めるよう --autostash を付ける。競合したら push を諦めて次回に回す。
   git -C "$VAULT_DIR" add "$VAULT_NOTE" 2>>"${REPORT%.md}.err" || :
+  # commit は**このノートだけ**を対象にする（`-- <path>`）。パス無しの commit は、人が vault で
+  # add しかけていた変更まで「docs(reports)」の名前で一緒に入れてしまう
+  VAULT_FAIL=""
   # 同じ期間を撮り直したときは中身が変わらないことがある。その場合は commit しない
   if git -C "$VAULT_DIR" diff --cached --quiet -- "$VAULT_NOTE"; then
     echo "vault: $TITLE に変更なし" >&2
-  elif git -C "$VAULT_DIR" commit --quiet -m "docs(reports): $TITLE" 2>>"${REPORT%.md}.err"; then
+  elif git -C "$VAULT_DIR" commit --quiet -m "docs(reports): $TITLE" -- "$VAULT_NOTE" 2>>"${REPORT%.md}.err"; then
     git -C "$VAULT_DIR" pull --rebase --autostash --quiet 2>>"${REPORT%.md}.err" \
       && git -C "$VAULT_DIR" push --quiet origin main 2>>"${REPORT%.md}.err" \
-      || echo "vault の push に失敗（commit は済んでいる。次回の実行で一緒に上がる）" >&2
+      || VAULT_FAIL="vault の push に失敗（commit は済んでいる。次回の実行で一緒に上がる）"
   else
-    echo "vault への commit に失敗（ノートは $VAULT_NOTE に残っている）" >&2
+    VAULT_FAIL="vault への commit に失敗（ノートは $VAULT_NOTE に残っている）"
+  fi
+  # 失敗は cron のログ（標準出力）に残し、Discord にも短く流す。push していない記録は
+  # PC 側の Obsidian から見えず、黙っていると欠けたことに誰も気づかない
+  if [ -n "$VAULT_FAIL" ]; then
+    echo "$VAULT_FAIL"
+    {
+      echo "**$TITLE — vault への記録に失敗**"
+      echo "$VAULT_FAIL"
+      echo '```'
+      tail -c 500 "${REPORT%.md}.err" 2>/dev/null
+      echo '```'
+    } | "$POST_BIN" || echo "vault の失敗を Discord に送れませんでした" >&2
   fi
 fi
 

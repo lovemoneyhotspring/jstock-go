@@ -28,7 +28,12 @@ if [ -f "$HOME_DIR/.env" ]; then
   . "$HOME_DIR/.env"
   set +a
 fi
-export WBJP_ENV="${WBJP_ENV:-prod}"
+# 口座は明示させる（Go の既定は uat。docs/DEPLOY.md「cron の環境」）。cron の行は WBJP_ENV=prod を渡す
+if [ -z "${WBJP_ENV:-}" ]; then
+  echo "WBJP_ENV が未設定です。prod か uat を明示してください（例: WBJP_ENV=prod NO_POST=1 $0）" >&2
+  exit 2
+fi
+export WBJP_ENV
 export JQUANTS_READ_BUDGET_MB="${JQUANTS_READ_BUDGET_MB:-2048}"
 export WBJP_DUCKDB_MEMORY_LIMIT="${WBJP_DUCKDB_MEMORY_LIMIT:-3GB}"
 

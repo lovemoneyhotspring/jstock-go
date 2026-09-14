@@ -162,6 +162,9 @@ crontab -l | grep -cF 'env $JQ_MEM'    # 上限が全行に渡っているか
 ロックは `deploy/with-lock.sh` で取る。`flock -n` は取れないとき**無言で exit 1** するので、
 「前の回が長引いて 9:04 が消えた」と「9:04 が走って失敗した」を後から区別できない。
 `with-lock.sh` は見送りを `[lock_busy]` としてログに残す。`open` / `close` は 30 秒までロックを待つ。
+見送りの判定は `flock -E 251` の番兵で行い、コマンド自身が 251 を返したら 250 に写す——
+コマンドの終了コードと混ざると、走って失敗した回まで `[lock_busy]` と記録され、
+`morning-check.sh` の「ロック見送り」の数が狂う。見送ったときの終了コードは従来どおり 75。
 
 照会の電文（余力・建玉・注文一覧・時価）は通信エラーで 1 度だけ送り直す。新規注文は送り直さない
 （届いていた場合に二重発注になる。送信結果不明は台帳に `PENDING` で残り、次の回が当日の注文一覧で判定する）。
@@ -222,6 +225,43 @@ echo 'テスト' | bin/discord-post
 ——追記専用の履歴（Parquet）とダイジェストを期間で読むので、日次の保持期間より
 長い範囲でも振り返れる。仕組みは [FEEDBACK.md](FEEDBACK.md)「4. レポート（Discord）」。
 
+vault（`~/obsidian-vault`）への commit は**そのノートだけ**を対象にする（`git commit -- <path>`）。
+人が vault で add しかけていた変更は巻き込まない。commit / push に失敗したら cron のログに書き、
+Discord（`WBJP_ALERT_CHANNEL_ID` / レポートの送り先）にも短く流す。
+
+### cron の環境（時刻帯・MAILTO・WBJP_ENV）
+
+- **時刻帯。** `deploy/crontab.txt` の時刻はすべて JST。Ubuntu / Debian の cron（3.0pl1）は
+  `CRON_TZ` を読まず**システムの時刻帯**でスケジュールするので、マシンが Asia/Tokyo であること
+  （`timedatectl`）が前提。`CRON_TZ=Asia/Tokyo` は cronie（RHEL 系）に移したとき効くように、
+  `TZ=Asia/Tokyo` はコマンド側の `date` などが JST で動くように置いてある。
+- **MAILTO。** ログへリダイレクトしていても、Go が起動する前の失敗（`cd` の失敗、`state/logs` が
+  無い、`bin/` が無い）は cron がメールで送るしかない。このマシンには MTA（`sendmail`）が無いので、
+  宛先を入れる前に `msmtp-mta` などを入れること。crontab の `# MAILTO=` は宛先が決まるまでコメントのまま。
+- **WBJP_ENV（口座）。** Go の既定は `uat`、以前の `report.sh` / `night-repair.sh` / `morning-check.sh`
+  の既定は `prod` で食い違っていた。既定で補うと、どちらに揃えても「黙って別の口座の
+  ダイジェストを読む（あるいは 1 件も無くて何もしない）」が起きるので、**3 本とも未設定なら
+  終了コード 2 で止まる**。crontab の行は `WBJP_ENV=prod` を渡す（`report.sh` と `morning-check.sh` は
+  `.env` の値でもよい）。手で回すときも `WBJP_ENV=prod DRY_RUN=1 deploy/report.sh daily` のように付ける。
+
+### 夜間自己修復（night-repair）
+
+`deploy/night-repair.sh`（6:00）はダイジェストに異常があるときだけ `claude -p --agent night-repair` を起こす。
+本番の作業ツリーは 8:30〜 の cron が `config/daytrade_margin/*.toml` と `bin/` を読むので、次を守らせている。
+
+- **修正は `/tmp/night-repair-<YYYYMMDD>-<slug>` の git worktree の中**で行い、`auto-fix/…` ブランチを
+  push して PR を作るまで。本番の作業ツリーでは checkout / pull をしない（以前の手順は
+  `git checkout -b` をこの木でやっていて、失敗すると別ブランチの config のまま朝の cron が走りえた）。
+- 禁止事項は `.claude/agents/night-repair.md` に書き、`--disallowedTools` でも止める
+  （`deploy/build.sh` のどの呼び方も、`crontab`、`--live` と発注系のコマンド、本番の作業ツリーを動かす
+  git、`main` への push・強制 push、`gh pr merge`、本番の作業ツリーと worktree の `config/` への書き込み）。
+  Claude Code の規則は境界ではない（別の書き方で抜けうる）ので、終了後にスクリプトが本番の作業ツリーの
+  ブランチ・HEAD・未コミットの変更を実行前と比べ、動いていればレポートの頭に警告を書く
+  （汚れていなければ元のブランチに戻す）。残った worktree は片付ける。
+- `.env` は丸ごと export しない。claude の子に渡すのは `WBJP_ENV` とメモリの上限だけで、
+  Discord の送信だけがサブシェルで `.env` を読む。`bin/*` の Go は自分で `.env` を読むので、
+  エージェントが叩く `review` などは困らない。
+
 ### cron を入れる前の検証
 
 cron 専用の「実行せずに全部検証する」コマンドは無い。次の 3 段で確かめる:
@@ -249,8 +289,8 @@ cd /home/abobo/jstock-go && env -i HOME=$HOME PATH=/usr/bin:/bin WBJP_ENV=prod \
 パスの誤り・権限・環境変数はコマンドを実際に流さないと分からない。
 `env -i` で流すのは、対話シェルの PATH や .zshrc に助けられて「手では動くが
 cron では動かない」を潰すため。ほかに cron 固有の罠は `%` （cron では改行の
-意味。コマンドに書くなら `\%`）と、`MAILTO` 未設定時にエラーメールが捨てられる
-こと（このリポジトリは stderr をログへリダイレクトしているので影響しない）。
+意味。コマンドに書くなら `\%`）と、Go が起動する前の失敗（`cd` の失敗・リダイレクト先が無い）が
+ログに残らないこと（下の「cron の環境」の `MAILTO`）。
 
 - **1 回きりの cron を作らない。** 失敗すると次の機会（翌日・翌月）までバックアップや
   取り込みの無い状態が続くため、どのジョブも「何度叩いても同じ（冪等）」に作り、
