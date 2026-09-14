@@ -164,10 +164,17 @@ func (r *RiskManager) Check(req domain.OrderRequest, ctx RiskContext, preview *d
 }
 
 func (r *RiskManager) notional(req domain.OrderRequest, ctx RiskContext) decimal.Decimal {
+	return Notional(req, ctx.BasePrices)
+}
+
+// Notional は注文の概算の約定代金。指値があれば指値、無ければ基準値段で見積もる。
+//
+// 発注の審査（Check）と、受理したぶんを余力・未約定から差し引く側で同じ見積もりを使う。
+func Notional(req domain.OrderRequest, basePrices map[string]decimal.Decimal) decimal.Decimal {
 	if req.LimitPrice != nil {
 		return req.LimitPrice.Mul(req.Quantity).Round(0)
 	}
-	if base, ok := ctx.BasePrices[req.Symbol]; ok {
+	if base, ok := basePrices[req.Symbol]; ok {
 		return base.Mul(req.Quantity).Round(0)
 	}
 	return decimal.Zero

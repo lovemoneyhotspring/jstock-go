@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
@@ -14,6 +15,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/engine"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/execute"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/portfolio"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/repo"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/risk"
@@ -46,7 +48,7 @@ func newRunCmd() *cobra.Command {
 }
 
 // runDaily は本体。RunE から切り出してあるのは、異常終了を run.Crash で記録・通知するため。
-func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
+func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) {
 	// 以降のログの全行とダイジェストに印を付ける（env とは独立）
 	run.SetVerify(brokerVerifyFlag)
 	setCfg, err := wbjpcfg.LoadSettingsFile(configDirFlag)
@@ -92,6 +94,21 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 	if err := rep.StartRun(runID, todayJST, string(appSettings.Env), mode); err != nil {
 		return fmt.Errorf("実行の記録を始められません: %w", err)
 	}
+	// 途中で返っても実行の終わりを残す（runs.status が running のまま残らないように）。
+	// 評価額・現金は照会できた時点で埋まる
+	var finishEquity, finishCash *decimal.Decimal
+	defer func() {
+		status := "success"
+		var errText *string
+		if err != nil {
+			status = "failed"
+			s := err.Error()
+			errText = &s
+		}
+		if ferr := rep.FinishRun(runID, status, finishEquity, finishCash, errText); ferr != nil {
+			logger.Warn("wbjp.ledger", fmt.Sprintf("実行の終了を記録できません: %v", ferr))
+		}
+	}()
 
 	// 判断の前に足を更新する。cron の data sync とは独立に、
 	// この実行が見る足を自分で最新にしてから判断する
@@ -118,6 +135,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 		return err
 	}
 	equity := bal.CashBalance.Add(bal.MarketValue)
+	finishEquity, finishCash = &equity, &bal.CashBalance
 	// 建玉が見えないまま進むと、保有中の銘柄を「未保有」として買い足し、ストップも
 	// 現値で作り直してしまう。発注する回は照会に失敗した時点で止める
 	posMap, err := b.PositionsBySymbol()
@@ -128,6 +146,10 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 		logger.Warn("run.positions_failed",
 			fmt.Sprintf("建玉を照会できません（dry-run のため未保有として続行）: %v", err))
 		posMap = map[string]domain.Position{}
+	}
+	// その時点の建玉を残す（explain / 事後の検証で「何を持っていたか」を引く）
+	if err := rep.RecordSnapshot(runID, todayJST, positionList(posMap)); err != nil {
+		logger.Warn("wbjp.ledger", fmt.Sprintf("建玉の記録を残せません: %v", err))
 	}
 
 	// 1. 日足の収集と ATR / 直近終値
@@ -183,6 +205,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 			CreatedOn:        st.CreatedOn,
 			Trailing:         st.Trailing,
 			ATRMultiple:      st.ATRMultiple,
+			TrailingPct:      st.TrailingPct,
 			HighestClose:     st.HighestClose,
 			InitialStopPrice: st.InitialStopPrice,
 			InitialQuantity:  st.InitialQuantity,
@@ -190,27 +213,45 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 		}
 	}
 	stopBook := risk.NewStopBook(stopObjMap)
+	// 手仕舞った銘柄のストップを外す。建玉を確かに照会できた回（発注する回）だけ——
+	// dry-run はメモリ上の模型（建玉 0）なので、ここで外すと全銘柄のストップを失う
+	if canLive {
+		if removed := stopBook.RetainHeld(posMap); len(removed) > 0 {
+			logger.Info("wbjp.stop_removed", fmt.Sprintf("保有していない銘柄のストップを外しました: %s", strings.Join(removed, ", ")))
+		}
+	}
 	stopBook.EnsureWithOptions(posMap, atrMap, todayJST,
 		risk.EnsureOptionsFrom(setCfg.Stops, setCfg.Sizing.ATRStopMultiple))
 	stopBook.UpdateTrailing(lastPrices, atrMap)
 	// 建値への引き上げは利確・トレーリングより先に行う。
 	stopBook.UpdateBreakeven(lastPrices, setCfg.Stops.BreakevenAfterR)
 
-	// DB へのストップ保存
+	// DB へのストップ保存。発注する回は台帳を StopBook に揃える（外した銘柄の行も消す）
+	stopRecords := make(map[string]repo.StopRecord)
 	for sym, st := range stopBook.All() {
-		if err := rep.SaveStop(repo.StopRecord{
+		stopRecords[sym] = repo.StopRecord{
 			Symbol:           sym,
 			StopPrice:        st.StopPrice,
 			EntryPrice:       st.EntryPrice,
 			CreatedOn:        st.CreatedOn,
 			Trailing:         st.Trailing,
 			ATRMultiple:      st.ATRMultiple,
+			TrailingPct:      st.TrailingPct,
 			HighestClose:     st.HighestClose,
 			InitialStopPrice: st.InitialStopPrice,
 			InitialQuantity:  st.InitialQuantity,
 			ScaledOut:        st.ScaledOut,
-		}); err != nil {
-			logger.Warn("wbjp.stop_save_failed", fmt.Sprintf("%s: ストップを保存できません: %v", sym, err))
+		}
+	}
+	if canLive {
+		if err := rep.SyncStops(stopRecords); err != nil {
+			logger.Warn("wbjp.stop_save_failed", fmt.Sprintf("ストップを保存できません: %v", err))
+		}
+	} else {
+		for sym, rec := range stopRecords {
+			if err := rep.SaveStop(rec); err != nil {
+				logger.Warn("wbjp.stop_save_failed", fmt.Sprintf("%s: ストップを保存できません: %v", sym, err))
+			}
 		}
 	}
 
@@ -340,6 +381,26 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 			digest.Anomaly("wbjp.pending_ambiguous", fmt.Sprintf("%d 件の送信結果不明の注文を自動で決められません", summary.Ambiguous))
 			return fmt.Errorf("送信結果不明の注文 %d 件を決められないため発注を中止しました（二重発注を避けます）", summary.Ambiguous)
 		}
+
+		// 出した注文の約定・失効を台帳に取り込む。当日買付（差金決済の柵）と
+		// 未約定の買い（比率上限）はこの台帳から数えるので、発注の判断より先に行う。
+		// 照会できなかった注文は未確定のまま残る（未約定に数え続けるので安全側）
+		fills, err := execute.SyncFills(rep, b)
+		if err != nil {
+			digest.Anomaly("wbjp.fill_sync_failed", err.Error())
+			return err
+		}
+		for _, c := range fills.Changes {
+			logger.Info("wbjp.fill", fmt.Sprintf("%s: %s → %s（%s/%s 株約定, ID: %s）",
+				c.Symbol, c.Before, c.After, c.FilledQuantity, c.Quantity, c.ClientOrderID))
+		}
+		if len(fills.Unresolved) > 0 {
+			logger.Warn("wbjp.fill_unresolved", "注文を照会できません（台帳は未確定のまま）:\n"+strings.Join(fills.Unresolved, "\n"))
+			digest.Anomaly("wbjp.fill_unresolved", fmt.Sprintf("%d 件の注文を照会できません（次の実行で再照会）", len(fills.Unresolved)))
+		}
+		if len(fills.Changes) > 0 {
+			digest.Note(map[string]any{"phase": "fills", "changed": len(fills.Changes)})
+		}
 	}
 
 	// 4. リコンサイル
@@ -384,6 +445,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 			OrderType:         orderType,
 			LimitOffset:       limitOffset,
 			TaxType:           taxType,
+			Topix500:          symbolSet(setCfg.Universe.TOPIX500Symbols),
 			BlocksSameDaySale: true,
 		},
 		boughtToday, todayJST)
@@ -410,7 +472,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 		return fmt.Errorf("当日の発注件数を読めません: %w", err)
 	}
 
-	riskCtx := risk.RiskContext{
+	riskCtx := &risk.RiskContext{
 		Equity:           equity,
 		Balance:          *bal,
 		Positions:        posMap,
@@ -420,80 +482,41 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) error {
 		RealizedPnLToday: decimal.Zero,
 	}
 
-	placed := 0
+	var requests []domain.OrderRequest
 	for _, res := range plan.Orders {
-		if res.Request == nil {
-			continue
+		if res.Request != nil {
+			requests = append(requests, *res.Request)
 		}
-		req := *res.Request
-
-		// 送信後・記録前に落ちた注文を再送しない。
-		if rep.WasPlaced(req.ClientOrderID) {
-			logger.Info("wbjp.skip", fmt.Sprintf("%s: 既に発注済み (ID: %s)", req.Symbol, req.ClientOrderID))
-			continue
+	}
+	// 発注済みの確認・リスク審査・送信・台帳の更新と、受理したぶんの余力の差し引きは
+	// execute.PlaceOrders（テストあり）
+	result, err := execute.PlaceOrders(rep, b, requests, riskCtx, execute.Options{
+		RunID: runID, Live: canLive, Risk: riskMgr, Report: logger,
+	})
+	// 見送りの理由は発注が途中で止まっても残す（explain で引く）
+	if rerr := rep.RecordRiskEvents(runID, result.RiskRejected); rerr != nil {
+		logger.Warn("wbjp.ledger", fmt.Sprintf("リスクの見送りを記録できません: %v", rerr))
+	}
+	if err != nil {
+		var unconfirmed *execute.ErrUnconfirmedOrder
+		if errors.As(err, &unconfirmed) {
+			return fmt.Errorf("注文 %s の結果を確認できないため発注を中止しました（口座と台帳 %s を確かめてください）: %w",
+				unconfirmed.ClientOrderID, appSettings.DBPath(), err)
 		}
-
-		decision := riskMgr.Check(req, riskCtx, nil)
-		if !decision.Approved {
-			logger.Warn("wbjp.risk_rejected", fmt.Sprintf("%s 発注見送り: %s", req.Symbol, decision.Reason))
-			continue
-		}
-
-		if !canLive {
-			if err := rep.RecordOrder(runID, req, "dry_run", nil); err != nil {
-				logger.Warn("wbjp.ledger", fmt.Sprintf("%s: dry-run を記録できません: %v", req.Symbol, err))
-			}
-			logger.Info("wbjp.dry_run", fmt.Sprintf("[dry-run] %s %s %s株 @ %s円 (%s)", req.Symbol, req.Side, req.Quantity, req.LimitPrice, req.Reason))
-			continue
-		}
-
-		// 送信前に記録する。応答が返らなくても次回の再送を止める。
-		if err := rep.RecordOrder(runID, req, string(domain.OrderStatusPending), nil); err != nil {
-			return fmt.Errorf("発注前の記録に失敗しました（発注を中止します）: %w", err)
-		}
-
-		ack, err := b.Place(req)
-		if err != nil {
-			var rejected *broker.OrderRejectedError
-			if errors.As(err, &rejected) {
-				if uerr := rep.UpdateOrder(req.ClientOrderID, domain.OrderStatusRejected, decimal.Zero, nil, nil); uerr != nil {
-					// PENDING のまま残ると次回 WasPlaced で弾かれ、拒否された注文が二度と出ない
-					logger.Error("wbjp.ledger", fmt.Sprintf("%s: 拒否を記録できません（台帳は送信中のまま）: %v", req.Symbol, uerr))
-				}
-				logger.Error("wbjp.order_failed", fmt.Sprintf("%s 発注拒否: %v", req.Symbol, err))
-				continue
-			}
-			// 届いたか分からない。送信中のまま残して人に確かめてもらう。
-			logger.Error("wbjp.unconfirmed",
-				fmt.Sprintf("%s 注文 %s の結果を確認できません（送信済みの可能性）: %v", req.Symbol, req.ClientOrderID, err))
-			return fmt.Errorf("注文 %s の結果を確認できませんでした: %w", req.ClientOrderID, err)
-		}
-
-		if uerr := rep.UpdateOrder(req.ClientOrderID, ack.Status, decimal.Zero, nil, ack.BrokerOrderID); uerr != nil {
-			// 注文は出ている。注文番号が台帳に残らないと照会も取消もできないので、
-			// ここで止めて人に確かめてもらう（続けると台帳が信用できないまま発注が増える）
-			logger.Error("wbjp.ledger", fmt.Sprintf("%s: 発注は受理されました（%s）が台帳の更新に失敗: %v",
-				req.Symbol, derefString(ack.BrokerOrderID), uerr))
-			return fmt.Errorf("注文 %s は受理されましたが台帳の更新に失敗しました（口座と台帳 %s を確かめてください）: %w",
-				req.ClientOrderID, appSettings.DBPath(), uerr)
-		}
-		logger.Info("wbjp.order", fmt.Sprintf("発注成功: %s %s %s株 (ID: %s)", req.Symbol, req.Side, req.Quantity, req.ClientOrderID))
-		riskCtx.OrdersToday++
-		placed++
+		return err
+	}
+	if len(result.Failed) > 0 {
+		digest.Anomaly("wbjp.order_failed", fmt.Sprintf("%d 件の注文を受け付けられませんでした:\n%s",
+			len(result.Failed), strings.Join(result.Failed, "\n")))
 	}
 
-	if err := rep.FinishRun(runID, "success", &equity, &bal.CashBalance, nil); err != nil {
-		logger.Warn("wbjp.ledger", fmt.Sprintf("実行の終了を記録できません: %v", err))
+	liveOrders, dryRunOrders := result.Placed, 0
+	if !canLive {
+		liveOrders, dryRunOrders = 0, result.Placed
 	}
-	digest.Note(map[string]any{"phase": "run", "live": canLive, "orders": placed, "targets": len(targetList)})
+	digest.Note(map[string]any{"phase": "run", "live": canLive, "orders": liveOrders, "dry_run_orders": dryRunOrders,
+		"risk_rejected": len(result.RiskRejected), "targets": len(targetList)})
 	return nil
 }
 
 var decimalZero = decimal.Zero
-
-func derefString(v *string) string {
-	if v == nil {
-		return ""
-	}
-	return *v
-}

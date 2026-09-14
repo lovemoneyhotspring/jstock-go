@@ -105,6 +105,26 @@ func (sb *StopBook) Remove(symbol string) {
 
 func (sb *StopBook) Len() int { return len(sb.stops) }
 
+// RetainHeld は保有していない銘柄のストップを外し、外した銘柄を昇順で返す。
+//
+// 手仕舞った銘柄のストップを残すと、次に同じ銘柄を建てたとき古いストップ
+// （古い建値・古い作成日・古い最高値）を引き継ぎ、R の計算が狂い、建てた直後に
+// 時間切れで手仕舞う。建玉が確かに分かっているとき（照会に成功したとき）だけ呼ぶ。
+func (sb *StopBook) RetainHeld(positions map[string]domain.Position) []string {
+	var removed []string
+	for sym := range sb.stops {
+		if pos, ok := positions[sym]; ok && pos.Quantity.GreaterThan(decimal.Zero) {
+			continue
+		}
+		removed = append(removed, sym)
+	}
+	sort.Strings(removed)
+	for _, sym := range removed {
+		delete(sb.stops, sym)
+	}
+	return removed
+}
+
 // EnsureOptions は Ensure の任意項目。設定（[stops]）から作る。
 type EnsureOptions struct {
 	// ATRMultiple は初期ストップ幅の ATR 倍率（sizing.atr_stop_multiple）。

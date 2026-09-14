@@ -33,12 +33,15 @@ type RunRecord struct {
 }
 
 type StopRecord struct {
-	Symbol           string
-	StopPrice        decimal.Decimal
-	EntryPrice       decimal.Decimal
-	CreatedOn        string
-	Trailing         bool
-	ATRMultiple      decimal.Decimal
+	Symbol      string
+	StopPrice   decimal.Decimal
+	EntryPrice  decimal.Decimal
+	CreatedOn   string
+	Trailing    bool
+	ATRMultiple decimal.Decimal
+	// TrailingPct は %トレーリングの比率。nil なら ATR 追従。
+	// 保存しないと 2 日目から ATR 追従に戻ってしまう（設定した比率が初日しか効かない）。
+	TrailingPct      *decimal.Decimal
 	HighestClose     *decimal.Decimal
 	InitialStopPrice *decimal.Decimal
 	InitialQuantity  *decimal.Decimal
@@ -167,7 +170,24 @@ func OpenRepo(dbPath string) (*Repo, error) {
 		last_price  TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_snapshots_as_of ON position_snapshots(as_of);
-	`)}}
+	`)},
+		// placed_at は UTC。JST の日付で数える（当日の発注件数・当日買付）のに
+		// substr(placed_at) を使うと 00:00〜08:59 JST の注文が前日に落ちる。
+		// JST の日付を別の列に持ち、既存行は placed_at から埋める
+		{Name: "orders.placed_on", Up: func(tx *sql.Tx) error {
+			if err := storage.AddColumn(tx, "orders", "placed_on", "TEXT"); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`UPDATE orders
+				SET placed_on = substr(datetime(placed_at, '+9 hours'), 1, 10)
+				WHERE placed_on IS NULL AND placed_at != '';`)
+			return err
+		}},
+		// %トレーリングの比率。無いと翌日から ATR 追従に戻る
+		{Name: "stops.trailing_pct", Up: storage.AddColumns("stops", map[string]string{
+			"trailing_pct": "TEXT",
+		})},
+	}
 
 	if err := storage.Migrate(db, migrations); err != nil {
 		_ = db.Close()
@@ -277,29 +297,56 @@ func (r *Repo) RecordTargets(runID string, targets []domain.TargetPosition) erro
 	return tx.Commit()
 }
 
+// RecordOrder は注文を台帳に書く。同じ ID が既にあれば発注の記録だけを書き換える。
+//
+// 同じ ID で書き直すのは、拒否・未送信（REJECTED / UNSENT）や dry-run の行を
+// 同じ日にもう一度出すとき。約定の記録（filled_quantity / avg_fill_price）は
+// 触らない——INSERT OR REPLACE だと約定済みの行を 0 株に巻き戻す。
 func (r *Repo) RecordOrder(runID string, req domain.OrderRequest, status string, brokerOrderID *string) error {
-	now := clock.NowUTC().Format(time.RFC3339)
+	return r.recordOrderAt(runID, req, status, brokerOrderID, clock.NowUTC())
+}
+
+func (r *Repo) recordOrderAt(runID string, req domain.OrderRequest, status string, brokerOrderID *string, now time.Time) error {
 	var limitStr *string
 	if req.LimitPrice != nil {
 		s := req.LimitPrice.String()
 		limitStr = &s
 	}
 
-	query := `INSERT OR REPLACE INTO orders (
+	query := `INSERT INTO orders (
 		client_order_id, run_id, broker_order_id, symbol, side, order_type,
-		quantity, limit_price, status, reason, placed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+		quantity, limit_price, status, reason, placed_at, placed_on
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(client_order_id) DO UPDATE SET
+		run_id = excluded.run_id,
+		broker_order_id = excluded.broker_order_id,
+		limit_price = excluded.limit_price,
+		status = excluded.status,
+		reason = excluded.reason,
+		placed_at = excluded.placed_at,
+		placed_on = excluded.placed_on,
+		updated_at = excluded.placed_at;`
 
 	_, err := r.db.Exec(query,
 		req.ClientOrderID, runID, brokerOrderID, req.Symbol, string(req.Side), string(req.OrderType),
-		req.Quantity.String(), limitStr, status, req.Reason, now,
+		req.Quantity.String(), limitStr, status, req.Reason,
+		now.Format(time.RFC3339), dayJST(now),
 	)
 	return err
 }
 
+// dayJST は UTC の時刻を JST の日付（YYYY-MM-DD）にする。
+func dayJST(t time.Time) string {
+	return clock.ToZone(t, clock.Tokyo).Format("2006-01-02")
+}
+
+// GetStops は保存済みのストップを全て読む。
+//
+// 数値が壊れていれば失敗にする。黙って 0 にすると「ストップ 0 円」が
+// 抵触しないまま残り、損切りが二度と効かない。
 func (r *Repo) GetStops() (map[string]StopRecord, error) {
 	rows, err := r.db.Query(`SELECT symbol, stop_price, entry_price, created_on, trailing,
-		atr_multiple, highest_close, initial_stop_price, initial_quantity, scaled_out, updated_at
+		atr_multiple, trailing_pct, highest_close, initial_stop_price, initial_quantity, scaled_out, updated_at
 		FROM stops;`)
 	if err != nil {
 		return nil, err
@@ -310,52 +357,75 @@ func (r *Repo) GetStops() (map[string]StopRecord, error) {
 	for rows.Next() {
 		var sym, stopStr, entryStr, createdOn, atrStr string
 		var trailingInt, scaledOutInt int
-		var highStr, initStopStr, initQtyStr, updatedStr *string
+		var pctStr, highStr, initStopStr, initQtyStr, updatedStr *string
 
 		if err := rows.Scan(&sym, &stopStr, &entryStr, &createdOn, &trailingInt,
-			&atrStr, &highStr, &initStopStr, &initQtyStr, &scaledOutInt, &updatedStr); err != nil {
+			&atrStr, &pctStr, &highStr, &initStopStr, &initQtyStr, &scaledOutInt, &updatedStr); err != nil {
 			return nil, err
 		}
 
-		sp, _ := decimal.NewFromString(stopStr)
-		ep, _ := decimal.NewFromString(entryStr)
-		atr, _ := decimal.NewFromString(atrStr)
-
-		var hc, isp, iq *decimal.Decimal
-		if highStr != nil {
-			d, _ := decimal.NewFromString(*highStr)
-			hc = &d
+		rec := StopRecord{
+			Symbol:    sym,
+			CreatedOn: createdOn,
+			Trailing:  trailingInt != 0,
+			ScaledOut: scaledOutInt != 0,
+			UpdatedAt: updatedStr,
 		}
-		if initStopStr != nil {
-			d, _ := decimal.NewFromString(*initStopStr)
-			isp = &d
+		fields := []struct {
+			name string
+			dst  *decimal.Decimal
+			src  string
+		}{
+			{"stop_price", &rec.StopPrice, stopStr},
+			{"entry_price", &rec.EntryPrice, entryStr},
+			{"atr_multiple", &rec.ATRMultiple, atrStr},
 		}
-		if initQtyStr != nil {
-			d, _ := decimal.NewFromString(*initQtyStr)
-			iq = &d
+		for _, f := range fields {
+			d, err := decimal.NewFromString(f.src)
+			if err != nil {
+				return nil, fmt.Errorf("ストップ %s の %s が数値ではありません (%q): %w", sym, f.name, f.src, err)
+			}
+			*f.dst = d
 		}
-
-		stops[sym] = StopRecord{
-			Symbol:           sym,
-			StopPrice:        sp,
-			EntryPrice:       ep,
-			CreatedOn:        createdOn,
-			Trailing:         trailingInt != 0,
-			ATRMultiple:      atr,
-			HighestClose:     hc,
-			InitialStopPrice: isp,
-			InitialQuantity:  iq,
-			ScaledOut:        scaledOutInt != 0,
-			UpdatedAt:        updatedStr,
+		optional := []struct {
+			name string
+			dst  **decimal.Decimal
+			src  *string
+		}{
+			{"trailing_pct", &rec.TrailingPct, pctStr},
+			{"highest_close", &rec.HighestClose, highStr},
+			{"initial_stop_price", &rec.InitialStopPrice, initStopStr},
+			{"initial_quantity", &rec.InitialQuantity, initQtyStr},
 		}
+		for _, f := range optional {
+			d, err := parseDecimalPtrStrict(f.src)
+			if err != nil {
+				return nil, fmt.Errorf("ストップ %s の %s が数値ではありません (%q): %w", sym, f.name, *f.src, err)
+			}
+			*f.dst = d
+		}
+		stops[sym] = rec
 	}
 
-	return stops, nil
+	return stops, rows.Err()
+}
+
+// execer は *sql.DB と *sql.Tx の共通部分。
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
 }
 
 func (r *Repo) SaveStop(rec StopRecord) error {
+	return saveStop(r.db, rec)
+}
+
+func saveStop(db execer, rec StopRecord) error {
 	now := clock.NowUTC().Format(time.RFC3339)
-	var hcStr, initStopStr, initQtyStr *string
+	var pctStr, hcStr, initStopStr, initQtyStr *string
+	if rec.TrailingPct != nil {
+		s := rec.TrailingPct.String()
+		pctStr = &s
+	}
 	if rec.HighestClose != nil {
 		s := rec.HighestClose.String()
 		hcStr = &s
@@ -379,13 +449,13 @@ func (r *Repo) SaveStop(rec StopRecord) error {
 	}
 
 	query := `INSERT OR REPLACE INTO stops (
-		symbol, stop_price, entry_price, created_on, trailing, atr_multiple,
+		symbol, stop_price, entry_price, created_on, trailing, atr_multiple, trailing_pct,
 		highest_close, initial_stop_price, initial_quantity, scaled_out, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
-	_, err := r.db.Exec(query,
+	_, err := db.Exec(query,
 		rec.Symbol, rec.StopPrice.String(), rec.EntryPrice.String(), rec.CreatedOn,
-		trailingInt, rec.ATRMultiple.String(), hcStr, initStopStr, initQtyStr, scaledOutInt, now,
+		trailingInt, rec.ATRMultiple.String(), pctStr, hcStr, initStopStr, initQtyStr, scaledOutInt, now,
 	)
 	return err
 }
@@ -395,17 +465,66 @@ func (r *Repo) DeleteStop(symbol string) error {
 	return err
 }
 
+// SyncStops は台帳のストップを records の中身に揃える。records に無い銘柄の行は消す。
+//
+// 手仕舞った銘柄のストップを残すと、次に同じ銘柄を建てたとき古いストップ
+// （古い建値・古い作成日・古い最高値）を引き継ぎ、R の計算が狂い、
+// 建てた直後に時間切れで手仕舞う。全部を 1 トランザクションで書き、
+// 途中で失敗したら丸ごと戻す。
+func (r *Repo) SyncStops(records map[string]StopRecord) error {
+	return r.withTx(func(tx *sql.Tx) error {
+		for _, rec := range records {
+			if err := saveStop(tx, rec); err != nil {
+				return err
+			}
+		}
+		rows, err := tx.Query("SELECT symbol FROM stops;")
+		if err != nil {
+			return err
+		}
+		var stale []string
+		for rows.Next() {
+			var sym string
+			if err := rows.Scan(&sym); err != nil {
+				rows.Close()
+				return err
+			}
+			if _, keep := records[sym]; !keep {
+				stale = append(stale, sym)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, sym := range stale {
+			if _, err := tx.Exec("DELETE FROM stops WHERE symbol = ?;", sym); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // WasPlaced はその注文 ID を既に発注済みかを返す。
 //
 // 送信後・記録前に落ちた場合の再送を止めるための鍵。拒否された注文は
 // 「出していない」と同じ扱いにして、次回もう一度出せるようにする。
-func (r *Repo) WasPlaced(clientOrderID string) bool {
+//
+// 台帳が読めないときはエラー。「読めない」を「出していない」と読むと、
+// プロセスをまたいだ二重発注の唯一の柵が外れる。
+func (r *Repo) WasPlaced(clientOrderID string) (bool, error) {
 	var dummy int
 	err := r.db.QueryRow(
 		"SELECT 1 FROM orders WHERE client_order_id = ? AND status NOT IN (?, ?, ?);",
 		clientOrderID, "dry_run", string(domain.OrderStatusRejected), string(domain.OrderStatusUnsent),
 	).Scan(&dummy)
-	return err == nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("注文 %s が発注済みかを確かめられません: %w", clientOrderID, err)
+	}
+	return true, nil
 }
 
 // BrokerOrderIDs は台帳が知っている注文番号（broker_order_id）の集合。
@@ -434,7 +553,7 @@ func (r *Repo) BrokerOrderIDs() (map[string]struct{}, error) {
 func (r *Repo) OrdersToday(dayJST string) (int, error) {
 	var count int
 	err := r.db.QueryRow(
-		"SELECT COUNT(*) FROM orders WHERE substr(placed_at, 1, 10) = ? AND status != ?;",
+		"SELECT COUNT(*) FROM orders WHERE placed_on = ? AND status != ?;",
 		dayJST, "dry_run",
 	).Scan(&count)
 	if err != nil {
@@ -447,7 +566,7 @@ func (r *Repo) OrdersToday(dayJST string) (int, error) {
 func (r *Repo) BoughtToday(dayJST string) (map[string]struct{}, error) {
 	rows, err := r.db.Query(
 		`SELECT DISTINCT symbol FROM orders
-		 WHERE substr(placed_at, 1, 10) = ? AND side = ? AND status != ?
+		 WHERE placed_on = ? AND side = ? AND status != ?
 		   AND CAST(filled_quantity AS REAL) > 0;`,
 		dayJST, string(domain.SideBuy), "dry_run",
 	)
@@ -519,9 +638,7 @@ type OrderRecord struct {
 // 次の実行でブローカーに照会し、約定・失効を台帳へ反映するために使う。
 func (r *Repo) UnresolvedOrders() ([]OrderRecord, error) {
 	rows, err := r.db.Query(
-		`SELECT client_order_id, run_id, broker_order_id, symbol, side, order_type,
-		        quantity, limit_price, status, filled_quantity, avg_fill_price, reason, placed_at
-		 FROM orders
+		orderSelect+`
 		 WHERE status NOT IN (?, ?, ?, ?, ?, ?)
 		 ORDER BY placed_at;`,
 		string(domain.OrderStatusFilled), string(domain.OrderStatusCancelled),
@@ -535,24 +652,70 @@ func (r *Repo) UnresolvedOrders() ([]OrderRecord, error) {
 
 	var out []OrderRecord
 	for rows.Next() {
-		var rec OrderRecord
-		var side, orderType, status, quantity, filledQty string
-		var limitPrice, avgFillPrice *string
-		if err := rows.Scan(&rec.ClientOrderID, &rec.RunID, &rec.BrokerOrderID, &rec.Symbol,
-			&side, &orderType, &quantity, &limitPrice, &status, &filledQty,
-			&avgFillPrice, &rec.Reason, &rec.PlacedAt); err != nil {
+		rec, err := scanOrder(rows)
+		if err != nil {
 			return nil, err
 		}
-		rec.Side = domain.Side(side)
-		rec.OrderType = domain.OrderType(orderType)
-		rec.Status = domain.OrderStatus(status)
-		rec.Quantity, _ = decimal.NewFromString(quantity)
-		rec.FilledQuantity, _ = decimal.NewFromString(filledQty)
-		rec.LimitPrice = parseDecimalPtr(limitPrice)
-		rec.AvgFillPrice = parseDecimalPtr(avgFillPrice)
-		out = append(out, rec)
+		out = append(out, *rec)
 	}
 	return out, rows.Err()
+}
+
+// GetOrder は注文 1 件を client_order_id で引く。無ければ nil。
+func (r *Repo) GetOrder(clientOrderID string) (*OrderRecord, error) {
+	row := r.db.QueryRow(orderSelect+` WHERE client_order_id = ?;`, clientOrderID)
+	rec, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+const orderSelect = `SELECT client_order_id, run_id, broker_order_id, symbol, side, order_type,
+		        quantity, limit_price, status, filled_quantity, avg_fill_price, reason, placed_at
+		 FROM orders`
+
+func scanOrder(src scanner) (*OrderRecord, error) {
+	var rec OrderRecord
+	var side, orderType, status, quantity, filledQty string
+	var limitPrice, avgFillPrice *string
+	if err := src.Scan(&rec.ClientOrderID, &rec.RunID, &rec.BrokerOrderID, &rec.Symbol,
+		&side, &orderType, &quantity, &limitPrice, &status, &filledQty,
+		&avgFillPrice, &rec.Reason, &rec.PlacedAt); err != nil {
+		return nil, err
+	}
+	rec.Side = domain.Side(side)
+	rec.OrderType = domain.OrderType(orderType)
+	rec.Status = domain.OrderStatus(status)
+	var err error
+	if rec.Quantity, err = decimal.NewFromString(quantity); err != nil {
+		return nil, fmt.Errorf("注文 %s の quantity が数値ではありません (%q): %w", rec.ClientOrderID, quantity, err)
+	}
+	if rec.FilledQuantity, err = decimal.NewFromString(filledQty); err != nil {
+		return nil, fmt.Errorf("注文 %s の filled_quantity が数値ではありません (%q): %w", rec.ClientOrderID, filledQty, err)
+	}
+	if rec.LimitPrice, err = parseDecimalPtrStrict(limitPrice); err != nil {
+		return nil, fmt.Errorf("注文 %s の limit_price が数値ではありません: %w", rec.ClientOrderID, err)
+	}
+	if rec.AvgFillPrice, err = parseDecimalPtrStrict(avgFillPrice); err != nil {
+		return nil, fmt.Errorf("注文 %s の avg_fill_price が数値ではありません: %w", rec.ClientOrderID, err)
+	}
+	return &rec, nil
+}
+
+// UpdateOrderStatus は状態だけを書き換える。約定の記録（filled_quantity 等）は触らない。
+//
+// 取消の記録に使う。UpdateOrder は約定数量を必ず受けるので、部分約定した注文を
+// 取り消したときに約定分を 0 に戻してしまう。
+func (r *Repo) UpdateOrderStatus(clientOrderID string, status domain.OrderStatus) error {
+	_, err := r.db.Exec(
+		`UPDATE orders SET status = ?, updated_at = ? WHERE client_order_id = ?;`,
+		string(status), clock.NowUTC().Format(time.RFC3339), clientOrderID,
+	)
+	return err
 }
 
 // UpdateOrder は注文の約定状況を書き戻す。
@@ -574,28 +737,28 @@ func (r *Repo) UpdateOrder(clientOrderID string, status domain.OrderStatus,
 	return err
 }
 
-// RecordFill は約定を1件記録する。
-func (r *Repo) RecordFill(runID, clientOrderID, symbol string, side domain.Side,
-	quantity, price, fee decimal.Decimal, filledAt string) error {
-	_, err := r.db.Exec(
-		`INSERT INTO fills (client_order_id, run_id, symbol, side, quantity, price, fee, filled_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
-		clientOrderID, runID, symbol, string(side),
-		quantity.String(), price.String(), fee.String(), filledAt,
-	)
-	return err
-}
-
-// parseDecimalPtr は NULL 許容の数値文字列を Decimal のポインタにする。
+// parseDecimalPtr は NULL 許容の数値文字列を Decimal のポインタにする。壊れていれば nil。
+//
+// 実行の記録（equity / cash）のような表示用の値にだけ使う。判断に使う値は
+// parseDecimalPtrStrict で読み、壊れていたら失敗にする。
 func parseDecimalPtr(s *string) *decimal.Decimal {
-	if s == nil || *s == "" {
-		return nil
-	}
-	d, err := decimal.NewFromString(*s)
+	d, err := parseDecimalPtrStrict(s)
 	if err != nil {
 		return nil
 	}
-	return &d
+	return d
+}
+
+// parseDecimalPtrStrict は NULL 許容の数値文字列を Decimal のポインタにする。壊れていればエラー。
+func parseDecimalPtrStrict(s *string) (*decimal.Decimal, error) {
+	if s == nil || *s == "" {
+		return nil, nil
+	}
+	d, err := decimal.NewFromString(*s)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
 }
 
 // ---- 調査（explain / runs） ----------------------------------------------

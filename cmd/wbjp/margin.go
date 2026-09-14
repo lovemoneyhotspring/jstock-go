@@ -2,10 +2,8 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/strategy"
 )
@@ -34,6 +32,8 @@ func loadMarginBook(symbols []string) (*strategy.MarginBook, error) {
 }
 
 // loadMarginBookWithLag は公表までの遅れを変えて読む（backtest --margin-lag-days の検証用）。
+//
+// ここはアーカイブを読むだけ。コードの対応と行の解釈は strategy 側（テストあり）。
 func loadMarginBookWithLag(symbols []string, lagDays int) (*strategy.MarginBook, error) {
 	arch := archive.NewArchive(appSettings.JQuantsArchiveDir())
 	ep, err := archive.LookupEndpoint(marginEndpoint)
@@ -41,18 +41,7 @@ func loadMarginBookWithLag(symbols []string, lagDays int) (*strategy.MarginBook,
 		return nil, err
 	}
 
-	// アーカイブのコードは 5 桁（72030）。銘柄コードから引けるように控える。
-	want := make(map[string]string, len(symbols))
-	for _, sym := range symbols {
-		code, isIndex, err := data.ToJQuantsCode(sym)
-		if err != nil || isIndex {
-			continue
-		}
-		if len(code) == 4 {
-			code += "0"
-		}
-		want[code] = sym
-	}
+	want := strategy.MarginCodes(symbols)
 	if len(want) == 0 {
 		return nil, nil
 	}
@@ -71,24 +60,16 @@ func loadMarginBookWithLag(symbols []string, lagDays int) (*strategy.MarginBook,
 		return nil, nil
 	}
 
-	records := make(map[string][]strategy.MarginRecord)
+	rows := make([]strategy.MarginRow, 0, frame.Height())
 	for i := 0; i < frame.Height(); i++ {
-		sym, ok := want[text(frame.Get(i, "Code"))]
-		if !ok {
-			continue
-		}
-		date := text(frame.Get(i, ep.DateColumn))
-		long, err1 := strconv.ParseFloat(text(frame.Get(i, "LongVol")), 64)
-		short, err2 := strconv.ParseFloat(text(frame.Get(i, "ShrtVol")), 64)
-		if date == "" || err1 != nil || err2 != nil {
-			continue
-		}
-		records[sym] = append(records[sym], strategy.MarginRecord{Date: date, Long: long, Short: short})
+		rows = append(rows, strategy.MarginRow{
+			Code:  text(frame.Get(i, "Code")),
+			Date:  text(frame.Get(i, ep.DateColumn)),
+			Long:  text(frame.Get(i, "LongVol")),
+			Short: text(frame.Get(i, "ShrtVol")),
+		})
 	}
-	if len(records) == 0 {
-		return nil, nil
-	}
-	return strategy.NewMarginBookWithLag(records, lagDays), nil
+	return strategy.NewMarginBookFromRows(want, rows, lagDays), nil
 }
 
 func text(p *string) string {

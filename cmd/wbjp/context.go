@@ -1,115 +1,68 @@
 package main
 
 import (
+	"sort"
+
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/indicators"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/risk"
 	"github.com/shopspring/decimal"
 )
 
-// closesOf は足の終値を float64 の並びにする。指標計算はこの形で受ける。
-func closesOf(bars []domain.Bar) []float64 {
-	out := make([]float64, len(bars))
-	for i, b := range bars {
-		v, _ := b.Close.Float64()
-		out[i] = v
-	}
-	return out
-}
-
-// trendValues は銘柄ごとのトレンド判定値（移動平均）を返す。
+// trendValues は銘柄ごとのトレンド判定値（trend_exit_kind の線）を返す。
 //
 // 残り玉（ランナー）をどこで手仕舞うかの基準。trend_exit_sma が未設定なら
-// 判定しないので空を返す。
+// 判定しないので空を返す。線の計算は risk.TrendValue（テストあり）。
 func trendValues(barStore *data.BarStore, symbols []string, stops wbjpcfg.StopsConfig) map[string]decimal.Decimal {
 	if stops.TrendExitSMA == nil || *stops.TrendExitSMA <= 0 {
 		return nil
 	}
-	period := *stops.TrendExitSMA
-
 	out := make(map[string]decimal.Decimal, len(symbols))
 	for _, sym := range symbols {
 		bars, err := barStore.Read(sym, "", "")
-		if err != nil || len(bars) < period {
+		if err != nil {
 			continue
 		}
-		closes := closesOf(bars)
-
-		var series []float64
-		switch stops.TrendExitKind {
-		case "ema":
-			series, err = indicators.EMA(closes, period)
-		default:
-			series, err = indicators.SMA(closes, period)
+		if v, ok := risk.TrendValue(bars, stops); ok {
+			out[sym] = v
 		}
-		if err != nil || len(series) == 0 {
-			continue
-		}
-		last := series[len(series)-1]
-		if last != last { // NaN（ウォームアップ中）
-			continue
-		}
-		out[sym] = decimal.NewFromFloat(last)
 	}
 	return out
 }
 
 // regimeInput は地合い判定に使う指数の直近値を組み立てる。
 //
-// 指標が揃わない（ウォームアップ中・足が無い）ときは nil のまま返す。
-// RegimeExposure 側がそれを弱気として扱う。
+// 指数の足が読めなければ空のまま返す（RegimeExposure 側が弱気として扱う）。
+// 指標の計算は risk.RegimeInputFromBars（テストあり）。
 func regimeInput(barStore *data.BarStore, cfg wbjpcfg.RegimeConfig) risk.RegimeInput {
-	var in risk.RegimeInput
 	if cfg.Benchmark == "" {
-		return in
+		return risk.RegimeInput{}
 	}
-
 	bars, err := barStore.Read(cfg.Benchmark, "", "")
-	if err != nil || len(bars) == 0 {
-		return in
-	}
-	closes := closesOf(bars)
-
-	last := bars[len(bars)-1].Close
-	in.Close = &last
-
-	longMA, err := indicators.SMA(closes, cfg.SMALong)
 	if err != nil {
-		return in
+		return risk.RegimeInput{}
 	}
-	midMA, err := indicators.SMA(closes, cfg.SMAMid)
-	if err != nil {
-		return in
-	}
-
-	if v := lastValid(longMA); v != nil {
-		d := decimal.NewFromFloat(*v)
-		in.LongMA = &d
-	}
-	if v := lastValid(midMA); v != nil {
-		d := decimal.NewFromFloat(*v)
-		in.MidMA = &d
-	}
-
-	// 長期線の傾き = 直近の長期線 − slope_lookback 日前の長期線。
-	idx := len(longMA) - 1 - cfg.SlopeLookback
-	if in.LongMA != nil && idx >= 0 && longMA[idx] == longMA[idx] {
-		slope := in.LongMA.Sub(decimal.NewFromFloat(longMA[idx]))
-		in.Slope = &slope
-	}
-	return in
+	return risk.RegimeInputFromBars(bars, cfg)
 }
 
-// lastValid は並びの末尾にある有効な値。NaN しか無ければ nil。
-func lastValid(series []float64) *float64 {
-	for i := len(series) - 1; i >= 0; i-- {
-		if series[i] == series[i] {
-			return &series[i]
-		}
+// positionList は建玉を銘柄順の並びにする（記録の並びを実行ごとに揃える）。
+func positionList(positions map[string]domain.Position) []domain.Position {
+	out := make([]domain.Position, 0, len(positions))
+	for _, pos := range positions {
+		out = append(out, pos)
 	}
-	return nil
+	sort.Slice(out, func(i, j int) bool { return out[i].Symbol < out[j].Symbol })
+	return out
+}
+
+// symbolSet は銘柄の並びを集合にする。
+func symbolSet(symbols []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(symbols))
+	for _, sym := range symbols {
+		out[sym] = struct{}{}
+	}
+	return out
 }
 
 // quantitiesOf は建玉の数量だけを取り出す。

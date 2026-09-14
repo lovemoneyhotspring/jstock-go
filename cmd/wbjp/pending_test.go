@@ -45,6 +45,15 @@ func pendingRepo(t *testing.T) (*repo.Repo, domain.OrderRequest) {
 	return rep, req
 }
 
+func wasPlaced(t *testing.T, rep *repo.Repo, clientOrderID string) bool {
+	t.Helper()
+	placed, err := rep.WasPlaced(clientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return placed
+}
+
 func TestResolvePendingOrdersNotSentAllowsResend(t *testing.T) {
 	rep, req := pendingRepo(t)
 	logger, _ := logging.NewLogger("wbjp", "uat", "r", "test", "")
@@ -53,7 +62,7 @@ func TestResolvePendingOrdersNotSentAllowsResend(t *testing.T) {
 	if err != nil || summary.NotSent != 1 {
 		t.Fatalf("summary=%+v err=%v", summary, err)
 	}
-	if rep.WasPlaced(req.ClientOrderID) {
+	if wasPlaced(t, rep, req.ClientOrderID) {
 		t.Error("UNSENT は発注済みに数えない（送り直せる）")
 	}
 }
@@ -75,7 +84,7 @@ func TestResolvePendingOrdersAttributes(t *testing.T) {
 	if len(open) != 1 || open[0].BrokerOrderID == nil || *open[0].BrokerOrderID != id || open[0].Status != domain.OrderStatusSubmitted {
 		t.Errorf("帰属が台帳に無い: %+v", open)
 	}
-	if !rep.WasPlaced(req.ClientOrderID) {
+	if !wasPlaced(t, rep, req.ClientOrderID) {
 		t.Error("板に残っている注文は発注済み")
 	}
 }
@@ -87,7 +96,7 @@ func TestResolvePendingOrdersFailsClosedWhenHistoryUnavailable(t *testing.T) {
 	if err == nil {
 		t.Fatal("一覧を照会できないのに通った")
 	}
-	if !rep.WasPlaced(req.ClientOrderID) {
+	if !wasPlaced(t, rep, req.ClientOrderID) {
 		t.Error("判定できないときは PENDING のまま（送り直さない）")
 	}
 }
