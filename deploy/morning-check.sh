@@ -20,7 +20,13 @@ cd "$HOME_DIR" || exit 1
 TODAY="$(TZ=Asia/Tokyo date +%F)"
 BOOK_DIR="$HOME_DIR/state/daytrade/history/book"
 SNAP_LOG="$HOME_DIR/state/logs/daytrade-snap.log"
-OPEN_LOG="$HOME_DIR/state/logs/daytrade-open-dryrun.log"
+# open のログ。本番（--live）の行があればそちら、無ければ dry-run の行（crontab のどちらが生きているか）
+OPEN_LOG="$HOME_DIR/state/logs/daytrade-open.log"
+OPEN_LABEL="open（本番）"
+if ! crontab -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -q 'daytrade open .*--live'; then
+  OPEN_LOG="$HOME_DIR/state/logs/daytrade-open-dryrun.log"
+  OPEN_LABEL="dry-run の open"
+fi
 
 if [ -f "$HOME_DIR/.env" ]; then
   set -a
@@ -103,7 +109,7 @@ trap 'rm -f "$body"' EXIT
     runs=$(count "$TODAY.*daytrade.run" "$OPEN_LOG")
     errs=$(count "$TODAY.*\[error\]" "$OPEN_LOG")
     busy=$(count "$TODAY.*lock_busy" "$OPEN_LOG")
-    echo "dry-run の open: 完了 $runs 回 / エラー $errs 件 / ロック見送り $busy 件"
+    echo "$OPEN_LABEL: 完了 $runs 回 / エラー $errs 件 / ロック見送り $busy 件"
     [ "$errs" != "0" ] && problems=$((problems + 1))
     echo '```'
     grep "$TODAY" "$OPEN_LOG" | grep -E "\[error\]|\[warn\]" | tail -5
@@ -140,7 +146,7 @@ trap 'rm -f "$body"' EXIT
     ' "$JSONL" 2>/dev/null | tail -6)
     if [ -n "$freshness" ]; then
       echo
-      echo "気配の鮮度（dry-run の open）:"
+      echo "気配の鮮度（$OPEN_LABEL）:"
       echo '```'
       echo "$freshness"
       echo '```'
