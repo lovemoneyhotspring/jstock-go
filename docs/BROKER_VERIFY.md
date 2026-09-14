@@ -78,8 +78,7 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 `go test` は .env と秘密鍵の相対パスを解決できない（作業ディレクトリがパッケージの側になる）ので、
 上のように絶対パスで渡す。
 
-**信用（`daytrade`）の検証は口座が開くまで進められない。** 信用新規・信用建玉の行あり・
-信用返済の逆指値は、どれも口座が要る。
+信用新規・信用建玉の行あり・信用返済の逆指値は、2026-09-14 に信用口座が開いてから確かめた（下の節）。
 
 ## 一般信用の在庫は API では取れない（2026-09-14、本番口座・照会のみ）
 
@@ -109,13 +108,59 @@ sDaiyouHyoukaTanka sHosyoukinDaiyouKakeme sTokuteiF sZyouzyouHakkouKabusu
 結論として、優待クロスの自動化はこの API の上では成立しない（在庫は Web 画面にしか無い）。
 記録: `~/obsidian-vault/20-research/2026-09-jp-institutional-arb-scan.md`
 
+## 信用の発注経路を 1 周させた（2026-09-14 昼、本番口座・信用 1 単元）
+
+信用口座が開いた（`sSinyouKouzaKubun = 1`）ので、ザラ場中に 1 単元だけ信用で買い建て、
+同じ実行の中で返済まで通した。貸借銘柄で値動きの小さい ETF（単元 10 株・約 2,350 円）を使った。
+
+```bash
+WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
+  TACHIBANA_PROD_PRIVATE_KEY_FILE=$PWD/e_api_private_key.der \
+  TACHIBANA_MARGIN_ORDER_PROBE=<銘柄> go test ./pkg/wbcore/broker -run TestMarginOrderProbe -v -count=1
+```
+
+**実際に発注する**（[tachibana_margin_order_probe_test.go](../pkg/wbcore/broker/tachibana_margin_order_probe_test.go)）。
+買建だけ・1 単元・見積り 5,000 円まで・その銘柄に建玉があれば送らない・新規は売気配／返済は買気配の指値。
+途中で落ちても、建った玉は最後に返済を試みる。
+
+| 電文 | 結果 |
+|---|---|
+| `CLMZanKaiSummary`（余力） | ✅ 信用新規建可能額 `sSinyouSinkidate` が実数で読めた。**`sLargeKaidateYoryoku` などの建余力は 0 のまま**（使っていない） |
+| `CLMKabuNewOrder`（信用新規買い・指値） | ✅ 受理。単品照会で `取引 MARGIN_OPEN`・FILLED・約定単価が読めた |
+| `CLMShinyouTategyokuList`（行あり） | ✅ `sOrderTategyokuNumber`（建玉番号）・`sOrderHensaiKanouSuryou`・`sOrderTategyokuTanka`・`sOrderTategyokuDay` が現行の定数どおり。`MarginPositions` の建玉番号も取れた |
+| `CLMKabuNewOrder`（信用返済の逆指値・建玉指定つき） | ✅ 受理。照会で `取引 MARGIN_CLOSE`・条件・`発火 false` が読めた（手順 5 e） |
+| `CLMKabuCorrectOrder`（返済の逆指値の条件） | ✅ 条件の訂正が照会に反映された |
+| `CLMKabuCancelOrder`（返済の逆指値） | ✅ CANCELLED |
+| `CLMKabuNewOrder`（信用返済売り・指値） | ✅ 受理 → FILLED（`取引 MARGIN_CLOSE`・`売買 SELL`）。**現物売りになっていない** |
+| 返済後の `CLMShinyouTategyokuList` | ✅ 0 行 |
+
+建玉の行で分かったこと:
+
+- 買建の `sOrderBaibaiKubun` は **`3`**（`ParseSide` がそのまま読めた）
+- `sOrderTategyokuKizituDay`（期日）は建日の約 6 か月後。制度信用（`sGenkinShinyouKubun = 2`）で建っている
+- 定数に無い項目: `sOrderBensaiKubun`・`sOrderTateTesuryou`（建手数料 0）・`sOrderKanrihi`・`sOrderZyunHibu`・`sTategyokuDaikin` など
+
+**余力の動き**: 現物買付可能額が 1 円減った（= 気配の差 0.1 円 × 10 株）。信用の売買代金に新規と返済の 2 件ぶんが載り、
+現物の注文件数は 0 のまま。**信用の手数料は 0 円**で、受渡も信用として処理された。
+
+**逆指値だけの注文は、発火待ちの間 `PENDING` で読まれる**（現物の逆指値でも同じ）。`PENDING` は台帳側で
+「送信結果不明」の意味にも使うので、逆指値を台帳に載せる経路を作るときは区別が要る。
+
+**まだ確かめていないこと**（下の「未検証」に残した）:
+
+- `daytrade open` / `close` / `verify` を通した経路（台帳への記録・close の数量・verify の「持ち越しなし」）。
+  いまの設定は 1 注文 100 万円で、1 単元の検証には使えない。プローブは電文だけを直接叩いている
+- 前営業日の注文を `CLMOrderListDetail` で照会できるか。今日の新規・返済の注文番号は日誌
+  （`~/obsidian-vault/10-journal/2026-09-14.md`）に残したので、翌営業日に照会する
+
 ## 未検証の電文
 
 | 電文 | 使うところ | 実装 |
 |---|---|---|
-| `CLMShinyouTategyokuList` | 信用建玉の一覧・返済する玉の指定 | [pkg/wbcore/broker/tachibana_trade.go](../pkg/wbcore/broker/tachibana_trade.go) |
-| `CLMKabuNewOrder`（信用） | 信用新規・返済の発注 | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
-| 信用返済の逆指値（建玉指定つき） | 信用のストップ | [pkg/wbcore/broker/tachibana.go](../pkg/wbcore/broker/tachibana.go) |
+| `CLMOrderListDetail`（前営業日の注文） | 持ち越しの判定（`execute.CarriedPositions`） | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
+| `daytrade` の台帳を通した信用の 1 周 | `open` → `close` → `verify` | [pkg/daytrade/execute](../pkg/daytrade/execute) |
+
+信用建玉（行あり）・信用新規／返済の発注・信用返済の逆指値は 2026-09-14 に本番口座で確認済み（上の節）。
 
 残高・現物建玉（`CLMZanKaiSummary` / `CLMGenbutuKabuList`）は 2026-09-11 に実数で確認済み。
 Go への移植時に項目名を取り違えていた（`aCLMKabuZan` / `sGenkinZandaka` などは実在しない）ので、
@@ -280,7 +325,7 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 #   accum verify-stop --symbol 563A --also-limit --live -y  # 約定しない指値＋条件
 #
 # a〜d・f と通常＋逆指値は 2026-09-11 に本番口座で確認済み。
-# e（信用返済の逆指値）だけが信用口座を待っている。
+# e（信用返済の逆指値）は 2026-09-14 に TestMarginOrderProbe で確認済み。
 ```
 
 ## 既知の制約
@@ -297,8 +342,9 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 
 ## 本番へ移すときの条件
 
-**残っているのは信用（`daytrade`）だけ**で、口座が開設されるまで進められない
-（2026-09-11 時点で `sSinyouKouzaKubun = 0`）。現物と逆指値は同日に本番口座で全部通した。
+現物と逆指値は 2026-09-11、信用の電文（新規・建玉・返済・返済の逆指値）は 2026-09-14 に本番口座で通した。
+**残っているのは信用の 4 点のうち 3（`daytrade verify` の「持ち越しなし」）と 4（前営業日の単品照会）**。
+3 は `daytrade` の台帳を通して回す必要があり、1 単元で回せる設定がまだ無い。
 
 上の 8 点がすべて確認できるまで、`deploy/crontab.txt` の発注経路の行は開けない。
 開けるときも **まず `--live` 無しで数日**、次に `--live` の順にする。
