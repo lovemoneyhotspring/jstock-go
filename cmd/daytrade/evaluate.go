@@ -84,6 +84,14 @@ func runEvaluate(date string, asJSON bool) error {
 		runIDOfRanking = ""
 		source = dtevaluate.SourceArchiveOpen
 		fmt.Println("9:00 の順位表が無いので、前夜の plan と当日の始値から順位を作り直しました")
+		// 2026-09-14 までの危険信号の見送りは順位表を書いていない。open の要約で見分けて印を付ける
+		// （見送りの日の成績を通常日と混ぜない。review が分けて集計する）
+		if runs, err := store.Latest(dthistory.KindOpenRun, day); err == nil && runs.Height() > 0 &&
+			strOf(runs.Rows[0]["outcome"]) == "regime" {
+			for i := range rows {
+				rows[i].Skipped = true
+			}
+		}
 	}
 
 	led, err := dtledger.Open(appSettings.DaytradeDBPath())

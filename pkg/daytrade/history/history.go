@@ -130,6 +130,12 @@ var RankingSchema = []history.Column{
 	{Name: "amount", Type: history.TypeFloat64},
 	{Name: "n", Type: history.TypeInt64},
 	{Name: "budget", Type: history.TypeFloat64},
+	// over_budget は 1 単元が 1 注文の予算を超える銘柄。選定はこれを飛ばして次点を繰り上げるので、
+	// 順位が上でも picked にならない（値がさ株ほど深いギャップの上位から外れる偏りを追うため）。
+	{Name: "over_budget", Type: history.TypeBool},
+	// skipped は危険信号で見送った日の順位表。picked は「建てていたら選んだ」銘柄で、発注はしていない。
+	// N と予算は通常日の値（縮小・ショックの倍率を掛けない。evaluate.NominalLegs）。
+	{Name: "skipped", Type: history.TypeBool},
 }
 
 // OpenRunSchema は open 1 回の要約。
@@ -324,6 +330,7 @@ func RankingFrame(ranking []selection.Ranked, picks []selection.Pick, side strin
 			"vol20": floatOrNil(r.Vol), "picked": false,
 			"quantity": nil, "amount": nil,
 			"n": int64(n), "budget": budgetF,
+			"over_budget": selection.OverBudget(budget, r.Price), "skipped": false,
 		}
 		if p, ok := picked[r.Symbol]; ok {
 			quantity, _ := p.Quantity.Float64()
@@ -335,6 +342,14 @@ func RankingFrame(ranking []selection.Ranked, picks []selection.Pick, side strin
 		rows = append(rows, row)
 	}
 	return history.NewFrame(RankingSchema, rows)
+}
+
+// MarkSkipped は順位表の全行に skipped を立てる（危険信号で見送った日の「建てていたら」）。
+func MarkSkipped(frame history.Frame) history.Frame {
+	for _, row := range frame.Rows {
+		row["skipped"] = true
+	}
+	return frame
 }
 
 // OpenRunFrame は open 1 回の要約。OpenRunSchema に無い項目は捨てる。

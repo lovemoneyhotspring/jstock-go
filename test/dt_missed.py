@@ -56,11 +56,25 @@ FROM p JOIN b ON b.Code = p.Code AND b.Date = p.day
 if df.empty:
     print('突き合わせる記録がありません（9:01 の順位表は ranking_source = quotes の日だけ）'); sys.exit(0)
 
+# その日の最初の open の結末。順位表が無い日を「全部欠け」と数えないため
+# （2026-09-14 までの危険信号の見送りは順位表を書いていなかった）
+c.execute(f"CREATE VIEW open_run AS SELECT * FROM read_parquet('{STATE}/open_run/*.parquet', union_by_name=true)")
+outcome = {d: o for d, o in c.execute(f"""
+SELECT day, arg_min(outcome, recorded_at) FROM open_run
+WHERE day BETWEEN DATE '{frm}' AND DATE '{to}' GROUP BY day""").fetchall()}
+SKIP_LABEL = {'regime': '危険信号で見送り', 'no_quotes': '気配が取れず見送り'}
+
 for day, g in df.groupby('day'):
+    how = outcome.get(day.date() if hasattr(day, 'date') else day)
+    if not g.ranked.any():
+        why = SKIP_LABEL.get(how) or (f'open の結末 {how}' if how else 'open の記録なし（cron が動いていない・発注経路が止まっている）')
+        print(f"\n=== {day:%Y-%m-%d}  母集団 {len(g)}  9:01 の順位表なし: {why}。欠けは数えない")
+        continue
     cand = g[g.gap < MAX_GAP].sort_values('gap_vol')   # 買う条件を満たす候補を理想の順で
     missed = cand[~cand.ranked]
     top = cand.head(N)
-    print(f"\n=== {day:%Y-%m-%d}  母集団 {len(g)}  9:01 の順位表に載った {int(g.ranked.sum())}"
+    label = f"（{SKIP_LABEL[how]}。picked は建てていたら）" if how in SKIP_LABEL else ''
+    print(f"\n=== {day:%Y-%m-%d}{label}  母集団 {len(g)}  9:01 の順位表に載った {int(g.ranked.sum())}"
           f"  欠け {int((~g.ranked).sum())}")
     print(f"  買う条件を満たす候補 {len(cand)}  うち欠け {len(missed)}"
           f"  理想の上位 {N} のうち欠け {int((~top.ranked).sum())}")

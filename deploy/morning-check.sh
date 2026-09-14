@@ -107,10 +107,20 @@ trap 'rm -f "$body"' EXIT
     # 0 が 2 行になるので、成否は無視して出力だけ取る
     count() { grep -c "$@" 2>/dev/null | head -1; }
     runs=$(count "$TODAY.*daytrade.run" "$OPEN_LOG")
+    # 判断まで進んで建てずに終わった回（危険信号・候補なし等）。「完了」のログは出ないので、
+    # 数えないと cron が動かなかった朝と見分けがつかない（2026-09-14 は 4 回とも危険信号で見送り）
+    skips=$(count "$TODAY.*\[daytrade.skip\]" "$OPEN_LOG")
     errs=$(count "$TODAY.*\[error\]" "$OPEN_LOG")
     busy=$(count "$TODAY.*lock_busy" "$OPEN_LOG")
-    echo "$OPEN_LABEL: 完了 $runs 回 / エラー $errs 件 / ロック見送り $busy 件"
+    echo "$OPEN_LABEL: 完了 $runs 回 / 見送り $skips 回 / エラー $errs 件 / ロック見送り $busy 件"
+    if [ "$skips" != "0" ]; then
+      grep "$TODAY" "$OPEN_LOG" | grep -o "\[daytrade.skip\] .*" | sort | uniq -c | sed 's/^ */  /'
+    fi
     [ "$errs" != "0" ] && problems=$((problems + 1))
+    if [ "$runs" = "0" ] && [ "$skips" = "0" ] && [ "$errs" = "0" ]; then
+      echo "❌ open が 1 回も判断まで進んでいません（cron が動いていない・ロックで見送り）"
+      problems=$((problems + 1))
+    fi
     echo '```'
     grep "$TODAY" "$OPEN_LOG" | grep -E "\[error\]|\[warn\]" | tail -5
     echo '```'

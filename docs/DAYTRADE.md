@@ -367,7 +367,7 @@ toml でよい。
 | `plan` | 母集団の 1 銘柄（`eligible` / `short_eligible` と除外理由の列ごと。`margin_ratio` は記録だけ） | `plan` のたび |
 | `plan_meta` | `plan` 1 回の要約（件数・IV・ドリフト） | `plan` のたび |
 | `quotes` | 9:00 に受け取った気配 1 銘柄。`usable`（鮮度の検査を通った）・`opened`（もう寄っていた）・`gap` 付き | `open` が気配を取ったとき |
-| `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount` | `open` が順位を付けたとき |
+| `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount`。`over_budget` は 1 単元が 1 注文の予算を超えて飛ばされた銘柄（順位が上でも picked にならない）。`skipped` は危険信号で見送った日の順位表で、picked は「建てていたら」（N と予算は通常日の値） | `open` が順位を付けたとき（見送りの日も） |
 | `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数 | `open` が判断まで進んだとき |
 | `open_run` の `broker_verify` | 実機検証の実行（`--broker-verify`）だったか | `open` のたび |
 | `book` | 板・気配 1 銘柄 × 1 観測時刻（`slot` = JST の HHMM）。時価問合の応答をそのまま（値は文字列） | `snap` のたび（1 日 10 回。[OPENING_DATA.md](OPENING_DATA.md)） |
@@ -480,7 +480,15 @@ daytrade trades --side SELL --csv /tmp/short.csv                 # 脚で絞っ�
 `review` は日 × 脚ごとに「選んだ N の平均 net bp」「次点の平均」「候補全体の平均」と想定損益・
 実現損益を並べ、期間の合計に「picked が勝った日」「picked が all を上回った日」の割合を出す。
 選定が効いていれば picked ≥ next ≥ all の日が多い。逆が続けば、順位付けの規則（ギャップの
-小さい順／大きい順）がその相場で効いていない合図。全行は DuckDB で直接読める:
+小さい順／大きい順）がその相場で効いていない合図。
+
+危険信号で見送った日は `skipped`（`evaluation` と `review` の列。表示は「見送」）。`open` が
+見送りの日も通常日の N と予算で順位表を書くので、「建てていたら」が気配の順位表で評価される
+（2026-09-14 までの見送りの日は始値の作り直しに、`open_run` の結末から印を付ける）。
+**期間の合計は脚ごとに通常日と見送りの日の 2 行に分かれる**——見送りの日の picked が
+負けていれば見送りは正しかった、勝ち続けていれば危険信号の規則を見直す材料。
+`over_budget` は 1 単元が予算を超えて飛ばされた銘柄で、値がさ株の取り逃がしを追える。
+全行は DuckDB で直接読める:
 
 ```bash
 jquants query "SELECT rank_group, avg(net_bp) FROM read_parquet('state/daytrade/history/evaluation/*.parquet')

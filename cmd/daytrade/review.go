@@ -89,6 +89,9 @@ func printReview(table, totals history.Frame) {
 		if strOf(row["source"]) == dtevaluate.SourceQuotes {
 			source = "気配"
 		}
+		if row["skipped"] == true {
+			source += "・見送"
+		}
 		day := ""
 		if t, ok := row["day"].(time.Time); ok {
 			day = t.Format(DateLayout)
@@ -104,8 +107,12 @@ func printReview(table, totals history.Frame) {
 		"脚", "日数", "picked bp", "next bp", "all bp",
 		"picked が勝った日", "picked が all を上回った日", "想定損益", "実現損益")
 	for _, row := range totals.Rows {
+		leg := strOf(row["side"])
+		if row["skipped"] == true {
+			leg += "（見送り）" // 危険信号で建てなかった日の「建てていたら」
+		}
 		fmt.Printf("  %-5s %6d %10s %10s %10s %18s %26s %14s %14s\n",
-			strOf(row["side"]), iOf(row["days"]),
+			leg, iOf(row["days"]),
 			bpText(row["picked_bp"]), bpText(row["next_bp"]), bpText(row["all_bp"]),
 			rateText(row["picked_win_days"]), rateText(row["beat_all_days"]),
 			pnlText(row["picked_pnl"]), pnlText(row["actual_pnl"]))

@@ -255,6 +255,58 @@ func TestReviewAndTotals(t *testing.T) {
 	}
 }
 
+func TestEvaluateCarriesSkippedAndOverBudget(t *testing.T) {
+	rows := ranking()
+	for i := range rows {
+		rows[i].Skipped = true
+	}
+	rows[1].OverBudget = true
+	frame := evaluate.Evaluate(rows, "r1", bars(), baseConfig(), nil, evaluate.SourceQuotes)
+	for _, row := range frame.Rows {
+		if row["skipped"] != true {
+			t.Errorf("%v: skipped が立っていない", row["symbol"])
+		}
+		if want := row["symbol"] == "2000"; row["over_budget"] != want {
+			t.Errorf("%v: over_budget = %v, want %v", row["symbol"], row["over_budget"], want)
+		}
+	}
+}
+
+// 見送りの日（危険信号で建てなかった日の「建てていたら」）は、通常日の合計に混ぜない。
+func TestReviewSeparatesSkippedDays(t *testing.T) {
+	traded := time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC)
+	skipped := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
+	row := func(day time.Time, skip bool, group string, bp float64) map[string]any {
+		return map[string]any{"day": day, "recorded_at": day.Add(12 * time.Hour), "side": "BUY",
+			"rank_group": group, "ranking_source": evaluate.SourceQuotes, "skipped": skip,
+			"net_bp": bp, "hypo_pnl": bp * 10, "actual_pnl": nil, "traded": false}
+	}
+	frame := history.NewFrame(evaluate.EvaluationSchema, []map[string]any{
+		row(traded, false, "picked", -50), row(traded, false, "next", 10),
+		row(skipped, true, "picked", 300), row(skipped, true, "next", 100),
+	})
+	table := evaluate.Review(frame)
+	if table.Height() != 2 || table.Rows[0]["skipped"] != false || table.Rows[1]["skipped"] != true {
+		t.Fatalf("日別の skipped が違う: %+v", table.Rows)
+	}
+	totals := evaluate.ReviewTotals(table)
+	if totals.Height() != 2 {
+		t.Fatalf("合計 %d 行, want 2（通常日と見送りの日）", totals.Height())
+	}
+	if totals.Rows[0]["skipped"] != false {
+		t.Errorf("通常日の合計が先に並んでいない: %+v", totals.Rows)
+	}
+	for _, tot := range totals.Rows {
+		want := -50.0
+		if tot["skipped"] == true {
+			want = 300
+		}
+		if tot["days"].(int64) != 1 || tot["picked_bp"].(float64) != want {
+			t.Errorf("skipped=%v: days %v picked_bp %v, want 1 / %v", tot["skipped"], tot["days"], tot["picked_bp"], want)
+		}
+	}
+}
+
 func TestLatestPerDayKeepsLastRun(t *testing.T) {
 	day := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
 	early := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	dtevaluate "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/evaluate"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/execute"
 	dthistory "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/history"
 	dtledger "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
@@ -299,6 +300,10 @@ func runOpen(opts openOptions) error {
 		fmt.Println("危険信号により今日は取引しません: " + strings.Join(verdict.Reasons, "、"))
 		logInfo("daytrade.skip", "危険信号で見送り", map[string]any{"reason": "regime", "reasons": verdict.Reasons})
 		digest.Note(map[string]any{"regime_skip": strings.Join(verdict.Reasons, "、")})
+		// 見送りの日も「建てていたら」の順位表を残す。無いと evaluate が始値で作り直すので、
+		// 9:01 の気配で何を選んでいたかが消え、dt_missed も欠けと見送りを見分けられない
+		skippedQuotes, _ := execute.RankQuotes(quotes, placed.Symbols, execute.SweptSymbols(carried), cfg.Signal.SkipOpened)
+		appendSkippedRanking(cfg, p, skippedQuotes, day)
 		finish("regime", nil)
 		return nil
 	}
@@ -504,6 +509,19 @@ func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap
 	}
 	logInfo("daytrade.regime", "危険信号", fields)
 	return verdict, nil
+}
+
+// appendSkippedRanking は危険信号で見送った日の順位表を、通常日の件数と予算で作って積む
+// （skipped の印付き）。evaluate が気配の順位表として評価し、review が通常日と分けて集計する。
+func appendSkippedRanking(cfg dtconfig.Config, p dtplan.Plan, quotes map[string]selection.Quote, day time.Time) {
+	var frames []history.Frame
+	for _, leg := range dtevaluate.NominalLegs(p, quotes, cfg) {
+		frames = append(frames, dthistory.MarkSkipped(
+			dthistory.RankingFrame(leg.Ranking, leg.Picks, leg.Side, leg.N, leg.Budget)))
+	}
+	if path := appendHistory(dthistory.KindRanking, concatFrames(frames), day); path != "" {
+		fmt.Printf("見送りの日の順位表（建てていたら）を履歴に追記 %s\n", path)
+	}
 }
 
 func modeOf(watchOnly, allowed bool) string {

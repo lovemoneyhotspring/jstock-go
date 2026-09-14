@@ -110,6 +110,28 @@ func TestRankingFrameMarksPicks(t *testing.T) {
 	}
 }
 
+func TestRankingFrameMarksOverBudgetAndSkipped(t *testing.T) {
+	ranked := []selection.Ranked{
+		// 1 単元 176 万円は 1 注文 125 万円に収まらない（2026-09-14 のイビデン）
+		{Rank: 1, Symbol: "4062", PrevClose: decimal.NewFromInt(19600),
+			Price: decimal.NewFromInt(17605), Gap: decimal.RequireFromString("-0.10")},
+		{Rank: 2, Symbol: "3445", PrevClose: decimal.NewFromInt(5300),
+			Price: decimal.NewFromInt(4990), Gap: decimal.RequireFromString("-0.06")},
+	}
+	frame := RankingFrame(ranked, nil, "BUY", 3, decimal.NewFromInt(1_250_000))
+	if frame.Rows[0]["over_budget"] != true || frame.Rows[1]["over_budget"] != false {
+		t.Errorf("over_budget = %v / %v", frame.Rows[0]["over_budget"], frame.Rows[1]["over_budget"])
+	}
+	if frame.Rows[0]["skipped"] != false {
+		t.Error("通常の順位表に skipped が立っている")
+	}
+	for _, row := range MarkSkipped(frame).Rows {
+		if row["skipped"] != true {
+			t.Errorf("%v: skipped が立っていない", row["symbol"])
+		}
+	}
+}
+
 func TestOpenRunFrameCoercesAndDropsUnknown(t *testing.T) {
 	frame := OpenRunFrame(map[string]any{
 		"mode": "dry_run", "outcome": "picked",

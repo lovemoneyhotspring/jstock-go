@@ -73,12 +73,20 @@ type RankingRow struct {
 	Amount    *float64
 	N         int
 	Budget    float64
+	// OverBudget は 1 単元が 1 注文の予算を超えて選べなかった銘柄。
+	OverBudget bool
+	// Skipped は危険信号で見送った日（Picked は「建てていたら」で、発注していない）。
+	Skipped bool
 }
 
 // EvaluationSchema は評価結果 1 行の列。
 var EvaluationSchema = []history.Column{
 	// ranking_source は quotes（9:00 の気配）/ archive_open（plan × 始値で作り直し）。
 	{Name: "ranking_source", Type: history.TypeString},
+	// skipped は危険信号で open が見送った日。成績は「建てていたら」で、review は通常日と分けて集計する。
+	{Name: "skipped", Type: history.TypeBool},
+	// over_budget は 1 単元が 1 注文の予算を超えて選べなかった銘柄（順位が上でも picked にならない）。
+	{Name: "over_budget", Type: history.TypeBool},
 	// ranking_run_id は元にした順位表の run_id（作り直しなら null）。
 	{Name: "ranking_run_id", Type: history.TypeString},
 	{Name: "side", Type: history.TypeString},
@@ -268,12 +276,33 @@ func ReconstructRanking(p plan.Plan, bars map[string]Bar, cfg config.Config, at 
 			At: at, Source: SourceArchiveOpen,
 		}
 	}
+	var rows []RankingRow
+	for _, leg := range NominalLegs(p, quotes, cfg) {
+		rows = append(rows, rowsOf(leg.Ranking, leg.Picks, leg.Side, leg.N, leg.Budget)...)
+	}
+	return rows
+}
+
+// Leg は 1 本の脚（BUY / SELL）の順位表と選定。
+type Leg struct {
+	Side    string
+	Ranking []selection.Ranked
+	Picks   []selection.Pick
+	N       int
+	Budget  decimal.Decimal
+}
+
+// NominalLegs は**通常日**の件数と予算で、open と同じ規則の順位表と選定を作る（ロングが先）。
+//
+// 危険信号・ショック・縮小は見ない。順位表の無い日の作り直し（ReconstructRanking）と、
+// 危険信号で見送った日の open が「建てていたら」を残すのに使う——見送りの日の成績を
+// 通常日と同じ物差しで比べるため。
+func NominalLegs(p plan.Plan, quotes map[string]selection.Quote, cfg config.Config) []Leg {
 	n := cfg.Capital.Positions()
 	budget := cfg.Capital.BudgetPerOrder()
 
-	// ショートを先に決め、余りをロングに回す（open と同じ順序。危険信号・ショックは
-	// 作り直しでは見ない——前夜の plan と始値だけから同じ規則で作るため）
-	var shortRows []RankingRow
+	// ショートを先に決め、余りをロングに回す（open と同じ順序）
+	var short *Leg
 	if cfg.Margin.Enabled && cfg.Margin.Positions() > 0 {
 		shortN := cfg.Margin.Positions()
 		shortBudget := cfg.Margin.BudgetPerOrder().Mul(cfg.Margin.MultiplierNormal).Round(0)
@@ -282,7 +311,7 @@ func ReconstructRanking(p plan.Plan, bars map[string]Bar, cfg config.Config, at 
 			N: shortN, Budget: shortBudget, Weighting: cfg.Margin.Weighting, Side: domain.SideSell,
 			MaxAmount: cfg.Margin.MaxOrder,
 		})
-		shortRows = rowsOf(shortRanking, shortPicks, "SELL", shortN, shortBudget)
+		short = &Leg{Side: "SELL", Ranking: shortRanking, Picks: shortPicks, N: shortN, Budget: shortBudget}
 		if cfg.Margin.SpillToLong {
 			used := decimal.Zero
 			for _, pk := range shortPicks {
@@ -297,7 +326,11 @@ func ReconstructRanking(p plan.Plan, bars map[string]Bar, cfg config.Config, at 
 		N: n, Budget: budget, Weighting: cfg.Capital.Weighting, Side: domain.SideBuy,
 		ValuePool: cfg.Signal.ValuePool, MaxPerSector: cfg.Signal.MaxPerSector,
 	})
-	return append(rowsOf(longRanking, longPicks, "BUY", n, budget), shortRows...)
+	legs := []Leg{{Side: "BUY", Ranking: longRanking, Picks: longPicks, N: n, Budget: budget}}
+	if short != nil {
+		legs = append(legs, *short)
+	}
+	return legs
 }
 
 func rowsOf(ranking []selection.Ranked, picks []selection.Pick, side string, n int, budget decimal.Decimal) []RankingRow {
@@ -314,7 +347,7 @@ func rowsOf(ranking []selection.Ranked, picks []selection.Pick, side string, n i
 		row := RankingRow{
 			Side: side, Rank: r.Rank, Symbol: r.Symbol, Code: r.Code, Name: r.Name,
 			PrevClose: prevClose, Price: price, Gap: gap, Vol20: r.Vol,
-			N: n, Budget: budgetF,
+			N: n, Budget: budgetF, OverBudget: selection.OverBudget(budget, r.Price),
 		}
 		if p, ok := picked[r.Symbol]; ok {
 			quantity, _ := p.Quantity.Float64()
@@ -342,6 +375,8 @@ func RowsFromFrame(frame history.Frame) (rows []RankingRow, runID string) {
 			Picked: boolOf(raw["picked"]), Quantity: floatPtrOf(raw["quantity"]),
 			Amount: floatPtrOf(raw["amount"]),
 			N:      int(intOf(raw["n"])), Budget: floatOf(raw["budget"]),
+			// 2026-09-15 より前の順位表には列が無い（null → false）
+			OverBudget: boolOf(raw["over_budget"]), Skipped: boolOf(raw["skipped"]),
 		})
 	}
 	return rows, runID
@@ -447,6 +482,8 @@ func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg confi
 			"amount":         floatOrNil(r.Amount),
 			"n":              int64(r.N),
 			"budget":         r.Budget,
+			"skipped":        r.Skipped,
+			"over_budget":    r.OverBudget,
 		}
 		for _, name := range []string{"open", "high", "low", "close", "gap_open", "ret_oc",
 			"gross_bp", "cost_bp", "net_bp", "hypo_quantity", "hypo_pnl",

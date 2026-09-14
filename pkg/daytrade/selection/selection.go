@@ -384,6 +384,13 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 	return picks
 }
 
+// OverBudget は 1 単元（既定の単元株数）が 1 注文の予算を超えるか。PickFrom はこの銘柄を
+// 飛ばして次点を繰り上げる。順位表の記録で「順位が上なのに外れた理由」を残すのに使う。
+func OverBudget(budget, price decimal.Decimal) bool {
+	return price.GreaterThan(decimal.Zero) &&
+		SharesFor(budget, price, marketrules.DefaultLotSize).LessThanOrEqual(decimal.Zero)
+}
+
 func lotOf(lots map[string]decimal.Decimal, symbol string) decimal.Decimal {
 	if lot, ok := lots[symbol]; ok && lot.GreaterThan(decimal.Zero) {
 		return lot

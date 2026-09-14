@@ -24,6 +24,8 @@ var ReviewSchema = []history.Column{
 	{Name: "day", Type: history.TypeDate},
 	{Name: "side", Type: history.TypeString},
 	{Name: "source", Type: history.TypeString},
+	// skipped は危険信号で見送った日（picked は「建てていたら」）。合計は通常日と分ける。
+	{Name: "skipped", Type: history.TypeBool},
 	{Name: "picked_n", Type: history.TypeInt64},
 	{Name: "picked_bp", Type: history.TypeFloat64},
 	{Name: "next_bp", Type: history.TypeFloat64},
@@ -37,6 +39,8 @@ var ReviewSchema = []history.Column{
 // ReviewTotalsSchema は期間の合計。
 var ReviewTotalsSchema = []history.Column{
 	{Name: "side", Type: history.TypeString},
+	// skipped の行は危険信号で見送った日だけの合計（見送りが正しかったかを比べる材料）。
+	{Name: "skipped", Type: history.TypeBool},
 	{Name: "days", Type: history.TypeInt64},
 	{Name: "picked_bp", Type: history.TypeFloat64},
 	{Name: "next_bp", Type: history.TypeFloat64},
@@ -148,6 +152,7 @@ func Review(evaluations history.Frame) history.Frame {
 		day        time.Time
 		side       string
 		source     string
+		skipped    bool
 		pickedN    int64
 		picked     []float64
 		next       []float64
@@ -170,7 +175,7 @@ func Review(evaluations history.Frame) history.Frame {
 		key := day.Format("2006-01-02") + "|" + side
 		b, ok := buckets[key]
 		if !ok {
-			b = &bucket{day: day, side: side, source: str(row["ranking_source"])}
+			b = &bucket{day: day, side: side, source: str(row["ranking_source"]), skipped: boolOf(row["skipped"])}
 			buckets[key] = b
 			order = append(order, key)
 		}
@@ -204,7 +209,7 @@ func Review(evaluations history.Frame) history.Frame {
 			actual = b.actualPnL
 		}
 		rows = append(rows, map[string]any{
-			"day": b.day, "side": b.side, "source": b.source,
+			"day": b.day, "side": b.side, "source": b.source, "skipped": b.skipped,
 			"picked_n":  b.pickedN,
 			"picked_bp": mean(b.picked), "next_bp": mean(b.next), "all_bp": mean(b.all),
 			"picked_pnl": b.pickedPnL, "actual_pnl": actual,
@@ -214,12 +219,16 @@ func Review(evaluations history.Frame) history.Frame {
 	return history.NewFrame(ReviewSchema, rows)
 }
 
-// ReviewTotals は Review の表を脚ごとに合計・平均する。
+// ReviewTotals は Review の表を脚ごとに合計・平均する。危険信号で見送った日は
+// 同じ脚の別の行（skipped = true）に分ける——建てていない日の「建てていたら」を
+// 通常日の成績に混ぜず、見送りが正しかったか（見送りの日の picked が負けているか）を比べるため。
 func ReviewTotals(table history.Frame) history.Frame {
 	if table.Height() == 0 {
 		return history.NewFrame(ReviewTotalsSchema, nil)
 	}
 	type totals struct {
+		side                    string
+		skipped                 bool
 		days                    int64
 		picked, next, all       []float64
 		pickedWin, beatAll, cmp int64
@@ -232,11 +241,16 @@ func ReviewTotals(table history.Frame) history.Frame {
 	var order []string
 	for _, row := range table.Rows {
 		side := str(row["side"])
-		t, ok := byLeg[side]
+		skipped := row["skipped"] == true
+		key := side + "|0"
+		if skipped {
+			key = side + "|1" // 同じ脚の通常日の後ろに並ぶ
+		}
+		t, ok := byLeg[key]
 		if !ok {
-			t = &totals{}
-			byLeg[side] = t
-			order = append(order, side)
+			t = &totals{side: side, skipped: skipped}
+			byLeg[key] = t
+			order = append(order, key)
 		}
 		t.days++
 		pickedBP := floatPtrOf(row["picked_bp"])
@@ -271,14 +285,14 @@ func ReviewTotals(table history.Frame) history.Frame {
 	}
 	slices.Sort(order)
 	rows := make([]map[string]any, 0, len(order))
-	for _, side := range order {
-		t := byLeg[side]
+	for _, key := range order {
+		t := byLeg[key]
 		actual := any(nil)
 		if t.hasActual {
 			actual = t.actualPnL
 		}
 		rows = append(rows, map[string]any{
-			"side": side, "days": t.days,
+			"side": t.side, "skipped": t.skipped, "days": t.days,
 			"picked_bp": mean(t.picked), "next_bp": mean(t.next), "all_bp": mean(t.all),
 			"picked_win_days": ratio(t.pickedWin, t.winDenom),
 			"beat_all_days":   ratio(t.beatAll, t.cmp),
