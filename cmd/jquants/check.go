@@ -5,7 +5,6 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
-	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
@@ -16,25 +15,23 @@ import (
 func newCheckCmd() *cobra.Command {
 	var date string
 	var days int
+	var staleDays int
 	var doNotify bool
 
 	cmd := &cobra.Command{
 		Use:   "check",
-		Short: "営業日ごとの欠けを探す（欠けがあれば終了コード 2）",
+		Short: "営業日ごとの欠けと、古くなった端点を探す（あれば終了コード 2）",
 		Long: "監視用。cron から回すときは --notify を付けると、ログを開かなくても気づける。\n" +
 			"確認そのものに失敗したときも通知する（監視役が黙って死ぬのを防ぐ）。\n" +
+			"日付で取る端点は営業日の欠けを、全件・範囲で取る端点（取引カレンダー・TOPIX・\n" +
+			"決算予定・投資部門別）は最終取得が --stale-days より古いかを見る。\n" +
 			"欠けを埋めるには `jquants repair`（同じ判定で、その日だけ取り直す）。",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			end := clock.TodayUTC()
-			if date != "" {
-				parsed, err := time.Parse("2006-01-02", date)
-				if err != nil {
-					return fmt.Errorf("--date は YYYY-MM-DD で指定してください: %w", err)
-				}
-				end = parsed
+			start, end, err := archive.CheckRange(date, days)
+			if err != nil {
+				return err
 			}
-			start := end.AddDate(0, 0, -days)
 
 			s, err := newSession("check", false)
 			if err != nil {
@@ -42,48 +39,75 @@ func newCheckCmd() *cobra.Command {
 			}
 			defer s.close()
 
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "端点\t欠けている営業日")
+			fail := func(what string, err error) error {
+				if doNotify {
+					notify.Alert("jquants check が失敗", fmt.Sprintf("%s: %v", what, err), s.logger)
+				}
+				return fmt.Errorf("%s の確認に失敗しました: %w", what, err)
+			}
+			now := clock.NowUTC()
+			eps := archive.ActiveEndpoints()
 			missingTotal := 0
-			var lines []string
-			for _, ep := range archive.ActiveEndpoints() {
+			var lines, table []string
+			for _, ep := range eps {
 				if ep.Mode != archive.ModeDate {
 					continue
 				}
-				gaps, err := s.ingestor.Gaps(ep, start, end, clock.NowUTC())
+				gaps, err := s.ingestor.Gaps(ep, start, end, now)
 				if err != nil {
-					if doNotify {
-						notify.Alert("jquants check が失敗", fmt.Sprintf("%s: %v", ep.Path, err), s.logger)
-					}
-					return fmt.Errorf("%s の確認に失敗しました: %w", ep.Path, err)
+					return fail(ep.Path, err)
 				}
 				if len(gaps) == 0 {
 					continue
 				}
 				missingTotal += len(gaps)
-				text := joinDays(gaps)
-				fmt.Fprintf(w, "%s\t%s\n", ep.Path, text)
+				text := archive.JoinDays(gaps)
+				table = append(table, fmt.Sprintf("%s\t%s", ep.Path, text))
 				lines = append(lines, fmt.Sprintf("%s: %s", ep.Path, text))
 			}
-			if missingTotal == 0 {
-				fmt.Printf("欠けはありません（%s 〜 %s）\n", start.Format("2006-01-02"), end.Format("2006-01-02"))
+			stale, err := s.ingestor.Stale(eps, now, staleDays)
+			if err != nil {
+				return fail("最終取得", err)
+			}
+			for _, st := range stale {
+				text := fmt.Sprintf("最終取得 %s（%.0f 日を超えて古い）",
+					clock.Fmt(st.LastFetched, clock.Tokyo, false), st.Limit.Hours()/24)
+				if st.LastFetched.IsZero() {
+					text = "一度も取っていません"
+				}
+				table = append(table, fmt.Sprintf("%s\t%s", st.Endpoint.Path, text))
+				lines = append(lines, fmt.Sprintf("%s: %s", st.Endpoint.Path, text))
+			}
+
+			span := fmt.Sprintf("%s 〜 %s", start.Format("2006-01-02"), end.Format("2006-01-02"))
+			if missingTotal == 0 && len(stale) == 0 {
+				fmt.Printf("欠けはありません（%s）\n", span)
 				return nil
 			}
-			fmt.Printf("欠け（%s 〜 %s）\n", start.Format("2006-01-02"), end.Format("2006-01-02"))
+			fmt.Printf("欠け・古い端点（%s）\n", span)
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "端点\t欠けている営業日 / 最終取得")
+			for _, row := range table {
+				fmt.Fprintln(w, row)
+			}
 			w.Flush()
 			if s.logger != nil {
-				s.logger.Warn("jquants.gap", "欠けがあります", map[string]any{"missing": missingTotal})
+				s.logger.Warn("jquants.gap", "欠けがあります", map[string]any{"missing": missingTotal, "stale": len(stale)})
 			}
 			if doNotify {
-				notify.Alert(fmt.Sprintf("J-Quants の蓄積に欠け（%d 件）", missingTotal), strings.Join(lines, "\n"), s.logger)
+				notify.Alert(fmt.Sprintf("J-Quants の蓄積に欠け（%d 件、古い端点 %d）", missingTotal, len(stale)),
+					strings.Join(lines, "\n"), s.logger)
 			}
+			// os.Exit は defer を飛ばすので、ダイジェストとログを先に畳む
 			s.close()
 			os.Exit(2)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&date, "date", "", "確認する日（YYYY-MM-DD）。既定は今日")
+	cmd.Flags().StringVar(&date, "date", "", "確認する日（YYYY-MM-DD、JST）。既定は JST の今日")
 	cmd.Flags().IntVar(&days, "days", 30, "欠けを探す範囲（日）")
+	cmd.Flags().IntVar(&staleDays, "stale-days", archive.DefaultStaleDays,
+		"全件・範囲で取る端点を「古い」とみなす日数（取得間隔の 2 倍の方が長ければそちら）")
 	cmd.Flags().BoolVar(&doNotify, "notify", false,
 		"欠けがあれば Discord（"+notify.AlertChannelEnvVar+"）に通知する")
 	return cmd

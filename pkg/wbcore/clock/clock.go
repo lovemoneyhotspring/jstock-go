@@ -11,18 +11,50 @@ var (
 	UTC = time.UTC
 
 	// Tokyo は JST (Asia/Tokyo) ロケーションを表す。
-	Tokyo, _ = time.LoadLocation("Asia/Tokyo")
+	// tzdata の無い環境でも UTC に化けないよう、読めなければ固定の +09:00 にする。
+	Tokyo = loadTokyo()
+
+	// Now は現在時刻の出所。試験で時刻を固定したいときに差し替える
+	// （NowUTC / NowJST / TodayUTC / TodayJST / StampISO はすべてここを通る）。
+	Now = time.Now
 )
+
+// loadTokyo は Asia/Tokyo を読み、無ければ固定の JST（+09:00）を返す。
+// 日本に夏時間は無いので、固定オフセットでも時刻は変わらない。
+func loadTokyo() *time.Location {
+	loc, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil || loc == nil {
+		return time.FixedZone("JST", 9*3600)
+	}
+	return loc
+}
 
 // NowUTC は現在時刻を UTC で返す。
 func NowUTC() time.Time {
-	return time.Now().UTC()
+	return Now().UTC()
+}
+
+// NowJST は現在時刻を JST で返す。
+func NowJST() time.Time {
+	return Now().In(Tokyo)
 }
 
 // TodayUTC は UTC で見た今日の日付（年月日のみ、時刻は 00:00:00 UTC）を返す。
 func TodayUTC() time.Time {
 	now := NowUTC()
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// TodayJST は JST で見た今日の日付（年月日のみ、時刻は 00:00:00 JST）を返す。
+// 日本の営業日を数えるコマンドはこちらを使う。TodayUTC は 09:00 JST までは前日になる。
+func TodayJST() time.Time {
+	now := NowJST()
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, Tokyo)
+}
+
+// ParseDateJST は "YYYY-MM-DD" を JST の 00:00 として読む。
+func ParseDateJST(s string) (time.Time, error) {
+	return time.ParseInLocation("2006-01-02", s, Tokyo)
 }
 
 // EnsureUTC は時刻を UTC に揃える。タイムゾーン情報が未指定の場合は UTC とみなす。

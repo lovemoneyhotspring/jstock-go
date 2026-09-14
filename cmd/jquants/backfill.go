@@ -26,37 +26,31 @@ func newBackfillCmd() *cobra.Command {
 			}
 			defer s.close()
 
-			targets, err := resolveEndpoints(only)
+			targets, err := archive.LookupEndpoints(only)
 			if err != nil {
 				return err
 			}
-			var ingests []archive.Ingest
-			var failures []archive.Failure
-			for _, ep := range targets {
-				if !ep.Bulk {
+			result := s.ingestor.BackfillAll(targets, since, !noRaw, func(step archive.BackfillStep) {
+				switch {
+				case step.Skipped:
 					// --only で明示された端点だけ知らせる（既定は一括のあるものに絞る）
 					if len(only) > 0 {
-						fmt.Printf("%s は一括に無いので `sync --days N` で遡ります\n", ep.Path)
+						fmt.Printf("%s は一括に無いので `sync --days N` で遡ります\n", step.Endpoint.Path)
 					}
-					continue
+				case step.Err != nil:
+					fmt.Printf("%s: 一括の一覧を取れません: %v\n", step.Endpoint.Path, step.Err)
+				default:
+					rows := 0
+					for _, r := range step.Result.Ingests {
+						rows += r.Rows
+					}
+					fmt.Printf("%s: %d ファイル、%d 行\n", step.Endpoint.Path, len(step.Result.Ingests), rows)
 				}
-				fmt.Printf("%s を一括取り込み中…\n", ep.Path)
-				result, err := s.ingestor.Backfill(ep, since, !noRaw)
-				if err != nil {
-					// 一覧の取得に失敗した等。他の端点は続ける
-					failures = append(failures, archive.Failure{Endpoint: ep.Path, Target: "bulk:list", Error: err.Error()})
-					continue
-				}
-				ingests = append(ingests, result.Ingests...)
-				failures = append(failures, result.Failures...)
-				rows := 0
-				for _, r := range result.Ingests {
-					rows += r.Rows
-				}
-				fmt.Printf("%s: %d ファイル、%d 行\n", ep.Path, len(result.Ingests), rows)
-			}
-			printIngests(ingests, "一括取り込み")
-			if printFailures(failures, "再実行すればそこだけ取り直します") {
+			})
+			printIngests(result.Ingests, "一括取り込み")
+			if printFailures(result.Failures, "再実行すればそこだけ取り直します") {
+				// os.Exit は defer を飛ばすので、ダイジェストとログを先に畳む
+				s.close()
 				os.Exit(1)
 			}
 			return nil

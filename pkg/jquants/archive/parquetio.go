@@ -53,18 +53,30 @@ func buildSchema(columns []string, kinds map[string]ColumnKind) (*parquet.Schema
 // 一度に作ると行数に比例してメモリを食うので、この単位で使い回す。
 const writeRowBatch = 8192
 
+// parquetSink は Parquet の書き先。既定はファイルそのもの。
+// 試験で「途中で書けなくなった」を再現するために差し替える。
+var parquetSink = func(handle *os.File) io.Writer { return handle }
+
 // writeParquet は表を 1 ファイルに書き出す。呼び出し側が一時ファイルに書いて
 // rename する前提なので、ここでは追記や部分更新をしない。
 //
 // 行は writeRowBatch ずつ書く（バッファを使い回すので、行数が増えても
-// ここのメモリは一定）。
-func writeParquet(path string, f *Frame, kinds map[string]ColumnKind) error {
+// ここのメモリは一定）。閉じる前に fsync する（rename は原子的でも、中身が
+// ディスクに届く前に電源が落ちると空の Parquet が本物の名前で残る）。
+// 途中で失敗したら書きかけのファイルは消す（.tmp が溜まらないように）。
+func writeParquet(path string, f *Frame, kinds map[string]ColumnKind) (err error) {
 	schema, order := buildSchema(f.Columns, kinds)
 	handle, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("保管庫の Parquet を作成できません %s: %w", path, err)
 	}
-	writer := parquet.NewWriter(handle, schema, parquet.Compression(&parquet.Zstd))
+	defer func() {
+		if err != nil {
+			_ = handle.Close()
+			_ = os.Remove(path)
+		}
+	}()
+	writer := parquet.NewWriter(parquetSink(handle), schema, parquet.Compression(&parquet.Zstd))
 	batch := make([]parquet.Row, 0, writeRowBatch)
 	cells := make([]parquet.Value, writeRowBatch*len(order))
 	flush := func() error {
@@ -85,21 +97,21 @@ func writeParquet(path string, f *Frame, kinds map[string]ColumnKind) error {
 		}
 		batch = append(batch, values)
 		if len(batch) == writeRowBatch {
-			if err := flush(); err != nil {
-				handle.Close()
+			if err = flush(); err != nil {
 				return err
 			}
 		}
 	}
-	if err := flush(); err != nil {
-		handle.Close()
+	if err = flush(); err != nil {
 		return err
 	}
-	if err := writer.Close(); err != nil {
-		handle.Close()
+	if err = writer.Close(); err != nil {
 		return fmt.Errorf("保管庫の Parquet の確定に失敗しました %s: %w", path, err)
 	}
-	if err := handle.Close(); err != nil {
+	if err = handle.Sync(); err != nil {
+		return fmt.Errorf("保管庫の Parquet を同期できません %s: %w", path, err)
+	}
+	if err = handle.Close(); err != nil {
 		return fmt.Errorf("保管庫の Parquet を閉じられません %s: %w", path, err)
 	}
 	return nil

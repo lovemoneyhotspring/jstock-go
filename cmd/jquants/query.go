@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -30,13 +29,10 @@ func newQueryCmd() *cobra.Command {
 			}
 			defer db.Close()
 
-			// 端点ディレクトリの Parquet をビューとして登録する。
-			// union_by_name で列が増えた月とも一緒に読める
-			arch := archive.NewArchive(jquantsDir)
-			for _, name := range arch.ExistingParquetDirs() {
-				glob := filepath.Join(jquantsDir, name, "*.parquet")
-				_, _ = db.Exec(fmt.Sprintf(
-					"CREATE VIEW %s AS SELECT * FROM read_parquet('%s', union_by_name=true);", name, glob))
+			// 端点ディレクトリの Parquet をビューとして登録する。作れなかった端点は
+			// 知らせて続ける（その端点を引かないクエリまで止めない）
+			if err := archive.RegisterViews(db, archive.NewArchive(jquantsDir)); err != nil {
+				fmt.Fprintf(os.Stderr, "警告: %v\n", err)
 			}
 
 			results, err := storage.QueryDuckDB(db, args[0])

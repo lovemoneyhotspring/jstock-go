@@ -68,22 +68,6 @@ func newSession(command string, needClient bool) (*session, error) {
 	}, nil
 }
 
-// resolveEndpoints は --only を端点に解決する。空なら全端点。
-func resolveEndpoints(only []string) ([]archive.Endpoint, error) {
-	if len(only) == 0 {
-		return archive.ActiveEndpoints(), nil
-	}
-	out := make([]archive.Endpoint, 0, len(only))
-	for _, name := range only {
-		ep, err := archive.LookupEndpoint(name)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, ep)
-	}
-	return out, nil
-}
-
 // printIngests は取り込み結果を表で出す。
 func printIngests(ingests []archive.Ingest, title string) {
 	if len(ingests) == 0 {

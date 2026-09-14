@@ -24,6 +24,8 @@ type stubClient struct {
 	files map[string][]byte
 	// failOn に一致するパスはエラーを返す。
 	failOn string
+	// failList に一致する端点は一括の一覧でエラーを返す。
+	failList string
 }
 
 func (s *stubClient) GetAll(path string, params map[string]string) ([]map[string]any, error) {
@@ -35,6 +37,9 @@ func (s *stubClient) GetAll(path string, params map[string]string) ([]map[string
 }
 
 func (s *stubClient) BulkList(endpoint string) ([]map[string]any, error) {
+	if s.failList != "" && endpoint == s.failList {
+		return nil, fmt.Errorf("わざと一覧で失敗")
+	}
 	return s.bulk[endpoint], nil
 }
 
@@ -273,7 +278,9 @@ func TestTradingDaysFromCalendar(t *testing.T) {
 
 func TestGaps(t *testing.T) {
 	cal := CalendarEndpoint()
-	ep := bars()
+	// 0 行の日が普通にある端点（信用残高は週次）。日足のように毎営業日行がある端点で
+	// 0 行を掴んだ日は欠けに数える（TestGapsCountsEmptyDayOnEveryDayEndpoint）
+	ep := MustEndpoint("markets_margin_interest")
 	ing := newTestIngestor(t, &stubClient{})
 	f, _ := RowsToFrame([]map[string]any{
 		{"Date": "2025-01-06", "HolDiv": "1"},

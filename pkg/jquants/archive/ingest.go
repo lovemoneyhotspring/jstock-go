@@ -135,7 +135,7 @@ func (i *Ingestor) store(ep Endpoint, target string, frame *Frame, source string
 	trimWindows(frame, ep, windows)
 	changed := 0
 	if frame.Height() > 0 {
-		n, err := i.Archive.Upsert(ep, frame)
+		n, err := i.upsertWindowed(ep, frame, windows)
 		if err != nil {
 			return Ingest{}, err
 		}
@@ -152,6 +152,21 @@ func (i *Ingestor) store(ep Endpoint, target string, frame *Frame, source string
 		"rows": frame.Height(), "changed": changed,
 	})
 	return Ingest{ep.Path, target, source, frame.Height(), changed}, nil
+}
+
+// upsertWindowed は時間帯で絞った塊を書く。
+//
+// 窓があって日分割の端点なら、既存ファイルの**窓の外の行は残して**合流する
+// （UpsertKeeping）。JQUANTS_TICKS_WINDOWS を後から狭めて backfill / repair すると、
+// 新しい塊は窓の中しか持たないので、丸ごと差し替えると窓の外に溜めた行が黙って
+// 消える。消すのは明示の `jquants prune` だけにする。窓の中の行は新しい塊で差し替わる。
+func (i *Ingestor) upsertWindowed(ep Endpoint, frame *Frame, windows Windows) (int, error) {
+	if len(windows) == 0 || ep.Split != SplitDay || ep.TimeColumn == "" {
+		return i.Archive.Upsert(ep, frame)
+	}
+	return i.Archive.UpsertKeeping(ep, frame, func(row RowView) bool {
+		return !windows.Keep(row.Text(ep.TimeColumn))
+	})
 }
 
 // -- 一括（初回） ---------------------------------------------------------
@@ -225,7 +240,7 @@ func (i *Ingestor) backfillOne(ep Endpoint, key, target, stamp string, keepRaw b
 		// 日付順に並んでいるので、日ごとに区切って書けば常駐は 1 日ぶんで済む
 		err = CSVToFramesByDay(payload, ep, func(f *Frame) error {
 			trimWindows(f, ep, windows)
-			n, err := i.Archive.Upsert(ep, f)
+			n, err := i.upsertWindowed(ep, f, windows)
 			if err != nil {
 				return err
 			}
@@ -242,7 +257,7 @@ func (i *Ingestor) backfillOne(ep Endpoint, key, target, stamp string, keepRaw b
 			return err
 		}
 		trimWindows(frame, ep, windows)
-		if changed, err = i.Archive.Upsert(ep, frame); err != nil {
+		if changed, err = i.upsertWindowed(ep, frame, windows); err != nil {
 			return err
 		}
 		rows = frame.Height()
@@ -543,6 +558,13 @@ func covers(covered map[string]bool, day time.Time) bool {
 //     0 件のもの。取ったが空だったのは欠けではない）。
 //
 // 公開時刻（AvailableAt）がまだ来ていない日は数えない。
+//
+// ただし営業日なら必ず行がある端点（RowsEveryTradingDay）では、台帳に 0 行とだけ
+// 残っている日は「取れていない」とみなして欠けに数える。0 行を掴んだ日は訂正の猶予を
+// 過ぎると Plan が見直さないので、ここで拾わないと永久に空のまま残る。
+//
+// 日付モード以外（取引カレンダーなど）は日の欠けの概念が無いので nil。
+// そちらの鮮度は Stale で見る。
 func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]time.Time, error) {
 	if ep.Mode != ModeDate {
 		return nil, nil
@@ -559,14 +581,18 @@ func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]tim
 	for _, d := range dates {
 		have[d.Format(dateLayout)] = true
 	}
-	targets, err := i.Ledger.Targets(ep)
+	latest, err := i.Ledger.LatestRows(ep)
 	if err != nil {
 		return nil, err
 	}
+	targets := make([]string, 0, len(latest))
 	fetched := map[string]bool{}
-	for _, t := range targets {
-		fetched[t] = true
+	for t, rows := range latest {
+		targets = append(targets, t)
+		// 毎営業日行があるはずの端点で 0 行なら、取ったことにしない
+		fetched[t] = rows > 0 || !(ep.RowsEveryTradingDay && ep.TradingDaysOnly)
 	}
+	sort.Strings(targets)
 	covered, err := i.BulkCoverage(ep)
 	if err != nil {
 		return nil, err
@@ -599,6 +625,61 @@ func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]tim
 		missing = append(missing, d)
 	}
 	return missing, nil
+}
+
+// DefaultStaleDays は日付モード以外の端点を「古い」とみなす既定の日数。
+// 取引カレンダーのように週 1 回しか取らない端点は、取得間隔の 2 倍の方を使う。
+const DefaultStaleDays = 7
+
+// Stale は最終取得が古すぎる端点 1 つぶん。LastFetched がゼロ値なら一度も取っていない。
+type Stale struct {
+	Endpoint    Endpoint
+	LastFetched time.Time
+	Limit       time.Duration
+}
+
+// StaleLimit は端点を古いとみなす経過時間。staleDays 日と取得間隔の 2 倍の長い方。
+// staleDays が 0 以下なら DefaultStaleDays。
+func StaleLimit(ep Endpoint, staleDays int) time.Duration {
+	if staleDays <= 0 {
+		staleDays = DefaultStaleDays
+	}
+	limit := time.Duration(staleDays) * 24 * time.Hour
+	if cadence := 2 * time.Duration(ep.MinIntervalHours) * time.Hour; cadence > limit {
+		limit = cadence
+	}
+	return limit
+}
+
+// Stale は日付モード以外（全件・範囲。取引カレンダー・TOPIX・決算予定・投資部門別）で、
+// 最後に取れた時刻が StaleLimit より古い端点を返す。
+//
+// これらは Gaps が日の欠けを数えないので、sync が黙って失敗し続けても check に
+// 出てこなかった。台帳は成功した取り込みしか書かないので、最新の記録が「最後に取れた時刻」。
+// 一度も取っていない端点も古いとして返す。
+func (i *Ingestor) Stale(eps []Endpoint, now time.Time, staleDays int) ([]Stale, error) {
+	if now.IsZero() {
+		now = clock.NowUTC()
+	}
+	var out []Stale
+	for _, ep := range eps {
+		if ep.Mode == ModeDate {
+			continue
+		}
+		history, err := i.Ledger.History(ep, 1)
+		if err != nil {
+			return nil, err
+		}
+		limit := StaleLimit(ep, staleDays)
+		var last time.Time
+		if len(history) > 0 {
+			last = history[0].FetchedUTC
+		}
+		if last.IsZero() || now.Sub(last) > limit {
+			out = append(out, Stale{Endpoint: ep, LastFetched: last, Limit: limit})
+		}
+	}
+	return out, nil
 }
 
 // firstKnown は端点が最初に持っている日（"2006-01-02"）。データの日付と台帳の

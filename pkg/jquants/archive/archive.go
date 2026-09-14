@@ -273,6 +273,21 @@ func (a *Archive) Dates(ep Endpoint) ([]time.Time, error) {
 // （足の取得の書き戻し）は別プロセスで、同じ月ファイルを同時に読んで
 // 書き戻すと後から rename した側が先の更新を握り潰すため。
 func (a *Archive) Upsert(ep Endpoint, f *Frame) (int, error) {
+	return a.upsert(ep, f, nil)
+}
+
+// UpsertKeeping は Upsert と同じだが、日分割（SplitDay）の丸ごと差し替えで、
+// 既存ファイルのうち keep が真の行を残して合流する。
+//
+// 時間帯で絞って取り込むとき（JQUANTS_TICKS_WINDOWS）に使う。窓を後から狭めて
+// 取り直す（backfill / repair）と、新しい塊は窓の中しか無いので、丸ごと差し替えると
+// 既存の窓の外の行が黙って消える。窓の外の行は取り込みの対象外なので既存のまま残し、
+// 消すのは明示の `jquants prune` だけにする。月分割の端点では Upsert と同じ。
+func (a *Archive) UpsertKeeping(ep Endpoint, f *Frame, keep func(RowView) bool) (int, error) {
+	return a.upsert(ep, f, keep)
+}
+
+func (a *Archive) upsert(ep Endpoint, f *Frame, keep func(RowView) bool) (int, error) {
 	if f.Height() == 0 {
 		return 0, nil
 	}
@@ -314,7 +329,7 @@ func (a *Archive) Upsert(ep Endpoint, f *Frame) (int, error) {
 	defer unlock()
 	changed := 0
 	for _, name := range order {
-		n, err := a.upsertPart(ep, name, byPart[name])
+		n, err := a.upsertPart(ep, name, byPart[name], keep)
 		if err != nil {
 			return changed, err
 		}
@@ -349,7 +364,10 @@ func (a *Archive) lock(ep Endpoint) (func(), error) {
 // 日分割は**既存を読まずに丸ごと差し替える**——取得の単位（date= の 1 日ぶん）と
 // ファイルの単位が一致するので、新しく取ったものが常にその日の全体になる。
 // 分足は月 2,400 万行あり、毎日読み直して書き戻すと月末ほど重くなる。
-func (a *Archive) upsertPart(ep Endpoint, part string, new *Frame) (int, error) {
+//
+// keep が非 nil なら、日分割でも既存ファイルのうち keep が真の行だけを読んで残す
+// （UpsertKeeping）。落とす行は Frame に載せないので常駐は残す行ぶんだけ。
+func (a *Archive) upsertPart(ep Endpoint, part string, new *Frame, keep func(RowView) bool) (int, error) {
 	path := a.PathFor(ep, part)
 	new = dedupeLast(new, ep.Key)
 	merged := new
@@ -364,6 +382,16 @@ func (a *Archive) upsertPart(ep Endpoint, part string, new *Frame) (int, error) 
 			changed = countChanged(old, new, ep.Key)
 		}
 		merged = dedupeLast(merged, ep.Key)
+	} else if keep != nil {
+		if _, err := os.Stat(path); err == nil {
+			old, err := scanParquet(path, scanOptions{keep: keep})
+			if err != nil {
+				return 0, err
+			}
+			if old.Height() > 0 {
+				merged = dedupeLast(concatDiagonal(old, new), ep.Key)
+			}
+		}
 	}
 	sortByKey(merged, ep.Key)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -381,7 +409,15 @@ func (a *Archive) upsertPart(ep Endpoint, part string, new *Frame) (int, error) 
 
 // pruneFile は 1 ファイルを時間帯で絞って書き戻す。落とす行が無ければ触らない。
 // 落とした行は Frame に載せない（scanParquet の keep）ので、常駐は残す行ぶんだけ。
+//
+// ロックは**読む前に**取る。読んでからロックを取ると、その間に別プロセスの Upsert
+// （日分割の丸ごと差し替え）が入ったとき、古い中身で rename して更新を握り潰す。
 func (a *Archive) pruneFile(ep Endpoint, part string, windows Windows, dryRun bool) (Pruned, error) {
+	unlock, err := a.lock(ep)
+	if err != nil {
+		return Pruned{}, err
+	}
+	defer unlock()
 	path := a.PathFor(ep, part)
 	info, err := os.Stat(path)
 	if err != nil {
@@ -400,11 +436,6 @@ func (a *Archive) pruneFile(ep Endpoint, part string, windows Windows, dryRun bo
 	if dryRun || res.After == res.Before {
 		return res, nil
 	}
-	unlock, err := a.lock(ep)
-	if err != nil {
-		return Pruned{}, err
-	}
-	defer unlock()
 	sortByKey(kept, ep.Key)
 	tmp := path + ".tmp"
 	if err := writeParquet(tmp, kept, ep.columnKinds()); err != nil {

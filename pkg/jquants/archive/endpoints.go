@@ -97,6 +97,11 @@ type Endpoint struct {
 	MinIntervalHours int
 	// TradingDaysOnly は取引日だけ対象にする（false なら平日すべて。EDINET の提出日など）。
 	TradingDaysOnly bool
+	// RowsEveryTradingDay は営業日なら必ず行がある端点か（日足・銘柄一覧など）。
+	// 真なら、台帳に「取ったが 0 行」とだけ残っている営業日を欠けと数える
+	// （公開前に叩いた等で空を掴んだ日が、訂正の猶予を過ぎて二度と見直されないのを防ぐ）。
+	// 信用残高（週次）や適時開示のように 0 行の日が普通にある端点では偽にしておく。
+	RowsEveryTradingDay bool
 	// Bulk は一括ダウンロード（/bulk）にあるか。
 	Bulk bool
 	// RangeDays は ModeRange のとき、何日ぶん重ねて取るか。
@@ -199,17 +204,17 @@ var StandardEndpoints = []Endpoint{
 	{
 		Path: "/equities/master", Key: []string{"Date", "Code"}, DateColumn: "Date",
 		Mode: ModeDate, DateParam: "date", AvailableAt: t1730,
-		SettleDays: 1, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		SettleDays: 1, MinIntervalHours: 20, TradingDaysOnly: true, RowsEveryTradingDay: true, Bulk: true,
 	},
 	{
 		Path: "/equities/bars/daily", Key: []string{"Date", "Code"}, DateColumn: "Date",
 		Mode: ModeDate, DateParam: "date", AvailableAt: t1630,
-		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, RowsEveryTradingDay: true, Bulk: true,
 	},
 	{
 		Path: "/indices/bars/daily", Key: []string{"Date", "Code"}, DateColumn: "Date",
 		Mode: ModeDate, DateParam: "date", AvailableAt: t1630,
-		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, RowsEveryTradingDay: true, Bulk: true,
 	},
 	{
 		Path: "/indices/bars/daily/topix", Key: []string{"Date"}, DateColumn: "Date",
@@ -256,7 +261,7 @@ var StandardEndpoints = []Endpoint{
 	{
 		Path: "/markets/short-ratio", Key: []string{"Date", "S33"}, DateColumn: "Date",
 		Mode: ModeDate, DateParam: "date", AvailableAt: t1630,
-		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, RowsEveryTradingDay: true, Bulk: true,
 	},
 	{
 		Path:       "/markets/short-sale-report",
@@ -268,7 +273,7 @@ var StandardEndpoints = []Endpoint{
 	{
 		Path: "/derivatives/bars/daily/options/225", Key: []string{"Date", "Code"}, DateColumn: "Date",
 		Mode: ModeDate, DateParam: "date", AvailableAt: t1630,
-		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, RowsEveryTradingDay: true, Bulk: true,
 	},
 	{
 		Path: "/edinet/major-shareholders", Key: []string{"DocId"}, DateColumn: "SubDate",
@@ -301,7 +306,7 @@ var AddonEndpoints = []Endpoint{
 		// 日時は読み手が Date と Time から組む（派生列は 1,000 万行ぶんの容量を食う）
 		Path: "/equities/bars/minute", Key: []string{"Date", "Code", "Time"}, DateColumn: "Date",
 		Mode: ModeDate, DateParam: "date", AvailableAt: t1630,
-		SettleDays: 2, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		SettleDays: 2, MinIntervalHours: 20, TradingDaysOnly: true, RowsEveryTradingDay: true, Bulk: true,
 		Split: SplitDay,
 		ColumnTypes: map[string]ColumnKind{
 			"O": KindFloat64, "H": KindFloat64, "L": KindFloat64, "C": KindFloat64,

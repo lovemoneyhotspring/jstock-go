@@ -124,6 +124,29 @@ func (l *Ledger) Targets(ep Endpoint) ([]string, error) {
 	return out, rows.Err()
 }
 
+// LatestRows は対象ごとの「最新の取り込み」の行数。
+// 欠けの判定で「取ったが 0 行だった日」を見分けるのに使う。
+func (l *Ledger) LatestRows(ep Endpoint) (map[string]int, error) {
+	rows, err := l.db.Query(
+		`SELECT target, rows FROM ingest AS i
+		 WHERE endpoint = ? AND fetched_utc = (
+		   SELECT MAX(fetched_utc) FROM ingest WHERE endpoint = i.endpoint AND target = i.target)`, ep.Path)
+	if err != nil {
+		return nil, fmt.Errorf("台帳を引けません %s: %w", ep.Path, err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var target string
+		var n int
+		if err := rows.Scan(&target, &n); err != nil {
+			return nil, err
+		}
+		out[target] = n
+	}
+	return out, rows.Err()
+}
+
 // History は端点の取り込み履歴（新しい順）。
 func (l *Ledger) History(ep Endpoint, limit int) ([]IngestRecord, error) {
 	if limit <= 0 {

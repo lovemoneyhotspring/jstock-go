@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"sort"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
@@ -42,38 +40,9 @@ func newSyncCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				wanted := map[string]bool{}
-				if len(only) > 0 {
-					eps, err := resolveEndpoints(only)
-					if err != nil {
-						return err
-					}
-					for _, ep := range eps {
-						wanted[ep.Path] = true
-					}
-				}
-				var lines [][3]string
-				for _, job := range jobs {
-					if len(wanted) > 0 && !wanted[job.Endpoint.Path] {
-						continue
-					}
-					// 引数は順序を固定して並べる（map の走査順は不定）
-					keys := make([]string, 0, len(job.Params))
-					for k := range job.Params {
-						keys = append(keys, k)
-					}
-					sort.Strings(keys)
-					params := make([]string, 0, len(keys))
-					for _, k := range keys {
-						params = append(params, fmt.Sprintf("%s=%s", k, job.Params[k]))
-					}
-					lines = append(lines, [3]string{job.Endpoint.Path, job.Target, strings.Join(params, ", ")})
-				}
-				// API の無い端点は一括の一覧を見るまで対象が分からない
-				for _, ep := range archive.ActiveEndpoints() {
-					if ep.BulkOnly && (len(wanted) == 0 || wanted[ep.Path]) {
-						lines = append(lines, [3]string{ep.Path, "bulk", "一括の日次ファイルで、台帳に無いか更新されたもの"})
-					}
+				lines, err := archive.PlanLines(jobs, only)
+				if err != nil {
+					return err
 				}
 				if len(lines) == 0 {
 					fmt.Println("やることはありません（すべて最新）")
@@ -83,7 +52,7 @@ func newSyncCmd() *cobra.Command {
 				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 				fmt.Fprintln(w, "端点\t対象\t引数")
 				for _, line := range lines {
-					fmt.Fprintf(w, "%s\t%s\t%s\n", line[0], line[1], line[2])
+					fmt.Fprintf(w, "%s\t%s\t%s\n", line.Endpoint, line.Target, line.Params)
 				}
 				return w.Flush()
 			}
@@ -95,6 +64,8 @@ func newSyncCmd() *cobra.Command {
 			printIngests(result.Ingests,
 				fmt.Sprintf("取り込み（%s）", clock.Fmt(clock.NowUTC(), clock.MustZone(appSettings.Timezone), false)))
 			if printFailures(result.Failures, "次回の sync で再試行されます") {
+				// os.Exit は defer を飛ばすので、ダイジェストとログを先に畳む
+				s.close()
 				os.Exit(1)
 			}
 			return nil

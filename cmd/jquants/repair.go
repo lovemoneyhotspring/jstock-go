@@ -5,7 +5,6 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
-	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
@@ -24,21 +23,17 @@ func newRepairCmd() *cobra.Command {
 		Use:   "repair",
 		Short: "check と同じ判定で欠けを探し、その日だけ取り直す（埋まらなければ終了コード 2）",
 		Long: "check が欠けを報告したときの修復用。API のある端点は 1 日ずつ date= で取り直す\n" +
-			"（0 行でも台帳に残るので、週次のように行の無い日は次から欠けと数えない）。\n" +
+			"（0 行でも台帳に残るので、週次のように行の無い日は次から欠けと数えない。\n" +
+			"日足のように毎営業日行があるはずの端点は、0 行なら欠けのまま残る）。\n" +
 			"API の無い端点（ティック）は一括の日次ファイルを欠けの月から取り直す。\n" +
 			"--dry-run で取らずに対象だけ表示する。",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			end := clock.TodayUTC()
-			if date != "" {
-				parsed, err := time.Parse("2006-01-02", date)
-				if err != nil {
-					return fmt.Errorf("--date は YYYY-MM-DD で指定してください: %w", err)
-				}
-				end = parsed
+			start, end, err := archive.CheckRange(date, days)
+			if err != nil {
+				return err
 			}
-			start := end.AddDate(0, 0, -days)
-			eps, err := resolveEndpoints(only)
+			eps, err := archive.LookupEndpoints(only)
 			if err != nil {
 				return err
 			}
@@ -81,6 +76,7 @@ func newRepairCmd() *cobra.Command {
 			if len(result.Remaining) == 0 {
 				fmt.Println("欠けはすべて埋まりました")
 				if failed {
+					s.close()
 					os.Exit(1)
 				}
 				return nil
@@ -91,7 +87,7 @@ func newRepairCmd() *cobra.Command {
 			var lines []string
 			for _, p := range result.Remaining {
 				total += len(p.Days)
-				lines = append(lines, fmt.Sprintf("%s: %s", p.Endpoint.Path, joinDays(p.Days)))
+				lines = append(lines, fmt.Sprintf("%s: %s", p.Endpoint.Path, archive.JoinDays(p.Days)))
 			}
 			if s.logger != nil {
 				s.logger.Warn("jquants.gap", "取り直しても欠けが残っています", map[string]any{"missing": total})
@@ -99,12 +95,13 @@ func newRepairCmd() *cobra.Command {
 			if doNotify {
 				notify.Alert(fmt.Sprintf("J-Quants の欠けが埋まらない（%d 件）", total), strings.Join(lines, "\n"), s.logger)
 			}
+			// os.Exit は defer を飛ばすので、ダイジェストとログを先に畳む
 			s.close()
 			os.Exit(2)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&date, "date", "", "確認する日（YYYY-MM-DD）。既定は今日")
+	cmd.Flags().StringVar(&date, "date", "", "確認する日（YYYY-MM-DD、JST）。既定は JST の今日")
 	cmd.Flags().IntVar(&days, "days", 30, "欠けを探す範囲（日）")
 	cmd.Flags().StringSliceVar(&only, "only", nil, "端点を絞る（名前かパス。複数可）")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "取らずに、対象の日だけ表示")
@@ -118,23 +115,7 @@ func printPlans(plans []archive.RepairPlan) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "端点\t欠けている営業日")
 	for _, p := range plans {
-		fmt.Fprintf(w, "%s\t%s\n", p.Endpoint.Path, joinDays(p.Days))
+		fmt.Fprintf(w, "%s\t%s\n", p.Endpoint.Path, archive.JoinDays(p.Days))
 	}
 	w.Flush()
-}
-
-// joinDays は日付を先頭 8 つまで並べ、多ければ合計を添える。
-func joinDays(days []time.Time) string {
-	shown := make([]string, 0, 8)
-	for i, d := range days {
-		if i >= 8 {
-			break
-		}
-		shown = append(shown, d.Format("2006-01-02"))
-	}
-	text := strings.Join(shown, ", ")
-	if len(days) > 8 {
-		text += fmt.Sprintf(" …（計 %d）", len(days))
-	}
-	return text
 }
