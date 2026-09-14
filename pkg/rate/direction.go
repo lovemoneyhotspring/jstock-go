@@ -51,6 +51,8 @@ var (
 	// 判断の強さとは関係が無いので落とす
 	ratingRiskRe  = regexp.MustCompile(`^([a-z\p{Han}\p{Hiragana}\p{Katakana}]+)[1-9]$`)
 	ratingCleanRe = regexp.MustCompile(`[\s()（）・,，.。/／]`)
+	// 末尾の "-"（後ろが文字列の終わりか、英数字以外）だけを半段階として拾う
+	ratingMinusRe = regexp.MustCompile(`([\p{L}\p{N}])-($|[^\p{L}\p{N}])`)
 )
 
 // RatingDirection は投資判断が上がったか下がったかを返す。
@@ -126,11 +128,16 @@ func ratingNumber(s string) (float64, bool) {
 
 // normalizeRating は表記の揺れを寄せる。全角・大文字小文字・記号・かっこ書きを落とし、
 // "B+" "B-" は語として扱えるよう bplus / bminus に直す。
+//
+// "-" が半段階なのは語や数字の**末尾**に付いたときだけ（"B-" "2-" "2-(中立)"）。
+// 語の中のハイフン（"Equal-weight" "Market-Perform"）は区切りなので落とす。
+// 全部 minus にすると "equalminusweight" になって序列に当たらない。
 func normalizeRating(s string) string {
 	s = strings.ToLower(strings.TrimSpace(toHalfWidth(s)))
+	s = strings.ReplaceAll(s, "−", "-")
 	s = strings.ReplaceAll(s, "+", "plus")
-	s = strings.ReplaceAll(s, "-", "minus")
-	s = strings.ReplaceAll(s, "−", "minus")
+	s = ratingMinusRe.ReplaceAllString(s, "${1}minus${2}")
+	s = strings.ReplaceAll(s, "-", "")
 	s = ratingCleanRe.ReplaceAllString(s, "")
 	// "Buy2" のリスク区分を落とす。"2plus" のような数値の判断は残す
 	if m := ratingRiskRe.FindStringSubmatch(s); m != nil {

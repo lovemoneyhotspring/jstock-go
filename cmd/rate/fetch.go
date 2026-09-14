@@ -1,11 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/rate"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/spf13/cobra"
 )
 
@@ -20,7 +21,8 @@ func newFetchCmd() *cobra.Command {
 			"取れなかった回も fetches に残すので、「取れなかった時間帯」と「載っていなかった時間帯」を混ぜずに済む。",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			now := time.Now().In(jst())
+			// 掲載時刻を見るのが目的なので、記録の時刻は常に日本時間で持つ
+			now := clock.NowJST()
 
 			store, err := rate.OpenStore(dbPathFlag)
 			if err != nil {
@@ -28,27 +30,16 @@ func newFetchCmd() *cobra.Command {
 			}
 			defer func() { _ = store.Close() }()
 
-			started := time.Now()
-			html, err := readSource(cmd, fromFile)
-			if err == nil {
-				var entries []rate.Entry
-				entries, err = rate.Parse(html, now)
-				if err == nil {
-					added, saveErr := store.Save(ctx, entries, now)
-					if saveErr != nil {
-						err = saveErr
-					} else {
-						_ = store.RecordFetch(ctx, now, len(entries), added, "ok", time.Since(started))
-						if !quiet {
-							fmt.Printf("%s  ページ %d 行 / 新規 %d 行\n", now.Format("2006-01-02 15:04:05"), len(entries), added)
-						}
-						return nil
-					}
-				}
+			rows, added, err := rate.FetchAndSave(ctx, store, now, func(ctx context.Context) (string, error) {
+				return readSource(ctx, fromFile)
+			})
+			if err != nil {
+				return err
 			}
-			// 失敗も記録に残してから落とす
-			_ = store.RecordFetch(ctx, now, 0, 0, err.Error(), time.Since(started))
-			return err
+			if !quiet {
+				fmt.Printf("%s  ページ %d 行 / 新規 %d 行\n", now.Format("2006-01-02 15:04:05"), rows, added)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&fromFile, "from-file", "", "URL の代わりに手元の HTML を読む（動作確認用）")
@@ -56,19 +47,10 @@ func newFetchCmd() *cobra.Command {
 	return cmd
 }
 
-func readSource(cmd *cobra.Command, fromFile string) (string, error) {
+func readSource(ctx context.Context, fromFile string) (string, error) {
 	if fromFile != "" {
 		b, err := os.ReadFile(fromFile)
 		return string(b), err
 	}
-	return rate.Fetch(cmd.Context(), urlFlag)
-}
-
-// jst は記録の時刻帯。掲載時刻を見るのが目的なので、常に日本時間で持つ。
-func jst() *time.Location {
-	loc, err := time.LoadLocation("Asia/Tokyo")
-	if err != nil {
-		return time.FixedZone("JST", 9*60*60)
-	}
-	return loc
+	return rate.Fetch(ctx, urlFlag)
 }

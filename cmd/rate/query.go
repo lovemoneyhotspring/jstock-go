@@ -51,7 +51,7 @@ ORDER BY first_seen_at DESC, code LIMIT ?`, args2...)
 					if err := rows.Scan(&seen, &pub, &code, &name, &f, &r, &t); err != nil {
 						return err
 					}
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", trimTS(seen), pub, code, name, f, r, t)
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", rate.TrimTS(seen), pub, code, name, f, r, t)
 				}
 				if err := rows.Err(); err != nil {
 					return err
@@ -106,7 +106,7 @@ GROUP BY firm ORDER BY mean`, days, maxLag)
 					if err := rows.Scan(&f, &n, &d, &lo, &mean, &hi); err != nil {
 						return err
 					}
-					fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%s\t%s\n", f, n, d, hhmm(lo), hhmm(mean), hhmm(hi))
+					fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%s\t%s\n", f, n, d, rate.HHMM(lo), rate.HHMM(mean), rate.HHMM(hi))
 				}
 				if err := rows.Err(); err != nil {
 					return err
@@ -172,21 +172,4 @@ func withStore(fn func(*sql.DB) error) error {
 	}
 	defer func() { _ = store.Close() }()
 	return fn(store.DB())
-}
-
-// hhmm は掲載日 0 時からの経過時間を HH:MM で見せる（日またぎは 24 時超えのまま出す）。
-func hhmm(hours float64) string {
-	total := int(hours*60 + 0.5)
-	sign := ""
-	if total < 0 {
-		sign, total = "-", -total
-	}
-	return fmt.Sprintf("%s%02d:%02d", sign, total/60, total%60)
-}
-
-func trimTS(ts string) string {
-	if len(ts) >= 16 {
-		return strings.Replace(ts[:16], "T", " ", 1)
-	}
-	return ts
 }
