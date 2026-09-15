@@ -97,9 +97,13 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # --- 銘柄選定（デイトレ）----------------------------------------------------------
 # 前夜 20:30: 翌営業日の母集団を state/daytrade/plan-<日付>.parquet に保存（ロング＋ショート）
 30 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade plan --config-dir config/daytrade_margin >> state/logs/daytrade-plan.log    2>&1
-# 20:20（日足の取り込み後、plan の前）: 朝の候補（選んだ銘柄も次点も）に当日の日足を当てて結果を履歴に残す。
+# 17:05・17:20・20:20（日足の取り込み後）: 朝の候補（選んだ銘柄も次点も）に当日の日足を当てて結果を履歴に残す。
 # 9:00 の順位表が無い日は plan × 始値で順位を作り直して評価する。妥当性の確認は `daytrade review`
-20 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
+# 日足は普段 16:43 の jquants sync で入る。17:05 は 17:35 の日次レポートに間に合わせるため、17:20 は
+# 17:13 の sync で入った日のため、20:20 は公開が遅れた日の拾い直し。日足が無ければ何もせず終わり、
+# 同じ日を何度評価しても review / trades は最後の 1 回だけを使う（LatestPerDay）
+5,20 17 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
+20 20 * * 1-5  cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
 
 # --- 板・気配の記録（docs/OPENING_DATA.md）----------------------------------------
 # 発注しない。今の選定はギャップ 1 変数しか見ておらず、「どんな気配なら勝率が上がるか」に
@@ -143,11 +147,13 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # （docs/FEEDBACK.md「自動化するときの線引き」）。ロックは 3 つで共有する
 # ——同時に走ると claude の負荷とダイジェストの汚れが重なるため。
 #
-# 21:00（平日）: その日の運用（.claude/agents/daily-report.md）。
-# 上の evaluate 群（20:20〜20:35）と plan（20:30）が出揃ってから回す
-0 21 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh daily   >> state/logs/report-daily.log   2>&1
+# 17:35（平日）: その日の運用（.claude/agents/daily-report.md）。17:00〜18:00 に届けるための時刻。
+# 取引（open〜verify は 15:40 まで）と daytrade evaluate（17:05・17:20）の後。claude は最長 15 分で切れる。
+# wbjp evaluate（20:25）・accum evaluate（金 20:35）はまだ回っていないので、その 2 つは前日までの結果になる。
+# 日足の公開が遅れた日は当日の評価が載らない（20:20 の evaluate が拾い、翌日のレポートの review に入る）
+35 17 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh daily   >> state/logs/report-daily.log   2>&1
 # 21:30（金）: その週（月〜金）の傾向（.claude/agents/periodic-report.md）。
-# 同じ日の日次（21:00）が終わってから
+# 同じ日の evaluate 群（20:20〜20:35）が出揃ってから
 30 21 * * 5     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh weekly  >> state/logs/report-weekly.log  2>&1
 # 毎月 1 日 22:00: 前月まるごと。曜日を問わない（前月の記録は出揃っている）
 0 22 1 * *      cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/report.lock $WBJP_HOME/deploy/report.sh monthly >> state/logs/report-monthly.log 2>&1
