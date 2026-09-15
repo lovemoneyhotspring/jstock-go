@@ -28,6 +28,8 @@ type stubBroker struct {
 	placed     []domain.OrderRequest
 	history    []domain.Order // 当日の注文一覧
 	historyErr error
+	cancel     func(clientOrderID string) error
+	cancelled  []string // 取消を送った client_order_id
 }
 
 func (s *stubBroker) Name() string      { return "stub" }
@@ -85,7 +87,13 @@ func (s *stubBroker) Place(req domain.OrderRequest) (*domain.OrderAck, error) {
 	}
 	return s.place(req)
 }
-func (s *stubBroker) Cancel(_ string, _ *string) error { return nil }
+func (s *stubBroker) Cancel(clientOrderID string, _ *string) error {
+	s.cancelled = append(s.cancelled, clientOrderID)
+	if s.cancel == nil {
+		return nil
+	}
+	return s.cancel(clientOrderID)
+}
 func (s *stubBroker) LotSizes(_ []string) map[string]decimal.Decimal {
 	return map[string]decimal.Decimal{}
 }

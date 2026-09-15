@@ -378,7 +378,12 @@ func recordedByLeg(env Env, carried []Carried) (map[broker.PositionLeg]decimal.D
 			continue
 		}
 		leg := broker.LegOf(o.Symbol, o.Trade, o.Leg() == "short")
-		recorded[leg] = recorded[leg].Add(o.Quantity)
+		qty := o.Quantity
+		if !o.IsOpen() {
+			// 終わった注文は約定した株数だけ建っている（一部約定の後の取消・失効）
+			qty = o.FilledQuantity
+		}
+		recorded[leg] = recorded[leg].Add(qty)
 	}
 	return recorded, nil
 }

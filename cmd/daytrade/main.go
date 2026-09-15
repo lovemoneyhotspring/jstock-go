@@ -35,6 +35,7 @@ func main() {
 	rootCmd.AddCommand(newPlanCmd())
 	rootCmd.AddCommand(newOpenCmd())
 	rootCmd.AddCommand(newCloseCmd())
+	rootCmd.AddCommand(newGuardCmd())
 	rootCmd.AddCommand(newVerifyCmd())
 	rootCmd.AddCommand(newHistoryCmd())
 	rootCmd.AddCommand(newEvaluateCmd())

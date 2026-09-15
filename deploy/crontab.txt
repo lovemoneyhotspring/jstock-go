@@ -86,6 +86,11 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 当日ぶんだけなので --days 1 --recent 1（1 回 4 秒ほど）。ロックは news.lock で daytrade と別
 52 8 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 1 --recent 1                                    >> state/logs/news-sync.log        2>&1
 20 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 1 --recent 1                                    >> state/logs/news-sync.log        2>&1
+# 場中は 10 分おき（9:14〜15:14）。2 分後の daytrade guard が、材料の出た今日の売建を取消・返済する。
+# 9:14 は最後の open（9:13）の直後——8:52〜9:13 の公表で建ててしまった売建を 9:16 に拾う
+14,24,34,44,54 9 * * 1-5     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 1 --recent 1                         >> state/logs/news-sync.log        2>&1
+4,14,24,34,44,54 10-14 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 1 --recent 1                       >> state/logs/news-sync.log        2>&1
+4,14 15 * * 1-5              cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 1 --recent 1                         >> state/logs/news-sync.log        2>&1
 
 # --- 銘柄選定（デイトレ）----------------------------------------------------------
 # 前夜 20:30: 翌営業日の母集団を state/daytrade/plan-<日付>.parquet に保存（ロング＋ショート）
@@ -170,6 +175,12 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # この行を消して上の --live 行を開ける（両方を同時に動かさない）。
 # dry-run は実行のたびに当日の古い dry_run を台帳から消して最新だけ残す（cmd/daytrade/open.go）
 #1,4,7,10,13 9 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open-dryrun.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin
+# 9:16〜15:16 の 10 分おき（news sync の 2 分後）: 材料（TOB など）の出た今日の売建を処置する。
+# 未約定なら取消、一部約定なら残りを取消して約定分を返済買い、全部約定なら返済買い。
+# 今日の売建が無い日は台帳を見るだけで終わる（ブローカーに接続しない）。窓は guard_window（〜15:19）
+16,26,36,46,56 9 * * 1-5     cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
+6,16,26,36,46,56 10-14 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
+6,16 15 * * 1-5              cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
 # 15:20・15:24・15:28: 当日建てた分を返済（1 回目で済めば以降は何もしない）
 20,24,28 15 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-close.log $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin --live --yes
 # --- dry-run の close / verify（2026-09-11〜）。--live が無いので**注文は出ない**。
