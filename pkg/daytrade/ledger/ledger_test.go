@@ -114,6 +114,94 @@ func TestWasPlacedFailsClosedOnDBError(t *testing.T) {
 	}
 }
 
+// 執行の滑りは「送る直前の時価」と約定単価の差でしか測れない。
+// 判断時の気配（Price）も残したまま、両方が 1 行に並ぶこと。
+func TestSetRefKeepsDecisionAndExecutionPrices(t *testing.T) {
+	led := openTest(t)
+	quote := decimal.NewFromInt(1000)
+	if err := led.Record(request("a", "7203", domain.SideBuy, 100, domain.TradeTypeCash), day,
+		string(domain.OrderStatusSubmitted), &quote, nil); err != nil {
+		t.Fatal(err)
+	}
+	ref := Ref{
+		Price: decimal.NewFromInt(1020), Bid: decimal.NewFromInt(1019), Ask: decimal.NewFromInt(1021),
+		At: time.Date(2026, 9, 16, 0, 4, 0, 0, time.UTC),
+	}
+	if err := led.SetRef("a", ref); err != nil {
+		t.Fatal(err)
+	}
+	fill := decimal.NewFromInt(1025)
+	if err := led.UpdateStatus("a", domain.OrderStatusFilled, decimal.NewFromInt(100), &fill, nil); err != nil {
+		t.Fatal(err)
+	}
+	o, ok, err := led.Get("a")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if o.Price == nil || !o.Price.Equal(quote) {
+		t.Errorf("判断時の気配が消えた: %v", o.Price)
+	}
+	if o.RefPrice == nil || !o.RefPrice.Equal(ref.Price) {
+		t.Errorf("執行時の時価 = %v, want 1020", o.RefPrice)
+	}
+	if o.RefBid == nil || o.RefAsk == nil || !o.RefBid.Equal(ref.Bid) || !o.RefAsk.Equal(ref.Ask) {
+		t.Errorf("最良気配が残っていない: %v / %v", o.RefBid, o.RefAsk)
+	}
+	if o.RefAt == nil || *o.RefAt != "2026-09-16T00:04:00Z" {
+		t.Errorf("時価の時刻 = %v", o.RefAt)
+	}
+	if o.AvgFillPrice == nil || !o.AvgFillPrice.Equal(fill) {
+		t.Errorf("約定単価が消えた: %v", o.AvgFillPrice)
+	}
+}
+
+// 時価を控えていない注文（この機能より前の行）は null のまま読める。
+func TestRefAbsentIsNil(t *testing.T) {
+	led := openTest(t)
+	if err := led.Record(request("a", "7203", domain.SideBuy, 100, domain.TradeTypeCash), day,
+		string(domain.OrderStatusSubmitted), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	o, _, err := led.Get("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.RefPrice != nil || o.RefBid != nil || o.RefAsk != nil || o.RefAt != nil {
+		t.Errorf("記録していない時価が入っている: %+v", o)
+	}
+}
+
+// 手仕舞いが 2 本（引けの一部約定 + 翌寄りの返済）なら、基準の時価も約定数量で加重する。
+func TestExitAvgRefWeightsByFilledQuantity(t *testing.T) {
+	led := openTest(t)
+	exits := []Order{}
+	for _, e := range []struct {
+		id       string
+		qty, ref int64
+	}{{"e1", 200, 1000}, {"e2", 100, 1300}} {
+		refPrice := decimal.NewFromInt(e.ref)
+		if err := led.Record(request(e.id, "7203", domain.SideSell, e.qty, domain.TradeTypeCash), day,
+			string(domain.OrderStatusSubmitted), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := led.SetRef(e.id, Ref{Price: refPrice, At: day}); err != nil {
+			t.Fatal(err)
+		}
+		if err := led.UpdateStatus(e.id, domain.OrderStatusFilled, decimal.NewFromInt(e.qty), &refPrice, nil); err != nil {
+			t.Fatal(err)
+		}
+		o, _, err := led.Get(e.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		exits = append(exits, o)
+	}
+	avg, ok := ExitAvgRef(exits)
+	if !ok || !avg.Equal(decimal.NewFromInt(1100)) {
+		t.Errorf("加重平均 = %v (ok=%v), want 1100（200 株 × 1000 + 100 株 × 1300）", avg, ok)
+	}
+}
+
 // fillOrder は注文を記録して約定させる（数量と単価）。
 func fillOrder(t *testing.T, led *Ledger, id, symbol string, side domain.Side, trade domain.TradeType, d time.Time, qty, price int64) {
 	t.Helper()

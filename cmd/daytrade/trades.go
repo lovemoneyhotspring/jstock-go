@@ -131,8 +131,11 @@ func printTradeDetail(table, totals history.Frame) {
 		fmt.Printf("      勝敗 × 主因: 選定勝ち %d / 選定負け %d ｜ 地合い勝ち %d / 地合い負け %d\n",
 			iOf(row["selection_win"]), iOf(row["selection_loss"]),
 			iOf(row["market_win"]), iOf(row["market_loss"]))
-		fmt.Printf("      実発注 %d 件（執行の乖離 %s bp）  張り付き %d 件\n",
-			iOf(row["traded"]), orDash(bpText(row["slippage_bp"])), iOf(row["pinned"]))
+		// 検証との差は日足（寄付・引け）との乖離、執行の滑りは送る直前の時価との差。
+		// 前者が大きく後者が小さければ、原因は執行ではなく発注の遅れ
+		fmt.Printf("      実発注 %d 件（検証との差 %s bp / 執行の滑り %s bp）  張り付き %d 件\n",
+			iOf(row["traded"]), orDash(bpText(row["slippage_bp"])),
+			orDash(bpText(row["exec_slippage_bp"])), iOf(row["pinned"]))
 	}
 	fmt.Println("\n※ 取引数が少ないうちは平均も勝率も揺れる。20 取引に満たない期間の数字で規則を変えない")
 }

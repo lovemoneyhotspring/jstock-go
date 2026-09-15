@@ -24,6 +24,14 @@ type Broker interface {
 	PositionsBySymbol() (map[string]domain.Position, error)
 }
 
+// PriceSource は時価を返せるブローカー（立花証券）。
+//
+// Broker 本体には入れない——模型のブローカーや試験用の差し替えに時価は要らず、
+// 取れなくても発注は続けられる（執行時の値は記録のためだけに使う）。
+type PriceSource interface {
+	MarketPrices(symbols []string) (map[string]MarketPrice, error)
+}
+
 // StopCorrector は置いた逆指値の条件を後から変えられるブローカー。
 // トレーリングは「逆指値を置いて、定期的にここで条件を引き上げる」形で作る。
 // 発火済みの逆指値は訂正できない（立花証券のリファレンス）。

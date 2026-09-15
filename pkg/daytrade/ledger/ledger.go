@@ -22,6 +22,22 @@ const DryRunStatus = "dry_run"
 
 const dayLayout = "2006-01-02"
 
+// orderColumns は Order を読み出す列。query の Scan と同じ並び。
+const orderColumns = "client_order_id, broker_order_id, day, symbol, side, quantity," +
+	" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify," +
+	" ref_price, ref_bid, ref_ask, ref_at"
+
+// Ref は注文を**送る直前**の時価。約定単価と比べると執行そのものの滑りが出る。
+// 取れなければ記録しないだけで、発注は続ける。
+type Ref struct {
+	// Price は現在値（無ければ最良気配の仲値）。
+	Price decimal.Decimal
+	// Bid / Ask は最良買気配値・最良売気配値（無ければゼロ）。成行が食う側の値。
+	Bid, Ask decimal.Decimal
+	// At は現在値の時刻。
+	At time.Time
+}
+
 // deadStatuses は未約定のまま終わった状態。同じ判断を送り直してよい。
 var deadStatuses = map[string]struct{}{
 	string(domain.OrderStatusCancelled): {},
@@ -42,9 +58,15 @@ type Order struct {
 	Status         string
 	Price          *decimal.Decimal
 	AvgFillPrice   *decimal.Decimal
-	PlacedAt       string
-	UpdatedAt      *string
-	Reason         string
+	// RefPrice / RefBid / RefAsk は**送る直前**に照会した時価（現在値・最良買気配・
+	// 最良売気配）。AvgFillPrice との差が執行そのものの滑り。判断時の Price（9:00 の
+	// 気配）との差は、選定から発注までの**遅れ**も混じるので別物。
+	RefPrice, RefBid, RefAsk *decimal.Decimal
+	// RefAt は RefPrice の時刻（現在値の時刻。RFC3339 UTC）。時価がどれだけ古いか。
+	RefAt     *string
+	PlacedAt  string
+	UpdatedAt *string
+	Reason    string
 	// Trade は現物 / 信用新規 / 信用返済。古い台帳（列が無い）は現物。
 	Trade domain.TradeType
 	// Verify は発注経路の実機検証（docs/BROKER_VERIFY.md）で出した注文か。
@@ -142,6 +164,13 @@ var migrations = []storage.Migration{
 	{Name: "orders.verify", Up: storage.AddColumns("orders", map[string]string{
 		"verify": "INTEGER NOT NULL DEFAULT 0",
 	})},
+	// 送る直前の時価（Ref）。約定単価との差が執行の滑り。古い行は null のまま
+	{Name: "orders.ref_price", Up: storage.AddColumns("orders", map[string]string{
+		"ref_price": "TEXT",
+		"ref_bid":   "TEXT",
+		"ref_ask":   "TEXT",
+		"ref_at":    "TEXT",
+	})},
 }
 
 // Open は台帳を開き、スキーマを最新に揃える。
@@ -172,6 +201,21 @@ func (l *Ledger) Record(req domain.OrderRequest, day time.Time, status string, p
 		clock.NowUTC().Format(time.RFC3339), string(req.Trade), boolToInt(l.Verify))
 	if err != nil {
 		return fmt.Errorf("台帳への記録に失敗しました: %w", err)
+	}
+	return nil
+}
+
+// SetRef は送る直前の時価を控える（Record の直後、発注の前に呼ぶ）。
+//
+// Record と分けてあるのは、これが**測るためだけ**の記録だから。取れなくても
+// 発注は続ける——ここで失敗しても注文の可否には関わらせない。
+func (l *Ledger) SetRef(clientOrderID string, ref Ref) error {
+	_, err := l.db.Exec(
+		"UPDATE orders SET ref_price = ?, ref_bid = ?, ref_ask = ?, ref_at = ? WHERE client_order_id = ?",
+		decimalString(ref.Price), decimalString(ref.Bid), decimalString(ref.Ask),
+		ref.At.UTC().Format(time.RFC3339), clientOrderID)
+	if err != nil {
+		return fmt.Errorf("台帳に執行時の時価を記録できません: %w", err)
 	}
 	return nil
 }
@@ -238,9 +282,7 @@ func (l *Ledger) DeadCount(day time.Time, symbol string, side domain.Side) int {
 
 // Get は 1 件の注文。無ければ ok が偽。
 func (l *Ledger) Get(clientOrderID string) (Order, bool, error) {
-	orders, err := l.query("SELECT client_order_id, broker_order_id, day, symbol, side, quantity,"+
-		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify"+
-		" FROM orders WHERE client_order_id = ?", clientOrderID)
+	orders, err := l.query("SELECT "+orderColumns+" FROM orders WHERE client_order_id = ?", clientOrderID)
 	if err != nil || len(orders) == 0 {
 		return Order{}, false, err
 	}
@@ -268,8 +310,7 @@ func (l *Ledger) BrokerOrderIDs() (map[string]struct{}, error) {
 
 // OrdersOn はその日の注文（dry-run を含む）。side が nil なら全部。
 func (l *Ledger) OrdersOn(day time.Time, side *domain.Side) ([]Order, error) {
-	query := "SELECT client_order_id, broker_order_id, day, symbol, side, quantity, filled_quantity," +
-		" status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify FROM orders WHERE day = ?"
+	query := "SELECT " + orderColumns + " FROM orders WHERE day = ?"
 	args := []any{day.Format(dayLayout)}
 	if side != nil {
 		query += " AND side = ?"
@@ -299,9 +340,7 @@ func (l *Ledger) ExitsOn(day time.Time) ([]Order, error) {
 
 // OpenOrders は結果が確定していない注文（全期間）。
 func (l *Ledger) OpenOrders() ([]Order, error) {
-	orders, err := l.query("SELECT client_order_id, broker_order_id, day, symbol, side, quantity," +
-		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify" +
-		" FROM orders ORDER BY placed_at")
+	orders, err := l.query("SELECT " + orderColumns + " FROM orders ORDER BY placed_at")
 	if err != nil {
 		return nil, err
 	}
@@ -314,17 +353,13 @@ func (l *Ledger) OpenOrders() ([]Order, error) {
 // day ではなく placed_at で引く（ブローカーの当日の注文一覧と突き合わせるとき）。
 func (l *Ledger) PlacedBetween(start, end time.Time) ([]Order, error) {
 	// placed_at は RFC3339 の UTC（末尾 Z）で書いているので、文字列の比較が時刻の比較になる
-	return l.query("SELECT client_order_id, broker_order_id, day, symbol, side, quantity,"+
-		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify"+
-		" FROM orders WHERE placed_at >= ? AND placed_at < ? ORDER BY placed_at",
+	return l.query("SELECT "+orderColumns+" FROM orders WHERE placed_at >= ? AND placed_at < ? ORDER BY placed_at",
 		start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339))
 }
 
 // Recent は新しい順の注文。
 func (l *Ledger) Recent(limit int) ([]Order, error) {
-	return l.query("SELECT client_order_id, broker_order_id, day, symbol, side, quantity,"+
-		" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify"+
-		" FROM orders ORDER BY placed_at DESC LIMIT ?", limit)
+	return l.query("SELECT "+orderColumns+" FROM orders ORDER BY placed_at DESC LIMIT ?", limit)
 }
 
 func filter(orders []Order, keep func(Order) bool) []Order {
@@ -354,12 +389,17 @@ func (l *Ledger) query(query string, args ...any) ([]Order, error) {
 			updatedAt, reason      *string
 			trade                  *string
 			verify                 *int64
+			refPrice, refBid       *string
+			refAsk                 *string
 		)
 		if err := rows.Scan(&o.ClientOrderID, &brokerOrderID, &dayText, &o.Symbol, &side,
 			&quantity, &filled, &o.Status, &price, &avgFillPrice, &o.PlacedAt, &updatedAt,
-			&reason, &trade, &verify); err != nil {
+			&reason, &trade, &verify, &refPrice, &refBid, &refAsk, &o.RefAt); err != nil {
 			return nil, err
 		}
+		o.RefPrice = parseDecimalPtr(refPrice)
+		o.RefBid = parseDecimalPtr(refBid)
+		o.RefAsk = parseDecimalPtr(refAsk)
 		o.BrokerOrderID = brokerOrderID
 		o.Day, _ = time.Parse(dayLayout, dayText)
 		o.Side = domain.Side(side)
@@ -565,6 +605,23 @@ func ExitAvgPrice(exits []Order) (avg, filled decimal.Decimal, ok bool) {
 	return amount.Div(filled), filled, true
 }
 
+// ExitAvgRef は手仕舞いの「送る直前の時価」を約定数量で加重平均したもの。
+// 手仕舞いが複数本（引けの一部約定 + 翌寄りの返済）でも 1 つの基準値にする。
+func ExitAvgRef(exits []Order) (avg decimal.Decimal, ok bool) {
+	amount, filled := decimal.Zero, decimal.Zero
+	for _, exit := range exits {
+		if exit.RefPrice == nil || exit.FilledQuantity.LessThanOrEqual(decimal.Zero) {
+			continue
+		}
+		amount = amount.Add(exit.RefPrice.Mul(exit.FilledQuantity))
+		filled = filled.Add(exit.FilledQuantity)
+	}
+	if !filled.IsPositive() {
+		return decimal.Zero, false
+	}
+	return amount.Div(filled), true
+}
+
 // boolToInt は SQLite に真偽を入れるための 0 / 1。
 func boolToInt(b bool) int64 {
 	if b {
@@ -594,6 +651,14 @@ func parseDecimalPtr(text *string) *decimal.Decimal {
 
 func decimalPtrString(d *decimal.Decimal) any {
 	if d == nil {
+		return nil
+	}
+	return d.String()
+}
+
+// decimalString はゼロを null にする（取れなかった値と 0 円を見分ける）。
+func decimalString(d decimal.Decimal) any {
+	if d.IsZero() {
 		return nil
 	}
 	return d.String()

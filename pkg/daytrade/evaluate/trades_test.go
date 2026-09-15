@@ -32,7 +32,9 @@ type evalRow struct {
 	quantity float64
 	// 実発注の約定単価（0 なら建てていない）。
 	actualEntry, actualExit, actualPnL float64
-	limitUpClose                       bool
+	// 送る直前の時価（0 なら記録が無い）。
+	refEntry, refExit float64
+	limitUpClose      bool
 }
 
 func rowOf(r evalRow) map[string]any {
@@ -56,6 +58,7 @@ func rowOf(r evalRow) map[string]any {
 		"ul_flag": nil, "ll_flag": nil,
 		"traded": false, "filled_quantity": nil,
 		"actual_entry": nil, "actual_exit": nil, "actual_pnl": nil,
+		"ref_entry": nil, "ref_exit": nil,
 	}
 	if r.actualEntry > 0 {
 		row["traded"] = true
@@ -63,6 +66,12 @@ func rowOf(r evalRow) map[string]any {
 		row["actual_entry"] = r.actualEntry
 		row["actual_exit"] = r.actualExit
 		row["actual_pnl"] = r.actualPnL
+	}
+	if r.refEntry > 0 {
+		row["ref_entry"] = r.refEntry
+	}
+	if r.refExit > 0 {
+		row["ref_exit"] = r.refExit
 	}
 	return row
 }
@@ -241,6 +250,52 @@ func TestTradeTotalsSlippage(t *testing.T) {
 	}
 	if totals.Rows[0]["traded"] != int64(1) {
 		t.Errorf("実発注の件数が数えられていない: %+v", totals.Rows[0])
+	}
+}
+
+// 検証との差（日足との乖離）と執行の滑り（送る直前の時価との差）は別物。
+// 前者が大きく後者が小さければ、原因は執行ではなく発注の遅れ。
+func TestTradeTotalsExecSlippage(t *testing.T) {
+	frame := frameOf(evalRow{
+		day: "2026-09-16", side: "BUY", rank: 1, code: "10000", name: "遅れ",
+		group: "picked", picked: true, netBP: 50, pnl: 1000, open: 1000, close: 1010, quantity: 100,
+		// 寄付 1000 が、発注できた時には 1020 まで戻っていた（遅れ）。そこから 1021 で
+		// 建て（-9.8 bp）、時価 1008 のところを 1007 で手仕舞った（-9.9 bp）
+		actualEntry: 1021, actualExit: 1007, actualPnL: -1400,
+		refEntry: 1020, refExit: 1008,
+	})
+	trades := evaluate.Trades(frame)
+	execBP, ok := trades.Rows[0]["exec_bp"].(float64)
+	if !ok {
+		t.Fatalf("執行の滑りが出ていない: %+v", trades.Rows[0])
+	}
+	if execBP > -15 || execBP < -25 {
+		t.Errorf("執行の滑り = %.1f bp, want ≈ -20（建て -9.8 + 手仕舞い -9.9）", execBP)
+	}
+	totals := evaluate.TradeTotals(trades)
+	if got, _ := totals.Rows[0]["exec_slippage_bp"].(float64); got > -15 || got < -25 {
+		t.Errorf("合計の執行の滑り = %v bp, want ≈ -20", totals.Rows[0]["exec_slippage_bp"])
+	}
+	// 日足との差は遅れも含むのでずっと大きい。2 つが揃って初めて原因を切り分けられる
+	if got, _ := totals.Rows[0]["slippage_bp"].(float64); got > -200 {
+		t.Errorf("検証との差 = %v bp, want < -200（遅れのぶん大きい）", totals.Rows[0]["slippage_bp"])
+	}
+}
+
+// 時価の記録が無い日（2026-09-16 より前の取引）は執行の滑りを出さない。
+// 0 と「測れない」を混ぜると平均が嘘になる。
+func TestTradeExecSlippageAbsentWithoutRef(t *testing.T) {
+	frame := frameOf(evalRow{
+		day: "2026-09-15", side: "BUY", rank: 1, code: "10000", name: "記録なし",
+		group: "picked", picked: true, netBP: 50, pnl: 1000, open: 1000, close: 1010, quantity: 100,
+		actualEntry: 1021, actualExit: 1007, actualPnL: -1400,
+	})
+	trades := evaluate.Trades(frame)
+	if trades.Rows[0]["exec_bp"] != nil {
+		t.Errorf("時価の記録が無いのに滑りが出ている: %v", trades.Rows[0]["exec_bp"])
+	}
+	if totals := evaluate.TradeTotals(trades); totals.Rows[0]["exec_slippage_bp"] != nil {
+		t.Errorf("合計にも出さないこと: %v", totals.Rows[0]["exec_slippage_bp"])
 	}
 }
 

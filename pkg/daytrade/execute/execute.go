@@ -208,6 +208,50 @@ func EntryTrade(side domain.Side, cfg config.Config) domain.TradeType {
 	return domain.TradeTypeCash
 }
 
+// refPriceOf は**送る直前**の時価。約定単価と比べると執行そのものの滑りが出る。
+//
+// 選定に使った 9:00 の気配では、判断から発注までの遅れ（危険信号の再試行や余力の照会で
+// 数分空く）が混じって滑りと区別できない。だから送る直前に 1 銘柄ずつ聞き直す。
+// 取れなければ nil——記録のためだけの値なので、発注は止めない。
+func refPriceOf(env Env, b broker.Broker, symbol string) *ledger.Ref {
+	source, ok := b.(broker.PriceSource)
+	if !ok {
+		return nil
+	}
+	prices, err := source.MarketPrices([]string{symbol})
+	if err != nil {
+		env.Report.Warn("daytrade.ref_price", "執行時の時価を取れません（発注は続けます）", map[string]any{
+			"day": env.dayText(), "symbol": symbol, "error": err.Error(),
+		})
+		return nil
+	}
+	price, ok := prices[symbol]
+	if !ok {
+		return nil
+	}
+	ref := ledger.Ref{Price: price.Last, Bid: price.Bid, Ask: price.Ask, At: price.At}
+	if !ref.Price.IsPositive() {
+		// 寄り前と未寄付の銘柄は現在値が無い。値段は気配にしかない（docs/OPENING_DATA.md）
+		ref.Price = midOf(price.Bid, price.Ask)
+	}
+	if !ref.Price.IsPositive() {
+		return nil
+	}
+	return &ref
+}
+
+// midOf は最良気配の仲値。片側しか無ければその側の値。
+func midOf(bid, ask decimal.Decimal) decimal.Decimal {
+	switch {
+	case bid.IsPositive() && ask.IsPositive():
+		return bid.Add(ask).Div(decimal.NewFromInt(2))
+	case bid.IsPositive():
+		return bid
+	default:
+		return ask
+	}
+}
+
 // PlaceRecorded は送る前に台帳へ PENDING を書き、送ったら結果で更新する。
 //
 // 送信後に落ちても台帳には残るので、次の実行で同じ注文を送り直さない
@@ -220,7 +264,13 @@ func EntryTrade(side domain.Side, cfg config.Config) domain.TradeType {
 // 同時に実行品質の intent 行を残す。台帳の price は後で約定額に上書きされうるので、
 // 判断時の想定はここで別に控えておく。
 func PlaceRecorded(env Env, b broker.Broker, request domain.OrderRequest, price decimal.Decimal, fee *decimal.Decimal) error {
+	// 送る直前の時価。intent 行と台帳の両方に残す（closure は後で読むので先に宣言する）
+	var ref *ledger.Ref
 	intent := func(reason execution.ReasonCode, note string) {
+		refPrice := any(nil)
+		if ref != nil {
+			refPrice = ref.Price
+		}
 		execution.Collect(execution.Spec{
 			Event: execution.EventIntent, App: "daytrade",
 			Symbol: request.Symbol, Side: string(request.Side), Trade: string(request.Trade),
@@ -229,11 +279,20 @@ func PlaceRecorded(env Env, b broker.Broker, request domain.OrderRequest, price 
 			IntentPrice:  price,
 			IntentAmount: price.Mul(request.Quantity),
 			IntentFee:    fee,
+			RefPrice:     refPrice,
 			Reason:       reason, Note: note,
 		})
 	}
 	if err := env.Ledger.Record(request, env.Day, string(domain.OrderStatusPending), &price, nil); err != nil {
 		return fmt.Errorf("発注前の台帳記録に失敗しました（発注を中止します）: %w", err)
+	}
+	if ref = refPriceOf(env, b, request.Symbol); ref != nil {
+		if err := env.Ledger.SetRef(request.ClientOrderID, *ref); err != nil {
+			// 測るための値なので、記録できなくても発注は続ける
+			env.Report.Warn("daytrade.ref_price", "執行時の時価を台帳に残せません（発注は続けます）", map[string]any{
+				"day": env.dayText(), "symbol": request.Symbol, "error": err.Error(),
+			})
+		}
 	}
 	ack, err := b.Place(request)
 	if err != nil {
@@ -736,6 +795,7 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 					BrokerOrderID: stringOf(current.BrokerOrderID),
 					Live:          true, Quantity: order.Quantity,
 					IntentPrice:  decimalOrNil(order.Price),
+					RefPrice:     decimalOrNil(order.RefPrice),
 					FillQuantity: filled, FillPrice: decimalOrNil(fillPrice),
 					Reason: fillReason,
 				})
