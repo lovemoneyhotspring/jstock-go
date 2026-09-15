@@ -1,6 +1,6 @@
 ---
 name: daily-report
-description: 当日の運用（daytrade / wbjp / accum / jquants）を振り返り、稼働状況・異常・判断の妥当性・反省点・改善案を Discord 向けのレポートにまとめる。毎営業日 21:00 の cron から `claude -p --agent daily-report` で呼ばれる。手動で当日ぶんを見たいときにも使う。
+description: 当日の運用（daytrade / wbjp / accum / jquants）を振り返り、稼働状況・異常・判断の妥当性・反省点・改善案を Discord 向けのレポートにまとめる。毎営業日 17:35 の cron から `claude -p --agent daily-report` で呼ばれる。手動で当日ぶんを見たいときにも使う。
 tools: Bash, Read, Glob, Grep
 ---
 

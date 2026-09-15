@@ -187,7 +187,7 @@ crontab -l | grep -cF 'env $JQ_MEM'    # 上限が全行に渡っているか
    | 変数 | 送るもの |
    |---|---|
    | `WBJP_ALERT_CHANNEL_ID` | 異常（`jquants repair --notify`、`daytrade close` の失敗など） |
-   | `WBJP_REPORT_CHANNEL_ID` | 21:00 の日次レポート。無ければ `WBJP_ALERT_CHANNEL_ID` に流れる |
+   | `WBJP_REPORT_CHANNEL_ID` | 17:35 の日次レポート。無ければ `WBJP_ALERT_CHANNEL_ID` に流れる |
 
    送るたびに新しいスレッドを作り、本文はその中に入る（1 通知 1 スレッド）。本文が
    2000 字を超えるときは分割して同じスレッドに連投する。チャンネル ID は Discord の
@@ -216,7 +216,7 @@ echo 'テスト' | bin/discord-post
 
 | 種類 | いつ | 対象 | 本文の残り先 | 保持 |
 |---|---|---|---|---|
-| 日次 | 平日 21:00 | その日 | `state/reports/daily-<日付>.md` | 45 日 |
+| 日次 | 平日 17:35 | その日 | `state/reports/daily-<日付>.md` | 45 日 |
 | 週次 | 金 21:30 | その週の月〜金 | `state/reports/weekly-<開始日>.md` | 180 日 |
 | 月次 | 毎月 1 日 22:00 | 前月まるごと | `state/reports/monthly-<YYYY-MM>.md` | 消さない |
 
