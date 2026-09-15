@@ -33,11 +33,13 @@ func recentPnL(cfg dtconfig.Config, day time.Time, led *dtledger.Ledger) (*float
 }
 
 // usmarketLatest は前夜の米国セッション（S&P500・VIX）。キャッシュ（data/daytrade/us.json）を
-// 先に見て、無い日だけ Cboe（落ちていれば FRED）へ取りに行く。source は cache / fetched / cache_fallback。
+// 先に見て、無い日だけ Cboe → Yahoo → FRED の順に取りに行く。source は cache / fetched / cache_fallback。
+// FRED は前夜の値が 9:10 JST ごろまで出ないので、寄付では Cboe と Yahoo が両方落ちた朝の最後の手。
 //
 // timeout は 1 リクエストの待ち時間。寄付の判断（open）は短く、前夜の温め直し（plan）は長く。
 func usmarketLatest(day time.Time, timeout time.Duration) (*usmarket.Session, string, error) {
-	fetcher := usmarket.FirstOf(usmarket.NewCboeFetcher(timeout), usmarket.NewFredFetcherWithTimeout(timeout))
+	fetcher := usmarket.FirstOf(usmarket.NewCboeFetcher(timeout), usmarket.NewYahooFetcher(timeout),
+		usmarket.NewFredFetcherWithTimeout(timeout))
 	return usmarket.LatestBeforeCached(fetcher, usmarket.DefaultCachePath(appSettings.DataDir), day)
 }
 
