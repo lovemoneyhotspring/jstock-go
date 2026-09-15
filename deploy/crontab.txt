@@ -80,6 +80,12 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 場中の記事に反応する使い方に進むなら 10 分おきに上げる。そのときは --days 1 にすること
 # （--days 5 のままだと過去 4 日を 1 日 100 回以上取り直す）。docs/NEWS.md の「頻度を上げるとき」。
 20 6 * * *      cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 5                                               >> state/logs/news-sync.log        2>&1
+# 平日は open と plan の前にも当日ぶんを取り直す（TOB などの材料をショートから外すため）。
+# 適時開示は配信時刻から 2〜4 分で電文に載る（2026-09-15 の実測。15:30 の 67 件で最大 4.3 分）。
+# 8:52 は 08:30・08:45 の開示を 9:01 の open に、20:20 は 15:30〜20:15 の開示を 20:30 の plan に間に合わせる。
+# 当日ぶんだけなので --days 1 --recent 1（1 回 4 秒ほど）。ロックは news.lock で daytrade と別
+52 8 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 1 --recent 1                                    >> state/logs/news-sync.log        2>&1
+20 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 1 --recent 1                                    >> state/logs/news-sync.log        2>&1
 
 # --- 銘柄選定（デイトレ）----------------------------------------------------------
 # 前夜 20:30: 翌営業日の母集団を state/daytrade/plan-<日付>.parquet に保存（ロング＋ショート）
