@@ -251,8 +251,9 @@ Sharpe の頂点（[research/2026-09-jp-shock-days.md](research/2026-09-jp-shock
 | IV（前日 ≤ 18） | CAGR 維持で MaxDD 半分、稼働 5 割 | 無効 |
 | **ショック日**（市場ギャップ ≤ −2% か前夜の S&P500 ≤ −2%） | 止めるのではなく**増やす**。市場ギャップ ≤ −2% の日は +7.8 万/日（t = 6.2、勝率 78%、IS/OOS 一致）で最良の日。翌 5 日も基準の 2〜3 倍。効くのはロングだけ（ショートの勝率 16〜26%）。予定された経済イベント（FOMC・日銀・雇用統計・選挙）は何も出ない。信用の設定でロング ×1.5・ショート ×0: 10 年で合算 +10%・Sharpe 2.09 → 2.19、MaxDD 不変、建玉は通常の 500 万を超えない（[research/2026-09-jp-shock-days.md](research/2026-09-jp-shock-days.md)） | 土台は記録のみ、**`config/daytrade_margin` で有効** |
 
-米国の信号（S&P500 / VIX の終値）は 9:00 の `open` が Cboe（公式の日次履歴。引け後すぐ出る）へ取りに行き、
-落ちていれば FRED（`SP500` / `VIXCLS`。前夜の値が出るのは 9:10 JST ごろ）に切り替える。
+米国の信号（S&P500 / VIX の終値）は 9:00 の `open` が Cboe（公式の日次履歴）へ取りに行き、
+落ちていれば Yahoo Finance（chart API。非公式で、ブラウザ風の User-Agent が要る）、それも駄目なら
+FRED（`SP500` / `VIXCLS`。前夜の値が出るのは 9:10 JST ごろで、寄付の早い回には間に合わない）に切り替える。
 前夜（NYSE の直近の取引日。祝日は飛ばす）の値がまだ無い回は `regime.us_stale_wait_until`（信用の設定は 9:12）まで
 判定せずに見送り（`daytrade.skip` の `us_stale`）、過ぎたら手元の最新で判定して `daytrade.us_stale` を異常に載せる。
 取れなければ信号なしとして取引する（`daytrade.us_missing`）。

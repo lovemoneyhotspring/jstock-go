@@ -2,8 +2,8 @@
 //
 // 米国の引けは 5:00〜6:00 JST。9:00 の open はキャッシュに前夜ぶんが無いときだけ取りに行く
 // （LatestBeforeCached。寄付の判断に取得元の遅さを持ち込まない）。
-// 取得元は、寄付は Cboe（引け後すぐ出る）→ 落ちていれば FRED（SP500 / VIXCLS。前夜の値は
-// 9:10 JST ごろ）、バックテストは FRED。取れなければ nil を返し、ゲートは効かない。
+// 取得元は、寄付は Cboe → 落ちていれば Yahoo Finance → FRED（SP500 / VIXCLS。前夜の値は
+// 9:10 JST ごろで寄付の早い回には間に合わない）、バックテストは FRED。取れなければ nil を返し、ゲートは効かない。
 // バックテスト用に data/daytrade/us.json へ溜める（取得元から取り直せるので data 側）。
 package usmarket
 
@@ -73,7 +73,7 @@ func (f *FredFetcher) Closes(series string, start, end time.Time) (map[string]fl
 // firstOf は取得元を順に試す Fetcher。
 type firstOf []Fetcher
 
-// FirstOf は取得元を順に試し、最初に取れたものを返す（寄付は Cboe、落ちていれば FRED）。
+// FirstOf は取得元を順に試し、最初に取れたものを返す（寄付は Cboe → Yahoo → FRED）。
 func FirstOf(fetchers ...Fetcher) Fetcher { return firstOf(fetchers) }
 
 // Closes は最初に取れた取得元の終値。全部だめならそれぞれのエラーをまとめて返す。
