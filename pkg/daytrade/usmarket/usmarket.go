@@ -1,13 +1,15 @@
 // Package usmarket は前夜の米国市場（S&P500・VIX）。寄付前に分かる危険信号の材料。
 //
-// 米国の引けは 6:00 JST。20:30 の plan がキャッシュを温め、9:00 の open はキャッシュに前日ぶんが
-// 無いときだけ取りに行く（LatestBeforeCached。寄付の判断に FRED の遅さを持ち込まない）。
-// 取得元は FRED（SP500 / VIXCLS の日次終値）。取れなければ nil を返し、ゲートは効かない。
+// 米国の引けは 5:00〜6:00 JST。9:00 の open はキャッシュに前夜ぶんが無いときだけ取りに行く
+// （LatestBeforeCached。寄付の判断に取得元の遅さを持ち込まない）。
+// 取得元は、寄付は Cboe（引け後すぐ出る）→ 落ちていれば FRED（SP500 / VIXCLS。前夜の値は
+// 9:10 JST ごろ）、バックテストは FRED。取れなければ nil を返し、ゲートは効かない。
 // バックテスト用に data/daytrade/us.json へ溜める（取得元から取り直せるので data 側）。
 package usmarket
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,6 +68,30 @@ func (f *FredFetcher) Closes(series string, start, end time.Time) (map[string]fl
 		}
 	}
 	return out, nil
+}
+
+// firstOf は取得元を順に試す Fetcher。
+type firstOf []Fetcher
+
+// FirstOf は取得元を順に試し、最初に取れたものを返す（寄付は Cboe、落ちていれば FRED）。
+func FirstOf(fetchers ...Fetcher) Fetcher { return firstOf(fetchers) }
+
+// Closes は最初に取れた取得元の終値。全部だめならそれぞれのエラーをまとめて返す。
+func (fs firstOf) Closes(series string, start, end time.Time) (map[string]float64, error) {
+	var errs []error
+	for _, f := range fs {
+		out, err := f.Closes(series, start, end)
+		if err == nil && len(out) > 0 {
+			return out, nil
+		}
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) == 0 {
+		return nil, fmt.Errorf("どの取得元にも %s の終値がありません", series)
+	}
+	return nil, errors.Join(errs...)
 }
 
 // download は S&P500 と VIX の終値を日付でそろえる。
@@ -158,19 +184,18 @@ const (
 
 // LatestBeforeCached は LatestBefore のキャッシュ付き。寄付の判断はこちらを使う。
 //
-// 9:01 に FRED へ取りに行くと、遅い日は待ち時間 × 2 本を寄付の判断に上乗せする。そこで
+// 9:01 に取りに行くと、遅い日は待ち時間 × 2 本を寄付の判断に上乗せする。そこで
 //
-//  1. キャッシュに day−1 のセッションがあればそれを返す（それより新しいものは無い）
+//  1. キャッシュに前夜（ExpectedSession）のセッションがあればそれを返す（それより新しいものは無い）
 //  2. 無ければ取りに行き、取れたらキャッシュに足して返す
 //  3. 取れなければキャッシュの最新（day−1 以前）で代用し、エラーも返す（呼び出し側がログに）
 //
-// 前夜の plan が同じ関数で温めておくと、朝は 1 で済むか、2 でも新しい日だけ足す。
-// FRED の SP500 は翌営業日に更新されるので、朝の時点で day−1 が無いのは普通——
-// その場合は取りに行く（出ていれば拾い、出ていなければ day−2 で判断する）。
+// 返したセッションが前夜のものかは呼び出し側が IsFresh で確かめる（取得元の公開が遅れた朝は
+// 前々夜の値が返る）。
 func LatestBeforeCached(f Fetcher, cachePath string, day time.Time) (*Session, string, error) {
 	limit := day.AddDate(0, 0, -1)
 	cached, _ := readCache(cachePath)
-	if s := latestAtOrBefore(SessionsFrom(cached), limit); s != nil && s.Date.Equal(limit) {
+	if s := latestAtOrBefore(SessionsFrom(cached), limit); IsFresh(s, day) {
 		return s, SourceCache, nil
 	}
 	rows, err := download(f, day.AddDate(0, 0, -14), limit)

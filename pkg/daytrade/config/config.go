@@ -223,6 +223,10 @@ type Regime struct {
 	UsSkipHigh *decimal.Decimal `toml:"us_skip_high"`
 	// UsVixOverride は VIX がこれを超えていれば米国のゲートを無視する。
 	UsVixOverride decimal.Decimal `toml:"us_vix_override"`
+	// UsStaleWaitUntil は前夜の米国セッションがまだ取れていないとき、この時刻（JST の "HH:MM"）
+	// より前の回は判定せずに見送り、次の回を待つ。過ぎたら手元の最新で判定する。空なら待たない。
+	// 米国の信号（us_skip_high / shock_us_ret）を使う設定でだけ意味を持つ。
+	UsStaleWaitUntil string `toml:"us_stale_wait_until"`
 
 	// --- ショック日（予期せぬ急落）のサイズ変更 ---
 	//
@@ -478,6 +482,20 @@ func (e Execution) Window(name string) (startHour, startMinute, endHour, endMinu
 	return sh, sm, eh, em, nil
 }
 
+// WaitsForUs は now（JST）が regime.us_stale_wait_until より前か——前夜の米国セッションが
+// 取れていない回を見送って次の回を待つか。設定が空（読めない）なら偽。
+func (r Regime) WaitsForUs(now time.Time, jst *time.Location) bool {
+	if r.UsStaleWaitUntil == "" {
+		return false
+	}
+	h, m, err := session.ParseTime(r.UsStaleWaitUntil, "regime.us_stale_wait_until")
+	if err != nil {
+		return false
+	}
+	local := now.In(jst)
+	return local.Before(time.Date(local.Year(), local.Month(), local.Day(), h, m, 0, 0, jst))
+}
+
 // Load は設定を読む。ファイルが無い・内容が不正ならエラー。
 func Load(configDir string) (Config, error) {
 	if configDir == "" {
@@ -592,6 +610,11 @@ func (c Config) Validate() error {
 	}
 	if c.Regime.UsSkipHigh != nil && c.Regime.UsSkipHigh.LessThanOrEqual(c.Regime.UsSkipLow) {
 		return fmt.Errorf("regime.us_skip_high は us_skip_low より大きい値")
+	}
+	if c.Regime.UsStaleWaitUntil != "" {
+		if _, _, err := session.ParseTime(c.Regime.UsStaleWaitUntil, "regime.us_stale_wait_until"); err != nil {
+			return err
+		}
 	}
 	if c.Regime.DriftDays < 0 || c.Regime.EquityCurveDays < 0 {
 		return fmt.Errorf("regime.drift_days / equity_curve_days は 0 以上")
