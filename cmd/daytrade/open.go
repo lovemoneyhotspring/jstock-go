@@ -416,6 +416,11 @@ func runOpen(opts openOptions) error {
 	// 予算（capital.max_positions が上限）。倍率 0 の日（ショック日）は回す元が無い。
 	// 余りは今日のショートの総予算から、今日建てた分と今回の選定を引いたもの（再実行で数え直さない）
 	long, spill, spillNotes := sizing.WithSpill(shortPicks)
+	if corpStale != "" {
+		// 記録簿が使えずショートを見送った回は余りを回さない。回したまま後の回で記録簿が読めると、
+		// ショートは建てた金額 0 として満額で建ち、ロングに回した分と合わせて資金を超える
+		long, spill, spillNotes = sizing.Long, decimal.Zero, nil
+	}
 	n, budget := long.N, long.Budget
 	if spill.IsPositive() {
 		execute.EmitNotes(env, spillNotes)

@@ -83,8 +83,10 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 平日は open と plan の前にも当日ぶんを取り直す（TOB などの材料をショートから外すため）。
 # 適時開示は配信時刻から 2〜4 分で電文に載る（2026-09-15 の実測。15:30 の 67 件で最大 4.3 分）。
 # 8:52 は 08:30・08:45 の開示を 9:01 の open に、20:20 は 15:30〜20:15 の開示を 20:30 の plan に間に合わせる。
-# 当日ぶんだけなので --days 1 --recent 1（1 回 4 秒ほど）。ロックは news.lock で daytrade と別
-52 8 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 1 --recent 1                                    >> state/logs/news-sync.log        2>&1
+# 8:52 だけは前日ぶんも取り直す（--days 2 --recent 2）: 前夜 20:20 より後の開示は 06:20 の回でしか入らず、
+# 06:20 が失敗した朝に 8:52 が当日ぶんだけ取ると、記録簿は「新しい」のに前夜遅くの TOB を知らないまま売る。
+# ほかは当日ぶんだけなので --days 1 --recent 1（1 回 4 秒ほど）。ロックは news.lock で daytrade と別
+52 8 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 2 --recent 2                                    >> state/logs/news-sync.log        2>&1
 20 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 1 --recent 1                                    >> state/logs/news-sync.log        2>&1
 # 場中は 10 分おき（9:14〜15:14）。2 分後の daytrade guard が、材料の出た今日の売建を取消・返済する。
 # 9:14 は最後の open（9:13）の直後——8:52〜9:13 の公表で建ててしまった売建を 9:16 に拾う
