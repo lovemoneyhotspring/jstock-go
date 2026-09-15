@@ -4,6 +4,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/execution"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/history"
 )
 
@@ -33,6 +34,12 @@ var TradeSchema = []history.Column{
 	{Name: "entry", Type: history.TypeFloat64},
 	{Name: "exit", Type: history.TypeFloat64},
 	{Name: "priced", Type: history.TypeString},
+	// ref_entry / ref_exit は注文を送る直前の時価、exec_bp はそれと約定の差（建て + 手仕舞い、
+	// 不利なら負）。bar_open / bar_close との差（totals の slippage_bp）が「検証との差」で、
+	// そのうち執行そのものの滑りがこれ。残りは判断から発注までの遅れ。
+	{Name: "ref_entry", Type: history.TypeFloat64},
+	{Name: "ref_exit", Type: history.TypeFloat64},
+	{Name: "exec_bp", Type: history.TypeFloat64},
 	// bar_open / bar_close はその日の日足（検証が前提にしている値）。
 	// entry / exit との差が執行の乖離＝バックテストとの差になる。
 	{Name: "bar_open", Type: history.TypeFloat64},
@@ -124,6 +131,9 @@ func Trades(evaluations history.Frame) history.Frame {
 			"entry":       entry,
 			"exit":        exit,
 			"priced":      priced,
+			"ref_entry":   row["ref_entry"],
+			"ref_exit":    row["ref_exit"],
+			"exec_bp":     floatOrNilPtr(execSlippageOf(row)),
 			"bar_open":    row["open"],
 			"bar_close":   row["close"],
 			"gap":         row["gap"],
@@ -244,6 +254,9 @@ var TradeTotalsSchema = []history.Column{
 	// slippage_bp は執行の乖離。実際の約定単価と日足の始値・終値の差（bp）。
 	// 想定（バックテスト）が寄付・引けなので、この差がそのまま検証との乖離になる。
 	{Name: "slippage_bp", Type: history.TypeFloat64},
+	// exec_slippage_bp は執行そのものの滑り（送る直前の時価と約定の差）。
+	// slippage_bp との差が、判断から発注までの遅れで失った（得た）ぶん。
+	{Name: "exec_slippage_bp", Type: history.TypeFloat64},
 	// traded は実際に建てた件数（残りは「建てていたら」の想定）。
 	{Name: "traded", Type: history.TypeInt64},
 }
@@ -265,6 +278,7 @@ func TradeTotals(trades history.Frame) history.Frame {
 		selectionWin, selectionLos int64
 		pinned, traded             int64
 		slippage                   []float64
+		execSlippage               []float64
 	}
 	byLeg := map[string]*totals{}
 	var order []string
@@ -287,6 +301,9 @@ func TradeTotals(trades history.Frame) history.Frame {
 			t.traded++
 			if v := slippageOf(row); v != nil {
 				t.slippage = append(t.slippage, *v)
+			}
+			if v := floatPtrOf(row["exec_bp"]); v != nil {
+				t.execSlippage = append(t.execSlippage, *v)
 			}
 		}
 		netBP := floatPtrOf(row["net_bp"])
@@ -336,6 +353,7 @@ func TradeTotals(trades history.Frame) history.Frame {
 			"market_win": t.marketWin, "market_loss": t.marketLoss,
 			"selection_win": t.selectionWin, "selection_loss": t.selectionLos,
 			"pinned": t.pinned, "slippage_bp": mean(t.slippage), "traded": t.traded,
+			"exec_slippage_bp": mean(t.execSlippage),
 		})
 	}
 	return history.NewFrame(TradeTotalsSchema, rows)
@@ -371,6 +389,44 @@ func shareOfTop(winBP []float64, n int) any {
 		return nil
 	}
 	return top / total
+}
+
+// execSlippageOf は執行そのものの滑り（bp）。**送る直前の時価**と約定単価の差を、
+// 建てと手仕舞いで足す。不利なら負。
+//
+// slippageOf（日足との差）は「判断から発注までの遅れ」も含むので、どちらが効いているかは
+// 2 つを並べて初めて分かる——遅れなら発注を早める、滑りなら注文の出し方を変える。
+func execSlippageOf(row map[string]any) *float64 {
+	side := str(row["side"])
+	entry := floatPtrOf(execution.SlippageBP(side, row["ref_entry"], row["actual_entry"]))
+	exit := floatPtrOf(execution.SlippageBP(exitSide(side), row["ref_exit"], row["actual_exit"]))
+	if entry == nil && exit == nil {
+		return nil
+	}
+	total := 0.0
+	if entry != nil {
+		total += *entry
+	}
+	if exit != nil {
+		total += *exit
+	}
+	return &total
+}
+
+// exitSide は手仕舞いの向き（建てと逆）。
+func exitSide(side string) string {
+	if side == "SELL" {
+		return "BUY"
+	}
+	return "SELL"
+}
+
+// floatOrNilPtr はポインタを列の値に直す（nil なら null）。
+func floatOrNilPtr(v *float64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 // slippageOf は執行の乖離（bp）。実際の約定が日足の寄付・引けよりどれだけ不利だったか。

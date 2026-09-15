@@ -100,12 +100,17 @@ var Schema = []history.Column{
 	{Name: "intent_price", Type: history.TypeFloat64},
 	{Name: "intent_amount", Type: history.TypeFloat64},
 	{Name: "intent_fee", Type: history.TypeFloat64},
+	// 送る直前の時価。判断時の想定（intent_price）との差は判断から発注までの遅れ、
+	// 約定（fill_price）との差は執行そのものの滑り
+	{Name: "ref_price", Type: history.TypeFloat64},
 	// 実際
 	{Name: "fill_quantity", Type: history.TypeInt64},
 	{Name: "fill_price", Type: history.TypeFloat64},
 	{Name: "fill_fee", Type: history.TypeFloat64},
 	// 有利ならプラス、不利ならマイナス（SlippageBP）
 	{Name: "slippage_bp", Type: history.TypeFloat64},
+	// ref_slippage_bp は送る直前の時価と約定の差。slippage_bp から遅れのぶんを除いたもの
+	{Name: "ref_slippage_bp", Type: history.TypeFloat64},
 	{Name: "reason", Type: history.TypeString},
 	{Name: "note", Type: history.TypeString},
 }
@@ -131,6 +136,7 @@ type Spec struct {
 	IntentPrice  any
 	IntentAmount any
 	IntentFee    any
+	RefPrice     any
 	FillQuantity any
 	FillPrice    any
 	FillFee      any
@@ -171,10 +177,12 @@ func Row(spec Spec) map[string]any {
 		"intent_price":    history.ToFloat(spec.IntentPrice),
 		"intent_amount":   history.ToFloat(spec.IntentAmount),
 		"intent_fee":      history.ToFloat(spec.IntentFee),
+		"ref_price":       history.ToFloat(spec.RefPrice),
 		"fill_quantity":   history.ToInt(spec.FillQuantity),
 		"fill_price":      history.ToFloat(spec.FillPrice),
 		"fill_fee":        history.ToFloat(spec.FillFee),
 		"slippage_bp":     SlippageBP(spec.Side, spec.IntentPrice, spec.FillPrice),
+		"ref_slippage_bp": SlippageBP(spec.Side, spec.RefPrice, spec.FillPrice),
 		"reason":          string(spec.Reason),
 		"note":            nilIfEmpty(spec.Note),
 	}

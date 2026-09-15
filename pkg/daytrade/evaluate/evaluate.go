@@ -140,6 +140,10 @@ var EvaluationSchema = []history.Column{
 	// 別物で、滑りと執行の巧拙はこの差に出る。手仕舞い前なら actual_exit は null。
 	{Name: "actual_entry", Type: history.TypeFloat64},
 	{Name: "actual_exit", Type: history.TypeFloat64},
+	// ref_entry / ref_exit は**注文を送る直前**の時価。actual_* との差が執行そのものの
+	// 滑りで、日足との差（＝検証との乖離）から「判断から発注までの遅れ」を除いたもの。
+	{Name: "ref_entry", Type: history.TypeFloat64},
+	{Name: "ref_exit", Type: history.TypeFloat64},
 	{Name: "actual_pnl", Type: history.TypeFloat64},
 }
 
@@ -394,7 +398,10 @@ type actual struct {
 	// entry / exit は約定単価（建て／手仕舞い）。手仕舞い前なら exit は nil。
 	entry *float64
 	exit  *float64
-	pnl   *float64
+	// refEntry / refExit は送る直前の時価（台帳の ref_price）。執行の滑りを出す基準。
+	refEntry *float64
+	refExit  *float64
+	pnl      *float64
 }
 
 func actualsOf(orders []dtledger.Order) map[string]actual {
@@ -426,6 +433,14 @@ func actualsOf(orders []dtledger.Order) map[string]actual {
 		if entry.AvgFillPrice != nil {
 			price, _ := entry.AvgFillPrice.Float64()
 			a.entry = &price
+		}
+		if entry.RefPrice != nil {
+			price, _ := entry.RefPrice.Float64()
+			a.refEntry = &price
+		}
+		if avg, ok := dtledger.ExitAvgRef(exits[key]); ok {
+			price, _ := avg.Float64()
+			a.refExit = &price
 		}
 		if avg, _, ok := dtledger.ExitAvgPrice(exits[key]); ok {
 			price, _ := avg.Float64()
@@ -551,11 +566,14 @@ func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg confi
 			row["filled_quantity"] = a.filled
 			row["actual_entry"] = floatOrNil(a.entry)
 			row["actual_exit"] = floatOrNil(a.exit)
+			row["ref_entry"] = floatOrNil(a.refEntry)
+			row["ref_exit"] = floatOrNil(a.refExit)
 			row["actual_pnl"] = floatOrNil(a.pnl)
 		} else {
 			row["traded"] = false
 			row["filled_quantity"] = nil
 			row["actual_entry"], row["actual_exit"] = nil, nil
+			row["ref_entry"], row["ref_exit"] = nil, nil
 			row["actual_pnl"] = nil
 		}
 		rows = append(rows, row)

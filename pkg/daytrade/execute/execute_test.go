@@ -100,18 +100,47 @@ func (s *stubBroker) LotSizes(_ []string) map[string]decimal.Decimal {
 
 // recorder は Reporter の模型。通知と Error ログを覚える。
 type recorder struct {
-	alerts []string
-	errors []string
+	alerts   []string
+	errors   []string
+	warnings []string
 }
 
 func (r *recorder) Info(string, string, ...map[string]any) {}
-func (r *recorder) Warn(string, string, ...map[string]any) {}
+func (r *recorder) Warn(code, msg string, _ ...map[string]any) {
+	r.warnings = append(r.warnings, code+": "+msg)
+}
+
+// warned はその符号の警告が出たか。
+func (r *recorder) warned(code string) bool {
+	for _, w := range r.warnings {
+		if strings.HasPrefix(w, code+": ") {
+			return true
+		}
+	}
+	return false
+}
 func (r *recorder) Error(code, msg string, _ ...map[string]any) {
 	r.errors = append(r.errors, code+": "+msg)
 }
 func (r *recorder) Alert(title, body string) { r.alerts = append(r.alerts, title+" | "+body) }
 
 var day = time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC)
+
+// pricedBroker は時価を返せるブローカー（broker.PriceSource）。本番では立花だけが満たす。
+type pricedBroker struct {
+	*stubBroker
+	prices    map[string]broker.MarketPrice
+	pricesErr error
+	asked     []string // 時価を聞いた銘柄（送る直前に 1 銘柄ずつ）
+}
+
+func (p *pricedBroker) MarketPrices(symbols []string) (map[string]broker.MarketPrice, error) {
+	p.asked = append(p.asked, symbols...)
+	if p.pricesErr != nil {
+		return nil, p.pricesErr
+	}
+	return p.prices, nil
+}
 
 func newEnv(t *testing.T) (Env, *recorder) {
 	t.Helper()
@@ -292,6 +321,66 @@ func TestPlacePicksStopsAtDeadline(t *testing.T) {
 
 // TestPlaceRecordedDeadlineFromBrokerIsUnsent は、ブローカーが「締め切りで送らなかった」と
 // 返したら PENDING ではなく UNSENT にすること（送っていないので照会で判定する必要が無い）。
+// 執行の滑りは「送る直前の時価」と約定の差でしか測れない。判断に使った 9:00 の気配
+// （Price）との差には、発注までの遅れが混じる。両方を台帳に残すこと。
+func TestPlaceRecordsRefPrice(t *testing.T) {
+	env, _ := newEnv(t)
+	at := time.Date(2026, 9, 16, 0, 4, 0, 0, time.UTC)
+	b := &pricedBroker{stubBroker: &stubBroker{balance: richBalance()}, prices: map[string]broker.MarketPrice{
+		"7203": {
+			Symbol: "7203", Last: decimal.NewFromInt(1020),
+			Bid: decimal.NewFromInt(1019), Ask: decimal.NewFromInt(1021), At: at,
+		},
+	}}
+	if _, _, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)}); err != nil {
+		t.Fatal(err)
+	}
+	o := statusOf(t, env, "7203")
+	if o.RefPrice == nil || !o.RefPrice.Equal(decimal.NewFromInt(1020)) {
+		t.Errorf("執行時の時価 = %v, want 1020", o.RefPrice)
+	}
+	if o.RefBid == nil || o.RefAsk == nil {
+		t.Errorf("最良気配が残っていない: %v / %v", o.RefBid, o.RefAsk)
+	}
+	if o.Price == nil || !o.Price.Equal(decimal.NewFromInt(1000)) {
+		t.Errorf("判断時の気配 = %v, want 1000（遅れと滑りを分けるため両方残す）", o.Price)
+	}
+	if len(b.asked) != 1 || b.asked[0] != "7203" {
+		t.Errorf("送る直前に 1 銘柄ずつ聞くこと: %v", b.asked)
+	}
+}
+
+// 現在値の無い（まだ寄っていない）銘柄は最良気配の仲値で控える。
+func TestPlaceRefFallsBackToBook(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &pricedBroker{stubBroker: &stubBroker{balance: richBalance()}, prices: map[string]broker.MarketPrice{
+		"7203": {Symbol: "7203", Bid: decimal.NewFromInt(1000), Ask: decimal.NewFromInt(1010)},
+	}}
+	if _, _, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)}); err != nil {
+		t.Fatal(err)
+	}
+	if o := statusOf(t, env, "7203"); o.RefPrice == nil || !o.RefPrice.Equal(decimal.NewFromInt(1005)) {
+		t.Errorf("仲値 = %v, want 1005", o.RefPrice)
+	}
+}
+
+// 時価は記録のためだけの値。取れなくても注文は出す（測れないより買い漏れの方が高くつく）。
+func TestPlaceContinuesWhenRefPriceFails(t *testing.T) {
+	env, rep := newEnv(t)
+	b := &pricedBroker{stubBroker: &stubBroker{balance: richBalance()},
+		pricesErr: errors.New("時価問合に失敗")}
+	orders, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if err != nil || orders != 1 || len(failures) != 0 {
+		t.Fatalf("orders=%d failures=%v err=%v", orders, failures, err)
+	}
+	if o := statusOf(t, env, "7203"); o.RefPrice != nil {
+		t.Errorf("取れなかった時価が入っている: %v", o.RefPrice)
+	}
+	if !rep.warned("daytrade.ref_price") {
+		t.Error("時価を取れなかったことを警告していない")
+	}
+}
+
 func TestPlaceRecordedDeadlineFromBrokerIsUnsent(t *testing.T) {
 	env, _ := newEnv(t)
 	b := &stubBroker{balance: richBalance()}
