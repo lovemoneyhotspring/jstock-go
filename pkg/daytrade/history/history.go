@@ -209,6 +209,7 @@ func PlanFrames(p plan.Plan) (frame, meta history.Frame) {
 			"jsf_stop": c.JsfStop, "shortable": c.Shortable,
 			"eligible": c.Eligible, "short_eligible": c.ShortEligible,
 			"margin_ratio": floatOrNil(c.MarginRatio), "short_interest": floatOrNil(c.ShortInterest),
+			"corp_event": c.CorpEvent, "corp_event_headline": c.CorpEventHeadline, "corp_event_at": c.CorpEventAt,
 		})
 	}
 	prevDay, _ := time.Parse(plan.DateLayout, p.Meta.PrevDay)

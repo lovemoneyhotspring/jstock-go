@@ -2,7 +2,8 @@
 #
 #   jq -sr --arg d 2026-09-15 -f deploy/open-pipeline.jq state/logs/daytrade-prod.jsonl
 #
-# 1 回につき: 時刻と結末（見送りの理由 / 発注の件数）、気配の内訳、前夜の米国の値。
+# 1 回につき: 時刻と結末（見送りの理由 / 発注の件数）、気配の内訳、前夜の米国の値、
+# 材料（TOB・MBO など）でショートから外した銘柄と、記録簿が古くてショートを見送った理由。
 # 発注した回は、脚ごとに N・1 注文の予算と、最後に選ばれた順位までの全行
 # （選んだ銘柄の株数、外れた銘柄の理由 = selection.PickReasons）、出した注文。
 #
@@ -50,6 +51,9 @@ def reason_ja:
       + (if $fresh.usable != null then "・使えた \($fresh.usable)" else "" end)
     else empty end ),
   ( if $us then "  米国 \($us)" else empty end ),
+  ( $run[] | select(.code == "daytrade.news_stale") | "  ショートを見送り（ニュースの記録簿）: \(.extra.reason)" ),
+  ( $run[] | select(.code == "daytrade.corp_event") | .extra
+    | "  材料でショートから外した: \(.symbol) \(.name // "")（\(.kind)）\(.at) \(.headline)" ),
   ( $run[] | select(.code == "daytrade.ranking") | .extra as $r
     | ([ $r.rows[] | select(.picked) | .rank ] | max) as $last
     | if $last == null then empty else

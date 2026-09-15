@@ -27,6 +27,28 @@ func TestEligibleExcludesLoss(t *testing.T) {
 	}
 }
 
+// TOB・MBO など材料の印が付いた銘柄はショートから外す（買付価格に張り付いて返済できない）。
+// 設定を切れば外さない。
+func TestShortEligibleExcludesCorpEvents(t *testing.T) {
+	m := config.Margin{
+		Enabled: true, Segments: []string{"prime"},
+		MinTurnover:       decimal.NewFromInt(100_000_000),
+		ExcludeCorpEvents: true,
+	}
+	c := Candidate{Segment: "prime", TurnoverMed: 2e8, Shortable: true}
+	if !ShortEligible(c, m) {
+		t.Fatal("印の無い銘柄は残る")
+	}
+	c.CorpEvent = "tob_target"
+	if ShortEligible(c, m) {
+		t.Error("印の付いた銘柄は外す")
+	}
+	m.ExcludeCorpEvents = false
+	if !ShortEligible(c, m) {
+		t.Error("exclude_corp_events = false なら外さない")
+	}
+}
+
 // 空売り残高が重い銘柄はショートの母集団から外す（踏み上げの燃料）。
 // 報告の無い銘柄（nil）は通す——報告義務は 0.5% 以上なので、無い＝軽い。
 func TestShortEligibleCapsShortInterest(t *testing.T) {

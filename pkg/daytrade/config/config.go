@@ -73,6 +73,17 @@ type Margin struct {
 	ExcludeMarginAlert bool `toml:"exclude_margin_alert"`
 	// ExcludeJsfStop は日証金の申込停止（売り禁）。新規売りが出せないので必ず外す。
 	ExcludeJsfStop bool `toml:"exclude_jsf_stop"`
+	// ExcludeCorpEvents は TOB・MBO・締め出し・上場廃止など価格の行き先が決まった銘柄を外す
+	// （news.Classify で TDnet 適時開示の見出しから判定）。買付価格までサヤ寄せしてストップ高に
+	// 張り付き、返済の買いが通らない。plan でも付けるが、効かせる本番は open の時点の記録簿での付け直し。
+	// 電文は 2026-06-17 からしか無いので**バックテストでは効かない**。
+	ExcludeCorpEvents bool `toml:"exclude_corp_events"`
+	// CorpEventLookbackDays は何暦日前の開示まで見るか。TOB の最初の公表から締め出しの開示まで
+	// 49〜84 日の例がある（60 日だと 4 件が窓の外）ので既定は 120。
+	CorpEventLookbackDays int `toml:"corp_event_lookback_days"`
+	// CorpEventMaxStalenessMinutes は記録簿の最後の取り込み（成功）がこれより古ければ、その回の
+	// ショートを見送る（前夜〜朝の公表を知らないまま売らない）。取り込みは 8:52 と 20:20 と 6:20。
+	CorpEventMaxStalenessMinutes int `toml:"corp_event_max_staleness_minutes"`
 
 	// MinGap はギャップがこれ**以上**の銘柄だけ（ロングの逆）。5〜7% は +29 bp/取引で
 	// 薄く、7〜10% +79、10〜15% +112、15% 以上 +304。大きい順に取る。
@@ -402,17 +413,21 @@ func Default() Config {
 			ExcludeEarningsToday: true,
 			ExcludeMarginAlert:   false,
 			ExcludeJsfStop:       true,
-			MinGap:               decimal.RequireFromString("0.05"),
-			MaxGap:               decimal.NewFromInt(1),
-			SkipLimitUp:          true,
-			MultiplierNormal:     decimal.NewFromInt(1),
-			MultiplierLongWeak:   decimal.NewFromInt(1),
-			CarryPenalty:         decimal.NewFromInt(1),
-			LongShrink:           true,
-			MaxOrder:             decimal.Zero,
-			ExtraCostBP:          decimal.NewFromInt(5),
-			LongViaMargin:        false,
-			LongExtraCostBP:      decimal.NewFromInt(5),
+			ExcludeCorpEvents:    true,
+			// 窓と鮮度の既定は config.Margin の説明を参照
+			CorpEventLookbackDays:        120,
+			CorpEventMaxStalenessMinutes: 90,
+			MinGap:                       decimal.RequireFromString("0.05"),
+			MaxGap:                       decimal.NewFromInt(1),
+			SkipLimitUp:                  true,
+			MultiplierNormal:             decimal.NewFromInt(1),
+			MultiplierLongWeak:           decimal.NewFromInt(1),
+			CarryPenalty:                 decimal.NewFromInt(1),
+			LongShrink:                   true,
+			MaxOrder:                     decimal.Zero,
+			ExtraCostBP:                  decimal.NewFromInt(5),
+			LongViaMargin:                false,
+			LongExtraCostBP:              decimal.NewFromInt(5),
 		},
 	}
 }
@@ -651,6 +666,9 @@ func (c Config) Validate() error {
 	}
 	if c.Margin.MaxOrder.IsNegative() {
 		return fmt.Errorf("margin.max_order は 0 以上（0 は上限なし）")
+	}
+	if c.Margin.ExcludeCorpEvents && (c.Margin.CorpEventLookbackDays < 1 || c.Margin.CorpEventMaxStalenessMinutes < 1) {
+		return fmt.Errorf("margin.exclude_corp_events を使うなら corp_event_lookback_days と corp_event_max_staleness_minutes は 1 以上")
 	}
 	if err := validateGap(c.Margin.MinGap, "margin.min_gap"); err != nil {
 		return err

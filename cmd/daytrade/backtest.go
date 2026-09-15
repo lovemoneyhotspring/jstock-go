@@ -158,6 +158,10 @@ func runMarginBacktest(cfg dtconfig.Config, start, end time.Time, fetcher usmark
 		cfg.Capital.Positions(), yen(cfg.Capital.MaxCapital), shrink,
 		m.Positions(), yen(m.MaxCapital), m.MultiplierNormal.String(), m.MultiplierLongWeak.String(),
 		result.Summary.Days)
+	if m.ExcludeCorpEvents {
+		// 材料の印はニュースの記録簿（2026-06-17 から）でしか付かない。検証では常に空
+		fmt.Println("注意: margin.exclude_corp_events（TOB・MBO などを外す）は検証では効きません（電文が 2026-06-17 からしか無い）")
+	}
 
 	peak, required := dtbacktest.RequiredMargin(cfg)
 	note := fmt.Sprintf("（現金の %.0f%%）", required.Div(cash).InexactFloat64()*100)

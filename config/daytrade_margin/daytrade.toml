@@ -57,6 +57,11 @@ exclude_earnings_prev = true   # 決算翌日のギャップアップは順張�
 exclude_earnings_today = true
 exclude_margin_alert = false   # 日々公表・注意喚起・増担保は外さない（建てられる規制銘柄に効きの差は無い）
 exclude_jsf_stop = true        # 売り禁（日証金 申込停止）は新規売りが出せない
+# TOB・MBO・締め出し・上場廃止の開示が出た銘柄は外す（買付価格に張り付き返済できない。2026-09-15 の 8848）。
+# 判定は open の時点のニュースの記録簿（TDnet 適時開示の見出し）。検証では効かない
+exclude_corp_events = true
+corp_event_lookback_days = 120          # TOB の公表から締め出しの開示まで 49〜84 日の例がある
+corp_event_max_staleness_minutes = 90   # 最後の取り込み（8:52）がこれより古ければショートを見送る
 min_gap = 0.05             # ギャップ +5% 以上だけ、大きい順。5〜7% は +29 bp/取引、7〜10% +79、10% 以上 +112〜304
 max_gap = 1.0
 skip_limit_up = true       # 寄付がストップ高の銘柄は売らない

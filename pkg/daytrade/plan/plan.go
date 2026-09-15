@@ -171,6 +171,11 @@ type record struct {
 	// ShortInterest は空売り残高（発行済に対する比）。ショートの母集団の条件
 	// （margin.max_short_interest）に使うので、**必ず書き出して読み戻す**。
 	ShortInterest *float64 `parquet:"short_interest,optional"`
+	// CorpEvent は材料の印（TOB・MBO など。記録簿から付けた。無ければ空）。記録用で、
+	// open は読み戻さず朝の記録簿で付け直す。
+	CorpEvent         string `parquet:"corp_event"`
+	CorpEventHeadline string `parquet:"corp_event_headline"`
+	CorpEventAt       string `parquet:"corp_event_at"`
 }
 
 // Save は「最新」として plan-<日付> に置く（同じ日なら上書き。open はこれを読む）。
@@ -190,6 +195,7 @@ func Save(p Plan, directory string) (parquetPath, metaPath string, err error) {
 			JsfStop: c.JsfStop, Shortable: c.Shortable,
 			Eligible: c.Eligible, ShortEligible: c.ShortEligible,
 			MarginRatio: c.MarginRatio, ShortInterest: c.ShortInterest,
+			CorpEvent: c.CorpEvent, CorpEventHeadline: c.CorpEventHeadline, CorpEventAt: c.CorpEventAt,
 		})
 	}
 	// 一時ファイルに書いて rename（途中で落ちても壊れた plan を open に読ませない）

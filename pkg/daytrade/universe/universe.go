@@ -65,6 +65,12 @@ type Candidate struct {
 	// Loss は直近の本決算が赤字（当期純利益 ≤ 0）。EarnYield が nil なら偽
 	// （判定できない銘柄を赤字扱いにして落とさない）。
 	Loss bool
+	// CorpEvent は価格の行き先が決まった材料の種類（news.Kind*。TOB・MBO など外す種類だけ）。
+	// 無ければ空。CorpEventHeadline / CorpEventAt は記録用（見出しと配信の日時 "YYYY-MM-DD HHMM"）。
+	// J-Quants からは作れず、plan / open が記録簿から付ける。バックテストでは常に空。
+	CorpEvent         string
+	CorpEventHeadline string
+	CorpEventAt       string
 	// Eligible が真ならロングの対象、ShortEligible が真ならショートの対象。
 	Eligible      bool
 	ShortEligible bool
@@ -190,6 +196,7 @@ type ShortFilter struct {
 	excludeEarningsToday bool
 	excludeMarginAlert   bool
 	excludeJsfStop       bool
+	excludeCorpEvents    bool
 	// maxShortInterest は空売り残高の上限（0 なら上限なし）。
 	maxShortInterest float64
 }
@@ -208,6 +215,7 @@ func NewShortFilter(m config.Margin) ShortFilter {
 		excludeEarningsToday: m.ExcludeEarningsToday,
 		excludeMarginAlert:   m.ExcludeMarginAlert,
 		excludeJsfStop:       m.ExcludeJsfStop,
+		excludeCorpEvents:    m.ExcludeCorpEvents,
 		maxShortInterest:     maxSI,
 	}
 }
@@ -236,6 +244,9 @@ func (f ShortFilter) Match(c Candidate) bool {
 		return false
 	}
 	if f.excludeJsfStop && c.JsfStop {
+		return false
+	}
+	if f.excludeCorpEvents && c.CorpEvent != "" {
 		return false
 	}
 	// 空売り残高が重い銘柄は踏み上げの燃料を抱えている（張り付き率が 2 倍・寄→引も不利）。

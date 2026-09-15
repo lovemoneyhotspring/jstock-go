@@ -129,6 +129,30 @@ func runOpen(opts openOptions) error {
 		}
 	}
 	p = refreshIV(cfg, p)
+	// 材料（TOB・MBO など）の印をこの時点の記録簿で付け直す。前夜の plan より後の公表
+	// （20:30 以降・朝の開示）を拾うため。記録簿が読めない・古いときは、その朝の公表を知らないまま
+	// 売らないようにショートを見送る（ロングは止めない）
+	corpStale := ""
+	var corpDropped []string
+	if cfg.Margin.Enabled && cfg.Margin.ExcludeCorpEvents {
+		ev, dropped, err := markPlanCorpEvents(cfg, &p, day, now)
+		age := now.Sub(ev.lastFetched)
+		switch {
+		case err != nil:
+			corpStale = err.Error()
+		case ev.lastFetched.IsZero():
+			corpStale = "取り込みに成功した日が 1 日も無い"
+		case age > time.Duration(cfg.Margin.CorpEventMaxStalenessMinutes)*time.Minute:
+			corpStale = fmt.Sprintf("最後の取り込みが %s（%d 分前。上限 %d 分）",
+				clock.ToZone(ev.lastFetched, jst).Format("01-02 15:04"), int(age.Minutes()), cfg.Margin.CorpEventMaxStalenessMinutes)
+		}
+		corpDropped = dropped
+		if corpStale != "" {
+			fmt.Println("ニュースの記録簿を使えないため、ショートを見送ります: " + corpStale)
+			logWarn("daytrade.news_stale", "ニュースの記録簿を使えずショートを見送り", map[string]any{"reason": corpStale})
+			digest.Anomaly("daytrade.news_stale", "ショートを見送り: "+corpStale)
+		}
+	}
 	printPlan(p, cfg)
 
 	allowed, reason := appSettings.CanExecuteLive(opts.live, cfg.Execution.KillSwitch)
@@ -208,6 +232,9 @@ func runOpen(opts openOptions) error {
 	eligible := p.Eligible()
 	symbols := p.Symbols(eligible)
 	shortUniverse := p.ShortEligible()
+	if corpStale != "" {
+		shortUniverse = nil
+	}
 	if cfg.Margin.Enabled && !watchOnly {
 		// ショートの母集団はロングと別なので、気配はその和集合で取る
 		symbols = mergeSymbols(symbols, p.Symbols(shortUniverse))
@@ -263,6 +290,9 @@ func runOpen(opts openOptions) error {
 		"already_short": placed.Short,
 		"deadline":      deadlineText(deadline),
 		"broker_verify": opts.brokerVerify,
+		// 材料（TOB・MBO など）でショートの対象から外した銘柄と、記録簿が使えずショートを見送った理由
+		"corp_excluded": strings.Join(corpDropped, ","),
+		"news_stale":    corpStale,
 	}
 	finish := func(outcome string, extra map[string]any) {
 		row := map[string]any{}
