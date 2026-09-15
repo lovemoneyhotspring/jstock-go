@@ -1,6 +1,7 @@
 package execute
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
@@ -30,6 +31,7 @@ type orderBook struct {
 	before, finalFilled int64
 	finalStatus         domain.OrderStatus
 	cancelled           bool
+	cancelErr           error // 取消の応答（状態は変わる。取消の間に約定し終えた場合を作る）
 	qty                 int64
 }
 
@@ -49,7 +51,7 @@ func (ob *orderBook) broker() *stubBroker {
 			return &domain.Order{ClientOrderID: id, Status: ob.finalStatus, Quantity: decimal.NewFromInt(ob.qty),
 				FilledQuantity: decimal.NewFromInt(ob.finalFilled), AvgFillPrice: &price}, nil
 		},
-		cancel: func(string) error { ob.cancelled = true; return nil },
+		cancel: func(string) error { ob.cancelled = true; return ob.cancelErr },
 	}
 }
 
@@ -181,6 +183,58 @@ func TestGuardLeavesUnknownAndUnmarked(t *testing.T) {
 	// dry-run は台帳もブローカーも触らない
 	if actions, _ := GuardCorpEvents(env, nil, tobMarks); len(actions) != 1 || actions[0].Acted() {
 		t.Errorf("dry-run: %+v", actions)
+	}
+}
+
+// 取消がエラーで、実は全部約定していたら「取り消した」とは言わず、返済だけ出す。
+func TestGuardCancelErrorButFilled(t *testing.T) {
+	env, _ := newEnv(t)
+	recordShortToday(t, env, "8848", 1300)
+	ob := &orderBook{qty: 1300, finalFilled: 1300, finalStatus: domain.OrderStatusFilled,
+		cancelErr: errors.New("約定済みのため取消できません")}
+	b := ob.broker()
+	actions, err := GuardCorpEvents(env, b, tobMarks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 || actions[0].Cancelled || actions[0].Err != nil || !actions[0].Returned.Equal(decimal.NewFromInt(1300)) {
+		t.Fatalf("actions = %+v, want 取消なし・1300 株の返済", actions)
+	}
+}
+
+// FILLED なのに約定数量の入っていない行は注文数量が建っているとみなす（返済する・台帳外と読まない）。
+func TestGuardFilledWithoutQuantity(t *testing.T) {
+	env, _ := newEnv(t)
+	id := recordShortToday(t, env, "8848", 1300)
+	if err := env.Ledger.UpdateStatus(id, domain.OrderStatusFilled, decimal.Zero, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	recorded, _ := recordedByLeg(env, nil)
+	if got := recorded[broker.LegOf("8848", domain.TradeTypeMarginOpen, true)]; !got.Equal(decimal.NewFromInt(1300)) {
+		t.Errorf("recordedByLeg = %s, want 1300", got)
+	}
+	b := &stubBroker{balance: richBalance()}
+	actions, _ := GuardCorpEvents(env, b, tobMarks)
+	if len(actions) != 1 || !actions[0].Returned.Equal(decimal.NewFromInt(1300)) || len(b.placed) != 1 {
+		t.Errorf("actions=%+v placed=%d, want 1300 株の返済", actions, len(b.placed))
+	}
+}
+
+// 処置の残りは台帳だけで判定する。済んだら空（guard は接続しない）。
+func TestGuardPending(t *testing.T) {
+	env, _ := newEnv(t)
+	recordShortToday(t, env, "8848", 1300)
+	recordShortToday(t, env, "7203", 100)
+	pending, err := GuardPending(env, tobMarks)
+	if err != nil || len(pending) != 1 || pending[0] != "8848" {
+		t.Fatalf("処置の前: pending=%v err=%v, want [8848]", pending, err)
+	}
+	ob := &orderBook{qty: 1300, before: 300, finalFilled: 500, finalStatus: domain.OrderStatusCancelled}
+	if _, err := GuardCorpEvents(env, ob.broker(), tobMarks); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := GuardPending(env, tobMarks); len(pending) != 0 {
+		t.Errorf("処置の後: pending=%v, want なし（返済が生きている）", pending)
 	}
 }
 

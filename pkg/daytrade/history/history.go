@@ -75,6 +75,11 @@ var PlanSchema = []history.Column{
 	{Name: "margin_ratio", Type: history.TypeFloat64},
 	// short_interest は空売り残高（発行済に対する比）。margin.max_short_interest の判定に使う。
 	{Name: "short_interest", Type: history.TypeFloat64},
+	// corp_event は材料（TOB・MBO など）の種類。corp_event_headline / corp_event_at は見出しと配信の日時。
+	// 印の付いた銘柄はショートから外す（margin.exclude_corp_events）。無ければ空
+	{Name: "corp_event", Type: history.TypeString},
+	{Name: "corp_event_headline", Type: history.TypeString},
+	{Name: "corp_event_at", Type: history.TypeString},
 }
 
 // PlanMetaSchema は plan 1 回の要約。
@@ -187,6 +192,10 @@ var OpenRunSchema = []history.Column{
 	// 再実行は N − これ だけを建てる。0 なら初回
 	{Name: "already_long", Type: history.TypeInt64},
 	{Name: "already_short", Type: history.TypeInt64},
+	// corp_excluded はこの回に材料（TOB・MBO など）でショートから外した銘柄（「,」区切り。前夜の plan で
+	// 外した分は含まない）。news_stale はニュースの記録簿が使えずショートを見送った理由（見送らなければ空）
+	{Name: "corp_excluded", Type: history.TypeString},
+	{Name: "news_stale", Type: history.TypeString},
 	// deadline はこの実行の締め切り（JST、HH:MM:SS）。elapsed_ms は開始からの所要
 	{Name: "deadline", Type: history.TypeString},
 	{Name: "elapsed_ms", Type: history.TypeInt64},

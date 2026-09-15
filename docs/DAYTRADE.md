@@ -23,10 +23,11 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 |---|---|---|---|
 | 20:30（前夜） | `daytrade plan` | 翌営業日の母集団を `state/daytrade/plan-<日付>.parquet` に保存 | J-Quants アーカイブ（`jquants sync` 済みの前日足・銘柄一覧・決算・日々公表） |
 | 09:00〜09:15 | `daytrade open --live --yes` | 候補の気配を取り、ギャップ下位 N 銘柄を成行買い。台帳に記録 | plan + 気配（`execution.quote_source`） |
+| 06:20 / 8:52 / 9:14〜15:14（10 分おき）/ 20:20 | `news sync`（別コマンド。`docs/NEWS.md`） | ニュース電文（TDnet 適時開示を含む）を記録簿に取り込む。plan / open / guard が TOB などの材料の判定に読む。8:52 は前日ぶんも取り直す | 立花のニュース電文 |
 | 9:16〜15:16（10 分おき） | `daytrade guard --live --yes` | 直前の `news sync` の記録簿で、TOB など材料の出た今日の売建を処置（未約定→取消、一部約定→残りを取消して約定分を返済買い、全部約定→返済買い）。売建が無い日は接続しない | 台帳 + ニュースの記録簿 + ブローカー |
 | 15:20〜15:30 | `daytrade close --live --yes` | 台帳の当日買いをブローカーに照会し、約定数量を成行売り（15:20 はその場で約定。15:25 以降はクロージング・オークションで引け値） | 台帳 + ブローカー |
 | 15:40 | `daytrade verify` | 今日の売りが全部約定したか照会し、売れ残り（持ち越し）を通知。翌朝の `open` が自動で返済する | 台帳 + ブローカー |
-| 8:30〜9:10 / 15:00・15:19 | `daytrade snap` | 板・気配をそのまま履歴に残す（**発注しない**。[OPENING_DATA.md](OPENING_DATA.md)） | plan + 時価問合 |
+| 8:30〜9:11 / 15:00・15:19 | `daytrade snap` | 板・気配をそのまま履歴に残す（**発注しない**。[OPENING_DATA.md](OPENING_DATA.md)） | plan + 時価問合 |
 | 随時 | `daytrade status` | 候補と当日の注文 | |
 
 すべて既定は dry-run。`--live` が無ければ判断と記録だけで注文は出さない。本番口座では
@@ -91,7 +92,8 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
   読めなければ、その回の**ショートを見送る**（ログ `daytrade.news_stale`。ロングは止めず、余りの回し先の設定に従う）。
   外した銘柄はログ `daytrade.corp_event`、`open_run` の `corp_excluded`。判定の一覧は `news events`。
   **検証では効かない**（電文が 2026-06-17 からしか無い）。
-- **建てた後に分かった材料は `daytrade guard` が処置する**（`cancel_on_corp_event`、場中 10 分おき）。8:52 の取り込み〜open の間や
+- **建てた後に分かった材料は `daytrade guard` が処置する**（`cancel_on_corp_event`、場中 10 分おき、時間帯は
+  `execution.guard_window`＝09:00〜15:19。引けの手仕舞いと重ねない）。処置の残りが台帳に無ければ接続しない。8:52 の取り込み〜open の間や
   場中の公表で建ててしまった売建を、未約定なら取消、一部約定なら残りを取消して**取消の完了（最終の約定数量）を照会で確かめてから**
   約定分を成行で返済買い、全部約定なら返済買い。返済の注文 ID の種は引けの手仕舞いと同じなので、15:20 の `close` は重ねない。
   取消の完了を確かめられない・照会できない注文には何も送らず通知する（ログ `daytrade.corp_guard`）。

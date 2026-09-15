@@ -661,6 +661,10 @@ func (c Config) Validate() error {
 	if _, _, _, _, err := c.Execution.Window("exit"); err != nil {
 		return err
 	}
+	// 書き間違えると guard が毎回「時間帯の外」で黙って何もしなくなる
+	if _, _, _, _, err := c.Execution.Window("guard"); err != nil {
+		return err
+	}
 	if c.Execution.MaxRunSeconds < 0 || c.Book.MaxRunSeconds < 0 {
 		return fmt.Errorf("execution.max_run_seconds / book.max_run_seconds は 0 以上")
 	}

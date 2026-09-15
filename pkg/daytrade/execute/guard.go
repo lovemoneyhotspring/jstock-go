@@ -68,8 +68,41 @@ func IsShortEntry(o ledger.Order) bool {
 	return o.Trade == domain.TradeTypeMarginOpen && o.Side == domain.SideSell
 }
 
+// GuardPending は材料の出た今日の売建のうち、処置が残っている銘柄——まだ終わっていない注文か、
+// 約定があるのに返済が済んでいない（生きていない）もの。台帳だけで判定する。無ければ guard は
+// ブローカーに接続しない（処置の済んだ売建で 10 分ごとにログインしない）。
+func GuardPending(env Env, marks map[string]string) ([]string, error) {
+	entries, _, err := LiveEntries(env)
+	if err != nil {
+		return nil, err
+	}
+	exits, err := placedExits(env)
+	if err != nil {
+		return nil, err
+	}
+	var pending []string
+	for _, o := range entries {
+		if _, ok := marks[o.Symbol]; !ok || !IsShortEntry(o) || o.IsDead() {
+			continue
+		}
+		if o.IsOpen() || remainingToExit(exits, o, settledQuantity(o)).IsPositive() {
+			pending = append(pending, o.Symbol)
+		}
+	}
+	return pending, nil
+}
+
+// settledQuantity は終わった注文の建っている株数。状態が FILLED なのに約定数量が入っていない行は
+// 注文数量とみなす（0 と読むと、全部約定した建玉を「建っていない」と数え、返済しない・台帳外として掃除する）。
+func settledQuantity(o ledger.Order) decimal.Decimal {
+	if o.Status == string(domain.OrderStatusFilled) && !o.FilledQuantity.IsPositive() {
+		return o.Quantity
+	}
+	return o.FilledQuantity
+}
+
 func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAction {
-	filled, price := o.FilledQuantity, o.AvgFillPrice
+	filled, price := settledQuantity(o), o.AvgFillPrice
 	if o.IsOpen() {
 		if b == nil {
 			act.Result = fmt.Sprintf("dry-run: 未確定の売建 %s 株を取り消す（約定があれば返済する）", o.Quantity)
@@ -93,13 +126,13 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 			if brokerID == nil {
 				brokerID = o.BrokerOrderID
 			}
-			if err := b.Cancel(o.ClientOrderID, brokerID); err != nil {
+			cancelErr := b.Cancel(o.ClientOrderID, brokerID)
+			if cancelErr != nil {
 				// 取消の間に全部約定した・すでに取消中など。照会し直して結末で決める
 				env.Report.Warn("daytrade.corp_guard", "取消がエラー。照会し直して決める", map[string]any{
-					"day": env.dayText(), "symbol": o.Symbol, "client_order_id": o.ClientOrderID, "error": err.Error(),
+					"day": env.dayText(), "symbol": o.Symbol, "client_order_id": o.ClientOrderID, "error": cancelErr.Error(),
 				})
 			}
-			act.Cancelled = true
 			for i := 0; i < guardPolls && !current.Status.IsTerminal(); i++ {
 				if !env.boundedWait(env.RetryWait) && env.expired() {
 					break
@@ -112,16 +145,19 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 					current = next
 				}
 			}
+			// 取消が受け付けられたか、結末が取消のときだけ「取り消した」と言う（取消がエラーで
+			// 実は全部約定していたなら、通知は返済だけにする）
+			act.Cancelled = cancelErr == nil || current.Status == domain.OrderStatusCancelled
 		}
 		recordFill(env, o, current, current.FilledQuantity, current.AvgFillPrice, "材料の出た売建の取消")
-		filled, price = current.FilledQuantity, current.AvgFillPrice
+		o.Status, o.FilledQuantity, o.AvgFillPrice = string(current.Status), current.FilledQuantity, current.AvgFillPrice
+		filled, price = settledQuantity(o), current.AvgFillPrice
 		if !current.Status.IsTerminal() {
 			act.Filled = filled
 			act.Err = fmt.Errorf("取消の完了を確かめられません（%s、約定 %s 株）。次の回で照会し直します",
 				current.Status, filled)
 			return act
 		}
-		o.Status, o.FilledQuantity, o.AvgFillPrice = string(current.Status), filled, price
 	}
 	act.Filled = filled
 	if filled.LessThanOrEqual(decimal.Zero) {

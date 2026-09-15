@@ -129,7 +129,7 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 		}
 		marks[symbol] = m.Kind
 		fmt.Printf("材料の出た売建: %s（%s）%s %s\n", symbol, m.Kind, m.At, m.Headline)
-		logWarn("daytrade.corp_guard", "材料の出た売建", map[string]any{
+		logInfo("daytrade.corp_guard", "材料の出た売建", map[string]any{
 			"symbol": symbol, "kind": m.Kind, "at": m.At, "headline": m.Headline,
 		})
 	}
@@ -137,6 +137,19 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 		fmt.Printf("材料の出た売建はありません（%d 銘柄を点検）\n", len(shorts))
 		logInfo("daytrade.run", "材料の点検を終了", map[string]any{
 			"phase": "guard", "live": allowed, "shorts": len(shorts), "marked": 0,
+			"elapsed_ms": clock.NowUTC().Sub(started).Milliseconds(),
+		})
+		return nil
+	}
+	// 取消・返済の済んだ売建だけなら接続しない（10 分ごとにログインしない）
+	pending, err := execute.GuardPending(env, marks)
+	if err != nil {
+		return err
+	}
+	if len(pending) == 0 {
+		fmt.Printf("材料の出た売建 %d 銘柄は処置済み（取消・返済が済んでいるか返済が生きている）\n", len(marks))
+		logInfo("daytrade.run", "材料の点検を終了", map[string]any{
+			"phase": "guard", "live": allowed, "shorts": len(shorts), "marked": len(marks), "pending": 0,
 			"elapsed_ms": clock.NowUTC().Sub(started).Milliseconds(),
 		})
 		return nil
