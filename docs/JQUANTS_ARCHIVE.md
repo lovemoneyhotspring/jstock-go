@@ -39,7 +39,7 @@ Standard プランで取れるデータを**全部**ローカルに溜め、オ�
 | `/markets/margin-alert` | 日々公表信用残高 | 16:30 | `date=` | `PubDate, Code, AppDate` | ○ |
 | `/markets/short-ratio` | 業種別空売り比率 | 16:30 | `date=` | `Date, S33` | ○ |
 | `/markets/short-sale-report` | 空売り残高報告 | 17:30 | `disc_date=` | `DiscDate, CalcDate, Code, SSName, FundName` | ○ |
-| `/derivatives/bars/daily/options/225` | 日経 225 オプション | 16:30 | `date=` | `Date, Code` | ○ |
+| `/derivatives/bars/daily/options/225` | 日経 225 オプション | 翌 0:00（実測: 2026-09-15 ぶんは 20:00 に 0 行、翌 0:11 に行あり） | `date=` | `Date, Code` | ○ |
 | `/edinet/major-shareholders` | 大株主（EDINET） | 平日 8:00–18:00 | `date=`（提出日） | `DocId` | — |
 | `/edinet/cross-shareholdings` | 政策保有株式 | 同上 | `date=` | `DocId` | — |
 | `/edinet/large-volume-shareholders` | 大量保有報告 | 同上 | `date=` | `DocId` | — |

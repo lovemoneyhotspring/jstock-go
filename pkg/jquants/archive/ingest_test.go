@@ -156,6 +156,87 @@ func TestPlanSkipsRecentlyFetched(t *testing.T) {
 	}
 }
 
+// 毎営業日行があるはずの端点で 0 行を掴んだ日は、最短間隔（20 時間）を待たずに 1 時間で取り直す。
+// 行が取れた日は今までどおり待つ（2026-09-15、オプションの足が朝の open に間に合わなかった）。
+func TestPlanRetriesEmptyDayHourly(t *testing.T) {
+	ep := bars()
+	now := jstAt(2025, 1, 6, 19, 0)
+	for _, tc := range []struct {
+		name string
+		rows int
+		ago  time.Duration
+		want bool
+	}{
+		{"0 行・30 分前", 0, 30 * time.Minute, false},
+		{"0 行・1 時間前", 0, time.Hour, true},
+		{"行あり・2 時間前", 4000, 2 * time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ing := newTestIngestor(t, &stubClient{})
+			if err := ing.Ledger.Record(IngestRecord{
+				Endpoint: ep.Path, Target: "2025-01-06", Source: "api",
+				FetchedUTC: now.Add(-tc.ago), Rows: tc.rows, Changed: tc.rows, Digest: "d",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			jobs, err := ing.Plan(now, -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := hasJob(jobs, ep.Path, "2025-01-06"); got != tc.want {
+				t.Errorf("取り直す = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// 日経 225 オプションの足は夜遅くに乗る。当日の 20:00 には取りに行かず、repair も欠けと数えない。
+// 日付をまたいでから前日ぶんを取り、それでも 0 行なら欠け。
+func TestOptionsWaitUntilMidnight(t *testing.T) {
+	ing := newTestIngestor(t, &stubClient{})
+	ep := MustEndpoint("derivatives_bars_daily_options_225")
+	// 一度も取っていない端点は公開時刻を待たずに取るので、前の営業日を取ったことにしておく
+	if err := ing.Ledger.Record(IngestRecord{
+		Endpoint: ep.Path, Target: "2025-01-03", Source: "api", Rows: 9000, Changed: 9000,
+		FetchedUTC: jstAt(2025, 1, 4, 1, 0), Digest: "d0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := ing.Plan(jstAt(2025, 1, 6, 20, 0), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasJob(jobs, ep.Path, "2025-01-06") {
+		t.Error("公開前（当日 20:00）に当日ぶんを取ろうとしている")
+	}
+	jobs, err = ing.Plan(jstAt(2025, 1, 7, 0, 30), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasJob(jobs, ep.Path, "2025-01-06") {
+		t.Error("日付をまたいだら前日ぶんを取るはず")
+	}
+
+	cal := CalendarEndpoint()
+	f, _ := RowsToFrame([]map[string]any{{"Date": "2025-01-06", "HolDiv": "1"}}, cal)
+	if _, err := ing.Archive.Upsert(cal, f); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.Ledger.Record(IngestRecord{
+		Endpoint: ep.Path, Target: "2025-01-06", Source: "api", Rows: 0,
+		FetchedUTC: jstAt(2025, 1, 6, 20, 0), Digest: "d1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	day := time.Date(2025, 1, 6, 0, 0, 0, 0, time.UTC)
+	if gaps, err := ing.Gaps(ep, day, day, jstAt(2025, 1, 6, 20, 0)); err != nil || len(gaps) != 0 {
+		t.Errorf("当日 20:00 の repair が公開前の日を欠けと数えた: %v %v", gaps, err)
+	}
+	if gaps, err := ing.Gaps(ep, day, day, jstAt(2025, 1, 7, 1, 0)); err != nil || len(gaps) != 1 {
+		t.Errorf("公開時刻を過ぎても 0 行の日は欠けのはず: %v %v", gaps, err)
+	}
+}
+
 func TestPlanRangeEndpointUsesFromTo(t *testing.T) {
 	ing := newTestIngestor(t, &stubClient{})
 	ep := MustEndpoint("indices_bars_daily_topix") // RangeDays = 10

@@ -427,8 +427,19 @@ func (i *Ingestor) due(ep Endpoint, day, now time.Time, target string, backfilli
 	if !last.FetchedUTC.Before(final) {
 		return false, nil
 	}
-	return now.Sub(last.FetchedUTC) >= time.Duration(ep.MinIntervalHours)*time.Hour, nil
+	interval := time.Duration(ep.MinIntervalHours) * time.Hour
+	// 毎営業日行があるはずの端点で前回 0 行だった日は、公開が遅れているだけのことが多い
+	// （日経 225 オプションは 16:43・20:00 に 0 行、翌 0:11 に行があった。2026-09-15）。
+	// 最短間隔（20 時間）を待つと翌日の昼まで取りに行かず、朝の open の IV ゲートに間に合わない
+	if last.Rows == 0 && ep.RowsEveryTradingDay && ep.TradingDaysOnly {
+		interval = EmptyRetryInterval
+	}
+	return now.Sub(last.FetchedUTC) >= interval, nil
 }
+
+// EmptyRetryInterval は、毎営業日行があるはずの端点で 0 行を掴んだ日を取り直す間隔。
+// cron（30 分おき）で 1 時間に 1 回だけ叩き直す。
+const EmptyRetryInterval = time.Hour
 
 // Sync はやるべき取り込みを順に実行する。冪等。
 //

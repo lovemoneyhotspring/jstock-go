@@ -272,7 +272,9 @@ var StandardEndpoints = []Endpoint{
 	},
 	{
 		Path: "/derivatives/bars/daily/options/225", Key: []string{"Date", "Code"}, DateColumn: "Date",
-		Mode: ModeDate, DateParam: "date", AvailableAt: t1630,
+		// 公開は夜遅い（2026-09-15 ぶんは 16:43・20:00 に 0 行、翌 0:11 に行があった）。
+		// 24:00 は翌日 0:00（On が繰り上げる）。16:30 のままだと 20:00 の repair が公開前の当日を欠けと数える
+		Mode: ModeDate, DateParam: "date", AvailableAt: TimeOfDay{24, 0},
 		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, RowsEveryTradingDay: true, Bulk: true,
 	},
 	{
