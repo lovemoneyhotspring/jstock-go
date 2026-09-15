@@ -95,12 +95,20 @@ func missingConfig(channelID string, channelEnv string) string {
 // 呼ぶたびに新しいスレッドを作り、その中に本文を入れる。固定のスレッドを
 // 使い回さないので、通知ごとに読み分けられる。送っても送れなくても
 // state/notify に控えを残す（30 日）。
+//
+// 本番（WBJP_ENV=prod）以外は本文とスレッド名に口座を付ける（例: [wbjp uat]）。
+// .env は uat と prod で共用なので送り先のチャンネルも同じで、付けないと
+// 手で回した uat の通知が本番の異常と見分けられない。
 func Alert(title, body string, logger *logging.Logger) bool {
-	text := fmt.Sprintf("[wbjp] %s", title)
+	name, prefix := title, "[wbjp]"
+	if env := envLabel(); env != "prod" {
+		name, prefix = "["+env+"] "+title, "[wbjp "+env+"]"
+	}
+	text := fmt.Sprintf("%s %s", prefix, title)
 	if body != "" {
 		text = fmt.Sprintf("%s\n%s", text, body)
 	}
-	rec := Record{Kind: KindAlert, Title: title, Body: text, ChannelID: AlertChannelID()}
+	rec := Record{Kind: KindAlert, Title: name, Body: text, ChannelID: AlertChannelID()}
 
 	if reason := missingConfig(AlertChannelID(), AlertChannelEnvVar); reason != "" {
 		if logger != nil {
@@ -111,7 +119,7 @@ func Alert(title, body string, logger *logging.Logger) bool {
 		return false
 	}
 
-	threadID, err := PostThread(AlertChannelID(), title, text)
+	threadID, err := PostThread(AlertChannelID(), name, text)
 	rec.ThreadID = threadID
 	if err != nil {
 		if logger != nil {
@@ -124,4 +132,20 @@ func Alert(title, body string, logger *logging.Logger) bool {
 	rec.OK = true
 	archive(rec)
 	return true
+}
+
+// envVar は口座（uat / prod）。settings.LoadAppSettings が .env の値もプロセスに入れる。
+const envVar = "WBJP_ENV"
+
+// envLabel は Alert に付ける口座の名前。settings と同じく prod / production だけを本番とみなし、
+// 未設定は uat。
+func envLabel() string {
+	env := strings.ToLower(strings.TrimSpace(os.Getenv(envVar)))
+	switch env {
+	case "prod", "production":
+		return "prod"
+	case "":
+		return "uat"
+	}
+	return env
 }

@@ -111,9 +111,34 @@ func (f *fakeDiscord) start(t *testing.T) *fakeDiscord {
 	t.Setenv(AlertChannelEnvVar, "alert-ch")
 	t.Setenv(ReportChannelEnvVar, "report-ch")
 	t.Setenv(MentionEnvVar, "")
+	// 既定は本番の見え方（口座の印なし）。uat の印は TestAlertMarksNonProdEnv で見る
+	t.Setenv(envVar, "prod")
 	// 控えは試験ごとの一時ディレクトリへ（本物の state/notify を汚さない）
 	t.Setenv(archiveDirEnvVar, t.TempDir())
 	return f
+}
+
+// 本番以外の Alert は本文とスレッド名に口座が付く（.env を共用していて送り先が同じため）。
+// WBJP_ENV が無ければ uat（settings と同じ既定）。
+func TestAlertMarksNonProdEnv(t *testing.T) {
+	for _, tc := range []struct{ env, want string }{{"", "uat"}, {"UAT", "uat"}, {"production", ""}} {
+		f := (&fakeDiscord{}).start(t)
+		t.Setenv(envVar, tc.env)
+		if !Alert("障害", "詳細", nil) {
+			t.Fatalf("WBJP_ENV=%q: Alert が失敗", tc.env)
+		}
+		wantName, wantBody := "障害", "[wbjp] 障害"
+		if tc.want != "" {
+			wantName, wantBody = "["+tc.want+"] 障害", "[wbjp "+tc.want+"] 障害"
+		}
+		thread := f.threads[len(f.threads)-1]
+		if thread.Name != wantName {
+			t.Errorf("WBJP_ENV=%q: スレッド名 = %q, want %q", tc.env, thread.Name, wantName)
+		}
+		if body := f.contents(thread.ID); len(body) != 1 || !strings.HasPrefix(body[0], wantBody) {
+			t.Errorf("WBJP_ENV=%q: 本文 = %v, want 先頭 %q", tc.env, body, wantBody)
+		}
+	}
 }
 
 // contents は宛先ごとの本文。
