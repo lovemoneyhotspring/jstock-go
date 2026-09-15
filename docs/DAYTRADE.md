@@ -370,7 +370,7 @@ toml でよい。
 | `plan` | 母集団の 1 銘柄（`eligible` / `short_eligible` と除外理由の列ごと。`margin_ratio` は記録だけ） | `plan` のたび |
 | `plan_meta` | `plan` 1 回の要約（件数・IV・ドリフト） | `plan` のたび |
 | `quotes` | 9:00 に受け取った気配 1 銘柄。`usable`（鮮度の検査を通った）・`opened`（もう寄っていた）・`gap` 付き | `open` が気配を取ったとき |
-| `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount`。`over_budget` は 1 単元が 1 注文の予算を超えて飛ばされた銘柄（順位が上でも picked にならない）。`skipped` は危険信号で見送った日の順位表で、picked は「建てていたら」（N と予算は通常日の値） | `open` が順位を付けたとき（見送りの日も） |
+| `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount`。`over_budget` は 1 単元が 1 注文の予算を超えて飛ばされた銘柄（順位が上でも picked にならない）。`skipped` は危険信号で見送った日の順位表で、picked は「建てていたら」（N と予算は通常日の値）。`reason` は選ばれた／外れた理由（`picked` / `over_budget` / `sector_cap` 業種の上限 / `value_pool` 益回りで N に入らず / `too_small` 按分が 1 単元未満 / `beyond_n` N の外。2026-09-15 から） | `open` が順位を付けたとき（見送りの日も） |
 | `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数 | `open` が判断まで進んだとき |
 | `open_run` の `broker_verify` | 実機検証の実行（`--broker-verify`）だったか | `open` のたび |
 | `book` | 板・気配 1 銘柄 × 1 観測時刻（`slot` = JST の HHMM）。時価問合の応答をそのまま（値は文字列） | `snap` のたび（1 日 10 回。[OPENING_DATA.md](OPENING_DATA.md)） |

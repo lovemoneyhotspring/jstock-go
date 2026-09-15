@@ -129,7 +129,7 @@ trap 'rm -f "$body"' EXIT
     problems=$((problems + 1))
   fi
 
-  # --- 気配の鮮度（本番でしか出ない数字）-----------------------------------------
+  # --- open の判断の経過と気配の鮮度（本番でしか出ない数字）-----------------------------------------
   #
   # tDPP:T は「現在値時刻」＝最後に約定した時刻で、板の時刻ではない。約定の薄い銘柄は
   # 板が生きていても数分前の約定時刻を返すので stale に落ちる（2026-09-11 の朝で 2 割）。
@@ -140,23 +140,13 @@ trap 'rm -f "$body"' EXIT
   # 鮮度の検査を素通りする（FutureStamped は数えるだけで除外しない）。
   JSONL="$HOME_DIR/state/logs/daytrade-prod.jsonl"
   if [ -f "$JSONL" ]; then
-    # 「気配を取得」（受信数）と「使えない気配を除外」（内訳）は別の行なので、
-    # 直前の取得の受信数を覚えておいて内訳の行に添える。足し算はしない——
-    # future は Fresh と無関係に受信ぜんぶを走査するので stale/delayed と重なる。
-    freshness=$(jq -sr --arg d "$TODAY" '
-      # 9:01〜9:13 JST は同じ UTC 日付の 00:01〜00:13。朝の回だけを拾う
-      [ .[] | select(.code == "daytrade.quotes" and (.ts_utc | startswith($d))) ]
-      | reduce .[] as $e ({recv: null, req: null, out: []};
-          if $e.extra.received != null then
-            .recv = $e.extra.received | .req = $e.extra.requested
-          elif $e.extra.future != null then
-            .out += [ "\(($e.ts_utc[11:13] | tonumber + 9)):\($e.ts_utc[14:16]) JST  受信 \(.recv // "?")/\(.req // "?")  使えない stale \($e.extra.stale) / delayed \($e.extra.delayed) / 未来 \($e.extra.future)" ]
-          else . end)
-      | .out[]
-    ' "$JSONL" 2>/dev/null | tail -6)
+    # 回（run_id）ごとに、気配の内訳（受信・除外・板で残す・未来・使えた）、前夜の米国の値、
+    # 結末と理由、発注した回は選んだ銘柄とその上で外れた銘柄の理由。読み方は deploy/open-pipeline.jq。
+    # 9:01〜9:13 JST は同じ UTC 日付の 00:01〜00:13 なので、UTC の日付で朝の回を拾える
+    freshness=$(jq -sr --arg d "$TODAY" -f "$HOME_DIR/deploy/open-pipeline.jq" "$JSONL" 2>&1)
     if [ -n "$freshness" ]; then
       echo
-      echo "気配の鮮度（$OPEN_LABEL）:"
+      echo "$OPEN_LABEL の判断の経過（除外 = 鮮度で落とした / 板で残す = 除外していない）:"
       echo '```'
       echo "$freshness"
       echo '```'

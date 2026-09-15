@@ -328,30 +328,7 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 	if side == "" {
 		side = domain.SideBuy
 	}
-	// 1 単元が予算に収まる銘柄だけを順位順に残す（届かない銘柄は次点が繰り上がる）。
-	// 同じ業種の上限（MaxPerSector）を超えた銘柄もここで落とし、次点を繰り上げる
-	// ——業種が取れない銘柄（Sector が空）は数に入れない。
-	var affordable []Ranked
-	limit := opts.N
-	if opts.ValuePool > 1 {
-		limit = opts.N * opts.ValuePool
-	}
-	perSector := make(map[string]int, limit)
-	for _, r := range ranked {
-		if len(affordable) >= limit {
-			break
-		}
-		if SharesFor(opts.Budget, r.Price, lotOf(opts.LotSizes, r.Symbol)).LessThanOrEqual(decimal.Zero) {
-			continue
-		}
-		if opts.MaxPerSector > 0 && r.Sector != "" {
-			if perSector[r.Sector] >= opts.MaxPerSector {
-				continue
-			}
-			perSector[r.Sector]++
-		}
-		affordable = append(affordable, r)
-	}
+	affordable := candidatePool(ranked, opts, nil)
 	chosen := ByEarnYield(affordable, opts.N, opts.ValuePool)
 	total := opts.Budget.Mul(decimal.NewFromInt(int64(opts.N)))
 	weights := Weights(chosen, opts.Weighting)
@@ -382,6 +359,95 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 		})
 	}
 	return picks
+}
+
+// 選定で選ばれた／外れた理由（PickReasons）。順位表の記録に残し、「順位が上なのに
+// 選ばれなかった」を後から追えるようにする。
+const (
+	ReasonPicked = "picked"
+	// ReasonOverBudget は 1 単元が 1 注文の予算を超える（次点が繰り上がる）。
+	ReasonOverBudget = "over_budget"
+	// ReasonSectorCap は同じ業種から MaxPerSector 銘柄を既に取っていた。
+	ReasonSectorCap = "sector_cap"
+	// ReasonValuePool は 2 段階選定の母数（N × ValuePool）には入ったが、益回りで N に入らなかった。
+	ReasonValuePool = "value_pool"
+	// ReasonTooSmall は選んだが、按分した金額（inverse_vol 等）が 1 単元に届かず株数 0 になった。
+	ReasonTooSmall = "too_small"
+	// ReasonBeyondN は母数が埋まった後の順位（順位で届かなかった）。
+	ReasonBeyondN = "beyond_n"
+)
+
+// candidatePool は順位順に「1 単元が予算に収まり、業種の上限に掛からない」銘柄を
+// N（2 段階選定なら N × ValuePool）個取る。届かない銘柄・上限を超えた銘柄は次点が繰り上がる
+// ——業種が取れない銘柄（Sector が空）は数に入れない。
+//
+// reasons を渡すと外した銘柄の理由を書き込み、母数が埋まった後も最後まで走査する
+// （PickReasons 用）。nil なら埋まった時点で打ち切る（PickFrom は検証で何万回も呼ばれる）。
+func candidatePool(ranked []Ranked, opts PickOptions, reasons map[string]string) []Ranked {
+	limit := opts.N
+	if opts.ValuePool > 1 {
+		limit = opts.N * opts.ValuePool
+	}
+	var pool []Ranked
+	perSector := make(map[string]int, limit)
+	for _, r := range ranked {
+		if len(pool) >= limit {
+			if reasons == nil {
+				break
+			}
+			reasons[r.Symbol] = ReasonBeyondN
+			continue
+		}
+		if SharesFor(opts.Budget, r.Price, lotOf(opts.LotSizes, r.Symbol)).LessThanOrEqual(decimal.Zero) {
+			if reasons != nil {
+				reasons[r.Symbol] = ReasonOverBudget
+			}
+			continue
+		}
+		if opts.MaxPerSector > 0 && r.Sector != "" {
+			if perSector[r.Sector] >= opts.MaxPerSector {
+				if reasons != nil {
+					reasons[r.Symbol] = ReasonSectorCap
+				}
+				continue
+			}
+			perSector[r.Sector]++
+		}
+		pool = append(pool, r)
+	}
+	return pool
+}
+
+// PickReasons は順位表の各銘柄が選ばれた／外れた理由（Reason*）。picks は同じ opts で
+// PickFrom が返したもの。判定は PickFrom と同じ candidatePool・ByEarnYield を通す。
+func PickReasons(ranked []Ranked, opts PickOptions, picks []Pick) map[string]string {
+	reasons := make(map[string]string, len(ranked))
+	if opts.N < 1 {
+		for _, r := range ranked {
+			reasons[r.Symbol] = ReasonBeyondN
+		}
+		return reasons
+	}
+	pool := candidatePool(ranked, opts, reasons)
+	picked := make(map[string]bool, len(picks))
+	for _, p := range picks {
+		picked[p.Symbol] = true
+	}
+	chosen := make(map[string]bool, opts.N)
+	for _, r := range ByEarnYield(pool, opts.N, opts.ValuePool) {
+		chosen[r.Symbol] = true
+	}
+	for _, r := range pool {
+		switch {
+		case picked[r.Symbol]:
+			reasons[r.Symbol] = ReasonPicked
+		case chosen[r.Symbol]:
+			reasons[r.Symbol] = ReasonTooSmall
+		default:
+			reasons[r.Symbol] = ReasonValuePool
+		}
+	}
+	return reasons
 }
 
 // OverBudget は 1 単元（既定の単元株数）が 1 注文の予算を超えるか。PickFrom はこの銘柄を

@@ -226,16 +226,23 @@ func runOpen(opts openOptions) error {
 	// 「今日の 15:30」＝未来として鮮度の検査を素通りする。実機で確かめるまで、除外した
 	// 銘柄の時刻と年齢、未来の時刻を持つ銘柄の数を残す（docs/OPENING_DATA.md「実機で確かめること」）
 	future := dtquotes.FutureStamped(received, now, futureSlack)
-	if len(stale) > 0 || len(delayed) > 0 || len(future) > 0 || len(bookKept) > 0 {
-		logWarn("daytrade.quotes", "使えない気配を除外", map[string]any{
-			"stale": len(stale), "stale_sample": dtquotes.DescribeAges(received, sample(stale), now),
-			"delayed": len(delayed), "delayed_sample": sample(delayed),
-			"future": len(future), "future_sample": dtquotes.DescribeAges(received, sample(future), now),
-			// book_kept は現在値時刻が古くても板が返っていたので残した銘柄
-			// （tDPP:T は最後の約定時刻なので、約定の薄い銘柄はここに入る）
-			"book_kept": len(bookKept), "book_kept_sample": dtquotes.DescribeAges(received, sample(bookKept), now),
-			"max_age_sec": cfg.Execution.MaxQuoteAge,
-		})
+	// 気配の内訳は毎回残す（朝の点検 deploy/open-pipeline.jq が回ごとに並べる）。警告にするのは
+	// 実際に除外した（stale / delayed）ときと未来の時刻があったときだけ——板で残しただけの回まで
+	// 「使えない気配を除外」と書くと、除外 0 件でも警告に見える（2026-09-15 の朝がそうだった）
+	breakdown := map[string]any{
+		"received": len(received), "usable": len(quotes),
+		"stale": len(stale), "stale_sample": dtquotes.DescribeAges(received, sample(stale), now),
+		"delayed": len(delayed), "delayed_sample": sample(delayed),
+		"future": len(future), "future_sample": dtquotes.DescribeAges(received, sample(future), now),
+		// book_kept は現在値時刻が古くても板が返っていたので残した銘柄
+		// （tDPP:T は最後の約定時刻なので、約定の薄い銘柄はここに入る）
+		"book_kept": len(bookKept), "book_kept_sample": dtquotes.DescribeAges(received, sample(bookKept), now),
+		"max_age_sec": cfg.Execution.MaxQuoteAge,
+	}
+	if len(stale) > 0 || len(delayed) > 0 || len(future) > 0 {
+		logWarn("daytrade.quotes", "使えない気配を除外", breakdown)
+	} else {
+		logInfo("daytrade.quotes", "気配の内訳（除外なし）", breakdown)
 	}
 
 	prevAll := p.PrevCloseBySymbol()
@@ -360,16 +367,19 @@ func runOpen(opts openOptions) error {
 	var (
 		shortRanking []selection.Ranked
 		shortPicks   []selection.Pick
+		shortReasons map[string]string
 		shortN       int
 		shortBudget  decimal.Decimal
 	)
 	if sizing.ShortOpen {
 		shortN, shortBudget = sizing.Short.N, sizing.Short.Budget
 		shortRanking = selection.RankShort(shortUniverse, rankQuotes, cfg.Margin)
-		shortPicks = selection.PickFrom(shortRanking, selection.PickOptions{
+		shortOpts := selection.PickOptions{
 			N: shortN, Budget: shortBudget, Weighting: sizing.Short.Weighting, Side: domain.SideSell,
 			MaxAmount: cfg.Margin.MaxOrder,
-		})
+		}
+		shortPicks = selection.PickFrom(shortRanking, shortOpts)
+		shortReasons = selection.PickReasons(shortRanking, shortOpts, shortPicks)
 	}
 
 	// ショートの余り（候補が無い・上限で頭打ち）をロングに回す。銘柄数は総予算 ÷ 1 注文の
@@ -400,16 +410,18 @@ func runOpen(opts openOptions) error {
 				noSector, len(ranking), cfg.Signal.MaxPerSector)
 		}
 	}
-	picks := selection.PickFrom(ranking, selection.PickOptions{
+	longOpts := selection.PickOptions{
 		N: n, Budget: budget, Weighting: weighting, Side: domain.SideBuy,
 		MaxAmount: cfg.Capital.MaxOrder, ValuePool: cfg.Signal.ValuePool,
 		MaxPerSector: cfg.Signal.MaxPerSector,
-	})
+	}
+	picks := selection.PickFrom(ranking, longOpts)
+	longReasons := selection.PickReasons(ranking, longOpts, picks)
 	longPicks := len(picks)
-	frames := []history.Frame{dthistory.RankingFrame(ranking, picks, "BUY", n, budget)}
+	frames := []history.Frame{dthistory.RankingFrame(ranking, picks, "BUY", n, budget, longReasons)}
 	summary["n"], summary["budget"], summary["weighting"], summary["weak"] = n, budget, weighting, weak
 	printPicks(picks, len(rankQuotes), p, watchOnly, "")
-	logRanking(day, "BUY", ranking, picks, n, budget, verdict.Scale, weighting, len(rankQuotes))
+	logRanking(day, "BUY", ranking, picks, longReasons, n, budget, verdict.Scale, weighting, len(rankQuotes))
 
 	if shortMultiplier.GreaterThan(decimal.Zero) {
 		label := "通常日"
@@ -419,11 +431,11 @@ func runOpen(opts openOptions) error {
 		fmt.Printf("ショート: %sの倍率 %s × 1 注文 %s 円 = %s 円  対象 %d 銘柄\n",
 			label, shortMultiplier.String(), yen(cfg.Margin.BudgetPerOrder()), yen(shortBudget), len(shortUniverse))
 		printPicks(shortPicks, len(rankQuotes), p, false, "寄付の売建（信用）")
-		frames = append(frames, dthistory.RankingFrame(shortRanking, shortPicks, "SELL", shortN, shortBudget))
+		frames = append(frames, dthistory.RankingFrame(shortRanking, shortPicks, "SELL", shortN, shortBudget, shortReasons))
 		summary["short_n"] = shortN
 		summary["short_budget"] = shortBudget
 		summary["short_multiplier"] = shortMultiplier
-		logRanking(day, "SELL", shortRanking, shortPicks, shortN, shortBudget, verdict.Scale, cfg.Margin.Weighting, len(rankQuotes))
+		logRanking(day, "SELL", shortRanking, shortPicks, shortReasons, shortN, shortBudget, verdict.Scale, cfg.Margin.Weighting, len(rankQuotes))
 		picks = append(picks, shortPicks...)
 	} else if cfg.Margin.Enabled && !watchOnly && remainingShort <= 0 && placed.Short > 0 {
 		fmt.Printf("ショート: 発注済み（%d 件）\n", placed.Short)
@@ -539,7 +551,7 @@ func appendSkippedRanking(cfg dtconfig.Config, p dtplan.Plan, quotes map[string]
 	var frames []history.Frame
 	for _, leg := range dtevaluate.NominalLegs(p, quotes, cfg) {
 		frames = append(frames, dthistory.MarkSkipped(
-			dthistory.RankingFrame(leg.Ranking, leg.Picks, leg.Side, leg.N, leg.Budget)))
+			dthistory.RankingFrame(leg.Ranking, leg.Picks, leg.Side, leg.N, leg.Budget, leg.Reasons)))
 	}
 	if path := appendHistory(dthistory.KindRanking, concatFrames(frames), day); path != "" {
 		fmt.Printf("見送りの日の順位表（建てていたら）を履歴に追記 %s\n", path)
@@ -592,17 +604,25 @@ func concatFrames(frames []history.Frame) history.Frame {
 	return out
 }
 
-func logRanking(day time.Time, side string, ranking []selection.Ranked, picks []selection.Pick, n int, budget decimal.Decimal, scale float64, weighting string, quotes int) {
+// logRanking は順位表の上位をログに残す。行は N + rankingExtra 件か、最後に選ばれた順位までの
+// 深い方——上位が予算超え・業種の上限で飛ばされると、選ばれた銘柄が N + 5 位より下に来る
+// （2026-09-15 の 9:13 は 11 位と 13 位を建てた）。reason は selection.PickReasons。
+func logRanking(day time.Time, side string, ranking []selection.Ranked, picks []selection.Pick, reasons map[string]string, n int, budget decimal.Decimal, scale float64, weighting string, quotes int) {
 	picked := map[string]selection.Pick{}
 	for _, p := range picks {
 		picked[p.Symbol] = p
 	}
 	limit := min(len(ranking), n+rankingExtra)
+	for i, r := range ranking {
+		if _, ok := picked[r.Symbol]; ok && i+1 > limit {
+			limit = i + 1
+		}
+	}
 	rows := make([]map[string]any, 0, limit)
 	for _, r := range ranking[:limit] {
 		row := map[string]any{
-			"rank": r.Rank, "symbol": r.Symbol, "gap": r.Gap.String(), "price": r.Price.String(),
-			"picked": false,
+			"rank": r.Rank, "symbol": r.Symbol, "name": r.Name, "gap": r.Gap.String(), "price": r.Price.String(),
+			"picked": false, "reason": reasons[r.Symbol],
 		}
 		if r.Vol != nil {
 			row["vol"] = *r.Vol

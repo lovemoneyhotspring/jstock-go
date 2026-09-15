@@ -136,6 +136,10 @@ var RankingSchema = []history.Column{
 	// skipped は危険信号で見送った日の順位表。picked は「建てていたら選んだ」銘柄で、発注はしていない。
 	// N と予算は通常日の値（縮小・ショックの倍率を掛けない。evaluate.NominalLegs）。
 	{Name: "skipped", Type: history.TypeBool},
+	// reason は選ばれた／外れた理由（selection.PickReasons）: picked / over_budget（1 単元が予算超え）/
+	// sector_cap（業種の上限）/ value_pool（2 段階選定で益回りが足りない）/ too_small（按分が 1 単元未満）/
+	// beyond_n（N が埋まった後の順位）。2026-09-15 より前の順位表には無い。
+	{Name: "reason", Type: history.TypeString},
 }
 
 // OpenRunSchema は open 1 回の要約。
@@ -312,8 +316,9 @@ func bookText(value any) any {
 	return text
 }
 
-// RankingFrame は順位表の全行に、選ばれた銘柄の株数・金額を付ける。
-func RankingFrame(ranking []selection.Ranked, picks []selection.Pick, side string, n int, budget decimal.Decimal) history.Frame {
+// RankingFrame は順位表の全行に、選ばれた銘柄の株数・金額と、選ばれた／外れた理由
+// （selection.PickReasons。nil なら理由の列は null）を付ける。
+func RankingFrame(ranking []selection.Ranked, picks []selection.Pick, side string, n int, budget decimal.Decimal, reasons map[string]string) history.Frame {
 	picked := make(map[string]selection.Pick, len(picks))
 	for _, p := range picks {
 		picked[p.Symbol] = p
@@ -331,6 +336,10 @@ func RankingFrame(ranking []selection.Ranked, picks []selection.Pick, side strin
 			"quantity": nil, "amount": nil,
 			"n": int64(n), "budget": budgetF,
 			"over_budget": selection.OverBudget(budget, r.Price), "skipped": false,
+			"reason": nil,
+		}
+		if reason, ok := reasons[r.Symbol]; ok {
+			row["reason"] = reason
 		}
 		if p, ok := picked[r.Symbol]; ok {
 			quantity, _ := p.Quantity.Float64()

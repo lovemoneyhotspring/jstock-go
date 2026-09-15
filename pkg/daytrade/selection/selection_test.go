@@ -222,6 +222,47 @@ func TestPickFromLimitsPerSector(t *testing.T) {
 	}
 }
 
+// 理由は PickFrom と同じ判定から出る。予算超え・業種の上限・N が埋まった後が、選ばれた銘柄と食い違わない。
+func TestPickReasonsMatchesPickFrom(t *testing.T) {
+	cfg := config.Default().Signal
+	sector := func(c universe.Candidate, s string) universe.Candidate { c.Sector = s; return c }
+	candidates := []universe.Candidate{
+		sector(candidate("1000", 10000, nil), "3650"), // 1 単元 90 万円は予算 50 万円を超える
+		sector(candidate("2000", 1000, nil), "3650"),
+		sector(candidate("3000", 1000, nil), "3650"), // 業種の上限（2000 と同じ業種）
+		sector(candidate("4000", 1000, nil), "3600"),
+		sector(candidate("5000", 1000, nil), "3300"), // N = 2 が埋まった後
+	}
+	quotes := map[string]Quote{
+		"1000": quote("1000", 9000), "2000": quote("2000", 910), "3000": quote("3000", 920),
+		"4000": quote("4000", 930), "5000": quote("5000", 940),
+	}
+	ranked := Rank(candidates, quotes, cfg)
+	opts := PickOptions{
+		N: 2, Budget: decimal.NewFromInt(500_000), Weighting: "equal", Side: domain.SideBuy,
+		MaxPerSector: 1,
+	}
+	picks := PickFrom(ranked, opts)
+	got := PickReasons(ranked, opts, picks)
+	want := map[string]string{
+		"1000": ReasonOverBudget, "2000": ReasonPicked, "3000": ReasonSectorCap,
+		"4000": ReasonPicked, "5000": ReasonBeyondN,
+	}
+	for symbol, reason := range want {
+		if got[symbol] != reason {
+			t.Errorf("%s: 理由 = %q, want %q（全体 %v）", symbol, got[symbol], reason, got)
+		}
+	}
+	if len(picks) != 2 {
+		t.Fatalf("選定 %d 件, want 2", len(picks))
+	}
+	for _, p := range picks {
+		if got[p.Symbol] != ReasonPicked {
+			t.Errorf("選ばれた %s の理由が picked でない: %q", p.Symbol, got[p.Symbol])
+		}
+	}
+}
+
 func TestPickFromSkipsUnaffordable(t *testing.T) {
 	cfg := config.Default().Signal
 	// 1 単元 100 万円の銘柄は予算 10 万円では買えない → 次点が繰り上がる
