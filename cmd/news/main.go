@@ -29,6 +29,7 @@ func main() {
 	rootCmd.AddCommand(newSyncCmd())
 	rootCmd.AddCommand(newStatusCmd())
 	rootCmd.AddCommand(newListCmd())
+	rootCmd.AddCommand(newEventsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
