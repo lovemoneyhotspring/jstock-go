@@ -8,7 +8,6 @@ package ledger
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
@@ -66,8 +65,12 @@ func (o Order) IsOpen() bool {
 }
 
 // IsDead は未約定のまま終わったか（同じ判断を送り直してよい）。
+//
+// 一部約定の後に取消・失効した注文は**死んでいない**——約定した株数の建玉（返済なら返済済みの株数）が
+// 残る。状態だけで死んだと読むと、建てた売建を「建てていない」と数え、open が枠を埋め直し、
+// 引けの判定が台帳外の建玉として二重に返済する（材料での取消 daytrade guard で起きる）。
 func (o Order) IsDead() bool {
-	if o.IsDryRun() {
+	if o.IsDryRun() || o.FilledQuantity.IsPositive() {
 		return false
 	}
 	_, dead := deadStatuses[o.Status]
@@ -206,23 +209,19 @@ func (l *Ledger) ClearDryRun(day time.Time) (int, error) {
 // 台帳を読めなければ error。「読めない」を「未発注」と読むと、既に送った注文を
 // もう一度送る（二重発注）。呼び出し側は error で止めること。
 func (l *Ledger) WasPlaced(clientOrderID string) (bool, error) {
-	var status string
-	err := l.db.QueryRow("SELECT status FROM orders WHERE client_order_id = ?", clientOrderID).Scan(&status)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	o, ok, err := l.Get(clientOrderID)
 	if err != nil {
 		return false, fmt.Errorf("台帳の読み出しに失敗しました（発注済みか判定できません）: %w", err)
 	}
-	if status == DryRunStatus {
+	if !ok || o.IsDryRun() {
 		return false, nil
 	}
-	_, dead := deadStatuses[status]
-	return !dead, nil
+	return !o.IsDead(), nil
 }
 
 // DeadCount はその日・その銘柄・その売買で、拒否・取消・失効に終わった注文の数
-// （再送の ID の種に使う）。
+// （再送の ID の種に使う）。一部約定して終わった注文も数える——ID は使い終わっているので、
+// 残りを送り直すときに同じ ID を作らない。
 func (l *Ledger) DeadCount(day time.Time, symbol string, side domain.Side) int {
 	orders, err := l.OrdersOn(day, &side)
 	if err != nil {
@@ -230,7 +229,7 @@ func (l *Ledger) DeadCount(day time.Time, symbol string, side domain.Side) int {
 	}
 	n := 0
 	for _, o := range orders {
-		if o.Symbol == symbol && o.IsDead() {
+		if _, dead := deadStatuses[o.Status]; o.Symbol == symbol && dead {
 			n++
 		}
 	}

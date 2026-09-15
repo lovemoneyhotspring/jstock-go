@@ -642,19 +642,49 @@ func LiveEntries(env Env) (entries []ledger.Order, dryRun int, err error) {
 	return entries, dryRun, nil
 }
 
-// placedExits は生きている／約定した手仕舞い（銘柄|脚 → 注文）。拒否・失効は数えない。
-func placedExits(env Env) (map[string]ledger.Order, error) {
+// exitState は同じ銘柄・脚の今日の手仕舞い。
+type exitState struct {
+	// done は生きている（未確定の）か全部約定した手仕舞いがある——重ねて出さない。
+	// FILLED は台帳に約定数量が入っていないことがあるので、数量ではなく状態で見る。
+	done bool
+	// filled は一部だけ約定して終わった（取消・失効）手仕舞いの約定数量の合計。
+	filled decimal.Decimal
+}
+
+// placedExits は今日の手仕舞い（銘柄|脚 → 状態）。約定 0 で終わった拒否・失効は数えない。
+func placedExits(env Env) (map[string]exitState, error) {
 	all, err := env.Ledger.ExitsOn(env.Day)
 	if err != nil {
 		return nil, err
 	}
-	exits := map[string]ledger.Order{}
+	exits := map[string]exitState{}
 	for _, o := range all {
-		if !o.IsDryRun() && !o.IsDead() {
-			exits[o.Symbol+"|"+o.Leg()] = o
+		if o.IsDryRun() || o.IsDead() {
+			continue
 		}
+		key := o.Symbol + "|" + o.Leg()
+		s := exits[key]
+		if o.IsOpen() || o.Status == string(domain.OrderStatusFilled) {
+			s.done = true
+		} else {
+			s.filled = s.filled.Add(o.FilledQuantity)
+		}
+		exits[key] = s
 	}
 	return exits, nil
+}
+
+// remainingToExit は建玉の約定数量 filled のうち、まだ手仕舞っていない株数。
+// 手仕舞いが生きている・全部約定しているなら 0。
+func remainingToExit(exits map[string]exitState, order ledger.Order, filled decimal.Decimal) decimal.Decimal {
+	s, ok := exits[order.Symbol+"|"+order.Leg()]
+	if !ok {
+		return filled
+	}
+	if s.done {
+		return decimal.Zero
+	}
+	return decimal.Max(filled.Sub(s.filled), decimal.Zero)
 }
 
 // RefreshEntries は建玉の約定数量をブローカーに聞き、手仕舞う対象を組む。
@@ -725,11 +755,16 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 			env.printf("  %s: 約定なし（%s）。手仕舞う数量がありません\n", order.Symbol, order.Status)
 			continue
 		}
-		if _, done := exits[order.Symbol+"|"+order.Leg()]; done {
+		remaining := remainingToExit(exits, order, filled)
+		if remaining.LessThanOrEqual(decimal.Zero) {
 			env.printf("  %s: 手仕舞い発注済み（冪等）\n", order.Symbol)
 			continue
 		}
-		targets = append(targets, ExitTarget{Entry: order, Quantity: filled, FillPrice: fillPrice})
+		if !remaining.Equal(filled) {
+			env.printf("  %s: 手仕舞いのうち %s 株は約定して終わっている。残り %s 株を手仕舞う\n",
+				order.Symbol, filled.Sub(remaining), remaining)
+		}
+		targets = append(targets, ExitTarget{Entry: order, Quantity: remaining, FillPrice: fillPrice})
 	}
 	return targets, unconfirmed, nil
 }

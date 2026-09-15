@@ -84,6 +84,10 @@ type Margin struct {
 	// CorpEventMaxStalenessMinutes は記録簿の最後の取り込み（成功）がこれより古ければ、その回の
 	// ショートを見送る（前夜〜朝の公表を知らないまま売らない）。取り込みは 8:52 と 20:20 と 6:20。
 	CorpEventMaxStalenessMinutes int `toml:"corp_event_max_staleness_minutes"`
+	// CancelOnCorpEvent は場中（daytrade guard）に材料の出た今日の売建を処置する: 未約定なら取消、
+	// 一部約定なら残りを取消して約定分を返済買い、全部約定なら返済買い。open が外すのは判定の時点で
+	// 分かっていた材料だけで、取り込みの後や場中の公表で建ててしまった売建を救うため。
+	CancelOnCorpEvent bool `toml:"cancel_on_corp_event"`
 
 	// MinGap はギャップがこれ**以上**の銘柄だけ（ロングの逆）。5〜7% は +29 bp/取引で
 	// 薄く、7〜10% +79、10〜15% +112、15% 以上 +304。大きい順に取る。
@@ -269,7 +273,10 @@ type Execution struct {
 	// ExitWindow は手仕舞いの成行売りを出してよい時間帯（JST）。15:25 以降の注文は
 	// クロージング・オークションに回り引け値で約定する。
 	ExitWindow []string `toml:"exit_window"`
-	KillSwitch bool     `toml:"kill_switch"`
+	// GuardWindow は材料の出た売建を取消・返済してよい時間帯（daytrade guard）。引けの手仕舞い
+	// （15:20〜）と重ねない。
+	GuardWindow []string `toml:"guard_window"`
+	KillSwitch  bool     `toml:"kill_switch"`
 	// MaxQuoteAge は気配のタイムスタンプがこれより古ければ使わない（秒）。
 	MaxQuoteAge int `toml:"max_quote_age"`
 	// MaxRunSeconds は open / close の 1 回の実行に許す時間（秒）。開始からこれだけ経つか
@@ -397,6 +404,7 @@ func Default() Config {
 			QuoteSource:    "tachibana",
 			EntryWindow:    []string{"09:00", "09:15"},
 			ExitWindow:     []string{"15:20", "15:30"},
+			GuardWindow:    []string{"09:00", "15:19"},
 			MaxQuoteAge:    90,
 			MaxRunSeconds:  150,
 		},
@@ -417,6 +425,7 @@ func Default() Config {
 			// 窓と鮮度の既定は config.Margin の説明を参照
 			CorpEventLookbackDays:        120,
 			CorpEventMaxStalenessMinutes: 90,
+			CancelOnCorpEvent:            true,
 			MinGap:                       decimal.RequireFromString("0.05"),
 			MaxGap:                       decimal.NewFromInt(1),
 			SkipLimitUp:                  true,
@@ -474,11 +483,14 @@ func (m Margin) BudgetPerOrder() decimal.Decimal {
 	return m.MaxCapital.Div(decimal.NewFromInt(int64(n))).Floor()
 }
 
-// Window は entry / exit の時間帯（JST の時・分）。
+// Window は entry / guard / exit の時間帯（JST の時・分）。それ以外の名前は exit。
 func (e Execution) Window(name string) (startHour, startMinute, endHour, endMinute int, err error) {
 	raw := e.ExitWindow
-	if name == "entry" {
+	switch name {
+	case "entry":
 		raw = e.EntryWindow
+	case "guard":
+		raw = e.GuardWindow
 	}
 	if len(raw) != 2 {
 		return 0, 0, 0, 0, fmt.Errorf("%s_window は開始と終了の 2 要素", name)

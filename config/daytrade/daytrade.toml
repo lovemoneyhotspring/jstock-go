@@ -136,6 +136,7 @@ tax_account_type = "SPECIFIC"
 quote_source = "tachibana"   # tachibana / csv。立花証券の時価問合（寄付後は始値、無ければ現在値）
 entry_window = ["09:00", "09:15"]
 exit_window = ["15:20", "15:30"]  # 15:20 の成行はその場で約定（引け値ではない）。15:25 以降ならクロージング・オークションで引け値
+guard_window = ["09:00", "15:19"] # daytrade guard（材料の出た売建の取消・返済）。引けの手仕舞いと重ねない
 kill_switch = false
 max_quote_age = 90
 # 1 回の open / close に許す秒数。開始からこれだけ経つか時間帯の終わりが来たら、その先の電文は
