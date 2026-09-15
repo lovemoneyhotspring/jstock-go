@@ -128,6 +128,37 @@ func TestLatestBeforeCachedSkipsFetchWhenCacheHasYesterday(t *testing.T) {
 	}
 }
 
+// TestLatestBeforeCachedHitsCacheAfterHoliday は、祝日明けは前夜＝最後の取引日としてキャッシュを使うこと。
+func TestLatestBeforeCachedHitsCacheAfterHoliday(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "us.json")
+	source := newStub()
+	source.closes["SP500"]["2026-09-04"] = 5100
+	if _, _, err := LatestBeforeCached(source, cache, day("2026-09-05")); err != nil {
+		t.Fatal(err)
+	}
+	calls := source.calls
+	// 9/8（火）の前夜は労働者の日（9/7）を飛ばして 9/4（金）
+	s, src, err := LatestBeforeCached(source, cache, day("2026-09-08"))
+	if err != nil || src != SourceCache || !IsFresh(s, day("2026-09-08")) {
+		t.Fatalf("祝日明け: %+v %s %v", s, src, err)
+	}
+	if source.calls != calls {
+		t.Errorf("前夜の値がキャッシュにあるのに取りに行った: %d → %d", calls, source.calls)
+	}
+}
+
+// TestFirstOfFallsBack は、先の取得元が落ちていれば次を使い、全部だめならエラーにすること。
+func TestFirstOfFallsBack(t *testing.T) {
+	broken := &stub{closes: map[string]map[string]float64{}}
+	got, err := FirstOf(broken, newStub()).Closes("SP500", day("2026-09-01"), day("2026-09-03"))
+	if err != nil || got["2026-09-03"] != 5075 {
+		t.Errorf("次の取得元に回らない: %v %v", got, err)
+	}
+	if _, err := FirstOf(broken, broken).Closes("SP500", day("2026-09-01"), day("2026-09-03")); err == nil {
+		t.Error("全部落ちているのにエラーにならない")
+	}
+}
+
 // TestLatestBeforeCachedFallsBackToCache は、取りに行って失敗したらキャッシュの最新で代用し、
 // エラーも返すこと（ログには残す。判断は止めない）。
 func TestLatestBeforeCachedFallsBackToCache(t *testing.T) {

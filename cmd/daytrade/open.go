@@ -16,6 +16,7 @@ import (
 	dtquotes "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/quotes"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/regime"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/usmarket"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
@@ -286,7 +287,7 @@ func runOpen(opts openOptions) error {
 			gaps = append(gaps, price/prev-1)
 		}
 	}
-	verdict, err := evaluateRegime(cfg, p, day, regime.MarketGapOf(gaps), led)
+	verdict, usStale, err := evaluateRegime(cfg, p, day, regime.MarketGapOf(gaps), led)
 	if err != nil {
 		return err
 	}
@@ -295,6 +296,22 @@ func runOpen(opts openOptions) error {
 	summary["scale"] = verdict.Scale
 	for k, v := range verdict.Notes {
 		summary[k] = v
+	}
+	// 前夜の米国市場がまだ取れていない回は、待つ時刻（regime.us_stale_wait_until）までは判定せず
+	// 次の回に任せる。前々夜の値で見送り・取引を決めない（見送りの順位表も積まない）
+	if usStale {
+		want := usmarket.ExpectedSession(day).Format(DateLayout)
+		if cfg.Regime.WaitsForUs(clock.NowUTC(), jst) {
+			fmt.Printf("前夜（%s）の米国市場がまだ取れていません。%s までは判定せず次の回を待ちます\n",
+				want, cfg.Regime.UsStaleWaitUntil)
+			logInfo("daytrade.skip", "前夜の米国市場を待って見送り",
+				map[string]any{"reason": "us_stale", "want": want, "until": cfg.Regime.UsStaleWaitUntil})
+			digest.Skipped("us_stale")
+			finish("us_stale", map[string]any{"trade": false, "reasons": "前夜 " + want + " の米国市場を待つ"})
+			return nil
+		}
+		logWarn("daytrade.us_stale", "前夜の米国市場が取れないまま判定", map[string]any{"want": want})
+		digest.Anomaly("daytrade.us_stale", "前夜 "+want+" の米国市場が取れないまま判定")
 	}
 	if !verdict.Trade {
 		fmt.Println("危険信号により今日は取引しません: " + strings.Join(verdict.Reasons, "、"))
@@ -469,8 +486,9 @@ func runOpen(opts openOptions) error {
 	return nil
 }
 
-// evaluateRegime は危険信号を評価し、ログに残す。
-func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap *float64, led *dtledger.Ledger) (regime.Verdict, error) {
+// evaluateRegime は危険信号を評価し、ログに残す。usStale は米国の信号を使う設定で、前夜の
+// セッション（usmarket.ExpectedSession）がまだ取れていないか（取得元の公開遅れ・障害）。
+func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap *float64, led *dtledger.Ledger) (regime.Verdict, bool, error) {
 	signals := regime.Signals{
 		Day:       day,
 		IVPrev:    p.Meta.IVPrev,
@@ -480,10 +498,11 @@ func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap
 	if cfg.Regime.EquityCurveDays > 0 {
 		recent, err := recentPnL(cfg, day, led)
 		if err != nil {
-			return regime.Verdict{}, err
+			return regime.Verdict{}, false, err
 		}
 		signals.RecentPnL = recent
 	}
+	usStale := false
 	if usmarketNeeded(cfg) {
 		// 前夜の plan が温めたキャッシュを先に見る。取りに行くときも 1 本 8 秒まで——
 		// 寄付の判断に FRED の遅さを持ち込まない（取れなければゲートは効かせない）
@@ -501,14 +520,17 @@ func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap
 				signals.Vix = &session.Vix
 			}
 		}
+		// FRED だけだった頃は、火〜金の 9:01〜9:10 が前々夜の値で判定していた（前夜の値が出るのは
+		// 9:10 JST ごろ。2026-09-15 は 9/11 の値で 4 回見送り、9:13 に 9/14 の値で取引した）
+		usStale = !usmarket.IsFresh(session, day)
 	}
 	verdict := regime.Evaluate(cfg.Regime, signals)
-	fields := map[string]any{"day": day.Format(DateLayout), "trade": verdict.Trade, "reasons": verdict.Reasons}
+	fields := map[string]any{"day": day.Format(DateLayout), "trade": verdict.Trade, "reasons": verdict.Reasons, "us_stale": usStale}
 	for k, v := range verdict.Notes {
 		fields[k] = v
 	}
 	logInfo("daytrade.regime", "危険信号", fields)
-	return verdict, nil
+	return verdict, usStale, nil
 }
 
 // appendSkippedRanking は危険信号で見送った日の順位表を、通常日の件数と予算で作って積む

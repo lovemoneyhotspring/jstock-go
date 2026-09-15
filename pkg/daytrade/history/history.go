@@ -142,7 +142,7 @@ var RankingSchema = []history.Column{
 var OpenRunSchema = []history.Column{
 	// mode は live / dry_run / watch（資金 0）。
 	{Name: "mode", Type: history.TypeString},
-	// outcome は picked / regime / no_quotes / no_picks / no_capital。
+	// outcome は picked / regime / us_stale（前夜の米国市場を待って見送り）/ no_quotes / no_picks / no_capital。
 	{Name: "outcome", Type: history.TypeString},
 	{Name: "quotes_requested", Type: history.TypeInt64},
 	{Name: "quotes_received", Type: history.TypeInt64},

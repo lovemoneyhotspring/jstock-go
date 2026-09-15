@@ -33,12 +33,12 @@ func recentPnL(cfg dtconfig.Config, day time.Time, led *dtledger.Ledger) (*float
 }
 
 // usmarketLatest は前夜の米国セッション（S&P500・VIX）。キャッシュ（data/daytrade/us.json）を
-// 先に見て、無い日だけ FRED へ取りに行く。source は cache / fetched / cache_fallback。
+// 先に見て、無い日だけ Cboe（落ちていれば FRED）へ取りに行く。source は cache / fetched / cache_fallback。
 //
-// timeout は FRED 1 リクエストの待ち時間。寄付の判断（open）は短く、前夜の温め直し（plan）は長く。
+// timeout は 1 リクエストの待ち時間。寄付の判断（open）は短く、前夜の温め直し（plan）は長く。
 func usmarketLatest(day time.Time, timeout time.Duration) (*usmarket.Session, string, error) {
-	return usmarket.LatestBeforeCached(usmarket.NewFredFetcherWithTimeout(timeout),
-		usmarket.DefaultCachePath(appSettings.DataDir), day)
+	fetcher := usmarket.FirstOf(usmarket.NewCboeFetcher(timeout), usmarket.NewFredFetcherWithTimeout(timeout))
+	return usmarket.LatestBeforeCached(fetcher, usmarket.DefaultCachePath(appSettings.DataDir), day)
 }
 
 // usmarketNeeded は米国の信号を使う設定か（休むゲートかショック日の判定のどちらか）。
