@@ -352,3 +352,62 @@ func TestEvaluateAddsMiddayWhenMinuteBarsExist(t *testing.T) {
 		t.Errorf("分足の無い銘柄の midday = %v, want null", v)
 	}
 }
+
+// rankingRunFrame は順位表の回を 2 つ持つ最小の表（recorded_at と picked だけ見る）。
+func rankingRunFrame(rows []map[string]any) history.Frame {
+	return history.NewFrame([]history.Column{
+		{Name: "recorded_at", Type: history.TypeTimestamp},
+		{Name: "symbol", Type: history.TypeString},
+		{Name: "picked", Type: history.TypeBool},
+	}, rows)
+}
+
+// TestPickRankingRunPrefersRunWithPicks は、建て終わった後の回（picked 0）ではなく
+// picks のある最初の回を評価に使うこと。最後の回を採ると選定が丸ごと抜ける（2026-09-16）。
+func TestPickRankingRunPrefersRunWithPicks(t *testing.T) {
+	first := time.Date(2026, 9, 16, 0, 1, 6, 0, time.UTC)
+	later := time.Date(2026, 9, 16, 0, 13, 3, 0, time.UTC)
+	frame := rankingRunFrame([]map[string]any{
+		{"recorded_at": first, "symbol": "8136", "picked": true},
+		{"recorded_at": first, "symbol": "3445", "picked": false},
+		// 建て終わった後の回。建玉は候補から外れるので picks が 1 件も無い
+		{"recorded_at": later, "symbol": "3445", "picked": false},
+	})
+	got, info := evaluate.PickRankingRun(frame)
+	if info.Runs != 2 || info.Picked != 1 || info.Fallback {
+		t.Fatalf("回の選び方: %+v", info)
+	}
+	if !info.At.Equal(first) {
+		t.Errorf("採った回 = %v, want %v", info.At, first)
+	}
+	if got.Height() != 2 || got.Rows[0]["symbol"] != "8136" {
+		t.Errorf("picks のある最初の回を採っていない: %+v", got.Rows)
+	}
+}
+
+// TestPickRankingRunFallsBackWhenNoPicks は、建てなかった日（picks のある回が無い）は
+// 最後の回で代用し、その印を付けること。
+func TestPickRankingRunFallsBackWhenNoPicks(t *testing.T) {
+	first := time.Date(2026, 9, 16, 0, 1, 6, 0, time.UTC)
+	later := time.Date(2026, 9, 16, 0, 13, 3, 0, time.UTC)
+	frame := rankingRunFrame([]map[string]any{
+		{"recorded_at": first, "symbol": "8136", "picked": false},
+		{"recorded_at": later, "symbol": "3445", "picked": false},
+	})
+	got, info := evaluate.PickRankingRun(frame)
+	if !info.Fallback || info.Runs != 2 || info.Picked != 0 {
+		t.Fatalf("見送り日の代用が効いていない: %+v", info)
+	}
+	if !info.At.Equal(later) || got.Height() != 1 || got.Rows[0]["symbol"] != "3445" {
+		t.Errorf("最後の回を採っていない: %+v %+v", info, got.Rows)
+	}
+}
+
+// TestPickRankingRunWithoutTimestamps は recorded_at が無い表をそのまま返すこと。
+func TestPickRankingRunWithoutTimestamps(t *testing.T) {
+	frame := rankingRunFrame([]map[string]any{{"symbol": "8136", "picked": true}})
+	got, info := evaluate.PickRankingRun(frame)
+	if info.Runs != 0 || got.Height() != 1 {
+		t.Errorf("素通ししていない: %+v %+v", info, got.Rows)
+	}
+}

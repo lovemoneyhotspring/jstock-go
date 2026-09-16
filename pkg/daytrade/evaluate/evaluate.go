@@ -372,6 +372,66 @@ func rowsOf(ranking []selection.Ranked, picks []selection.Pick, side string, n i
 }
 
 // RowsFromFrame は history の ranking を RankingRow に読み直す。
+// RankingRun は「評価にどの回の順位表を使ったか」。ログに残して後から追えるようにする。
+type RankingRun struct {
+	// Runs はその日に記録された回の数。
+	Runs int
+	// Picked は採った回の picked 件数。
+	Picked int
+	// At は採った回の recorded_at。
+	At time.Time
+	// Fallback は picks のある回が無く、最後の回で代用したか（本当の見送り日）。
+	Fallback bool
+}
+
+// PickRankingRun はその日の順位表（open の回数ぶんある）から、評価に使う 1 回を選ぶ。
+//
+// **最後の回を採ってはいけない。** open は 9:01〜9:13 に何度も走り、建て終わった後の回は
+// 建玉を候補から外す（同じ銘柄を重ねて建てないため）。その回は picked が 0 件になるので、
+// 最後の回をそのまま評価すると、その日の選定が丸ごと履歴から抜ける——2026-09-16 に
+// 実際に起きた（9:01 は 226 行・picked 4、9:04 以降は 222 行・picked 0）。
+//
+// そこで **picks のある最初の回**を選ぶ。建玉を決めたのはその回で、以降は冪等の空振りだから。
+// picks のある回が 1 つも無い日（危険信号での見送りなど）は最後の回で代用する（Fallback）。
+func PickRankingRun(frame history.Frame) (history.Frame, RankingRun) {
+	picks := map[time.Time]int{}
+	var order []time.Time
+	for _, row := range frame.Rows {
+		at, ok := row["recorded_at"].(time.Time)
+		if !ok {
+			continue
+		}
+		if _, seen := picks[at]; !seen {
+			picks[at] = 0
+			order = append(order, at)
+		}
+		if boolOf(row["picked"]) {
+			picks[at]++
+		}
+	}
+	if len(order) == 0 {
+		return frame, RankingRun{}
+	}
+	var chosen, last time.Time
+	for _, at := range order {
+		if last.IsZero() || at.After(last) {
+			last = at
+		}
+		if picks[at] > 0 && (chosen.IsZero() || at.Before(chosen)) {
+			chosen = at
+		}
+	}
+	info := RankingRun{Runs: len(order)}
+	if chosen.IsZero() {
+		chosen, info.Fallback = last, true
+	}
+	info.At, info.Picked = chosen, picks[chosen]
+	return frame.Filter(func(row map[string]any) bool {
+		at, ok := row["recorded_at"].(time.Time)
+		return ok && at.Equal(chosen)
+	}), info
+}
+
 func RowsFromFrame(frame history.Frame) (rows []RankingRow, runID string) {
 	for _, raw := range frame.Rows {
 		if runID == "" {

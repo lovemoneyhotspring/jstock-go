@@ -63,9 +63,23 @@ func runEvaluate(date string, asJSON bool) error {
 	}
 
 	store := historyStore()
-	frame, err := store.Latest(dthistory.KindRanking, day)
+	// その日の順位表は open の回数ぶんある（9:01〜9:13）。建て終わった後の回は建玉を候補から
+	// 外すので picked が 0 になり、最後の回（Latest）をそのまま採ると選定が丸ごと評価から
+	// 抜ける（2026-09-16 に発生）。どの回を使うかは PickRankingRun が決める。
+	all, err := store.Read(dthistory.KindRanking, history.Range{Start: day, End: day})
 	if err != nil {
 		return err
+	}
+	frame, chosenRun := dtevaluate.PickRankingRun(all)
+	if chosenRun.Runs > 0 {
+		fields := map[string]any{
+			"day": day.Format(DateLayout), "runs": chosenRun.Runs,
+			"picked": chosenRun.Picked, "fallback": chosenRun.Fallback,
+		}
+		if !chosenRun.At.IsZero() {
+			fields["chosen"] = chosenRun.At.Format(time.RFC3339)
+		}
+		logInfo("daytrade.ranking_run", "評価に使う順位表の回", fields)
 	}
 	source := dtevaluate.SourceQuotes
 	rows, runIDOfRanking := dtevaluate.RowsFromFrame(frame)
