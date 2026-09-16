@@ -46,6 +46,10 @@ const (
 	clmCorrectOrder    = "CLMKabuCorrectOrder"
 	clmMarketPrice     = "CLMMfdsGetMarketPrice"
 	clmStockMaster     = "CLMStkGetIssueMstKabu"
+	// clmMarginSuii は可能額の推移（6 営業日ぶん）。委託保証金の内訳を取れる唯一の電文。
+	// CLMZanKaiSummary の sOhzs* は**建玉ゼロだと空で返る**ので日計りでは使えない
+	// （2026-09-16 に実機で確認）。こちらはザラ場中でも 6 日ぶん全部返る。
+	clmMarginSuii = "CLMZanKaiKanougakuSuii"
 
 	// 応答の配列のキー。電文ごとに違うので 1 箇所に集める。
 	balanceSummaryKey  = "sGenbutuKabuKaituke" // ※ 残高は配列ではなく直下の項目
@@ -53,6 +57,7 @@ const (
 	marginPositionsKey = "aShinyouTategyokuList"
 	stockMasterKey     = "aCLMStkIssueMstKabu"
 	marketPriceKey     = "aCLMMfdsMarketPrice"
+	marginSuiiKey      = "aKanougakuSuiiList"
 	newsKey            = "aCLMMfdsNews"
 
 	// orderNotFoundCode は「その注文は無い」を表す結果コード。

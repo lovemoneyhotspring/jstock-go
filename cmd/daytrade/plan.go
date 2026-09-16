@@ -42,6 +42,7 @@ func newPlanCmd() *cobra.Command {
 			}
 			printPlan(p, cfg)
 			warmUsmarket(cfg, day)
+			warmMargin(cfg, day)
 			return nil
 		},
 	}

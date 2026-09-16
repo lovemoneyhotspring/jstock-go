@@ -91,6 +91,10 @@ func runOpen(opts openOptions) error {
 	if err != nil {
 		return err
 	}
+	// 保証金で建玉の上限を安全側へ寄せる（下げ方向のみ）。前夜に plan が焼いたキャッシュを
+	// 読むだけなので、ここでブローカーには繋がない。取れない朝は設定の値のまま建てる。
+	// **watchOnly の判定より前**でなければ、下げた結果が今日の判断に効かない
+	cfg = applyMarginCap(cfg, day)
 	watchOnly := cfg.Capital.Positions() == 0
 	// 締め切り: 時間帯の終わり（live のとき）と開始 + max_run_seconds の早い方。
 	// 過ぎたら新しい電文は送らず、送信中は打ち切る。遅い日に 1 回がロックを握り続けて

@@ -260,6 +260,28 @@ func (b Balance) BuyingPowerFor(trade TradeType) decimal.Decimal {
 	return b.BuyingPower
 }
 
+// MarginSummary は委託保証金の内訳（受渡日 1 日ぶん）。
+//
+// 受入保証金 = 現金保証金 + 代用有価証券評価額（掛目適用後）。掛目は証券会社が掛けた後の
+// 値が返るので、現金と代用の按分を自分で持つ必要はない（2026-09-16 に実機で一致を確認）。
+type MarginSummary struct {
+	// Date は受渡ベースの日付（YYYYMMDD）。
+	Date string
+	// UkeireHosyoukin は受入保証金。建玉の上限を導く起点。
+	UkeireHosyoukin decimal.Decimal
+	// GenkinHosyoukin は現金保証金。
+	GenkinHosyoukin decimal.Decimal
+	// DaiyouHyoukagaku は代用有価証券の評価額（掛目適用後）。
+	DaiyouHyoukagaku decimal.Decimal
+	// SinyouSinkidate は信用新規建可能額。
+	SinyouSinkidate decimal.Decimal
+	// SonotaKousokukin はその他拘束金。**正体が分かっていない**（docs/BROKER_VERIFY.md）。
+	// 建玉の枠をそのまま削るので必ず記録する。
+	SonotaKousokukin decimal.Decimal
+	// Fusokugaku は不足額（追証）。0 でなければ建ててはいけない。
+	Fusokugaku decimal.Decimal
+}
+
 // MakeClientOrderID は決定論的に注文ID（32文字ハッシュ）を生成する。
 // Python 版と完全一致する規則: hashlib.sha256(f"{seed_key}|{symbol}|{side.value}|{quantity}".encode()).hexdigest()[:32]
 func MakeClientOrderID(seedKey, symbol string, side Side, quantity decimal.Decimal) string {

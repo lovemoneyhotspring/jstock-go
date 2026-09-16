@@ -32,6 +32,15 @@ type PriceSource interface {
 	MarketPrices(symbols []string) (map[string]MarketPrice, error)
 }
 
+// MarginSource は委託保証金の内訳を返せるブローカー（立花証券）。
+//
+// Broker 本体には入れない——PriceSource と同じ理由で、模型のブローカーや試験用の
+// 差し替えに保証金は要らない。取れない朝は設定の値で建てるので、発注は続けられる。
+type MarginSource interface {
+	// MarginSummaries は受渡日ごとの保証金の内訳（立花は 6 営業日ぶん返す）。
+	MarginSummaries() ([]domain.MarginSummary, error)
+}
+
 // StopCorrector は置いた逆指値の条件を後から変えられるブローカー。
 // トレーリングは「逆指値を置いて、定期的にここで条件を引き上げる」形で作る。
 // 発火済みの逆指値は訂正できない（立花証券のリファレンス）。
