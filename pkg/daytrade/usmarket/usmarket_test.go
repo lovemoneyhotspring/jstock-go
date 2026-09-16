@@ -212,6 +212,36 @@ func TestLatestBeforeCachedRefetchesWhenVixMissing(t *testing.T) {
 	}
 }
 
+// TestLatestBeforeCachedStopsAfterVixOnlyRetry は、VIX がどこからも取れない朝に取得を
+// 2 周させないこと。VIX だけ取り直して失敗した後にフルの download へ落ちると、同じ VIXCLS を
+// もう一度取りに行って 3 段のフォールバックが 2 周し、寄付の直列路に倍の待ちが乗る
+// （2026-09-16 のレビュー）。
+func TestLatestBeforeCachedStopsAfterVixOnlyRetry(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "us.json")
+	// 1 回目: S&P500 だけ取れて VIX が無い。キャッシュには前夜の S&P500 が残る
+	noVix := newStub()
+	delete(noVix.closes, "VIXCLS")
+	if _, _, err := LatestBeforeCached(noVix, cache, day("2026-09-04")); err != nil {
+		t.Fatal(err)
+	}
+	// 2 回目: 前夜の S&P500 はキャッシュにある。取りに行くのは VIXCLS の 1 回だけ
+	again := newStub()
+	delete(again.closes, "VIXCLS")
+	s, src, err := LatestBeforeCached(again, cache, day("2026-09-04"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.calls != 1 {
+		t.Errorf("取得を %d 回走らせた（VIX だけの 1 回で済むはず）", again.calls)
+	}
+	if src != SourceCacheNoVix {
+		t.Errorf("取得元 = %s, want %s", src, SourceCacheNoVix)
+	}
+	if s == nil || !IsFresh(s, day("2026-09-04")) || s.Vix != 0 {
+		t.Fatalf("前夜の S&P500 を VIX 無しで返していない: %+v", s)
+	}
+}
+
 // TestMergeClosesKeepsVix は、S&P500 だけ取れた回の 0 で、前に取れていた VIX を消さないこと。
 func TestMergeClosesKeepsVix(t *testing.T) {
 	old := []closes{{Date: "2026-09-03", Spx: 5075, Vix: 16}}
