@@ -131,10 +131,12 @@ type pricedBroker struct {
 	*stubBroker
 	prices    map[string]broker.MarketPrice
 	pricesErr error
-	asked     []string // 時価を聞いた銘柄（送る直前に 1 銘柄ずつ）
+	asked     []string // 時価を聞いた銘柄
+	calls     int      // 時価問合の回数（まとめ取りが効いていれば発注ループごとに 1 回）
 }
 
 func (p *pricedBroker) MarketPrices(symbols []string) (map[string]broker.MarketPrice, error) {
+	p.calls++
 	p.asked = append(p.asked, symbols...)
 	if p.pricesErr != nil {
 		return nil, p.pricesErr
@@ -346,7 +348,7 @@ func TestPlaceRecordsRefPrice(t *testing.T) {
 		t.Errorf("判断時の気配 = %v, want 1000（遅れと滑りを分けるため両方残す）", o.Price)
 	}
 	if len(b.asked) != 1 || b.asked[0] != "7203" {
-		t.Errorf("送る直前に 1 銘柄ずつ聞くこと: %v", b.asked)
+		t.Errorf("送る直前の時価を聞くこと: %v", b.asked)
 	}
 }
 
@@ -551,6 +553,45 @@ func TestRefreshEntriesAndPlaceExits(t *testing.T) {
 	targets, _, _ = RefreshEntries(env, b, entries)
 	if len(targets) != 0 {
 		t.Errorf("手仕舞いが二重に対象になった: %+v", targets)
+	}
+}
+
+// TestPlaceExitsPrefetchesRefPrices は、引けの手仕舞いも時価を**まとめて 1 回で**取ること。
+// 1 銘柄ずつ聞くと注文ごとに同期の往復が直列で挟まり、15:20〜15:30 の締め切りをそのぶん
+// 削る（2026-09-16 のレビュー）。
+func TestPlaceExitsPrefetchesRefPrices(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &pricedBroker{stubBroker: &stubBroker{balance: richBalance()}, prices: map[string]broker.MarketPrice{
+		"7203": {Symbol: "7203", Last: decimal.NewFromInt(1020)},
+		"9984": {Symbol: "9984", Last: decimal.NewFromInt(2030)},
+	}}
+	if _, _, err := PlacePicks(env, b, []selection.Pick{
+		pick("7203", domain.SideBuy), pick("9984", domain.SideBuy)}); err != nil {
+		t.Fatal(err)
+	}
+	price := decimal.NewFromInt(990)
+	b.getOrder = func(id string) (*domain.Order, error) {
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled,
+			Quantity: decimal.NewFromInt(100), FilledQuantity: decimal.NewFromInt(100), AvgFillPrice: &price}, nil
+	}
+	entries, _, err := LiveEntries(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, _, err := RefreshEntries(env, b, entries)
+	if err != nil || len(targets) != 2 {
+		t.Fatalf("targets=%+v err=%v", targets, err)
+	}
+	// 建てのぶんは数えない。ここから先が手仕舞いの問合
+	b.calls, b.asked = 0, nil
+	if failures := PlaceExits(env, b, targets); len(failures) != 0 {
+		t.Fatalf("手仕舞い: %v", failures)
+	}
+	if b.calls != 1 {
+		t.Errorf("時価問合 %d 回（2 銘柄を 1 回でまとめて取ること）: %v", b.calls, b.asked)
+	}
+	if len(b.asked) != 2 {
+		t.Errorf("聞いた銘柄 = %v, want 7203 と 9984", b.asked)
 	}
 }
 

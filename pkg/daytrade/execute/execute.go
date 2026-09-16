@@ -213,38 +213,39 @@ func EntryTrade(side domain.Side, cfg config.Config) domain.TradeType {
 	return domain.TradeTypeCash
 }
 
-// refPriceOf は**送る直前**の時価。約定単価と比べると執行そのものの滑りが出る。
-//
-// 選定に使った 9:00 の気配では、判断から発注までの遅れ（危険信号の再試行や余力の照会で
-// 数分空く）が混じって滑りと区別できない。だから送る直前に 1 銘柄ずつ聞き直す。
-// 取れなければ nil——記録のためだけの値なので、発注は止めない。
-// prefetchRefPrices は発注の前に pick の時価をまとめて取る（1 リクエスト 120 銘柄まで）。
+// prefetchRefPrices は発注の前に対象銘柄の時価をまとめて取る（1 リクエスト 120 銘柄まで）。
 // 取れなければ nil を返し、各注文が従来どおり 1 銘柄ずつ聞き直す——記録のための値なので、
 // ここで発注を止めることはしない。
-func prefetchRefPrices(env Env, b broker.Broker, picks []selection.Pick) map[string]broker.MarketPrice {
+func prefetchRefPrices(env Env, b broker.Broker, symbols []string) map[string]broker.MarketPrice {
 	source, ok := b.(broker.PriceSource)
-	if !ok || len(picks) == 0 {
+	if !ok || len(symbols) == 0 {
 		return nil
 	}
-	symbols := make([]string, 0, len(picks))
-	seen := make(map[string]bool, len(picks))
-	for _, p := range picks {
-		if seen[p.Symbol] {
+	uniq := make([]string, 0, len(symbols))
+	seen := make(map[string]bool, len(symbols))
+	for _, symbol := range symbols {
+		if seen[symbol] {
 			continue
 		}
-		seen[p.Symbol] = true
-		symbols = append(symbols, p.Symbol)
+		seen[symbol] = true
+		uniq = append(uniq, symbol)
 	}
-	prices, err := source.MarketPrices(symbols)
+	prices, err := source.MarketPrices(uniq)
 	if err != nil {
 		env.Report.Warn("daytrade.ref_price", "執行時の時価をまとめて取れません（1 銘柄ずつ聞き直します）", map[string]any{
-			"day": env.dayText(), "symbols": len(symbols), "error": err.Error(),
+			"day": env.dayText(), "symbols": len(uniq), "error": err.Error(),
 		})
 		return nil
 	}
 	return prices
 }
 
+// refPriceOf は**送る直前**の時価。約定単価と比べると執行そのものの滑りが出る。
+//
+// 選定に使った 9:00 の気配では、判断から発注までの遅れ（危険信号の再試行や余力の照会で
+// 数分空く）が混じって滑りと区別できない。だから送る直前の値を使う。まとめ取り
+// （prefetchRefPrices）が効いていればそこから、無ければ 1 銘柄ずつ聞き直す。
+// 取れなければ nil——記録のためだけの値なので、発注は止めない。
 func refPriceOf(env Env, b broker.Broker, symbol string) *ledger.Ref {
 	price, ok := env.RefPrices[symbol]
 	if !ok {
@@ -537,7 +538,11 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 	remaining := map[domain.TradeType]decimal.Decimal{}
 	// 送る直前の時価は**ループの前に 1 回で**取る。1 銘柄ずつだと注文の合間に往復が直列で入り、
 	// 測ろうとしている「判断から発注までの遅れ」をこの照会自身が増やす
-	env.RefPrices = prefetchRefPrices(env, b, picks)
+	symbols := make([]string, 0, len(picks))
+	for _, pick := range picks {
+		symbols = append(symbols, pick.Symbol)
+	}
+	env.RefPrices = prefetchRefPrices(env, b, symbols)
 
 	for _, pick := range picks {
 		pick := pick
@@ -1019,6 +1024,13 @@ func PlaceExitAs(env Env, b broker.Broker, target ExitTarget, phrase string) (st
 
 // PlaceExits は手仕舞いを順に送り、通らなかったものを返す。
 func PlaceExits(env Env, b broker.Broker, targets []ExitTarget) (failures []string) {
+	// 返済も送る直前の時価を残す。1 銘柄ずつ聞くと注文ごとに同期の往復が挟まり、
+	// 15:20〜15:30 の締め切りをそのぶん削る（2026-09-16 のレビュー）
+	symbols := make([]string, 0, len(targets))
+	for _, target := range targets {
+		symbols = append(symbols, target.Entry.Symbol)
+	}
+	env.RefPrices = prefetchRefPrices(env, b, symbols)
 	for _, target := range targets {
 		outcome, err := PlaceExit(env, b, target)
 		if err != nil {
