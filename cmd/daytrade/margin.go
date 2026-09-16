@@ -2,17 +2,53 @@ package main
 
 // 委託保証金から建玉の上限を安全側へ寄せる経路。
 //
-// 前夜（plan、20:30）に立花証券へ繋いで保証金を data/daytrade/margin.json へ焼き、
-// 朝（open、9:01）はそのファイルを読むだけ——寄付の判断にブローカーの遅さを持ち込まない。
+// 朝 8:53（`daytrade warm-margin`）に立花証券へ繋いで保証金を data/daytrade/margin.json へ焼き、
+// 9:01 の open はそのファイルを読むだけ——寄付の判断にブローカーの遅さを持ち込まない。
 // VIX（usmarket）と同じ約束で、取れなければ設定の値で建てる。
+//
+// **前夜ではなく朝に取る。** 代用有価証券の評価は前営業日終値 × 掛目で、受入保証金は
+// 夜間更新（5:30 頃）に確定する。前夜の値では ETF の評価替えを取りこぼす。
 
 import (
+	"fmt"
 	"time"
 
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/margincap"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
+	"github.com/spf13/cobra"
 )
+
+func newWarmMarginCmd() *cobra.Command {
+	var dateFlag string
+	cmd := &cobra.Command{
+		Use:   "warm-margin",
+		Short: "委託保証金を照会してキャッシュに焼く（朝 8:53 に cron で回す）。9:01 の open はこれを読む",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			if !cfg.Capital.Enabled {
+				fmt.Println("jp_gap_fade は無効（capital.enabled = false）。何もしません")
+				logInfo("daytrade.skip", "戦略が無効", map[string]any{"reason": "disabled"})
+				return nil
+			}
+			day, err := dayOrToday(dateFlag, clock.NowUTC())
+			if err != nil {
+				return err
+			}
+			if skipHoliday(day, "warm-margin") {
+				return nil
+			}
+			warmMargin(cfg, day)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dateFlag, "date", "", "判定日（YYYY-MM-DD、既定は今日）")
+	return cmd
+}
 
 // marginCachePath は保証金キャッシュの置き場。
 func marginCachePath() string { return margincap.DefaultCachePath(appSettings.DataDir) }
@@ -22,8 +58,8 @@ func marginCapNeeded(cfg dtconfig.Config) bool {
 	return cfg.Capital.Positions() > 0 || cfg.Margin.Positions() > 0
 }
 
-// warmMargin は前夜に委託保証金を取ってキャッシュに焼く。
-// 失敗しても plan は成功——取れなければ朝は設定の値で建てる（建てられなくはしない）。
+// warmMargin は委託保証金を取ってキャッシュに焼く。
+// 失敗しても落とさない——取れなければ open は設定の値で建てる（建てられなくはしない）。
 func warmMargin(cfg dtconfig.Config, day time.Time) {
 	if !marginCapNeeded(cfg) {
 		return
@@ -36,26 +72,26 @@ func warmMargin(cfg dtconfig.Config, day time.Time) {
 
 	b, err := connectBroker(cfg)
 	if err != nil {
-		warn("保証金を取れない（ブローカーに繋げない。朝は設定の値で建てる）", err)
+		warn("保証金を取れない（ブローカーに繋げない。open は設定の値で建てる）", err)
 		return
 	}
 	source, ok := b.(broker.MarginSource)
 	if !ok {
-		logWarn("daytrade.margin_warm", "このブローカーは保証金を返さない（朝は設定の値で建てる）", fields)
+		logWarn("daytrade.margin_warm", "このブローカーは保証金を返さない（open は設定の値で建てる）", fields)
 		return
 	}
 	rows, err := source.MarginSummaries()
 	if err != nil {
-		warn("保証金の照会に失敗（朝は設定の値で建てる）", err)
+		warn("保証金の照会に失敗（open は設定の値で建てる）", err)
 		return
 	}
 	snapshot, err := margincap.Conservative(day, rows)
 	if err != nil {
-		warn("保証金の内訳を読めない（朝は設定の値で建てる）", err)
+		warn("保証金の内訳を読めない（open は設定の値で建てる）", err)
 		return
 	}
 	if err := margincap.Write(marginCachePath(), snapshot); err != nil {
-		warn("保証金をキャッシュに書けない（朝は設定の値で建てる）", err)
+		warn("保証金をキャッシュに書けない（open は設定の値で建てる）", err)
 		return
 	}
 
@@ -71,10 +107,11 @@ func warmMargin(cfg dtconfig.Config, day time.Time) {
 		alert("daytrade: 追証", "委託保証金に不足額が出ています: "+snapshot.Fusokugaku.StringFixed(0)+" 円")
 		return
 	}
+	fmt.Println(snapshot.Describe())
 	logInfo("daytrade.margin_warm", "保証金をキャッシュに焼いた", fields)
 }
 
-// applyMarginCap は前夜の保証金で建玉の上限を下げる。**下げ方向のみ**。
+// applyMarginCap は朝の保証金で建玉の上限を下げる。**下げ方向のみ**。
 //
 // 設定は狙いの水準で、ここは「その日それが本当に建てられるか」の検算。
 // 保証金が増えていても勝手には上げない（増えたぶんを使うかは人が決める）。

@@ -42,7 +42,8 @@ func newPlanCmd() *cobra.Command {
 			}
 			printPlan(p, cfg)
 			warmUsmarket(cfg, day)
-			warmMargin(cfg, day)
+			// 保証金は朝 8:53 の `daytrade warm-margin` で取る。前夜の値では代用有価証券の
+			// 評価替え（前営業日終値 × 掛目、夜間更新で確定）を取りこぼす
 			return nil
 		},
 	}

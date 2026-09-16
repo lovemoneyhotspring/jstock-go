@@ -22,6 +22,7 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 | 時刻 | コマンド | 何をするか | 入力 |
 |---|---|---|---|
 | 20:30（前夜） | `daytrade plan` | 翌営業日の母集団を `state/daytrade/plan-<日付>.parquet` に保存 | J-Quants アーカイブ（`jquants sync` 済みの前日足・銘柄一覧・決算・日々公表） |
+| 8:53 | `daytrade warm-margin` | 委託保証金を照会して `data/daytrade/margin.json` に焼く。9:01 の `open` が読んで建玉の上限を下げ方向のみ上書きする。**前夜でなく朝に取る**（代用有価証券の評価替えが夜間更新で確定するため） | ブローカー |
 | 09:00〜09:15 | `daytrade open --live --yes` | 候補の気配を取り、ギャップ下位 N 銘柄を成行買い。台帳に記録 | plan + 気配（`execution.quote_source`） |
 | 06:20 / 8:52 / 9:14〜15:14（10 分おき）/ 20:20 | `news sync`（別コマンド。`docs/NEWS.md`） | ニュース電文（TDnet 適時開示を含む）を記録簿に取り込む。plan / open / guard が TOB などの材料の判定に読む。8:52 は前日ぶんも取り直す | 立花のニュース電文 |
 | 9:16〜15:16（10 分おき） | `daytrade guard --live --yes` | 直前の `news sync` の記録簿で、TOB など材料の出た今日の売建を処置（未約定→取消、一部約定→残りを取消して約定分を返済買い、全部約定→返済買い）。売建が無い日は接続しない | 台帳 + ニュースの記録簿 + ブローカー |
