@@ -30,10 +30,14 @@ type Session struct {
 }
 
 // closes は 1 日ぶんの終値（キャッシュのファイル形式）。
+//
+// Vix は取れなかった日は 0。**0 はキャッシュに書かない**（omitempty）——書くと
+// 「VIX が 0」という値として残り、次の回が取り直さなくなる（2026-09-16。S&P500 だけ
+// 取れて VIX が落ちた朝に 0 が焼き付き、その日は一度も VIX が入らなかった）。
 type closes struct {
 	Date string  `json:"date"`
 	Spx  float64 `json:"spx"`
-	Vix  float64 `json:"vix"`
+	Vix  float64 `json:"vix,omitempty"`
 }
 
 // Fetcher は終値の取得元。テストで差し替えられるようにインターフェースにする
@@ -186,16 +190,20 @@ const (
 //
 // 9:01 に取りに行くと、遅い日は待ち時間 × 2 本を寄付の判断に上乗せする。そこで
 //
-//  1. キャッシュに前夜（ExpectedSession）のセッションがあればそれを返す（それより新しいものは無い）
+//  1. キャッシュに前夜（ExpectedSession）のセッションが **VIX ごと** あればそれを返す
+//     （それより新しいものは無い）
 //  2. 無ければ取りに行き、取れたらキャッシュに足して返す
 //  3. 取れなければキャッシュの最新（day−1 以前）で代用し、エラーも返す（呼び出し側がログに）
+//
+// VIX が欠けている回を 1 で返さないのは、S&P500 だけ取れた朝にそこで止まると、その日は
+// 二度と VIX が入らないため（2026-09-16。9:01 の 0 が 9:13 まで残り、5 回とも VIX 無しで判定した）。
 //
 // 返したセッションが前夜のものかは呼び出し側が IsFresh で確かめる（取得元の公開が遅れた朝は
 // 前々夜の値が返る）。
 func LatestBeforeCached(f Fetcher, cachePath string, day time.Time) (*Session, string, error) {
 	limit := day.AddDate(0, 0, -1)
 	cached, _ := readCache(cachePath)
-	if s := latestAtOrBefore(SessionsFrom(cached), limit); IsFresh(s, day) {
+	if s := latestAtOrBefore(SessionsFrom(cached), limit); IsFresh(s, day) && s.Vix > 0 {
 		return s, SourceCache, nil
 	}
 	rows, err := download(f, day.AddDate(0, 0, -14), limit)
@@ -222,12 +230,19 @@ func latestAtOrBefore(sessions []Session, limit time.Time) *Session {
 }
 
 // mergeCloses は 2 つの終値の並びを日付で重ね、日付順にする（新しい方が勝つ）。
+// ただし **VIX は 0（取れなかった）で上書きしない**——S&P500 だけ取れた回が、前に
+// 取れていた VIX を消してしまう（2026-09-16）。
 func mergeCloses(old, fresh []closes) []closes {
 	byDate := make(map[string]closes, len(old)+len(fresh))
 	for _, r := range old {
 		byDate[r.Date] = r
 	}
 	for _, r := range fresh {
+		if r.Vix <= 0 {
+			if prev, ok := byDate[r.Date]; ok && prev.Vix > 0 {
+				r.Vix = prev.Vix
+			}
+		}
 		byDate[r.Date] = r
 	}
 	out := make([]closes, 0, len(byDate))

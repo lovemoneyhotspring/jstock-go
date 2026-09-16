@@ -565,6 +565,11 @@ func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap
 			// 0 を渡すと「VIX が低い」と読まれるので、無いものは無いままにする
 			if session.Vix > 0 {
 				signals.Vix = &session.Vix
+			} else {
+				// S&P500 は取れているので us_missing には出ない。黙って落ちると
+				// 気付けないので必ず残す（2026-09-16 まで無音だった）
+				logWarn("daytrade.us_vix_missing", "VIX が取れていない（米国のゲートの例外が効かない）",
+					map[string]any{"session": session.Describe(), "source": source})
 			}
 		}
 		// FRED だけだった頃は、火〜金の 9:01〜9:10 が前々夜の値で判定していた（前夜の値が出るのは
