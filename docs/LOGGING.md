@@ -181,7 +181,7 @@ jq -c 'select(.verify)' state/digest/prod-2026-09-06.jsonl
 | `daytrade.skip` | 何もしなかった | `reason`（`disabled` / `holiday` / `window` / `regime` / `already` / `no_quotes` / `no_picks` / `no_capital` / `no_buys` / `nothing_to_sell`）と付随項目 |
 | `daytrade.pnl_incomplete` | 資産曲線の評価で、売りの約定単価が確定していない日を除いた | `days` |
 | `daytrade.iv_missing` / `daytrade.us_missing` | 前日の IV／前夜の米国市場を取れず、そのゲート無しで進んだ | `prev_day` / `error`, `source` |
-| `daytrade.us_session` / `daytrade.us_warm` | 前夜の米国市場を読んだ（open）／前夜にキャッシュを温めた（plan）。`source` = `cache`（キャッシュに前日ぶんがあり取りに行かず）/ `fetched` / `cache_fallback`（取れずキャッシュの最新で代用） | `source`, `session` |
+| `daytrade.us_session` / `daytrade.us_warm` | 前夜の米国市場を読んだ（open）／前夜にキャッシュを温めた（plan）。`source` = `cache`（キャッシュに前日ぶんがあり取りに行かず）/ `fetched` / `cache_fallback`（取れずキャッシュの最新で代用）/ `cache_no_vix`（前夜の S&P500 はあり、VIX だけどこからも取れない。同じ VIXCLS を取り直して待ちを倍にしないよう、その回はここで打ち切る） | `source`, `session` |
 | `daytrade.us_vix_missing` | S&P500 は取れたが **VIX だけ**取れていない。`us_vix_override`（VIX > 24 ならゲートを無視）の例外が効かず、「小幅高で休む」が**休む側に倒れる**。取引そのものは止めない | `session`, `source` |
 | `daytrade.run` | 実行の終了 | `phase`（`open` / `close`）, `live`, `reason`, `n`, `budget`, `picks` / `sells`, `failures`, `already_long` / `already_short`, `elapsed_ms`, `deadline` |
 | `daytrade.evaluate` | 大引後に候補の全行へ日足を当てた（`docs/DAYTRADE.md`「候補の結果と選定の妥当性」） | `day`, `source`（`quotes` / `archive_open`）, `rows`, `picked`, `traded`, `path`, `summary`（脚 × 群の件数・平均 net bp・勝率・想定損益） |

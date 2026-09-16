@@ -154,6 +154,9 @@ trap 'rm -f "$body"' EXIT
       # それを「0 回」と読むと「open が 1 回も動いていません」と誤報する（9b250ff と同じ型）
       counted=0
     fi
+  else
+    # JSONL が退避・ローテートされた朝や、構造化ログを書かない env。これも 0 回と読むと同じ誤報
+    counted=0
   fi
   # grep -c は 0 件のとき「0」を出して終了コード 1 を返す。`|| echo 0` を足すと
   # 0 が 2 行になるので、成否は無視して出力だけ取る
@@ -165,6 +168,16 @@ trap 'rm -f "$body"' EXIT
   else
     echo "※ $OPEN_LOG がありません（エラーとロック見送りは数えられません）"
   fi
+  # 構造化ログを読めなかった朝（JSONL が無い・退避された・壊れた行がある）は、テキストの
+  # ログで数え直す。材料は粗い（起動は完了・見送り・ロック見送りの和で代用）が、0 回と読んで
+  # 「open が 1 回も動いていません」と誤報するよりは事実に近い（2026-09-16 のレビュー）
+  if [ "$counted" = "0" ] && [ -f "$OPEN_LOG" ]; then
+    runs=$(count "$TODAY.*daytrade.run" "$OPEN_LOG")
+    skips=$(count "$TODAY.*\[daytrade.skip\]" "$OPEN_LOG")
+    attempts=$((runs + skips + busy))
+    counted=2
+    echo "※ 構造化ログを読めないので、回数はテキストのログ（$OPEN_LOG）で数えました"
+  fi
   echo "$OPEN_LABEL: 起動 $attempts 回 / 完了 $runs 回 / 見送り $skips 回 / エラー $errs 件 / ロック見送り $busy 件"
   if [ "$skips" != "0" ] && [ -f "$JSONL" ]; then
     jq -sr --arg d "$TODAY" '
@@ -174,7 +187,7 @@ trap 'rm -f "$body"' EXIT
   fi
   [ "$errs" != "0" ] && problems=$((problems + 1))
   if [ "$counted" = "0" ]; then
-    echo "❌ 構造化ログを読めませんでした（jq が失敗。壊れた行がある）。open の回数は数えられません"
+    echo "❌ open の回数を数えられませんでした（構造化ログを読めず、$OPEN_LOG もありません）"
     problems=$((problems + 1))
   elif [ "$attempts" = "0" ]; then
     echo "❌ open が 1 回も動いていません（cron が動いていない・ロックで見送り）"

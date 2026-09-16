@@ -420,6 +420,39 @@ func TestPickRankingRunKeepsPicksFromLaterRuns(t *testing.T) {
 	}
 }
 
+// TestPickRankingRunDropsDuplicateWhenLaterRunPicks は、選んだ回に**候補として**載っていた
+// 銘柄が後の回で picked になった朝に、同じ銘柄が 2 行残らないこと。2 行あると Evaluate が
+// 台帳の同じ約定を両方に結び、その朝の実現損益と約定件数が倍になる（2026-09-16 のレビュー）。
+func TestPickRankingRunDropsDuplicateWhenLaterRunPicks(t *testing.T) {
+	first := time.Date(2026, 9, 16, 0, 1, 6, 0, time.UTC)
+	later := time.Date(2026, 9, 16, 0, 4, 3, 0, time.UTC)
+	frame := rankingRunFrame([]map[string]any{
+		{"recorded_at": first, "symbol": "8136", "picked": true},
+		// 1 回目は候補どまりで、2 回目に建てた。残すのは 2 回目の picked 行だけ
+		{"recorded_at": first, "symbol": "9984", "picked": false},
+		{"recorded_at": later, "symbol": "9984", "picked": true},
+	})
+	got, info := evaluate.PickRankingRun(frame)
+	if !info.At.Equal(first) || info.Extra != 1 || info.Picked != 2 {
+		t.Fatalf("回の選び方: %+v", info)
+	}
+	count := map[string]int{}
+	for _, row := range got.Rows {
+		count[row["symbol"].(string)]++
+	}
+	if count["9984"] != 1 {
+		t.Errorf("9984 が %d 行ある（実現損益が二重に乗る）: %+v", count["9984"], got.Rows)
+	}
+	if got.Height() != 2 {
+		t.Errorf("行数 %d, want 2（1 回目の 8136 + 2 回目の 9984）", got.Height())
+	}
+	for _, row := range got.Rows {
+		if row["symbol"] == "9984" && row["picked"] != true {
+			t.Errorf("残った 9984 が建てた回の行でない: %+v", row)
+		}
+	}
+}
+
 // TestPickRankingRunFallsBackWhenNoPicks は、建てなかった日（picks のある回が無い）は
 // 最後の回で代用し、その印を付けること。
 func TestPickRankingRunFallsBackWhenNoPicks(t *testing.T) {

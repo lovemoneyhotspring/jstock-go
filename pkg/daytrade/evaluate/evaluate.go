@@ -443,6 +443,11 @@ func PickRankingRun(frame history.Frame) (history.Frame, RankingRun) {
 		}
 		seen[str(row["symbol"])+"|"+str(row["side"])] = true
 	}
+	// 選んだ回に**非 picked の候補として**載っている銘柄が、後の回で picked になることがある。
+	// 両方残すと同じ symbol|side が 2 行になり、Evaluate が台帳の同じ約定を両方に結んで
+	// 実現損益と約定件数を二重に数える。建てた判断そのものである後の回の行を採り、
+	// 選んだ回の行は落とす（2026-09-16 のレビュー）
+	replaced := map[string]bool{}
 	extra := map[pickKey]bool{}
 	for _, row := range frame.Rows {
 		at, ok := row["recorded_at"].(time.Time)
@@ -450,10 +455,10 @@ func PickRankingRun(frame history.Frame) (history.Frame, RankingRun) {
 			continue
 		}
 		key := str(row["symbol"]) + "|" + str(row["side"])
-		if seen[key] {
+		if seen[key] || replaced[key] {
 			continue
 		}
-		seen[key] = true
+		replaced[key] = true
 		extra[pickKey{at, str(row["symbol"]), str(row["side"])}] = true
 	}
 	info.At, info.Extra = chosen, len(extra)
@@ -464,7 +469,7 @@ func PickRankingRun(frame history.Frame) (history.Frame, RankingRun) {
 			return false
 		}
 		if at.Equal(chosen) {
-			return true
+			return !replaced[str(row["symbol"])+"|"+str(row["side"])]
 		}
 		return extra[pickKey{at, str(row["symbol"]), str(row["side"])}]
 	}), info

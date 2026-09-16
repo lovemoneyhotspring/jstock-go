@@ -184,6 +184,8 @@ const (
 	SourceFetched = "fetched"
 	// SourceCacheFallback は取りに行って失敗し、キャッシュの最新（day−1 より古い）で代用した。
 	SourceCacheFallback = "cache_fallback"
+	// SourceCacheNoVix は前夜の S&P500 はキャッシュにあり、VIX だけどこからも取れなかった。
+	SourceCacheNoVix = "cache_no_vix"
 )
 
 // LatestBeforeCached は LatestBefore のキャッシュ付き。寄付の判断はこちらを使う。
@@ -218,6 +220,11 @@ func LatestBeforeCached(f Fetcher, cachePath string, day time.Time) (*Session, s
 				return s, SourceFetched, nil
 			}
 		}
+		// VIX が取れなかった。ここで下の download に落ちると、同じ VIXCLS をもう一度フルで
+		// 取りに行って 3 段のフォールバックが 2 周し、待ちが倍（最悪 48 秒）になる——上で
+		// 減らしたぶんが帳消しになる。前夜の S&P500 は手元にあるので VIX 無しのまま返し、
+		// 次の回にまた VIX だけ試す（2026-09-16 のレビュー）
+		return s, SourceCacheNoVix, nil
 	}
 	rows, err := download(f, day.AddDate(0, 0, -14), limit)
 	if err != nil {
