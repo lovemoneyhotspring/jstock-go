@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/shopspring/decimal"
 )
@@ -93,10 +94,21 @@ func (s Snapshot) Capacity() decimal.Decimal {
 	return s.SinyouSinkidate.Div(SafetyFactor).Floor()
 }
 
-// IsFresh は判定日ぶんとして使えるか（その日に焼いたものだけ）。
+// IsFresh は判定日ぶんとして使えるか（その日に**その日のうちに**焼いたものだけ）。
 // 古い保証金で建てない——増資も評価損も反映されていない値で枠を広げるのは危険。
+//
+// day だけでなく fetched_at も見るのは、前夜に「翌営業日ぶん」として焼いたファイルが
+// 翌朝そのまま当日ぶんとして通るため。代用有価証券の評価替え（前営業日終値 × 掛目、
+// 夜間更新で確定）を取りこぼした値で建ててしまう——8:53 の warm-margin が失敗した朝に
+// 前夜の値へ黙って落ちるのは、取得を朝へ移した意味を消す（2026-09-16 のレビュー）。
 func (s Snapshot) IsFresh(day time.Time) bool {
-	return s.Day == day.Format(dateLayout)
+	if s.Day != day.Format(dateLayout) {
+		return false
+	}
+	if s.FetchedAt.IsZero() {
+		return false
+	}
+	return clock.ToZone(s.FetchedAt, clock.Tokyo).Format(dateLayout) == s.Day
 }
 
 // Describe はログ用の 1 行。
