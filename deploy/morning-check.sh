@@ -168,15 +168,25 @@ trap 'rm -f "$body"' EXIT
   else
     echo "※ $OPEN_LOG がありません（エラーとロック見送りは数えられません）"
   fi
-  # 構造化ログを読めなかった朝（JSONL が無い・退避された・壊れた行がある）は、テキストの
-  # ログで数え直す。材料は粗い（起動は完了・見送り・ロック見送りの和で代用）が、0 回と読んで
-  # 「open が 1 回も動いていません」と誤報するよりは事実に近い（2026-09-16 のレビュー）
-  if [ "$counted" = "0" ] && [ -f "$OPEN_LOG" ]; then
+  # 構造化ログから今日の回を数えられなかった朝は、テキストのログで数え直す。材料は粗い
+  # （起動は完了・見送り・ロック見送りの和で代用）が、0 回と読んで「open が 1 回も動いて
+  # いません」と誤報するよりは事実に近い（2026-09-16 のレビュー）。
+  #
+  # jq の失敗・JSONL 不在（counted = 0）だけでなく、**jq は成功したが今日の open の行が
+  # 1 つも無い**（attempts = 0）も同じ扱いにする。open が別 env の JSONL に出た朝・JSONL を
+  # 空で置き直した朝は jq が素直に 0 回を返すので、counted だけ見ていると誤報が残る。しかも
+  # OPEN_LOG は「今日の行が多い方」で選んでいるので、今日の行があるログを選んでおきながら
+  # 「1 回も動いていません」と言うことになる（2026-09-17 のレビュー。同じ型の誤報の 4 度目）
+  if { [ "$counted" = "0" ] || [ "$attempts" = "0" ]; } && [ -f "$OPEN_LOG" ]; then
     runs=$(count "$TODAY.*daytrade.run" "$OPEN_LOG")
     skips=$(count "$TODAY.*\[daytrade.skip\]" "$OPEN_LOG")
     attempts=$((runs + skips + busy))
-    counted=2
-    echo "※ 構造化ログを読めないので、回数はテキストのログ（$OPEN_LOG）で数えました"
+    # テキストのログにも今日の回が無ければ、数え直しは何も足さない。counted はそのままにして
+    # 「数えられなかった（0）」と「本当に 1 回も動いていない（1）」の区別を保つ
+    if [ "$attempts" != "0" ]; then
+      counted=2
+      echo "※ 構造化ログに $TODAY の open が無いので、回数はテキストのログ（$OPEN_LOG）で数えました"
+    fi
   fi
   echo "$OPEN_LABEL: 起動 $attempts 回 / 完了 $runs 回 / 見送り $skips 回 / エラー $errs 件 / ロック見送り $busy 件"
   if [ "$skips" != "0" ] && [ -f "$JSONL" ]; then
