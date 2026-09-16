@@ -140,7 +140,8 @@ func TestReadWriteRoundTrip(t *testing.T) {
 	}
 }
 
-// 本番の設定に近い形（ロング 300 万 N3 / ショート 200 万 N3）。
+// 長短 3 : 2・両脚 N3 の設定。比と N の扱いを見るための土台で、本番の金額とは独立
+// （本番は 2026-09-16 にロングだけ 500 万へ上げ、3 : 2 ではなくなっている）。
 func prodLike() config.Config {
 	cfg := config.Default()
 	cfg.Capital.MaxCapital = dec("3000000")
