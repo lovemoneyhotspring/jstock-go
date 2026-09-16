@@ -46,6 +46,41 @@ func TestMarginSummariesReadsBreakdown(t *testing.T) {
 	}
 }
 
+// 不足額（追証）と拘束金は**項目が無いことを記録する**。fieldDecimal は欠けを 0 と読むので、
+// この電文での項目名が実機と違っていれば「追証なし」と同じ見え方になり、
+// 「追証の日は建てない」（margincap.Apply）が一度も発火しないまま気づけない。
+// docs/BROKER_VERIFY.md の実機確認の一覧に不足額は入っていない（2026-09-17 のレビュー）。
+func TestMarginSummariesRecordsMissingFields(t *testing.T) {
+	b, fake := newFixtureBroker(t)
+	row := marginSuiiRowFixture("20260916", "3823546", "2055696", "1720000", "11586503", "0")
+	delete(row, fieldSuiiFusoku) // 項目名が違う口座・電文を模す
+	fake.responses[clmMarginSuii] = okResponse(map[string]any{marginSuiiKey: []any{row}})
+
+	rows, err := b.MarginSummaries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("行数 %d, want 1（不足額が無くても行は落とさない——建可能額は読めている）", len(rows))
+	}
+	if !rows[0].Fusokugaku.IsZero() {
+		t.Errorf("不足額 %s, want 0（欠損は 0 として扱うが、欠損だったことを残す）", rows[0].Fusokugaku)
+	}
+	if len(rows[0].Missing) != 1 || rows[0].Missing[0] != fieldSuiiFusoku {
+		t.Errorf("欠けた項目 = %v, want [%s]", rows[0].Missing, fieldSuiiFusoku)
+	}
+	// 揃っている行は Missing を持たない（毎朝の警告で狼少年にしない）
+	full := marginSuiiRowFixture("20260918", "3813827", "2093827", "1720000", "11557051", "3211")
+	fake.responses[clmMarginSuii] = okResponse(map[string]any{marginSuiiKey: []any{full}})
+	rows, err = b.MarginSummaries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows[0].Missing) != 0 {
+		t.Errorf("揃っている行に欠けが出ている: %v", rows[0].Missing)
+	}
+}
+
 // 該当が 0 件のとき立花は配列ではなく空文字を返す（rowsOf が「該当なし」として通す）。
 func TestMarginSummariesEmptyIsNotAnError(t *testing.T) {
 	b, fake := newFixtureBroker(t)

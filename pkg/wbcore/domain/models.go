@@ -280,6 +280,9 @@ type MarginSummary struct {
 	SonotaKousokukin decimal.Decimal
 	// Fusokugaku は不足額（追証）。0 でなければ建ててはいけない。
 	Fusokugaku decimal.Decimal
+	// Missing は応答に無かった項目名。0 と欠損を取り違えないために残す
+	// ——不足額が欠けているなら「追証の日は建てない」は効いていない。
+	Missing []string
 }
 
 // MakeClientOrderID は決定論的に注文ID（32文字ハッシュ）を生成する。

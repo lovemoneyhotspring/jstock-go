@@ -219,6 +219,15 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 | `CLMZanRealHosyoukinRitu` | ✅ 受入・差入保証金と追証余力（当日 `sT0*` と T+5 の断面） |
 | `CLMZanShinkiKanoIjiritu` | ✅ 信用新規建可能額だけ |
 
+> **不足額（`sFusokugaku`）の項目名はこの電文で確認できていない。** 上の ✅ に並ぶのは
+> 受入保証金・現金保証金・代用評価額・建可能額・その他拘束金の 5 つで、追証の情報を実機で
+> 見たのは別電文（`CLMZanRealHosyoukinRitu` の「追証余力」）の方。`CLMZanKaiKanougakuSuii` に
+> `sFusokugaku` が実在するかは未検証で、**無ければ欠損が 0 と読まれ「追証の日は建てない」
+> （`margincap.Apply`）は一度も発火しない**。2026-09-17 に、項目が無いことを
+> `MarginSummary.Missing` に残し `daytrade.margin_warm` で警告するようにした——
+> 朝のログに `missing` が出たら、この項目名が違う。確かめるには追証の出ている口座か、
+> `aKanougakuSuiiList` の 1 行をそのまま出して項目名を並べる。
+
 実測値: 受入保証金 3,813,827 = 現金保証金 2,093,827 + 代用有価証券評価額 1,720,000。
 **代用の掛目は証券会社が掛けた後の値が返る**ので、現金と代用の按分を自分で持つ必要はない。
 信用新規建可能額 11,557,051 は 受入保証金 ÷ 0.33 = 11,556,445 と 606 円差で、

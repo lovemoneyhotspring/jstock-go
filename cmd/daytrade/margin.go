@@ -101,6 +101,12 @@ func warmMargin(cfg dtconfig.Config, day time.Time) {
 
 	fields["snapshot"] = snapshot.Describe()
 	fields["source_date"] = snapshot.SourceDate
+	// 応答に無かった項目。**不足額（追証）が欠けていれば「追証の日は建てない」は効いていない**
+	// ——この電文での項目名は実機で確認できていない（docs/BROKER_VERIFY.md。2026-09-17 のレビュー）
+	if len(snapshot.Missing) > 0 {
+		fields["missing"] = snapshot.Missing
+		logWarn("daytrade.margin_warm", "保証金の応答に無い項目がある（0 と読んでいる）", fields)
+	}
 	// 正体の分かっていない拘束金。枠をそのまま削るので、出ていたら必ず残す
 	if snapshot.SonotaKousokukin.IsPositive() {
 		fields["sonota_kousokukin"] = snapshot.SonotaKousokukin.StringFixed(0)
