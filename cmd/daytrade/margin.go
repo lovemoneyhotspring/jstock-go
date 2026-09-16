@@ -75,6 +75,10 @@ func warmMargin(cfg dtconfig.Config, day time.Time) {
 		warn("保証金を取れない（ブローカーに繋げない。open は設定の値で建てる）", err)
 		return
 	}
+	// 締め切りを持たせる。daytrade のコマンドでここだけ SetDeadline を呼んでおらず、
+	// 電文 1 本 30 秒 + 再送で最悪 90 秒 /tmp/daytrade.lock を握る——8:55 の snap は
+	// 待たない（wait 0）ので締め出され、板の記録が 1 スロット欠ける（2026-09-16 のレビュー）
+	broker.SetDeadline(b, clock.NowUTC().Add(60*time.Second))
 	source, ok := b.(broker.MarginSource)
 	if !ok {
 		logWarn("daytrade.margin_warm", "このブローカーは保証金を返さない（open は設定の値で建てる）", fields)
@@ -135,6 +139,11 @@ func applyMarginCap(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 	}
 
 	capped, res := margincap.Apply(cfg, snapshot)
+	// 縮小した後の設定でも、ショック日の倍率まで含めると枠を超えることがある
+	if over, total := margincap.ShockExceeds(capped, snapshot); over {
+		fields["shock_total"] = total.StringFixed(0)
+		logWarn("daytrade.margin_cap", "ショック日の倍率を掛けると建玉が保証金から導いた上限を超える", fields)
+	}
 	for k, v := range res.Fields() {
 		fields[k] = v
 	}

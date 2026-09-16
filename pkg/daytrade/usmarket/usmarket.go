@@ -206,6 +206,19 @@ func LatestBeforeCached(f Fetcher, cachePath string, day time.Time) (*Session, s
 	if s := latestAtOrBefore(SessionsFrom(cached), limit); IsFresh(s, day) && s.Vix > 0 {
 		return s, SourceCache, nil
 	}
+	// 前夜の S&P500 はキャッシュにあって VIX だけ欠けている回は、**VIX だけ**取り直す。
+	// 全部取り直すと、VIX がどこからも取れない朝は 9:01〜9:13 の 5 回とも 3 段のフォールバック
+	// （Cboe → Yahoo → FRED、各 8 秒）を走らせ、寄付の判断の直列路に最悪 24 秒が乗る。
+	// とくに最後の砦の 9:13 で待つのが一番まずい（2026-09-16 のレビュー）
+	if s := latestAtOrBefore(SessionsFrom(cached), limit); IsFresh(s, day) {
+		if vix, verr := f.Closes("VIXCLS", day.AddDate(0, 0, -14), limit); verr == nil && len(vix) > 0 {
+			merged := mergeVix(cached, vix)
+			writeCache(cachePath, merged)
+			if s := latestAtOrBefore(SessionsFrom(merged), limit); IsFresh(s, day) && s.Vix > 0 {
+				return s, SourceFetched, nil
+			}
+		}
+	}
 	rows, err := download(f, day.AddDate(0, 0, -14), limit)
 	if err != nil {
 		if s := latestAtOrBefore(SessionsFrom(cached), limit); s != nil {
@@ -216,6 +229,21 @@ func LatestBeforeCached(f Fetcher, cachePath string, day time.Time) (*Session, s
 	merged := mergeCloses(cached, rows)
 	writeCache(cachePath, merged)
 	return latestAtOrBefore(SessionsFrom(merged), limit), SourceFetched, nil
+}
+
+// mergeVix はキャッシュの行に VIX だけを足す（S&P500 は取り直さない）。
+// 0 では上書きしない——mergeCloses と同じ約束。
+func mergeVix(rows []closes, vix map[string]float64) []closes {
+	out := make([]closes, 0, len(rows))
+	for _, r := range rows {
+		if r.Vix <= 0 {
+			if v, ok := vix[r.Date]; ok && v > 0 {
+				r.Vix = v
+			}
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // latestAtOrBefore は limit 以前で最新のセッション。無ければ nil。

@@ -299,6 +299,25 @@ func TestTradeExecSlippageAbsentWithoutRef(t *testing.T) {
 	}
 }
 
+// 建てにだけ時価があり手仕舞いに無い取引は、執行の滑りを出さない。
+// 片道の値を往復の値と同じ列に混ぜると、slippage_bp（往復が揃った取引だけの平均）と
+// 母集団が違うものを並べて引き算することになり、滑りが過小に出る。
+func TestTradeExecSlippageNeedsBothLegs(t *testing.T) {
+	frame := frameOf(evalRow{
+		day: "2026-09-16", side: "BUY", rank: 1, code: "10000", name: "片道",
+		group: "picked", picked: true, netBP: 50, pnl: 1000, open: 1000, close: 1010, quantity: 100,
+		actualEntry: 1021, actualExit: 1007, actualPnL: -1400,
+		refEntry: 1020,
+	})
+	trades := evaluate.Trades(frame)
+	if trades.Rows[0]["exec_bp"] != nil {
+		t.Errorf("片道しか時価が無いのに滑りが出ている: %v", trades.Rows[0]["exec_bp"])
+	}
+	if totals := evaluate.TradeTotals(trades); totals.Rows[0]["exec_slippage_bp"] != nil {
+		t.Errorf("合計にも出さないこと: %v", totals.Rows[0]["exec_slippage_bp"])
+	}
+}
+
 func TestTradesEmpty(t *testing.T) {
 	trades := evaluate.Trades(history.NewFrame(evalColumns(), nil))
 	if trades.Height() != 0 {

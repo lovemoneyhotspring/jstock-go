@@ -55,8 +55,10 @@ def reason_ja:
   ( $run[] | select(.code == "daytrade.corp_event") | .extra
     | "  材料でショートから外した: \(.symbol) \(.name // "")（\(.kind)）\(.at) \(.headline)" ),
   ( $run[] | select(.code == "daytrade.ranking") | .extra as $r
-    | ([ $r.rows[] | select(.picked) | .rank ] | max) as $last
-    | if $last == null then empty else
+    # 誰も選ばれなかった回も出す。「上位が外れた理由」を追う機能は、まさにその回で一番効く
+    # （9:04 に picked 0 で 5 行あるのに何も出ない、が起きていた）
+    | (([ $r.rows[] | select(.picked) | .rank ] | max) // (($r.n // 0) + 5)) as $last
+    | if ($r.rows | length) == 0 then empty else
         "  \($r.side) N=\($r.n) 1 注文 \($r.budget | yen) 円（気配 \($r.quotes) 銘柄から）",
         ( $r.rows[] | select(.rank <= $last)
           | "    #\(.rank) \(.symbol) \(.name // "")  ギャップ \(.gap | tonumber * 10000 | round / 100)%  \(.price | yen) 円  "
@@ -65,4 +67,10 @@ def reason_ja:
                 end ) )
       end ),
   ( $run[] | select(.code == "daytrade.order") | .extra
-    | "  注文 \(.side) \(.symbol) \(.quantity) 株 @\(.price | yen) = \(.amount | yen) 円（\(.outcome)）" )
+    # 持ち越しの返済は price・amount・side を持たない（execute/carry.go）。同じ形と決めつけて
+    # yen（tonumber）に渡すと jq がその場で落ち、点検の本文が途中で切れる
+    | if .amount == null then
+        "  返済 \(.symbol) \(.quantity) 株（\(.outcome)）"
+      else
+        "  注文 \(.side) \(.symbol) \(.quantity) 株 @\(.price | yen) = \(.amount | yen) 円（\(.outcome)）"
+      end )

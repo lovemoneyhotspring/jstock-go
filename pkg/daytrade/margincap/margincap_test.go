@@ -110,12 +110,30 @@ func TestCapacityIsZeroWhenNothingAvailable(t *testing.T) {
 }
 
 func TestIsFreshOnlyForTheSameDay(t *testing.T) {
-	s := Snapshot{Day: "2026-09-17"}
+	// 2026-09-17 の朝 8:53 JST（= 前日 23:53 UTC）に焼いたもの
+	s := Snapshot{Day: "2026-09-17", FetchedAt: time.Date(2026, 9, 16, 23, 53, 0, 0, time.UTC)}
 	if !s.IsFresh(day()) {
 		t.Error("その日に焼いたものを古いと判定した")
 	}
 	if s.IsFresh(day().AddDate(0, 0, 1)) {
 		t.Error("前日の保証金を使えると判定した")
+	}
+}
+
+// 前夜に「翌営業日ぶん」として焼いたものは、日付が合っていても使わない。
+// 代用有価証券の評価替え（夜間更新で確定）を取りこぼした値だから——実際に
+// 2026-09-16 の 20:57 JST に day = 2026-09-17 のファイルが残っていた。
+func TestIsFreshRejectsPreviousNightFetch(t *testing.T) {
+	s := Snapshot{Day: "2026-09-17", FetchedAt: time.Date(2026, 9, 16, 11, 57, 0, 0, time.UTC)}
+	if s.IsFresh(day()) {
+		t.Error("前夜に焼いた保証金を当日ぶんとして使えると判定した")
+	}
+}
+
+// 取得時刻の無い（古い形式の）キャッシュも使わない。
+func TestIsFreshRejectsMissingFetchedAt(t *testing.T) {
+	if (Snapshot{Day: "2026-09-17"}).IsFresh(day()) {
+		t.Error("取得時刻の無いキャッシュを使えると判定した")
 	}
 }
 

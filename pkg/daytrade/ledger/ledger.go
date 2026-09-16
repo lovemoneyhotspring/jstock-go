@@ -607,19 +607,23 @@ func ExitAvgPrice(exits []Order) (avg, filled decimal.Decimal, ok bool) {
 
 // ExitAvgRef は手仕舞いの「送る直前の時価」を約定数量で加重平均したもの。
 // 手仕舞いが複数本（引けの一部約定 + 翌寄りの返済）でも 1 つの基準値にする。
-func ExitAvgRef(exits []Order) (avg decimal.Decimal, ok bool) {
-	amount, filled := decimal.Zero, decimal.Zero
+//
+// 加重に使った約定数量も返す——ref_price を持つ返済が一部しか無いと、ExitAvgPrice
+// （約定した返済を全部使う）と母集団がずれ、別物どうしの差が「執行の滑り」として
+// 記録される。呼び出し側は数量が一致するときだけ滑りを出す（2026-09-16 のレビュー）。
+func ExitAvgRef(exits []Order) (avg decimal.Decimal, filled decimal.Decimal, ok bool) {
+	amount, qty := decimal.Zero, decimal.Zero
 	for _, exit := range exits {
 		if exit.RefPrice == nil || exit.FilledQuantity.LessThanOrEqual(decimal.Zero) {
 			continue
 		}
 		amount = amount.Add(exit.RefPrice.Mul(exit.FilledQuantity))
-		filled = filled.Add(exit.FilledQuantity)
+		qty = qty.Add(exit.FilledQuantity)
 	}
-	if !filled.IsPositive() {
-		return decimal.Zero, false
+	if !qty.IsPositive() {
+		return decimal.Zero, decimal.Zero, false
 	}
-	return amount.Div(filled), true
+	return amount.Div(qty), qty, true
 }
 
 // boolToInt は SQLite に真偽を入れるための 0 / 1。

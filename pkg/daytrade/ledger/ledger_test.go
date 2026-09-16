@@ -196,9 +196,13 @@ func TestExitAvgRefWeightsByFilledQuantity(t *testing.T) {
 		}
 		exits = append(exits, o)
 	}
-	avg, ok := ExitAvgRef(exits)
+	avg, filled, ok := ExitAvgRef(exits)
 	if !ok || !avg.Equal(decimal.NewFromInt(1100)) {
 		t.Errorf("加重平均 = %v (ok=%v), want 1100（200 株 × 1000 + 100 株 × 1300）", avg, ok)
+	}
+	// 加重に使った株数も返す。ExitAvgPrice と母集団が揃うときだけ滑りを出すため
+	if !filled.Equal(decimal.NewFromInt(300)) {
+		t.Errorf("加重に使った株数 = %v, want 300", filled)
 	}
 }
 

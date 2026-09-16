@@ -51,13 +51,38 @@ func (r Result) Fields() map[string]any {
 // 最悪 0 に落ちて open が watch-only（その朝は何も建てない）に転ぶ。
 func Apply(cfg config.Config, s Snapshot) (config.Config, Result) {
 	res := Result{Shortfall: s.Fusokugaku.GreaterThan(decimal.Zero)}
-	derivedLong, derivedShort := legTargets(cfg, s.Capacity())
+	capacity := s.Capacity()
+	if res.Shortfall {
+		// 追証が出ている日は建てない。Result.Shortfall も domain.MarginSummary.Fusokugaku も
+		// そう書いてあるのに、実際は通知を出して通常どおり発注していた（2026-09-16 のレビュー）
+		capacity = decimal.Zero
+	}
+	derivedLong, derivedShort := legTargets(cfg, capacity)
 
 	res.Long = shrinkLong(&cfg, derivedLong)
 	res.Short = shrinkShort(&cfg, derivedShort)
 	res.Applied = res.Long.Changed() || res.Short.Changed()
 	res.WatchOnly = cfg.Capital.Positions() == 0 && (cfg.Margin.Positions() == 0)
 	return cfg, res
+}
+
+// ShockExceeds はショック日の倍率まで含めると、建玉の合計が保証金から導いた上限を超えるか。
+// 超える額（倍率を掛けた合計）も返す。
+//
+// 倍率は 1 注文の予算に**縮小の後から**掛かる（execute/sizing.go の順序は検証と揃えてある）。
+// つまりここで検算した額の shock_long_scale 倍が建ちうる。現行の設定（ショート 0.0）では
+// 建可能額の 8 割ほどに収まるが、ショートを 0 より上げると枠を超えて発注が弾かれる
+// ——気づけるように検算しておく（2026-09-16 のレビュー）。
+func ShockExceeds(cfg config.Config, s Snapshot) (bool, decimal.Decimal) {
+	capacity := s.Capacity()
+	if !capacity.IsPositive() {
+		return false, decimal.Zero
+	}
+	total := cfg.Capital.MaxCapital.Mul(cfg.Regime.ShockLongScale)
+	if cfg.Margin.Enabled {
+		total = total.Add(cfg.Margin.MaxCapital.Mul(cfg.Regime.ShockShortScale))
+	}
+	return total.GreaterThan(capacity), total
 }
 
 // legTargets は建玉合計を脚ごとに割る。比は**設定の max_capital そのまま**。

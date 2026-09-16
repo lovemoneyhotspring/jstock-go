@@ -114,12 +114,19 @@ func (t *TachibanaBroker) MarginSummaries() ([]domain.MarginSummary, error) {
 		if day == "" {
 			continue
 		}
+		// 建可能額は**欠損と 0 を区別する**。空文字を 0 と読むと margincap が
+		// 「建てられる額 0」と検算し、設定の値で建てるはずの朝がまるごとノートレードになる
+		// （max_capital = 0 は Validate を通ってしまう。2026-09-16 のレビュー）
+		sinkidate, ok := fieldDecimalOK(row, fieldSuiiSinkidate)
+		if !ok {
+			continue
+		}
 		out = append(out, domain.MarginSummary{
 			Date:             day,
 			UkeireHosyoukin:  fieldDecimal(row, fieldSuiiUkeire),
 			GenkinHosyoukin:  fieldDecimal(row, fieldSuiiGenkin),
 			DaiyouHyoukagaku: fieldDecimal(row, fieldSuiiDaiyou),
-			SinyouSinkidate:  fieldDecimal(row, fieldSuiiSinkidate),
+			SinyouSinkidate:  sinkidate,
 			SonotaKousokukin: fieldDecimal(row, fieldSuiiSonota),
 			Fusokugaku:       fieldDecimal(row, fieldSuiiFusoku),
 		})
