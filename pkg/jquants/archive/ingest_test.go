@@ -156,7 +156,7 @@ func TestPlanSkipsRecentlyFetched(t *testing.T) {
 	}
 }
 
-// 毎営業日行があるはずの端点で 0 行を掴んだ日は、最短間隔（20 時間）を待たずに 1 時間で取り直す。
+// 毎営業日行があるはずの端点で 0 行を掴んだ日は、最短間隔（20 時間）を待たずに 50 分で取り直す。
 // 行が取れた日は今までどおり待つ（2026-09-15、オプションの足が朝の open に間に合わなかった）。
 func TestPlanRetriesEmptyDayHourly(t *testing.T) {
 	ep := bars()
@@ -168,6 +168,9 @@ func TestPlanRetriesEmptyDayHourly(t *testing.T) {
 		want bool
 	}{
 		{"0 行・30 分前", 0, 30 * time.Minute, false},
+		// 50 分（EmptyRetryInterval ちょうど）で取り直す。cron は 30 分おきなので、ここを
+		// 1 時間にすると「ちょうど 1 時間後」の回が数秒足りずに落ち、実効 90 分になる
+		{"0 行・50 分前", 0, 50 * time.Minute, true},
 		{"0 行・1 時間前", 0, time.Hour, true},
 		{"行あり・2 時間前", 4000, 2 * time.Hour, false},
 	} {
@@ -187,6 +190,31 @@ func TestPlanRetriesEmptyDayHourly(t *testing.T) {
 				t.Errorf("取り直す = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// 0 行の取り直しは「毎営業日行があるはず」の端点だけ。0 行が普通の端点（信用残高など）まで
+// 毎時叩き直すと、Gaps はそれを欠けと数えないので**誰も気づかないまま API を焼き続ける**。
+// 実際に台帳には 0 行が正常な端点のレコードが千件単位である（2026-09-17 のレビュー）。
+func TestPlanDoesNotRetryEmptyDayForSparseEndpoint(t *testing.T) {
+	ep := MustEndpoint("markets_margin_interest")
+	if ep.RowsEveryTradingDay {
+		t.Fatalf("前提が変わった: %s が「毎営業日行がある」端点になっている", ep.Path)
+	}
+	now := jstAt(2025, 1, 6, 19, 0)
+	ing := newTestIngestor(t, &stubClient{})
+	if err := ing.Ledger.Record(IngestRecord{
+		Endpoint: ep.Path, Target: "2025-01-06", Source: "api",
+		FetchedUTC: now.Add(-time.Hour), Rows: 0, Changed: 0, Digest: "d",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := ing.Plan(now, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasJob(jobs, ep.Path, "2025-01-06") {
+		t.Error("0 行が普通の端点を 50 分で取り直そうとしている（最短間隔 20 時間を待つこと）")
 	}
 }
 
