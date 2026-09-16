@@ -1,0 +1,233 @@
+package margincap
+
+import (
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
+	"github.com/shopspring/decimal"
+)
+
+func day() time.Time { return time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC) }
+
+func dec(s string) decimal.Decimal { return decimal.RequireFromString(s) }
+
+// 2026-09-16 に本番口座で取れた実際の値。
+func realRows() []domain.MarginSummary {
+	return []domain.MarginSummary{
+		{Date: "20260916", UkeireHosyoukin: dec("3823546"), GenkinHosyoukin: dec("2055696"),
+			DaiyouHyoukagaku: dec("1720000"), SinyouSinkidate: dec("11586503")},
+		{Date: "20260918", UkeireHosyoukin: dec("3813827"), GenkinHosyoukin: dec("2093827"),
+			DaiyouHyoukagaku: dec("1720000"), SinyouSinkidate: dec("11557051"),
+			SonotaKousokukin: dec("3211")},
+	}
+}
+
+// Conservative は建てられる額を最小、拘束金を最大で採る（どちらも安全側）。
+func TestConservativeTakesWorstOfEachKind(t *testing.T) {
+	s, err := Conservative(day(), realRows())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.SinyouSinkidate.String(); got != "11557051" {
+		t.Errorf("建可能額 %s, want 11557051（最小）", got)
+	}
+	if got := s.SourceDate; got != "20260918" {
+		t.Errorf("採った行 %s, want 20260918", got)
+	}
+	// 拘束金は当日 0 でも 2 日後に出る。当日だけ見ると枠を過大に見積もる
+	if got := s.SonotaKousokukin.String(); got != "3211" {
+		t.Errorf("その他拘束金 %s, want 3211（最大）", got)
+	}
+}
+
+func TestConservativeNeedsAtLeastOneRow(t *testing.T) {
+	if _, err := Conservative(day(), nil); err == nil {
+		t.Fatal("1 行も無いのにエラーにならなかった")
+	}
+}
+
+// 建玉合計 = 建可能額 ÷ 1.3。
+func TestCapacity(t *testing.T) {
+	s := Snapshot{SinyouSinkidate: dec("11557051")}
+	if got := s.Capacity().String(); got != "8890039" {
+		t.Errorf("建玉合計 %s, want 8890039", got)
+	}
+}
+
+// 脚への割り振りは**設定の max_capital の比**。固定の 6:4 ではない
+// ——縮小はリスクを下げる操作で、長短の方針を変える操作ではない。
+func TestLegTargetsFollowsConfigRatio(t *testing.T) {
+	// 300 万 : 200 万 = 3 : 2
+	long, short := legTargets(prodLike(), dec("1000000"))
+	if got := long.String(); got != "600000" {
+		t.Errorf("ロング %s, want 600000", got)
+	}
+	if !long.Add(short).Equal(dec("1000000")) {
+		t.Errorf("両脚の和 %s が建玉合計に一致しない", long.Add(short))
+	}
+
+	// ショートを据え置いてロングだけ上げた設定（533 万 : 200 万）でも比が保たれる
+	skewed := prodLike()
+	skewed.Capital.MaxCapital = dec("5330000")
+	long2, short2 := legTargets(skewed, dec("7330000"))
+	// 5330/7330 ≒ 72.7%
+	if long2.LessThan(dec("5329000")) || long2.GreaterThan(dec("5331000")) {
+		t.Errorf("ロング %s, want ≒5330000（設定の比を保つ）", long2)
+	}
+	if short2.LessThan(dec("1999000")) || short2.GreaterThan(dec("2001000")) {
+		t.Errorf("ショート %s, want ≒2000000", short2)
+	}
+}
+
+// ショートが無効ならすべてロングへ。
+func TestLegTargetsWithoutShort(t *testing.T) {
+	cfg := prodLike()
+	cfg.Margin.Enabled = false
+	long, short := legTargets(cfg, dec("1000000"))
+	if !long.Equal(dec("1000000")) || !short.IsZero() {
+		t.Errorf("ロング %s / ショート %s, want 1000000 / 0", long, short)
+	}
+}
+
+// 両脚とも 0 の設定は割りようがない（0 を返し、下げ方向のみなので何も起きない）。
+func TestLegTargetsWithNoCapital(t *testing.T) {
+	cfg := prodLike()
+	cfg.Capital.MaxCapital = decimal.Zero
+	cfg.Margin.MaxCapital = decimal.Zero
+	long, short := legTargets(cfg, dec("1000000"))
+	if !long.IsZero() || !short.IsZero() {
+		t.Errorf("ロング %s / ショート %s, want 0 / 0", long, short)
+	}
+}
+
+func TestCapacityIsZeroWhenNothingAvailable(t *testing.T) {
+	if got := (Snapshot{}).Capacity(); !got.IsZero() {
+		t.Errorf("建可能額 0 なのに %s", got)
+	}
+}
+
+func TestIsFreshOnlyForTheSameDay(t *testing.T) {
+	s := Snapshot{Day: "2026-09-17"}
+	if !s.IsFresh(day()) {
+		t.Error("その日に焼いたものを古いと判定した")
+	}
+	if s.IsFresh(day().AddDate(0, 0, 1)) {
+		t.Error("前日の保証金を使えると判定した")
+	}
+}
+
+func TestReadWriteRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "margin.json")
+	if _, ok := Read(path); ok {
+		t.Fatal("無いファイルを読めたことになっている")
+	}
+	want, err := Conservative(day(), realRows())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := Read(path)
+	if !ok {
+		t.Fatal("書いたものを読めない")
+	}
+	if !got.SinyouSinkidate.Equal(want.SinyouSinkidate) || got.Day != want.Day {
+		t.Errorf("往復で変わった: %+v vs %+v", got, want)
+	}
+}
+
+// 長短 3 : 2・両脚 N3 の設定。比と N の扱いを見るための土台で、本番の金額とは独立
+// （本番は 2026-09-16 にロングだけ 500 万へ上げ、3 : 2 ではなくなっている）。
+func prodLike() config.Config {
+	cfg := config.Default()
+	cfg.Capital.MaxCapital = dec("3000000")
+	cfg.Capital.OrderBudget = dec("1000000")
+	cfg.Capital.MaxOrder = dec("1500000")
+	cfg.Margin.Enabled = true
+	cfg.Margin.MaxCapital = dec("2000000")
+	cfg.Margin.OrderBudget = dec("670000")
+	cfg.Margin.MaxOrder = dec("1000000")
+	return cfg
+}
+
+// 保証金に余裕がある日は何もしない——増えたぶんを勝手には使わない。
+func TestApplyNeverRaises(t *testing.T) {
+	cfg := prodLike()
+	got, res := Apply(cfg, Snapshot{SinyouSinkidate: dec("11557051")})
+	if res.Applied {
+		t.Errorf("余裕があるのに上書きした: %s", res.Describe())
+	}
+	if !got.Capital.MaxCapital.Equal(dec("3000000")) || !got.Margin.MaxCapital.Equal(dec("2000000")) {
+		t.Errorf("設定を変えてしまった: ロング %s / ショート %s", got.Capital.MaxCapital, got.Margin.MaxCapital)
+	}
+}
+
+// 保証金が足りない日は下げる。**このとき N が変わってはいけない**。
+func TestApplyShrinksAndKeepsN(t *testing.T) {
+	cfg := prodLike()
+	// 建可能額 390 万 → 建玉 300 万（ロング 180 万 / ショート 120 万）
+	got, res := Apply(cfg, Snapshot{SinyouSinkidate: dec("3900000")})
+	if !res.Applied {
+		t.Fatal("足りないのに下げていない")
+	}
+	if got.Capital.MaxCapital.GreaterThan(dec("1800000")) {
+		t.Errorf("ロングが下がりきっていない: %s", got.Capital.MaxCapital)
+	}
+	if got.Capital.Positions() != 3 || got.Margin.Positions() != 3 {
+		t.Errorf("N が変わった: ロング %d / ショート %d, want 3 / 3",
+			got.Capital.Positions(), got.Margin.Positions())
+	}
+	if res.Long.NBefore != res.Long.NAfter || res.Short.NBefore != res.Short.NAfter {
+		t.Errorf("N の前後が食い違う: %+v %+v", res.Long, res.Short)
+	}
+	// 下げた設定がそのまま Validate を通ること（open は上書き後に検証し直す）
+	if err := got.Validate(); err != nil {
+		t.Errorf("下げた設定が Validate を通らない: %v", err)
+	}
+}
+
+// 1 銘柄の上限も同率で縮む。0（上限なし）は触らない。
+func TestApplyScalesMaxOrderButLeavesUnlimited(t *testing.T) {
+	cfg := prodLike()
+	got, _ := Apply(cfg, Snapshot{SinyouSinkidate: dec("3900000")})
+	if !got.Capital.MaxOrder.LessThan(dec("1500000")) {
+		t.Errorf("max_order が縮んでいない: %s", got.Capital.MaxOrder)
+	}
+
+	unlimited := prodLike()
+	unlimited.Capital.MaxOrder = decimal.Zero
+	got2, _ := Apply(unlimited, Snapshot{SinyouSinkidate: dec("3900000")})
+	if !got2.Capital.MaxOrder.IsZero() {
+		t.Errorf("上限なし（0）を書き換えた: %s", got2.Capital.MaxOrder)
+	}
+}
+
+// 様子見モード（max_capital = 0）には触らない。
+func TestApplyLeavesWatchOnlyConfigAlone(t *testing.T) {
+	cfg := prodLike()
+	cfg.Capital.MaxCapital = decimal.Zero
+	got, _ := Apply(cfg, Snapshot{SinyouSinkidate: dec("3900000")})
+	if !got.Capital.MaxCapital.IsZero() {
+		t.Errorf("様子見モードを書き換えた: %s", got.Capital.MaxCapital)
+	}
+}
+
+// 追証が出ている日は印を付ける（呼び出し側が alert する）。
+func TestApplyFlagsShortfall(t *testing.T) {
+	_, res := Apply(prodLike(), Snapshot{SinyouSinkidate: dec("11557051"), Fusokugaku: dec("1")})
+	if !res.Shortfall {
+		t.Error("不足額があるのに印が付いていない")
+	}
+}
+
+// 保証金がほぼ無い日は N が 0 に落ちる。**黙って続けてはいけない**ので印を付ける。
+func TestApplyFlagsWatchOnlyCollapse(t *testing.T) {
+	_, res := Apply(prodLike(), Snapshot{SinyouSinkidate: dec("1")})
+	if !res.WatchOnly {
+		t.Error("N が 0 に落ちたのに印が付いていない")
+	}
+}

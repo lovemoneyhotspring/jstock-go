@@ -79,6 +79,54 @@ func (t *TachibanaBroker) GetBalance() (*domain.Balance, error) {
 	return balance, nil
 }
 
+// 可能額の推移（CLMZanKaiKanougakuSuii）の項目。2026-09-16 に実機で確認した名前。
+const (
+	fieldSuiiDay       = "sHituke"                   // 受渡ベースの日付（YYYYMMDD）
+	fieldSuiiUkeire    = "sUkeireHosyoukin"          // 受入保証金
+	fieldSuiiGenkin    = "sGenkinHosyoukin"          // 現金保証金
+	fieldSuiiDaiyou    = "sDaiyouHyoukagaku"         // 代用有価証券評価額（掛目適用後）
+	fieldSuiiSinkidate = "sSinyouSinkidateKanougaku" // 信用新規建可能額
+	fieldSuiiSonota    = "sSonotaKousokukin"         // その他拘束金（正体不明）
+	fieldSuiiFusoku    = "sFusokugaku"               // 不足額（追証）
+)
+
+// MarginSummaries は委託保証金の内訳を受渡日ごとに返す（立花は 6 営業日ぶん）。
+//
+// CLMZanKaiSummary ではなくこちらを使う——同電文の sOhzs*（受入・現金・代用・委託保証金率）は
+// **建玉ゼロだと全部空文字で返る**ので、日計りで毎日建玉を落とす運用では常に空になる
+// （2026-09-16 に実機で確認）。こちらはザラ場中でも 6 日ぶん取れる。
+func (t *TachibanaBroker) MarginSummaries() ([]domain.MarginSummary, error) {
+	res, err := t.postRequest(clmMarginSuii, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	if err := checkResult(res, clmMarginSuii); err != nil {
+		return nil, err
+	}
+	rows, err := rowsOf(res, marginSuiiKey, clmMarginSuii)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]domain.MarginSummary, 0, len(rows))
+	for _, row := range rows {
+		day := field(row, fieldSuiiDay)
+		if day == "" {
+			continue
+		}
+		out = append(out, domain.MarginSummary{
+			Date:             day,
+			UkeireHosyoukin:  fieldDecimal(row, fieldSuiiUkeire),
+			GenkinHosyoukin:  fieldDecimal(row, fieldSuiiGenkin),
+			DaiyouHyoukagaku: fieldDecimal(row, fieldSuiiDaiyou),
+			SinyouSinkidate:  fieldDecimal(row, fieldSuiiSinkidate),
+			SonotaKousokukin: fieldDecimal(row, fieldSuiiSonota),
+			Fusokugaku:       fieldDecimal(row, fieldSuiiFusoku),
+		})
+	}
+	return out, nil
+}
+
 // GetPositions は現物の保有。信用建玉は MarginPositions。
 // 両方を脚ごとに束ねたいときは PositionsByLeg（片方が落ちても他方を使える）。
 func (t *TachibanaBroker) GetPositions() ([]domain.Position, error) {

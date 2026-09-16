@@ -243,8 +243,14 @@ func TestMarginConfigMatchesBaseLongRules(t *testing.T) {
 	if !base.Regime.ShockLongScale.Equal(decimal.NewFromInt(1)) || !base.Regime.ShockShortScale.Equal(decimal.NewFromInt(1)) {
 		t.Errorf("土台（現物）のショック倍率は 1 / 1（記録のみ）のはず: %+v", base.Regime)
 	}
-	if !margin.Margin.Enabled || !margin.Capital.MaxCapital.Equal(decimal.NewFromInt(3_000_000)) {
+	// 子の [capital] が土台（現物の 200 万）を上書きできているかの見張り。金額そのものの
+	// 妥当性ではなく extends の効きを見る。2026-09-16 に 300 → 500 万（保証金の増加ぶん。
+	// 研究ノート 30-projects/daytrade-margin-sizing）
+	if !margin.Margin.Enabled || !margin.Capital.MaxCapital.Equal(decimal.NewFromInt(5_000_000)) {
 		t.Errorf("子の上書きが効いていない: %+v", margin.Capital)
+	}
+	if margin.Capital.MaxCapital.Equal(base.Capital.MaxCapital) {
+		t.Errorf("子の [capital] が土台と同じ＝ extends の上書きが消えている: %s", margin.Capital.MaxCapital)
 	}
 }
 
