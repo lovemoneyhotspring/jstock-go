@@ -75,6 +75,8 @@ func runEvaluate(date string, asJSON bool) error {
 		fields := map[string]any{
 			"day": day.Format(DateLayout), "runs": chosenRun.Runs,
 			"picked": chosenRun.Picked, "fallback": chosenRun.Fallback,
+			// extra > 0 は 1 回目で建てきれず、次の回が別の銘柄で埋めた朝（部分約定）
+			"extra": chosenRun.Extra,
 		}
 		if !chosenRun.At.IsZero() {
 			fields["chosen"] = chosenRun.At.Format(time.RFC3339)
@@ -116,6 +118,13 @@ func runEvaluate(date string, asJSON bool) error {
 	_ = led.Close()
 	if err != nil {
 		return err
+	}
+	// 順位表に無い約定が残っていないか。Evaluate は順位表の行だけをループするので、
+	// どの行にも一致しない約定は黙って捨てられる——2026-09-16 の取りこぼしもこれで気づけた
+	if missing := dtevaluate.OrdersNotInRanking(rows, orders); len(missing) > 0 {
+		logWarn("daytrade.evaluate_unmatched", "順位表に無い約定がある（評価から落ちる）", map[string]any{
+			"day": day.Format(DateLayout), "orders": missing,
+		})
 	}
 
 	result := dtevaluate.Evaluate(rows, runIDOfRanking, bars, cfg, orders, source)

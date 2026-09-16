@@ -400,16 +400,13 @@ func execSlippageOf(row map[string]any) *float64 {
 	side := str(row["side"])
 	entry := floatPtrOf(execution.SlippageBP(side, row["ref_entry"], row["actual_entry"]))
 	exit := floatPtrOf(execution.SlippageBP(exitSide(side), row["ref_exit"], row["actual_exit"]))
-	if entry == nil && exit == nil {
+	// 片道だけでは出さない。建てだけの値と往復の値を同じ列に混ぜると、slippage_bp
+	// （往復が揃った取引だけの平均）と母集団が違うものを並べて引き算することになり、
+	// 滑りが過小に出る（2026-09-16 のレビュー）
+	if entry == nil || exit == nil {
 		return nil
 	}
-	total := 0.0
-	if entry != nil {
-		total += *entry
-	}
-	if exit != nil {
-		total += *exit
-	}
+	total := *entry + *exit
 	return &total
 }
 

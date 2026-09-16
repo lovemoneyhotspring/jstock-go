@@ -385,6 +385,41 @@ func TestPickRankingRunPrefersRunWithPicks(t *testing.T) {
 	}
 }
 
+// TestPickRankingRunKeepsPicksFromLaterRuns は、1 回目で建てきれず次の回が**別の銘柄**で
+// 残りを埋めた朝（締め切り・余力不足・発注失敗による部分約定）に、後の回の picked 行も
+// 拾うこと。拾わないと、その約定は順位表のどの行にも一致せず Evaluate が黙って捨てる。
+func TestPickRankingRunKeepsPicksFromLaterRuns(t *testing.T) {
+	first := time.Date(2026, 9, 16, 0, 1, 6, 0, time.UTC)
+	later := time.Date(2026, 9, 16, 0, 4, 3, 0, time.UTC)
+	frame := rankingRunFrame([]map[string]any{
+		{"recorded_at": first, "symbol": "8136", "picked": true},
+		{"recorded_at": first, "symbol": "3445", "picked": false},
+		// 2 回目は建て済みの 8136 を候補から外し、残りの枚数を 9984 で埋めた
+		{"recorded_at": later, "symbol": "8136", "picked": false},
+		{"recorded_at": later, "symbol": "9984", "picked": true},
+	})
+	got, info := evaluate.PickRankingRun(frame)
+	if !info.At.Equal(first) {
+		t.Fatalf("採った回 = %v, want %v", info.At, first)
+	}
+	if info.Extra != 1 || info.Picked != 2 {
+		t.Fatalf("後の回の picked を拾えていない: %+v", info)
+	}
+	picked := map[string]bool{}
+	for _, row := range got.Rows {
+		if row["picked"] == true {
+			picked[row["symbol"].(string)] = true
+		}
+	}
+	if !picked["8136"] || !picked["9984"] {
+		t.Errorf("picked の和集合になっていない: %+v", got.Rows)
+	}
+	// 後の回から拾うのは picked だけ（同じ銘柄の非 picked 行を二重に持たない）
+	if got.Height() != 3 {
+		t.Errorf("行数 %d, want 3（1 回目の 2 行 + 2 回目の 9984）", got.Height())
+	}
+}
+
 // TestPickRankingRunFallsBackWhenNoPicks は、建てなかった日（picks のある回が無い）は
 // 最後の回で代用し、その印を付けること。
 func TestPickRankingRunFallsBackWhenNoPicks(t *testing.T) {

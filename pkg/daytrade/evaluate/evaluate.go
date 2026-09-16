@@ -382,6 +382,9 @@ type RankingRun struct {
 	At time.Time
 	// Fallback は picks のある回が無く、最後の回で代用したか（本当の見送り日）。
 	Fallback bool
+	// Extra は選んだ回に無く、後の回から拾った picked 行の数。0 でなければ、
+	// 1 回目で建てきれず次の回が別の銘柄で埋めた朝（部分約定）。
+	Extra int
 }
 
 // PickRankingRun はその日の順位表（open の回数ぶんある）から、評価に使う 1 回を選ぶ。
@@ -425,11 +428,82 @@ func PickRankingRun(frame history.Frame) (history.Frame, RankingRun) {
 	if chosen.IsZero() {
 		chosen, info.Fallback = last, true
 	}
-	info.At, info.Picked = chosen, picks[chosen]
+	// 選んだ回に無い picked 行も拾う。1 回目が締め切り・余力不足・発注失敗で N 件に届かないと、
+	// 次の回は建て済みを候補から外して**別の銘柄**を建てる（execute.RankQuotes）。その約定は
+	// 選んだ回のどの行にも一致せず、Evaluate が黙って捨てていた（2026-09-16 のレビュー）
+	type pickKey struct {
+		at        time.Time
+		sym, side string
+	}
+	seen := map[string]bool{}
+	for _, row := range frame.Rows {
+		at, ok := row["recorded_at"].(time.Time)
+		if !ok || !at.Equal(chosen) || !boolOf(row["picked"]) {
+			continue
+		}
+		seen[str(row["symbol"])+"|"+str(row["side"])] = true
+	}
+	extra := map[pickKey]bool{}
+	for _, row := range frame.Rows {
+		at, ok := row["recorded_at"].(time.Time)
+		if !ok || !at.After(chosen) || !boolOf(row["picked"]) {
+			continue
+		}
+		key := str(row["symbol"]) + "|" + str(row["side"])
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		extra[pickKey{at, str(row["symbol"]), str(row["side"])}] = true
+	}
+	info.At, info.Extra = chosen, len(extra)
+	info.Picked = picks[chosen] + len(extra)
 	return frame.Filter(func(row map[string]any) bool {
 		at, ok := row["recorded_at"].(time.Time)
-		return ok && at.Equal(chosen)
+		if !ok {
+			return false
+		}
+		if at.Equal(chosen) {
+			return true
+		}
+		return extra[pickKey{at, str(row["symbol"]), str(row["side"])}]
 	}), info
+}
+
+// rankingLeg は順位表の向き（BUY / SELL）を台帳の脚（long / short）に合わせる。
+func rankingLeg(side string) string {
+	if side == "SELL" {
+		return "short"
+	}
+	return "long"
+}
+
+// OrdersNotInRanking は台帳の約定のうち、順位表のどの行にも一致しないものの「銘柄|脚」。
+//
+// Evaluate は順位表の行だけをループするので、ここに残るものは**評価から黙って落ちる**。
+// 順位表の回の選び方を間違えた日（2026-09-16）も、記録そのものが欠けた日も、これで気づける。
+func OrdersNotInRanking(rows []RankingRow, orders []dtledger.Order) []string {
+	known := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		known[r.Symbol+"|"+rankingLeg(r.Side)] = true
+	}
+	var missing []string
+	seen := map[string]bool{}
+	for _, o := range orders {
+		if o.IsDryRun() || o.IsDead() || o.Verify || !o.IsEntry() {
+			continue
+		}
+		if !o.FilledQuantity.IsPositive() {
+			continue
+		}
+		key := o.Symbol + "|" + o.Leg()
+		if known[key] || seen[key] {
+			continue
+		}
+		seen[key] = true
+		missing = append(missing, key)
+	}
+	return missing
 }
 
 func RowsFromFrame(frame history.Frame) (rows []RankingRow, runID string) {
@@ -498,13 +572,15 @@ func actualsOf(orders []dtledger.Order) map[string]actual {
 			price, _ := entry.RefPrice.Float64()
 			a.refEntry = &price
 		}
-		if avg, ok := dtledger.ExitAvgRef(exits[key]); ok {
-			price, _ := avg.Float64()
-			a.refExit = &price
-		}
-		if avg, _, ok := dtledger.ExitAvgPrice(exits[key]); ok {
+		refAvg, refFilled, hasRef := dtledger.ExitAvgRef(exits[key])
+		if avg, filled, ok := dtledger.ExitAvgPrice(exits[key]); ok {
 			price, _ := avg.Float64()
 			a.exit = &price
+			// ref が一部の返済にしか無ければ基準値と約定の母集団がずれる。揃うときだけ使う
+			if hasRef && refFilled.Equal(filled) {
+				refPrice, _ := refAvg.Float64()
+				a.refExit = &refPrice
+			}
 			if pnl, ok := dtledger.RealizedOf(entry, exits[key]); ok {
 				a.pnl = &pnl
 			}
