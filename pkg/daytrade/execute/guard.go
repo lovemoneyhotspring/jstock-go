@@ -51,13 +51,23 @@ func GuardCorpEvents(env Env, b broker.Broker, marks map[string]string) ([]Guard
 	if err != nil {
 		return nil, err
 	}
-	var actions []GuardAction
+	var targets []ledger.Order
 	for _, o := range entries {
-		kind, ok := marks[o.Symbol]
-		if !ok || !IsShortEntry(o) || o.IsDead() {
+		if _, ok := marks[o.Symbol]; !ok || !IsShortEntry(o) || o.IsDead() {
 			continue
 		}
-		act := GuardAction{Symbol: o.Symbol, ClientOrderID: o.ClientOrderID, Kind: kind, Quantity: o.Quantity}
+		targets = append(targets, o)
+	}
+	// 返済の時価もまとめて取る。1 銘柄ずつだと材料の出た銘柄の数だけ往復が直列に入る
+	// （PlaceExits にしか入れていなかった。2026-09-17 のレビュー）
+	symbols := make([]string, 0, len(targets))
+	for _, o := range targets {
+		symbols = append(symbols, o.Symbol)
+	}
+	env.RefPrices, env.refBatchFailed = prefetchRefPrices(env, b, symbols)
+	var actions []GuardAction
+	for _, o := range targets {
+		act := GuardAction{Symbol: o.Symbol, ClientOrderID: o.ClientOrderID, Kind: marks[o.Symbol], Quantity: o.Quantity}
 		actions = append(actions, guardOne(env, b, o, act))
 	}
 	return actions, nil

@@ -439,7 +439,14 @@ func (i *Ingestor) due(ep Endpoint, day, now time.Time, target string, backfilli
 
 // EmptyRetryInterval は、毎営業日行があるはずの端点で 0 行を掴んだ日を取り直す間隔。
 // cron（30 分おき）で 1 時間に 1 回だけ叩き直す。
-const EmptyRetryInterval = time.Hour
+//
+// **1 時間ちょうどにしてはいけない（実効 90 分になる）。** 上の判定は
+// 「起動時刻 − 前回の*完了*時刻 ≥ interval」で、完了の時刻は起動の数秒〜十数秒後に打たれる
+// （Ledger.Record）。cron は :13 / :43 なので、ちょうど 1 時間後の回は必ず数秒足りずに落ち、
+// 次の 30 分後まで待つことになる。台帳の 20 時間の実績 50 例がすべて 20:29:58〜20:30:08 で、
+// 20 時間ちょうどが 1 度も無いのが同じ機構の裏付け。0:13 に 0 行を掴んだ日は
+// 07:43 の次が 09:13 になり、9:01 の open をまたいでしまう（2026-09-17 のレビュー）
+const EmptyRetryInterval = 50 * time.Minute
 
 // Sync はやるべき取り込みを順に実行する。冪等。
 //

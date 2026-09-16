@@ -45,6 +45,9 @@ type Snapshot struct {
 	SonotaKousokukin decimal.Decimal `json:"sonota_kousokukin"`
 	// Fusokugaku は不足額（追証）の最大。0 でなければ異常として扱う。
 	Fusokugaku decimal.Decimal `json:"fusokugaku"`
+	// Missing は応答に無かった項目名。**不足額（追証）がここに出ていたら、
+	// 「追証の日は建てない」は効いていない**（2026-09-17 のレビュー）。
+	Missing []string `json:"missing,omitempty"`
 	// SourceDate はこの数字が出てきた受渡日（YYYYMMDD）。最小を採った行の日付。
 	SourceDate string `json:"source_date"`
 	// FetchedAt は取得時刻。
@@ -61,7 +64,14 @@ func Conservative(day time.Time, rows []domain.MarginSummary) (Snapshot, error) 
 	}
 	out := Snapshot{Day: day.Format(dateLayout), FetchedAt: time.Now().UTC()}
 	found := false
+	missing := map[string]bool{}
 	for _, r := range rows {
+		for _, name := range r.Missing {
+			if !missing[name] {
+				missing[name] = true
+				out.Missing = append(out.Missing, name)
+			}
+		}
 		if !found || r.SinyouSinkidate.LessThan(out.SinyouSinkidate) {
 			out.SinyouSinkidate = r.SinyouSinkidate
 			out.UkeireHosyoukin = r.UkeireHosyoukin

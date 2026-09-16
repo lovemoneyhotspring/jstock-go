@@ -271,6 +271,14 @@ func carryQueryError(env Env, held broker.LegPositions, leg broker.PositionLeg) 
 // 台帳には建てた日の下に記録する。再実行は client_order_id で冪等。締め切りは env のもの
 // （寄付なら 9:15、引けなら 15:30）を使う。通らなかったものを返す。
 func ReturnCarried(env Env, b broker.Broker, carried []Carried, phrase string) (failures []string) {
+	// 送る直前の時価はここでもまとめて取る。持ち越しの返済は close の冒頭（SettleCarried）で
+	// 走るので、1 銘柄ずつ聞くと 15:20〜15:30 の締め切りをそのぶん削る。まとめ取りを
+	// PlaceExits にしか入れていなかったのが取りこぼし（2026-09-17 のレビュー）
+	symbols := make([]string, 0, len(carried))
+	for _, c := range carried {
+		symbols = append(symbols, c.Target.Entry.Symbol)
+	}
+	env.RefPrices, env.refBatchFailed = prefetchRefPrices(env, b, symbols)
 	for _, c := range carried {
 		if c.ExitOpen {
 			// 生きている返済の約定を待つ。重ねると一部約定の残りに対して二重に返済する

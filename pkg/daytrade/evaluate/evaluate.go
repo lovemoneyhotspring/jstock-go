@@ -382,6 +382,9 @@ type RankingRun struct {
 	At time.Time
 	// Fallback は picks のある回が無く、最後の回で代用したか（本当の見送り日）。
 	Fallback bool
+	// Skipped は採った回が「危険信号で見送った回」か。見送りの回の順位表は
+	// 「建てていたら」の仮想で、1 株も建てていない（appendSkippedRanking）。
+	Skipped bool
 	// Extra は選んだ回に無く、後の回から拾った picked 行の数。0 でなければ、
 	// 1 回目で建てきれず次の回が別の銘柄で埋めた朝（部分約定）。
 	Extra int
@@ -396,73 +399,106 @@ type RankingRun struct {
 //
 // そこで **picks のある最初の回**を選ぶ。建玉を決めたのはその回で、以降は冪等の空振りだから。
 // picks のある回が 1 つも無い日（危険信号での見送りなど）は最後の回で代用する（Fallback）。
+//
+// **見送った回は「picks のある回」に数えない。** 危険信号で見送った回も「建てていたら」の
+// 順位表を残し、その行にも picked が立つ（cmd/daytrade/open.go の appendSkippedRanking）。
+// skipped を見ないと、前半が見送りで後半に建てた朝——2026-09-15 がまさにそれで、9:01〜9:10 の
+// 4 回が見送り、9:13 だけが本物——に 1 株も建てていない仮想の回を採る。picked 件数が水増しされ、
+// review はその日を丸ごと「見送り日」に分類し、実現損益をそちらに乗せる（2026-09-17 のレビュー）
 func PickRankingRun(frame history.Frame) (history.Frame, RankingRun) {
-	picks := map[time.Time]int{}
+	type runInfo struct {
+		picks   int
+		skipped bool
+	}
+	runs := map[time.Time]*runInfo{}
 	var order []time.Time
 	for _, row := range frame.Rows {
 		at, ok := row["recorded_at"].(time.Time)
 		if !ok {
 			continue
 		}
-		if _, seen := picks[at]; !seen {
-			picks[at] = 0
+		r, seen := runs[at]
+		if !seen {
+			r = &runInfo{}
+			runs[at] = r
 			order = append(order, at)
 		}
+		if boolOf(row["skipped"]) {
+			r.skipped = true
+		}
 		if boolOf(row["picked"]) {
-			picks[at]++
+			r.picks++
 		}
 	}
 	if len(order) == 0 {
 		return frame, RankingRun{}
 	}
-	var chosen, last time.Time
+	var last time.Time
 	for _, at := range order {
 		if last.IsZero() || at.After(last) {
 			last = at
 		}
-		if picks[at] > 0 && (chosen.IsZero() || at.Before(chosen)) {
-			chosen = at
+	}
+	// 実際に建てた回（見送りでない）を先に探す。無ければ見送りの回で代用する
+	// ——本当の見送り日は「建てていたら」の成績を残したいので、従来どおり評価する
+	earliestWithPicks := func(skipped bool) time.Time {
+		var at time.Time
+		for _, candidate := range order {
+			r := runs[candidate]
+			if r.picks == 0 || r.skipped != skipped {
+				continue
+			}
+			if at.IsZero() || candidate.Before(at) {
+				at = candidate
+			}
 		}
+		return at
 	}
 	info := RankingRun{Runs: len(order)}
+	chosen := earliestWithPicks(false)
+	if chosen.IsZero() {
+		chosen = earliestWithPicks(true)
+		info.Skipped = !chosen.IsZero()
+	}
 	if chosen.IsZero() {
 		chosen, info.Fallback = last, true
+		info.Skipped = runs[last].skipped
 	}
 	// 選んだ回に無い picked 行も拾う。1 回目が締め切り・余力不足・発注失敗で N 件に届かないと、
 	// 次の回は建て済みを候補から外して**別の銘柄**を建てる（execute.RankQuotes）。その約定は
-	// 選んだ回のどの行にも一致せず、Evaluate が黙って捨てていた（2026-09-16 のレビュー）
+	// 選んだ回のどの行にも一致せず、Evaluate が黙って捨てていた（2026-09-16 のレビュー）。
+	//
+	// 同じ「銘柄|向き」が複数の回で picked になることもある（1 回目の注文が拒否・未約定だと
+	// その銘柄は建て済みに載らず候補に残り、次の回が別の株数で建て直す）。台帳の約定に対応
+	// するのは**最後に picked にした回**なので、それを残して前の回の行は落とす。両方残すと
+	// 同じ約定を 2 行に結び、実現損益と約定件数が二重になる（2026-09-16 のレビュー）。
+	// 見送りの回は混ぜない——建てていない銘柄を拾ってしまう（2026-09-17 のレビュー）
 	type pickKey struct {
 		at        time.Time
 		sym, side string
 	}
-	seen := map[string]bool{}
+	latest := map[string]pickKey{}
 	for _, row := range frame.Rows {
 		at, ok := row["recorded_at"].(time.Time)
-		if !ok || !at.Equal(chosen) || !boolOf(row["picked"]) {
-			continue
-		}
-		seen[str(row["symbol"])+"|"+str(row["side"])] = true
-	}
-	// 選んだ回に**非 picked の候補として**載っている銘柄が、後の回で picked になることがある。
-	// 両方残すと同じ symbol|side が 2 行になり、Evaluate が台帳の同じ約定を両方に結んで
-	// 実現損益と約定件数を二重に数える。建てた判断そのものである後の回の行を採り、
-	// 選んだ回の行は落とす（2026-09-16 のレビュー）
-	replaced := map[string]bool{}
-	extra := map[pickKey]bool{}
-	for _, row := range frame.Rows {
-		at, ok := row["recorded_at"].(time.Time)
-		if !ok || !at.After(chosen) || !boolOf(row["picked"]) {
+		if !ok || at.Before(chosen) || !boolOf(row["picked"]) || runs[at].skipped != info.Skipped {
 			continue
 		}
 		key := str(row["symbol"]) + "|" + str(row["side"])
-		if seen[key] || replaced[key] {
+		if prev, seen := latest[key]; !seen || at.After(prev.at) {
+			latest[key] = pickKey{at, str(row["symbol"]), str(row["side"])}
+		}
+	}
+	replaced := map[string]bool{}
+	extra := map[pickKey]bool{}
+	for key, pk := range latest {
+		if pk.at.Equal(chosen) {
 			continue
 		}
 		replaced[key] = true
-		extra[pickKey{at, str(row["symbol"]), str(row["side"])}] = true
+		extra[pk] = true
 	}
 	info.At, info.Extra = chosen, len(extra)
-	info.Picked = picks[chosen] + len(extra)
+	info.Picked = len(latest)
 	return frame.Filter(func(row map[string]any) bool {
 		at, ok := row["recorded_at"].(time.Time)
 		if !ok {

@@ -53,8 +53,11 @@ type Env struct {
 	// RefPrices は発注ループの前にまとめて取った「送る直前の時価」（銘柄 → 時価）。
 	// 1 銘柄ずつ聞くと注文の合間に往復が直列で挟まり、測ろうとしている遅れ自体を増やす
 	// ——時価問合は 1 回 120 銘柄まで束ねられる（2026-09-16 のレビュー）。
-	// nil なら 1 銘柄ずつ聞き直す（持ち越しの返済など、pick を持たない経路）。
+	// nil なら 1 銘柄ずつ聞き直す（時価を返さないブローカー・dry-run）。
 	RefPrices map[string]broker.MarketPrice
+	// refBatchFailed はまとめ取りを試みて失敗した回。1 銘柄ずつの聞き直しを止めるための印で、
+	// パッケージ内（prefetchRefPrices の呼び出し側）でしか立てない。
+	refBatchFailed bool
 }
 
 // DefaultRetryWait は RetryWait の既定。
@@ -214,12 +217,16 @@ func EntryTrade(side domain.Side, cfg config.Config) domain.TradeType {
 }
 
 // prefetchRefPrices は発注の前に対象銘柄の時価をまとめて取る（1 リクエスト 120 銘柄まで）。
-// 取れなければ nil を返し、各注文が従来どおり 1 銘柄ずつ聞き直す——記録のための値なので、
-// ここで発注を止めることはしない。
-func prefetchRefPrices(env Env, b broker.Broker, symbols []string) map[string]broker.MarketPrice {
+// 記録のための値なので、ここで発注を止めることはしない。
+//
+// 2 つ目の返り値は「まとめて取りにいって**失敗した**」。失敗を nil マップだけで表すと、
+// 各注文が 1 銘柄ずつ聞き直してしまい、まとめ取りの 1 回とあわせて往復がまとめ取り導入前より
+// 増える。通信が詰まっている引けでは、この直列の聞き直しが 15:20〜15:30 の締め切りを食い潰し、
+// 手仕舞いを送れないまま持ち越しに化けうる（2026-09-17 のレビュー）
+func prefetchRefPrices(env Env, b broker.Broker, symbols []string) (map[string]broker.MarketPrice, bool) {
 	source, ok := b.(broker.PriceSource)
 	if !ok || len(symbols) == 0 {
-		return nil
+		return nil, false
 	}
 	uniq := make([]string, 0, len(symbols))
 	seen := make(map[string]bool, len(symbols))
@@ -232,12 +239,12 @@ func prefetchRefPrices(env Env, b broker.Broker, symbols []string) map[string]br
 	}
 	prices, err := source.MarketPrices(uniq)
 	if err != nil {
-		env.Report.Warn("daytrade.ref_price", "執行時の時価をまとめて取れません（1 銘柄ずつ聞き直します）", map[string]any{
+		env.Report.Warn("daytrade.ref_price", "執行時の時価をまとめて取れません（この回は記録を諦めて発注を優先します）", map[string]any{
 			"day": env.dayText(), "symbols": len(uniq), "error": err.Error(),
 		})
-		return nil
+		return nil, true
 	}
-	return prices
+	return prices, false
 }
 
 // refPriceOf は**送る直前**の時価。約定単価と比べると執行そのものの滑りが出る。
@@ -249,6 +256,11 @@ func prefetchRefPrices(env Env, b broker.Broker, symbols []string) map[string]br
 func refPriceOf(env Env, b broker.Broker, symbol string) *ledger.Ref {
 	price, ok := env.RefPrices[symbol]
 	if !ok {
+		if env.refBatchFailed {
+			// まとめ取りが落ちた回。ここで 1 銘柄ずつ聞き直すと、注文ごとに失敗する往復が
+			// 直列に挟まって締め切りを削る。記録を諦めて発注を優先する
+			return nil
+		}
 		source, isSource := b.(broker.PriceSource)
 		if !isSource {
 			return nil
@@ -542,7 +554,7 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 	for _, pick := range picks {
 		symbols = append(symbols, pick.Symbol)
 	}
-	env.RefPrices = prefetchRefPrices(env, b, symbols)
+	env.RefPrices, env.refBatchFailed = prefetchRefPrices(env, b, symbols)
 
 	for _, pick := range picks {
 		pick := pick
@@ -1030,7 +1042,7 @@ func PlaceExits(env Env, b broker.Broker, targets []ExitTarget) (failures []stri
 	for _, target := range targets {
 		symbols = append(symbols, target.Entry.Symbol)
 	}
-	env.RefPrices = prefetchRefPrices(env, b, symbols)
+	env.RefPrices, env.refBatchFailed = prefetchRefPrices(env, b, symbols)
 	for _, target := range targets {
 		outcome, err := PlaceExit(env, b, target)
 		if err != nil {

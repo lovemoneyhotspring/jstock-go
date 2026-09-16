@@ -121,14 +121,28 @@ func (t *TachibanaBroker) MarginSummaries() ([]domain.MarginSummary, error) {
 		if !ok {
 			continue
 		}
+		// 拘束金と不足額（追証）は**項目が無いこと自体を記録する**。fieldDecimal は欠けを 0 と
+		// 読むので、電文の項目名が違えば「拘束なし・追証なし」と見分けが付かず、
+		// 「追証の日は建てない」（margincap.Apply）が一度も発火しないまま気づけない。
+		// docs/BROKER_VERIFY.md の実機確認の一覧に不足額は入っていない（2026-09-17 のレビュー）
+		var missing []string
+		sonota, ok := fieldDecimalOK(row, fieldSuiiSonota)
+		if !ok {
+			missing = append(missing, fieldSuiiSonota)
+		}
+		fusoku, ok := fieldDecimalOK(row, fieldSuiiFusoku)
+		if !ok {
+			missing = append(missing, fieldSuiiFusoku)
+		}
 		out = append(out, domain.MarginSummary{
 			Date:             day,
 			UkeireHosyoukin:  fieldDecimal(row, fieldSuiiUkeire),
 			GenkinHosyoukin:  fieldDecimal(row, fieldSuiiGenkin),
 			DaiyouHyoukagaku: fieldDecimal(row, fieldSuiiDaiyou),
 			SinyouSinkidate:  sinkidate,
-			SonotaKousokukin: fieldDecimal(row, fieldSuiiSonota),
-			Fusokugaku:       fieldDecimal(row, fieldSuiiFusoku),
+			SonotaKousokukin: sonota,
+			Fusokugaku:       fusoku,
+			Missing:          missing,
 		})
 	}
 	return out, nil

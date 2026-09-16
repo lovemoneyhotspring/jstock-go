@@ -383,6 +383,23 @@ func TestPlaceContinuesWhenRefPriceFails(t *testing.T) {
 	}
 }
 
+// まとめ取りが落ちた回は、注文ごとに 1 銘柄ずつ聞き直さない。聞き直すと失敗する往復が
+// 注文の間に直列で挟まり、往復がまとめ取り導入前より増える——引けなら 15:20〜15:30 の
+// 締め切りを削り、手仕舞いを送れずに持ち越しへ化けうる（2026-09-17 のレビュー）。
+func TestPlaceDoesNotRetryPerSymbolWhenBatchFails(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &pricedBroker{stubBroker: &stubBroker{balance: richBalance()},
+		pricesErr: errors.New("時価問合に失敗")}
+	picks := []selection.Pick{pick("7203", domain.SideBuy), pick("6758", domain.SideBuy)}
+	orders, failures, err := PlacePicks(env, b, picks)
+	if err != nil || orders != 2 || len(failures) != 0 {
+		t.Fatalf("orders=%d failures=%v err=%v", orders, failures, err)
+	}
+	if b.calls != 1 {
+		t.Errorf("時価問合 %d 回, want 1（まとめ取りの 1 回だけ。銘柄ごとに聞き直さない）", b.calls)
+	}
+}
+
 func TestPlaceRecordedDeadlineFromBrokerIsUnsent(t *testing.T) {
 	env, _ := newEnv(t)
 	b := &stubBroker{balance: richBalance()}

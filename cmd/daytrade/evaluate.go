@@ -75,6 +75,8 @@ func runEvaluate(date string, asJSON bool) error {
 		fields := map[string]any{
 			"day": day.Format(DateLayout), "runs": chosenRun.Runs,
 			"picked": chosenRun.Picked, "fallback": chosenRun.Fallback,
+			// skipped = true は「建てていたら」の仮想の回しか無かった日（本当の見送り日）
+			"skipped": chosenRun.Skipped,
 			// extra > 0 は 1 回目で建てきれず、次の回が別の銘柄で埋めた朝（部分約定）
 			"extra": chosenRun.Extra,
 		}
