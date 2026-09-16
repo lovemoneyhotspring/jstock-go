@@ -165,6 +165,45 @@ func TestCarriedPositionsSkipsUnconfirmed(t *testing.T) {
 	}
 }
 
+// 持ち越しの返済も送る直前の時価を**まとめて**取る。ここは close の冒頭（SettleCarried）で
+// 走るので、1 銘柄ずつ聞くと 15:20〜15:30 の締め切りをそのぶん削る。まとめ取りを PlaceExits に
+// しか入れていなかったのが取りこぼしだった（2026-09-17 のレビュー）。
+func TestReturnCarriedAsksPricesOnce(t *testing.T) {
+	env, _ := newEnv(t)
+	entryID, d := recordEntry(t, env, 1, "7203", domain.SideSell, 300, 1000)
+	exitID := recordDeadExit(t, env, d, "7203", domain.SideBuy, 300)
+	b := &pricedBroker{
+		stubBroker: &stubBroker{
+			getOrder:  filledLookup(map[string]int64{entryID: 300, exitID: 0}),
+			positions: []domain.Position{margin("7203", -300)},
+			balance:   richBalance(),
+		},
+		prices: map[string]broker.MarketPrice{
+			"7203": {Symbol: "7203", Last: decimal.NewFromInt(990)},
+		},
+	}
+	carried, _, _ := CarriedPositions(env, b, broker.PositionsByLeg(b))
+	if failures := ReturnCarried(env, b, carried, "翌寄りで持ち越しを手仕舞い"); len(failures) != 0 {
+		t.Fatalf("返済に失敗: %v", failures)
+	}
+	if b.calls != 1 {
+		t.Errorf("時価問合 %d 回, want 1（まとめて取る）", b.calls)
+	}
+	exits, err := env.Ledger.ExitsOn(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, o := range exits {
+		if o.RefPrice != nil && o.RefPrice.Equal(decimal.NewFromInt(990)) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("送る直前の時価が台帳に残っていない")
+	}
+}
+
 // 返済は建てた日の下に記録され、再実行は冪等。今日の手仕舞い対象には混ざらない。
 func TestReturnCarriedRecordsUnderEntryDayAndIsIdempotent(t *testing.T) {
 	env, _ := newEnv(t)
