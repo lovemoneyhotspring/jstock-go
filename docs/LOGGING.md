@@ -185,7 +185,7 @@ jq -c 'select(.verify)' state/digest/prod-2026-09-06.jsonl
 | `daytrade.us_vix_missing` | S&P500 は取れたが **VIX だけ**取れていない。`us_vix_override`（VIX > 24 ならゲートを無視）の例外が効かず、「小幅高で休む」が**休む側に倒れる**。取引そのものは止めない | `session`, `source` |
 | `daytrade.run` | 実行の終了 | `phase`（`open` / `close`）, `live`, `reason`, `n`, `budget`, `picks` / `sells`, `failures`, `already_long` / `already_short`, `elapsed_ms`, `deadline` |
 | `daytrade.evaluate` | 大引後に候補の全行へ日足を当てた（`docs/DAYTRADE.md`「候補の結果と選定の妥当性」） | `day`, `source`（`quotes` / `archive_open`）, `rows`, `picked`, `traded`, `path`, `summary`（脚 × 群の件数・平均 net bp・勝率・想定損益） |
-| `daytrade.ranking_run` | 評価に使う順位表の回を選んだ。`open` は 9:01〜9:13 に何度も走り、**建て終わった後の回は建玉を候補から外すので picked が 0 になる**。最後の回をそのまま使うと選定が丸ごと評価から抜けるため、**picks のある最初の回**を選ぶ（2026-09-16 に実際に起きた）。picks のある回が無い日（本当の見送り）は最後の回のまま | `day`, `chosen`（採った回の `recorded_at`）, `runs`（その日の回数）, `picked`, `fallback`（picks のある回が無く最後の回を使った） |
+| `daytrade.ranking_run` | 評価に使う順位表の回を選んだ。`open` は 9:01〜9:13 に何度も走り、**建て終わった後の回は建玉を候補から外すので picked が 0 になる**。最後の回をそのまま使うと選定が丸ごと評価から抜けるため、**picks のある最初の回**を選ぶ（2026-09-16 に実際に起きた）。picks のある回が無い日（本当の見送り）は最後の回のまま。**危険信号で見送った回は「picks のある回」に数えない**——見送りの回にも「建てていたら」の picked が立つので、前半が見送りで後半に建てた朝（2026-09-15）に 1 株も建てていない仮想の回を採ってしまう | `day`, `chosen`（採った回の `recorded_at`）, `runs`（その日の回数）, `picked`, `fallback`（picks のある回が無く最後の回を使った）, `skipped`（採った回が見送りの回＝本当の見送り日） |
 | `daytrade.snap` | 板・気配をそのまま履歴に残した（`docs/OPENING_DATA.md`）。発注はしない | `day`, `slot`（JST の HHMM）, `scope`, `requested`, `rows`, `path` |
 | `daytrade.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception`（トレースバック） |
 

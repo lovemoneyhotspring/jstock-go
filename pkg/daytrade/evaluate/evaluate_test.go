@@ -362,6 +362,86 @@ func rankingRunFrame(rows []map[string]any) history.Frame {
 	}, rows)
 }
 
+// rankingSkipFrame は side と skipped も持つ順位表（見送りの回を混ぜた朝を作るため）。
+func rankingSkipFrame(rows []map[string]any) history.Frame {
+	return history.NewFrame([]history.Column{
+		{Name: "recorded_at", Type: history.TypeTimestamp},
+		{Name: "symbol", Type: history.TypeString},
+		{Name: "side", Type: history.TypeString},
+		{Name: "picked", Type: history.TypeBool},
+		{Name: "skipped", Type: history.TypeBool},
+	}, rows)
+}
+
+// TestPickRankingRunIgnoresSkippedRun は、危険信号で見送った回を「建てた回」として採らないこと。
+// 見送りの回にも「建てていたら」の picked が立つので（appendSkippedRanking）、skipped を見ないと
+// 1 株も建てていない仮想の回を評価してしまう。2026-09-15 がこの形だった
+// （9:01〜9:10 の 4 回が見送りで picked 3〜5、9:13 だけが本物）。
+func TestPickRankingRunIgnoresSkippedRun(t *testing.T) {
+	skipped := time.Date(2026, 9, 15, 0, 1, 4, 0, time.UTC)
+	real := time.Date(2026, 9, 15, 0, 13, 4, 0, time.UTC)
+	frame := rankingSkipFrame([]map[string]any{
+		// 見送った回。建てていたら選んでいた銘柄に picked が立つ
+		{"recorded_at": skipped, "symbol": "6875", "side": "BUY", "picked": true, "skipped": true},
+		{"recorded_at": skipped, "symbol": "5310", "side": "BUY", "picked": false, "skipped": true},
+		// 実際に建てた回
+		{"recorded_at": real, "symbol": "5310", "side": "BUY", "picked": true, "skipped": false},
+		{"recorded_at": real, "symbol": "6875", "side": "BUY", "picked": false, "skipped": false},
+	})
+	got, info := evaluate.PickRankingRun(frame)
+	if !info.At.Equal(real) || info.Skipped || info.Fallback {
+		t.Fatalf("見送りの回を採っている: %+v", info)
+	}
+	if info.Picked != 1 {
+		t.Errorf("picked = %d, want 1（仮想の 6875 を数えない）", info.Picked)
+	}
+	for _, row := range got.Rows {
+		if at := row["recorded_at"].(time.Time); !at.Equal(real) {
+			t.Errorf("見送りの回の行が残っている: %v %v", at, row["symbol"])
+		}
+	}
+}
+
+// TestPickRankingRunUsesSkippedRunOnlyWhenAllSkipped は、本当の見送り日（全部の回が見送り）は
+// 従来どおり「建てていたら」の順位表を評価すること。
+func TestPickRankingRunUsesSkippedRunOnlyWhenAllSkipped(t *testing.T) {
+	first := time.Date(2026, 9, 14, 0, 1, 4, 0, time.UTC)
+	later := time.Date(2026, 9, 14, 0, 4, 4, 0, time.UTC)
+	frame := rankingSkipFrame([]map[string]any{
+		{"recorded_at": first, "symbol": "6875", "side": "BUY", "picked": true, "skipped": true},
+		{"recorded_at": later, "symbol": "6875", "side": "BUY", "picked": true, "skipped": true},
+	})
+	_, info := evaluate.PickRankingRun(frame)
+	if !info.At.Equal(first) || !info.Skipped || info.Fallback {
+		t.Fatalf("見送り日の回の選び方: %+v", info)
+	}
+	if info.Picked != 1 {
+		t.Errorf("picked = %d, want 1（同じ銘柄を 2 回数えない）", info.Picked)
+	}
+}
+
+// TestPickRankingRunKeepsLatestPick は、同じ銘柄が複数の回で picked になった朝に
+// **最後の回の行だけ**を残すこと。1 回目の注文が拒否・未約定だと候補に残り、次の回が
+// 別の株数で建て直す。両方残すと台帳の同じ約定を 2 行に結び、実現損益が二重になる。
+func TestPickRankingRunKeepsLatestPick(t *testing.T) {
+	first := time.Date(2026, 9, 15, 0, 1, 4, 0, time.UTC)
+	later := time.Date(2026, 9, 15, 0, 13, 4, 0, time.UTC)
+	frame := rankingSkipFrame([]map[string]any{
+		{"recorded_at": first, "symbol": "5020", "side": "BUY", "picked": true, "skipped": false},
+		{"recorded_at": later, "symbol": "5020", "side": "BUY", "picked": true, "skipped": false},
+	})
+	got, info := evaluate.PickRankingRun(frame)
+	if info.Picked != 1 {
+		t.Fatalf("picked = %d, want 1（二重に数えない）: %+v", info.Picked, info)
+	}
+	if len(got.Rows) != 1 {
+		t.Fatalf("残った行 = %d, want 1", len(got.Rows))
+	}
+	if at := got.Rows[0]["recorded_at"].(time.Time); !at.Equal(later) {
+		t.Errorf("残った行の回 = %v, want %v（建てたのは後の回）", at, later)
+	}
+}
+
 // TestPickRankingRunPrefersRunWithPicks は、建て終わった後の回（picked 0）ではなく
 // picks のある最初の回を評価に使うこと。最後の回を採ると選定が丸ごと抜ける（2026-09-16）。
 func TestPickRankingRunPrefersRunWithPicks(t *testing.T) {
