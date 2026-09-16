@@ -133,6 +133,7 @@ func TestLatestBeforeCachedHitsCacheAfterHoliday(t *testing.T) {
 	cache := filepath.Join(t.TempDir(), "us.json")
 	source := newStub()
 	source.closes["SP500"]["2026-09-04"] = 5100
+	source.closes["VIXCLS"]["2026-09-04"] = 17 // VIX ごと揃っていればキャッシュで済ませる
 	if _, _, err := LatestBeforeCached(source, cache, day("2026-09-05")); err != nil {
 		t.Fatal(err)
 	}
@@ -179,5 +180,50 @@ func TestLatestBeforeCachedFallsBackToCache(t *testing.T) {
 	s, _, err = LatestBeforeCached(broken, filepath.Join(t.TempDir(), "none.json"), day("2026-09-05"))
 	if err == nil || s != nil {
 		t.Errorf("キャッシュ無し: %+v %v", s, err)
+	}
+}
+
+// TestLatestBeforeCachedRefetchesWhenVixMissing は、S&P500 だけ取れて VIX が落ちた回の
+// キャッシュで止まらず、次の回が取りに行くこと。0 を「値」として残すと、その日は
+// 二度と VIX が入らなかった（2026-09-16）。
+func TestLatestBeforeCachedRefetchesWhenVixMissing(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "us.json")
+	// 1 回目: VIX だけ取れない朝（S&P500 は取れるので取得そのものは成功する）
+	noVix := newStub()
+	delete(noVix.closes, "VIXCLS")
+	s, _, err := LatestBeforeCached(noVix, cache, day("2026-09-04"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s == nil || s.Vix != 0 {
+		t.Fatalf("VIX が取れない朝: %+v", s)
+	}
+	// 2 回目: 取得元が直った。VIX が欠けたキャッシュで済ませず取りに行く
+	source := newStub()
+	s, src, err := LatestBeforeCached(source, cache, day("2026-09-04"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src != SourceFetched {
+		t.Errorf("VIX が欠けたキャッシュで済ませた: %s", src)
+	}
+	if s == nil || s.Vix != 16 {
+		t.Fatalf("取り直した VIX が入っていない: %+v", s)
+	}
+}
+
+// TestMergeClosesKeepsVix は、S&P500 だけ取れた回の 0 で、前に取れていた VIX を消さないこと。
+func TestMergeClosesKeepsVix(t *testing.T) {
+	old := []closes{{Date: "2026-09-03", Spx: 5075, Vix: 16}}
+	fresh := []closes{{Date: "2026-09-03", Spx: 5075}, {Date: "2026-09-04", Spx: 5100}}
+	got := mergeCloses(old, fresh)
+	if len(got) != 2 {
+		t.Fatalf("行数 %d, want 2", len(got))
+	}
+	if got[0].Vix != 16 {
+		t.Errorf("取れていた VIX を 0 で消した: %+v", got[0])
+	}
+	if got[1].Vix != 0 {
+		t.Errorf("無い VIX を作った: %+v", got[1])
 	}
 }
