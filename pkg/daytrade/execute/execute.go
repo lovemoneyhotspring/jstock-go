@@ -50,6 +50,11 @@ type Env struct {
 	// （broker.SetDeadline）と同じ値を渡す——こちらは「次を始めない」、あちらは
 	// 「送信中を打ち切る」の役割。
 	Deadline time.Time
+	// RefPrices は発注ループの前にまとめて取った「送る直前の時価」（銘柄 → 時価）。
+	// 1 銘柄ずつ聞くと注文の合間に往復が直列で挟まり、測ろうとしている遅れ自体を増やす
+	// ——時価問合は 1 回 120 銘柄まで束ねられる（2026-09-16 のレビュー）。
+	// nil なら 1 銘柄ずつ聞き直す（持ち越しの返済など、pick を持たない経路）。
+	RefPrices map[string]broker.MarketPrice
 }
 
 // DefaultRetryWait は RetryWait の既定。
@@ -213,21 +218,55 @@ func EntryTrade(side domain.Side, cfg config.Config) domain.TradeType {
 // 選定に使った 9:00 の気配では、判断から発注までの遅れ（危険信号の再試行や余力の照会で
 // 数分空く）が混じって滑りと区別できない。だから送る直前に 1 銘柄ずつ聞き直す。
 // 取れなければ nil——記録のためだけの値なので、発注は止めない。
-func refPriceOf(env Env, b broker.Broker, symbol string) *ledger.Ref {
+// prefetchRefPrices は発注の前に pick の時価をまとめて取る（1 リクエスト 120 銘柄まで）。
+// 取れなければ nil を返し、各注文が従来どおり 1 銘柄ずつ聞き直す——記録のための値なので、
+// ここで発注を止めることはしない。
+func prefetchRefPrices(env Env, b broker.Broker, picks []selection.Pick) map[string]broker.MarketPrice {
 	source, ok := b.(broker.PriceSource)
-	if !ok {
+	if !ok || len(picks) == 0 {
 		return nil
 	}
-	prices, err := source.MarketPrices([]string{symbol})
+	symbols := make([]string, 0, len(picks))
+	seen := make(map[string]bool, len(picks))
+	for _, p := range picks {
+		if seen[p.Symbol] {
+			continue
+		}
+		seen[p.Symbol] = true
+		symbols = append(symbols, p.Symbol)
+	}
+	prices, err := source.MarketPrices(symbols)
 	if err != nil {
-		env.Report.Warn("daytrade.ref_price", "執行時の時価を取れません（発注は続けます）", map[string]any{
-			"day": env.dayText(), "symbol": symbol, "error": err.Error(),
+		env.Report.Warn("daytrade.ref_price", "執行時の時価をまとめて取れません（1 銘柄ずつ聞き直します）", map[string]any{
+			"day": env.dayText(), "symbols": len(symbols), "error": err.Error(),
 		})
 		return nil
 	}
-	price, ok := prices[symbol]
+	return prices
+}
+
+func refPriceOf(env Env, b broker.Broker, symbol string) *ledger.Ref {
+	price, ok := env.RefPrices[symbol]
 	if !ok {
-		return nil
+		source, isSource := b.(broker.PriceSource)
+		if !isSource {
+			return nil
+		}
+		prices, err := source.MarketPrices([]string{symbol})
+		if err != nil {
+			env.Report.Warn("daytrade.ref_price", "執行時の時価を取れません（発注は続けます）", map[string]any{
+				"day": env.dayText(), "symbol": symbol, "error": err.Error(),
+			})
+			return nil
+		}
+		// 応答に銘柄が無いのは値が無いのと違う。黙ると、銘柄コードの形式が食い違って
+		// 全件外れたときに ref が永久に空のまま誰も気づかない
+		if price, ok = prices[symbol]; !ok {
+			env.Report.Info("daytrade.ref_price", "執行時の時価に銘柄が無い（発注は続けます）", map[string]any{
+				"day": env.dayText(), "symbol": symbol,
+			})
+			return nil
+		}
 	}
 	ref := ledger.Ref{Price: price.Last, Bid: price.Bid, Ask: price.Ask, At: price.At}
 	if !ref.Price.IsPositive() {
@@ -496,6 +535,9 @@ func ResolvePending(env Env, b broker.Broker, grace time.Duration) (reconcile.Su
 func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, failures []string, err error) {
 	// 余力は取引区分ごと（現物は買付余力、信用は新規建可能額）。同じ枠を使う注文で減らしていく
 	remaining := map[domain.TradeType]decimal.Decimal{}
+	// 送る直前の時価は**ループの前に 1 回で**取る。1 銘柄ずつだと注文の合間に往復が直列で入り、
+	// 測ろうとしている「判断から発注までの遅れ」をこの照会自身が増やす
+	env.RefPrices = prefetchRefPrices(env, b, picks)
 
 	for _, pick := range picks {
 		pick := pick
