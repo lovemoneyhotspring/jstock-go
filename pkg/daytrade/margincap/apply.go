@@ -51,13 +51,35 @@ func (r Result) Fields() map[string]any {
 // 最悪 0 に落ちて open が watch-only（その朝は何も建てない）に転ぶ。
 func Apply(cfg config.Config, s Snapshot) (config.Config, Result) {
 	res := Result{Shortfall: s.Fusokugaku.GreaterThan(decimal.Zero)}
-	derivedLong, derivedShort := s.Legs()
+	derivedLong, derivedShort := legTargets(cfg, s.Capacity())
 
 	res.Long = shrinkLong(&cfg, derivedLong)
 	res.Short = shrinkShort(&cfg, derivedShort)
 	res.Applied = res.Long.Changed() || res.Short.Changed()
 	res.WatchOnly = cfg.Capital.Positions() == 0 && (cfg.Margin.Positions() == 0)
 	return cfg, res
+}
+
+// legTargets は建玉合計を脚ごとに割る。比は**設定の max_capital そのまま**。
+//
+// 比をここに持たないのは、長短比が設定側の判断だから。固定値（例 6:4）を置くと、
+// 保証金が減った日だけ設定と違う比に引き戻される——縮小はリスクを下げる操作であって、
+// 長短の方針を変える操作ではない。
+//
+// ショートが無効・0 ならすべてロングへ。両脚とも 0 なら割りようがないので 0 を返す
+// （呼び出し側は「下げ方向のみ」なので、0 と比べれば何も起きない）。
+func legTargets(cfg config.Config, capacity decimal.Decimal) (long, short decimal.Decimal) {
+	longCap := cfg.Capital.MaxCapital
+	shortCap := decimal.Zero
+	if cfg.Margin.Enabled {
+		shortCap = cfg.Margin.MaxCapital
+	}
+	total := longCap.Add(shortCap)
+	if !total.IsPositive() || !capacity.IsPositive() {
+		return decimal.Zero, decimal.Zero
+	}
+	long = capacity.Mul(longCap).Div(total).Floor()
+	return long, capacity.Sub(long)
 }
 
 func shrinkLong(cfg *config.Config, derived decimal.Decimal) LegChange {

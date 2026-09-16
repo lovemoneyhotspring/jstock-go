@@ -49,18 +49,57 @@ func TestConservativeNeedsAtLeastOneRow(t *testing.T) {
 	}
 }
 
-// 建玉合計 = 建可能額 ÷ 1.3。ロング 6 : ショート 4。
-func TestCapacityAndLegs(t *testing.T) {
+// 建玉合計 = 建可能額 ÷ 1.3。
+func TestCapacity(t *testing.T) {
 	s := Snapshot{SinyouSinkidate: dec("11557051")}
 	if got := s.Capacity().String(); got != "8890039" {
 		t.Errorf("建玉合計 %s, want 8890039", got)
 	}
-	long, short := s.Legs()
-	if got := long.String(); got != "5334023" {
-		t.Errorf("ロング %s, want 5334023", got)
+}
+
+// 脚への割り振りは**設定の max_capital の比**。固定の 6:4 ではない
+// ——縮小はリスクを下げる操作で、長短の方針を変える操作ではない。
+func TestLegTargetsFollowsConfigRatio(t *testing.T) {
+	// 300 万 : 200 万 = 3 : 2
+	long, short := legTargets(prodLike(), dec("1000000"))
+	if got := long.String(); got != "600000" {
+		t.Errorf("ロング %s, want 600000", got)
 	}
-	if !long.Add(short).Equal(s.Capacity()) {
-		t.Errorf("両脚の和 %s が建玉合計 %s に一致しない", long.Add(short), s.Capacity())
+	if !long.Add(short).Equal(dec("1000000")) {
+		t.Errorf("両脚の和 %s が建玉合計に一致しない", long.Add(short))
+	}
+
+	// ショートを据え置いてロングだけ上げた設定（533 万 : 200 万）でも比が保たれる
+	skewed := prodLike()
+	skewed.Capital.MaxCapital = dec("5330000")
+	long2, short2 := legTargets(skewed, dec("7330000"))
+	// 5330/7330 ≒ 72.7%
+	if long2.LessThan(dec("5329000")) || long2.GreaterThan(dec("5331000")) {
+		t.Errorf("ロング %s, want ≒5330000（設定の比を保つ）", long2)
+	}
+	if short2.LessThan(dec("1999000")) || short2.GreaterThan(dec("2001000")) {
+		t.Errorf("ショート %s, want ≒2000000", short2)
+	}
+}
+
+// ショートが無効ならすべてロングへ。
+func TestLegTargetsWithoutShort(t *testing.T) {
+	cfg := prodLike()
+	cfg.Margin.Enabled = false
+	long, short := legTargets(cfg, dec("1000000"))
+	if !long.Equal(dec("1000000")) || !short.IsZero() {
+		t.Errorf("ロング %s / ショート %s, want 1000000 / 0", long, short)
+	}
+}
+
+// 両脚とも 0 の設定は割りようがない（0 を返し、下げ方向のみなので何も起きない）。
+func TestLegTargetsWithNoCapital(t *testing.T) {
+	cfg := prodLike()
+	cfg.Capital.MaxCapital = decimal.Zero
+	cfg.Margin.MaxCapital = decimal.Zero
+	long, short := legTargets(cfg, dec("1000000"))
+	if !long.IsZero() || !short.IsZero() {
+		t.Errorf("ロング %s / ショート %s, want 0 / 0", long, short)
 	}
 }
 

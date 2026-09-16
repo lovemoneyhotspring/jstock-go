@@ -28,12 +28,6 @@ const dateLayout = "2006-01-02"
 // （9 年の複利試算で 1.3 → 1.94 億、2.0 → 1.43 億、3.0 → 9,891 万）。
 var SafetyFactor = decimal.RequireFromString("1.3")
 
-// LongShare は建玉合計のうちロングに割く比。残りがショート。
-//
-// 名目 300 万 : 200 万 = 1.5 : 1 を保つ。比そのものの根拠は 2026-09-jp-short-dd
-// （ショートは相関 −0.07 の分散装置で、縮めると spill_to_long でロングが膨らみ合算 DD が悪化）。
-var LongShare = decimal.RequireFromString("0.6")
-
 // Snapshot は前夜に焼いた保証金の状態（キャッシュのファイル形式）。
 type Snapshot struct {
 	// Day は判定日（この保証金で建てる営業日）。
@@ -88,18 +82,15 @@ func Conservative(day time.Time, rows []domain.MarginSummary) (Snapshot, error) 
 // Capacity は建てられる額。ロングとショートに割り振る前の合計。
 //
 //	建玉合計 = 信用新規建可能額 ÷ SafetyFactor
+//
+// 脚への割り振りは設定の max_capital の比で決める（legTargets）。ここに比を持たないのは、
+// 長短比が設定側の判断だから——ハードコードすると、縮小した日だけ設定と違う比に
+// 引き戻されることになる。
 func (s Snapshot) Capacity() decimal.Decimal {
 	if s.SinyouSinkidate.LessThanOrEqual(decimal.Zero) {
 		return decimal.Zero
 	}
 	return s.SinyouSinkidate.Div(SafetyFactor).Floor()
-}
-
-// Legs は建玉合計をロング・ショートに割る。
-func (s Snapshot) Legs() (long, short decimal.Decimal) {
-	total := s.Capacity()
-	long = total.Mul(LongShare).Floor()
-	return long, total.Sub(long)
 }
 
 // IsFresh は判定日ぶんとして使えるか（その日に焼いたものだけ）。
