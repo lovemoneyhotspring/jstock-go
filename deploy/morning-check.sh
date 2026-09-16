@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 寄り付きの記録（daytrade snap）と dry-run の open が、その朝ちゃんと回ったかを点検して
+# 寄り付きの記録（daytrade snap）と open が、その朝ちゃんと回ったかを点検して
 # Discord に 1 通投げる。板は過去に遡れないので、**欠けたその日のうちに気づく**ためのもの。
 #
 #   deploy/morning-check.sh            # cron 用（9:22）。結果を必ず 1 通投げる
@@ -20,13 +20,44 @@ cd "$HOME_DIR" || exit 1
 TODAY="$(TZ=Asia/Tokyo date +%F)"
 BOOK_DIR="$HOME_DIR/state/daytrade/history/book"
 SNAP_LOG="$HOME_DIR/state/logs/daytrade-snap.log"
-# open のログ。本番（--live）の行があればそちら、無ければ dry-run の行（crontab のどちらが生きているか）
-OPEN_LOG="$HOME_DIR/state/logs/daytrade-open.log"
-OPEN_LABEL="open（本番）"
-if ! crontab -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -q 'daytrade open .*--live'; then
-  OPEN_LOG="$HOME_DIR/state/logs/daytrade-open-dryrun.log"
-  OPEN_LABEL="dry-run の open"
+# open が本番（--live）だったか dry-run だったかは、**crontab ではなくその朝の事実**で決める。
+# 構造化ログの daytrade.config に extra.live が残っているので、そこから読む。
+#
+# 以前は `crontab -l | grep -v … | grep -q …--live` で決めていた。`grep -q` は一致した時点で
+# 終了するので、負荷が高くて上流がまだ書いている途中だと上流が SIGPIPE で死に、pipefail の
+# せいで「一致しているのに失敗」になる。本番の朝に dry-run（9/14 で止まったログ）を数え、
+# 完了 0・見送り 0 で誤報を出した（2026-09-16。~/obsidian-vault/30-projects/daytrade-morning-check-open-log.md）。
+#
+# 9:01〜9:13 JST は同じ UTC 日付の 00:01〜00:13 なので、UTC の日付で朝の回を拾える
+# （下の「判断の経過」の deploy/open-pipeline.jq と同じ前提）。
+JSONL="$HOME_DIR/state/logs/daytrade-prod.jsonl"
+OPEN_LOG_LIVE="$HOME_DIR/state/logs/daytrade-open.log"
+OPEN_LOG_DRYRUN="$HOME_DIR/state/logs/daytrade-open-dryrun.log"
+open_live=""
+if [ -f "$JSONL" ]; then
+  open_live=$(jq -sr --arg d "$TODAY" '
+    [ .[] | select(.command == "open" and .code == "daytrade.config"
+                   and (.ts_utc | startswith($d))) | .extra.live ]
+    | if length == 0 then "" elif any then "true" else "false" end' "$JSONL" 2>/dev/null)
 fi
+case "$open_live" in
+  true)
+    OPEN_LOG="$OPEN_LOG_LIVE";   OPEN_LABEL="open（本番）";     OPEN_WHY="構造化ログの live=true" ;;
+  false)
+    OPEN_LOG="$OPEN_LOG_DRYRUN"; OPEN_LABEL="dry-run の open"; OPEN_WHY="構造化ログの live=false" ;;
+  *)
+    # 今日の daytrade.config が無い（cron が動かなかった・config を残す前の版）。
+    # 次善の事実として、今日の行があるログの方を選ぶ。どちらも無ければ本番
+    live_lines=$(grep -c "$TODAY" "$OPEN_LOG_LIVE" 2>/dev/null | head -1)
+    dry_lines=$(grep -c "$TODAY" "$OPEN_LOG_DRYRUN" 2>/dev/null | head -1)
+    if [ "${dry_lines:-0}" -gt "${live_lines:-0}" ]; then
+      OPEN_LOG="$OPEN_LOG_DRYRUN"; OPEN_LABEL="dry-run の open"
+    else
+      OPEN_LOG="$OPEN_LOG_LIVE";   OPEN_LABEL="open（本番）"
+    fi
+    OPEN_WHY="構造化ログに $TODAY の open なし。今日の行が多い方（本番 ${live_lines:-0} 行 / dry-run ${dry_lines:-0} 行）"
+    ;;
+esac
 
 if [ -f "$HOME_DIR/.env" ]; then
   set -a
@@ -100,33 +131,57 @@ trap 'rm -f "$body"' EXIT
     done
   fi
 
-  # --- dry-run の open --------------------------------------------------------
+  # --- open -------------------------------------------------------------------
+  #
+  # 起動・完了・見送りは構造化ログから数える。下の「判断の経過」と材料を 1 本に揃えるため。
+  # テキストのログは [error] と lock_busy（with-lock.sh が書く。JSONL には残らない）にだけ使う
   echo
+  echo "読んだログ: $OPEN_LOG（$OPEN_WHY）"
+  attempts=0; runs=0; skips=0
+  if [ -f "$JSONL" ]; then
+    # 起動 = その日の open の run_id の数、完了 = daytrade.run のあった回、
+    # 見送り = daytrade.skip のあった回（危険信号・候補なし等。2026-09-14 は 4 回とも見送り）
+    counts=$(jq -sr --arg d "$TODAY" '
+      [ .[] | select(.command == "open" and (.ts_utc | startswith($d))) ]
+      | group_by(.run_id)
+      | [ length,
+          (map(select(any(.[]; .code == "daytrade.run")))  | length),
+          (map(select(any(.[]; .code == "daytrade.skip"))) | length) ]
+      | @tsv' "$JSONL" 2>/dev/null)
+    [ -n "$counts" ] && read -r attempts runs skips <<<"$counts"
+  fi
+  # grep -c は 0 件のとき「0」を出して終了コード 1 を返す。`|| echo 0` を足すと
+  # 0 が 2 行になるので、成否は無視して出力だけ取る
+  count() { grep -c "$@" 2>/dev/null | head -1; }
+  errs=0; busy=0
   if [ -f "$OPEN_LOG" ]; then
-    # grep -c は 0 件のとき「0」を出して終了コード 1 を返す。`|| echo 0` を足すと
-    # 0 が 2 行になるので、成否は無視して出力だけ取る
-    count() { grep -c "$@" 2>/dev/null | head -1; }
-    runs=$(count "$TODAY.*daytrade.run" "$OPEN_LOG")
-    # 判断まで進んで建てずに終わった回（危険信号・候補なし等）。「完了」のログは出ないので、
-    # 数えないと cron が動かなかった朝と見分けがつかない（2026-09-14 は 4 回とも危険信号で見送り）
-    skips=$(count "$TODAY.*\[daytrade.skip\]" "$OPEN_LOG")
     errs=$(count "$TODAY.*\[error\]" "$OPEN_LOG")
     busy=$(count "$TODAY.*lock_busy" "$OPEN_LOG")
-    echo "$OPEN_LABEL: 完了 $runs 回 / 見送り $skips 回 / エラー $errs 件 / ロック見送り $busy 件"
-    if [ "$skips" != "0" ]; then
-      grep "$TODAY" "$OPEN_LOG" | grep -o "\[daytrade.skip\] .*" | sort | uniq -c | sed 's/^ */  /'
-    fi
-    [ "$errs" != "0" ] && problems=$((problems + 1))
-    if [ "$runs" = "0" ] && [ "$skips" = "0" ] && [ "$errs" = "0" ]; then
-      echo "❌ open が 1 回も判断まで進んでいません（cron が動いていない・ロックで見送り）"
-      problems=$((problems + 1))
-    fi
-    echo '```'
-    grep "$TODAY" "$OPEN_LOG" | grep -E "\[error\]|\[warn\]" | tail -5
-    echo '```'
   else
-    echo "❌ $OPEN_LOG がありません（cron が動いていない）"
+    echo "※ $OPEN_LOG がありません（エラーとロック見送りは数えられません）"
+  fi
+  echo "$OPEN_LABEL: 起動 $attempts 回 / 完了 $runs 回 / 見送り $skips 回 / エラー $errs 件 / ロック見送り $busy 件"
+  if [ "$skips" != "0" ] && [ -f "$JSONL" ]; then
+    jq -sr --arg d "$TODAY" '
+      [ .[] | select(.command == "open" and .code == "daytrade.skip"
+                     and (.ts_utc | startswith($d))) | .msg ]
+      | group_by(.) | map("  \(length) \(.[0])") | .[]' "$JSONL" 2>/dev/null
+  fi
+  [ "$errs" != "0" ] && problems=$((problems + 1))
+  if [ "$attempts" = "0" ]; then
+    echo "❌ open が 1 回も動いていません（cron が動いていない・ロックで見送り）"
     problems=$((problems + 1))
+  elif [ "$runs" = "0" ] && [ "$skips" = "0" ]; then
+    echo "❌ open は $attempts 回動きましたが、1 回も判断まで進んでいません（途中で止まった）"
+    problems=$((problems + 1))
+  fi
+  if [ -f "$OPEN_LOG" ]; then
+    tail_warn=$(grep "$TODAY" "$OPEN_LOG" 2>/dev/null | grep -E "\[error\]|\[warn\]" | tail -5)
+    if [ -n "$tail_warn" ]; then
+      echo '```'
+      echo "$tail_warn"
+      echo '```'
+    fi
   fi
 
   # --- open の判断の経過と気配の鮮度（本番でしか出ない数字）-----------------------------------------
@@ -138,11 +193,9 @@ trap 'rm -f "$body"' EXIT
   #
   # 未来の件数は別の穴。寄り前の銘柄が前日の 15:30 を返すと「今日の 15:30」＝未来になり、
   # 鮮度の検査を素通りする（FutureStamped は数えるだけで除外しない）。
-  JSONL="$HOME_DIR/state/logs/daytrade-prod.jsonl"
   if [ -f "$JSONL" ]; then
     # 回（run_id）ごとに、気配の内訳（受信・除外・板で残す・未来・使えた）、前夜の米国の値、
-    # 結末と理由、発注した回は選んだ銘柄とその上で外れた銘柄の理由。読み方は deploy/open-pipeline.jq。
-    # 9:01〜9:13 JST は同じ UTC 日付の 00:01〜00:13 なので、UTC の日付で朝の回を拾える
+    # 結末と理由、発注した回は選んだ銘柄とその上で外れた銘柄の理由。読み方は deploy/open-pipeline.jq
     freshness=$(jq -sr --arg d "$TODAY" -f "$HOME_DIR/deploy/open-pipeline.jq" "$JSONL" 2>&1)
     if [ -n "$freshness" ]; then
       echo
