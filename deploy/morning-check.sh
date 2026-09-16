@@ -137,18 +137,23 @@ trap 'rm -f "$body"' EXIT
   # テキストのログは [error] と lock_busy（with-lock.sh が書く。JSONL には残らない）にだけ使う
   echo
   echo "読んだログ: $OPEN_LOG（$OPEN_WHY）"
-  attempts=0; runs=0; skips=0
+  attempts=0; runs=0; skips=0; counted=1
   if [ -f "$JSONL" ]; then
     # 起動 = その日の open の run_id の数、完了 = daytrade.run のあった回、
     # 見送り = daytrade.skip のあった回（危険信号・候補なし等。2026-09-14 は 4 回とも見送り）
-    counts=$(jq -sr --arg d "$TODAY" '
+    if counts=$(jq -sr --arg d "$TODAY" '
       [ .[] | select(.command == "open" and (.ts_utc | startswith($d))) ]
       | group_by(.run_id)
       | [ length,
           (map(select(any(.[]; .code == "daytrade.run")))  | length),
           (map(select(any(.[]; .code == "daytrade.skip"))) | length) ]
-      | @tsv' "$JSONL" 2>/dev/null)
-    [ -n "$counts" ] && read -r attempts runs skips <<<"$counts"
+      | @tsv' "$JSONL" 2>/dev/null); then
+      [ -n "$counts" ] && read -r attempts runs skips <<<"$counts"
+    else
+      # jq -s はファイル全体を一括で読むので、1 行でも壊れていれば何も数えられない。
+      # それを「0 回」と読むと「open が 1 回も動いていません」と誤報する（9b250ff と同じ型）
+      counted=0
+    fi
   fi
   # grep -c は 0 件のとき「0」を出して終了コード 1 を返す。`|| echo 0` を足すと
   # 0 が 2 行になるので、成否は無視して出力だけ取る
@@ -168,7 +173,10 @@ trap 'rm -f "$body"' EXIT
       | group_by(.) | map("  \(length) \(.[0])") | .[]' "$JSONL" 2>/dev/null
   fi
   [ "$errs" != "0" ] && problems=$((problems + 1))
-  if [ "$attempts" = "0" ]; then
+  if [ "$counted" = "0" ]; then
+    echo "❌ 構造化ログを読めませんでした（jq が失敗。壊れた行がある）。open の回数は数えられません"
+    problems=$((problems + 1))
+  elif [ "$attempts" = "0" ]; then
     echo "❌ open が 1 回も動いていません（cron が動いていない・ロックで見送り）"
     problems=$((problems + 1))
   elif [ "$runs" = "0" ] && [ "$skips" = "0" ]; then

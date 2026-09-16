@@ -86,7 +86,9 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 8:52 だけは前日ぶんも取り直す（--days 2 --recent 2）: 前夜 20:20 より後の開示は 06:20 の回でしか入らず、
 # 06:20 が失敗した朝に 8:52 が当日ぶんだけ取ると、記録簿は「新しい」のに前夜遅くの TOB を知らないまま売る。
 # ほかは当日ぶんだけなので --days 1 --recent 1（1 回 4 秒ほど）。ロックは news.lock で daytrade と別
-52 8 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 2 --recent 2                                    >> state/logs/news-sync.log        2>&1
+# 8:52 は with-lock.sh で 30 秒待つ。flock -n だと取れなかった回が無言で消え、TOB 除外の前提
+# （記録簿が前夜遅くの開示まで入っている）が黙って崩れる——見送った回もログに残す
+52 8 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/news.lock 30 state/logs/news-sync.log $WBJP_BIN/news sync --days 2 --recent 2
 20 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 1 --recent 1                                    >> state/logs/news-sync.log        2>&1
 # 場中は 10 分おき（9:14〜15:14）。2 分後の daytrade guard が、材料の出た今日の売建を取消・返済する。
 # 9:14 は最後の open（9:13）の直後——8:52〜9:13 の公表で建ててしまった売建を 9:16 に拾う
@@ -134,6 +136,8 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # **前夜ではなく朝に取る**: 代用有価証券の評価は前営業日終値 × 掛目で、受入保証金は夜間更新
 # （5:30 頃）に確定する。前夜の値では ETF の評価替えを取りこぼす。
 # 仮想 URL は口座に 1 つしか持てないので 8:55 の snap と同じロックを共有する（30 秒待つ）。
+# warm-margin 自身は 60 秒の締め切りを持つので 8:54 までに終わる——8:55 の snap は待たない
+# （wait 0）ため、ここが長引くと板の記録がそのぶん欠ける。
 # 取れなかった朝は open が設定の値で建てる（売買は止まらない）
 53 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-margin.log $WBJP_BIN/daytrade warm-margin --config-dir config/daytrade_margin
 # 9:22: その朝の記録が回ったかを点検して Discord に 1 通投げる（deploy/morning-check.sh）。
