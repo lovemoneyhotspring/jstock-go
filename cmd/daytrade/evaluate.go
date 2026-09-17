@@ -156,6 +156,11 @@ func runEvaluate(date string, asJSON bool) error {
 		"day": day.Format(DateLayout), "source": source, "rows": result.Height(),
 		"picked": picked, "traded": traded, "path": path,
 	})
+	if cmp, ok := dtevaluate.CompareRule(result); ok {
+		fields := cmp.Fields()
+		fields["day"] = day.Format(DateLayout)
+		logInfo("daytrade.rule_compare", "ロングの LightGBM と既存規則（gap_vol）の比べ", fields)
+	}
 	digest.Note(map[string]any{
 		"rows": result.Height(), "picked": picked, "traded": traded, "source": source,
 	})
@@ -237,12 +242,14 @@ func printEvaluation(day time.Time, result, summary history.Frame, source string
 			pnlText(row["hypo_pnl"]), iOf(row["traded"]), pnlText(row["actual_pnl"]))
 	}
 
+	printRuleComparison(result)
+
 	fmt.Println("\n選んだ銘柄と次点（想定損益は「建てていたら」）")
 	fmt.Printf("  %-5s %-5s %-6s %-10s %9s %9s %9s %9s %9s %12s %6s %12s %s\n",
 		"脚", "#", "銘柄", "名称", "順位の gap", "始値", "終値", "gross bp", "net bp",
 		"想定損益", "建てた", "実現損益", "備考")
 	for _, row := range result.Rows {
-		if strOf(row["rank_group"]) == "rest" {
+		if strOf(row["rank_group"]) == "rest" && !bOf(row["rule_picked"]) {
 			continue
 		}
 		var notes []string
@@ -259,6 +266,9 @@ func printEvaluation(day time.Time, result, summary history.Frame, source string
 		if bOf(row["picked"]) {
 			mark = "*"
 		}
+		if row["score"] != nil && bOf(row["rule_picked"]) {
+			mark += "r"
+		}
 		traded := ""
 		if bOf(row["traded"]) {
 			traded = "○"
@@ -270,5 +280,31 @@ func printEvaluation(day time.Time, result, summary history.Frame, source string
 			bpText(row["gross_bp"]), bpText(row["net_bp"]), pnlText(row["hypo_pnl"]),
 			traded, pnlText(row["actual_pnl"]), strings.Join(notes, "、"))
 	}
-	fmt.Println("# の * は選んだ銘柄。net bp は費用（滑り・貸株料等の見込み）を引いた後")
+	fmt.Println("# の * は選んだ銘柄、r は既存規則（gap_vol）なら選んでいた銘柄（LightGBM で並べた日だけ）。net bp は費用（滑り・貸株料等の見込み）を引いた後")
+}
+
+// printRuleComparison は LightGBM で並べた日に、ロングを既存規則で選んでいたらと並べて出す。
+func printRuleComparison(result history.Frame) {
+	cmp, ok := dtevaluate.CompareRule(result)
+	if !ok {
+		return
+	}
+	title := "\nロング: LightGBM と既存規則（gap_vol）の比べ（想定損益は「建てていたら」）"
+	if cmp.Skipped {
+		title += "  ※見送りの日"
+	}
+	fmt.Println(title)
+	fmt.Printf("  %-10s %6s %12s %14s  %s\n", "並べ方", "件数", "平均 net bp", "想定損益", "銘柄")
+	for _, row := range []struct {
+		label string
+		set   dtevaluate.PickSet
+	}{{"LightGBM", cmp.LGBM}, {"gap_vol", cmp.Rule}} {
+		var avg any
+		if row.set.AvgNetBP != nil {
+			avg = *row.set.AvgNetBP
+		}
+		fmt.Printf("  %-10s %6d %12s %14s  %s\n", row.label, row.set.Count, bpText(avg),
+			pnlText(row.set.HypoPnL), strings.Join(row.set.Symbols, " "))
+	}
+	fmt.Printf("  重なり %d 件  差（LightGBM − gap_vol）%s\n", cmp.Overlap, pnlText(cmp.LGBM.HypoPnL-cmp.Rule.HypoPnL))
 }

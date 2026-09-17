@@ -83,3 +83,21 @@ func TestRulePicksWithoutModel(t *testing.T) {
 		t.Errorf("RulePicks = %v, want %v", got, picks)
 	}
 }
+
+// TryRank は並べ替えの失敗（読めないモデル）を誤りで返し、パニックを外に出さない。
+func TestTryRankReportsFailure(t *testing.T) {
+	sig := lgbmSignal(t)
+	candidates := []universe.Candidate{candidate("1000", 1000, nil)}
+	quotes := map[string]Quote{"1000": quote("1000", 950)}
+	if got, err := TryRank(candidates, quotes, sig); err != nil || len(got) != 1 || got[0].Score == nil {
+		t.Fatalf("読めるモデルで %v / %v", got, err)
+	}
+	sig.Model = filepath.Join(t.TempDir(), "none.txt")
+	if got, err := TryRank(candidates, quotes, sig); err == nil || got != nil {
+		t.Errorf("読めないモデルで誤りにならない: %v / %v", got, err)
+	}
+	// 候補が 0 件ならモデルに触れないので誤りにしない
+	if _, err := TryRank(nil, quotes, sig); err != nil {
+		t.Errorf("候補 0 件で誤り: %v", err)
+	}
+}

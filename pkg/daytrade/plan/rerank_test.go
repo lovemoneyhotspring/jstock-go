@@ -1,6 +1,8 @@
 package plan_test
 
 import (
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -45,10 +47,25 @@ func TestSaveLoadKeepsRerankFeatures(t *testing.T) {
 	if d := loaded.Candidates[1]; d.Ret1 != nil || d.EarnYield != nil {
 		t.Errorf("値の無い銘柄が nil でない: %v %v", d.Ret1, d.EarnYield)
 	}
-	sig := config.Signal{RankBy: config.RankByLGBM}
-	if got := loaded.Signal(sig).RankBy; got != config.RankByLGBM {
-		t.Errorf("特徴量のある plan で rank_by = %s", got)
+	cfg := config.Default()
+	cfg.Signal.RankBy, cfg.Signal.Model = config.RankByLGBM, repoModel(t)
+	cfg.Regime.UsSkipLegs = config.UsSkipLegsShort
+	if got, reason := loaded.RankConfig(cfg); got.Signal.RankBy != config.RankByLGBM || reason != "" ||
+		got.Regime.UsSkipLegs != config.UsSkipLegsShort {
+		t.Errorf("特徴量のある plan で rank_by = %s（%s）us_skip_legs = %s", got.Signal.RankBy, reason, got.Regime.UsSkipLegs)
 	}
+	// モデルが読めなければ gap_vol に戻し、米国小幅高の日は両脚とも休む
+	cfg.Signal.Model = filepath.Join(t.TempDir(), "none.txt")
+	if got, reason := loaded.RankConfig(cfg); got.Signal.RankBy != config.RankByGapVol || reason == "" ||
+		got.Regime.UsSkipLegs != config.UsSkipLegsAll {
+		t.Errorf("読めないモデルで rank_by = %s（%q）us_skip_legs = %s", got.Signal.RankBy, reason, got.Regime.UsSkipLegs)
+	}
+}
+
+func repoModel(t *testing.T) string {
+	t.Helper()
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(file), "..", "..", "..", "config", "daytrade", "models", "lgbm_rank.txt")
 }
 
 // 特徴量の列が無い古い plan も読め、機械学習では並べない（既存規則に戻す）。
@@ -80,11 +97,13 @@ func TestOldPlanFallsBackToRule(t *testing.T) {
 	if c := loaded.Candidates[0]; c.Ret1 != nil || c.EarnYield != nil || !c.Eligible {
 		t.Errorf("古い plan の読み方が違う: %+v", c)
 	}
-	sig := config.Signal{RankBy: config.RankByLGBM, Model: "x"}
-	if got := loaded.Signal(sig); got.RankBy != config.RankByGapVol {
-		t.Errorf("古い plan で rank_by = %s, want %s", got.RankBy, config.RankByGapVol)
+	cfg := config.Default()
+	cfg.Signal.RankBy, cfg.Signal.Model = config.RankByLGBM, repoModel(t)
+	if got, reason := loaded.RankConfig(cfg); got.Signal.RankBy != config.RankByGapVol || reason == "" {
+		t.Errorf("古い plan で rank_by = %s（%q）, want %s", got.Signal.RankBy, reason, config.RankByGapVol)
 	}
-	if got := loaded.Signal(config.Signal{RankBy: config.RankByGap}); got.RankBy != config.RankByGap {
-		t.Errorf("lgbm 以外を書き換えた: %s", got.RankBy)
+	cfg.Signal.RankBy = config.RankByGap
+	if got, reason := loaded.RankConfig(cfg); got.Signal.RankBy != config.RankByGap || reason != "" {
+		t.Errorf("lgbm 以外を書き換えた: %s", got.Signal.RankBy)
 	}
 }

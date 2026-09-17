@@ -137,6 +137,23 @@ func Rank(candidates []universe.Candidate, quotes map[string]Quote, cfg config.S
 	})
 }
 
+// TryRank は Rank と同じだが、機械学習の並べ替えが失敗したら（パニック・予測値が数でない）
+// 誤りを返す。open は寄付の判定の前にこれで試し、失敗なら gap_vol に戻して取引する。
+func TryRank(candidates []universe.Candidate, quotes map[string]Quote, cfg config.Signal) (out []Ranked, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			out, err = nil, fmt.Errorf("並べ替えに失敗: %v", r)
+		}
+	}()
+	out = Rank(candidates, quotes, cfg)
+	for _, r := range out {
+		if r.Score != nil && (math.IsNaN(*r.Score) || math.IsInf(*r.Score, 0)) {
+			return nil, fmt.Errorf("%s の予測値が数でない（%v）", r.Symbol, *r.Score)
+		}
+	}
+	return out, nil
+}
+
 // RankShort は信用売りの候補を、ギャップの**大きい**順に並べる（Rank の鏡像）。
 //
 // candidates は前夜の plan がショート専用の母集団で判定した行だけを渡すこと。
@@ -265,9 +282,9 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 		}
 		model, err := rerank.Cached(f.model)
 		if err != nil {
-			// config.Validate がモデルを読めることを確かめてから来る。ここに来るのは
-			// 検証を通さずに作った設定だけなので、黙って別の並べ方にせず止める
-			panic(fmt.Sprintf("並べ替えのモデルを読めません（config.Validate を通していない設定）: %v", err))
+			// 黙って別の並べ方にせず止める。open は TryRank で受けて gap_vol に戻す
+			// （plan.RankConfig がモデルを先に確かめるので、ふつうはここに来ない）
+			panic(fmt.Sprintf("並べ替えのモデルを読めません: %v", err))
 		}
 		for i, v := range model.Scores(inputs) {
 			out[i].Score = &v

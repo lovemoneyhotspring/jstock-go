@@ -222,6 +222,28 @@ type Signal struct {
 	MaxPerSector int `toml:"max_per_sector"`
 }
 
+// ModelError は rank_by = "lgbm" のモデルが読めなければその誤り（lgbm 以外なら nil）。
+func (s Signal) ModelError() error {
+	if s.RankBy != RankByLGBM {
+		return nil
+	}
+	if _, err := rerank.Cached(s.Model); err != nil {
+		return fmt.Errorf("signal.model: %w", err)
+	}
+	return nil
+}
+
+// FallbackToGapVol は LightGBM で並べられない日の設定（rank_by = gap_vol）。
+// us_skip_legs = "short" は LightGBM のロングが米国小幅高の日も稼げるから選んだ値で、
+// gap_vol のこの日は稼げない（+3.88 bp・t 0.59）。なので両脚とも休む（"all"）に戻す。
+func (c Config) FallbackToGapVol() Config {
+	c.Signal.RankBy = RankByGapVol
+	if c.Regime.UsSkipLegs == UsSkipLegsShort {
+		c.Regime.UsSkipLegs = UsSkipLegsAll
+	}
+	return c
+}
+
 // 米国のゲートで止める脚（Regime.UsSkipLegs）。
 const (
 	UsSkipLegsAll   = "all"
@@ -652,10 +674,9 @@ func (c Config) Validate() error {
 		if c.Signal.Model == "" {
 			return fmt.Errorf("signal.rank_by = %q には signal.model（モデルのファイル）が要る", RankByLGBM)
 		}
-		// 読めないモデルで朝を迎えないよう、設定を読んだ時点で確かめる（読んだものは使い回す）
-		if _, err := rerank.Cached(c.Signal.Model); err != nil {
-			return fmt.Errorf("signal.model: %w", err)
-		}
+		// モデルが読めるかはここでは確かめない。確かめると、モデルが壊れた日に close・verify・guard
+		// まで設定の読み込みで止まる。open は ModelError で確かめ、読めなければ gap_vol で取引する
+		// （FallbackToGapVol）。backtest は並べる時点で止まる
 	default:
 		return fmt.Errorf("signal.rank_by は %s / %s / %s: %q", RankByGap, RankByGapVol, RankByLGBM, c.Signal.RankBy)
 	}
