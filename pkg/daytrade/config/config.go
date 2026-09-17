@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/fees"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/rerank"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/session"
 	"github.com/pelletier/go-toml/v2"
@@ -168,6 +169,9 @@ type Universe struct {
 const (
 	RankByGap    = "gap"
 	RankByGapVol = "gap_vol"
+	// RankByLGBM は機械学習（LightGBM）の予測値の高い順。候補・帯・N の取り方は同じで、
+	// 並べる順番だけが変わる（daytrade/rerank）。モデルは Signal.Model。
+	RankByLGBM = "lgbm"
 )
 
 type Signal struct {
@@ -184,6 +188,10 @@ type Signal struct {
 	// 研究ノート 2026-09-jp-daytrade-selection-2: 探索 +6.7 bp/日（t 2.1）・確認 +6.7 bp（t 1.7）で
 	// 事前基準（t 2.5）には届かず、追跡中の仮説。
 	RankBy string `toml:"rank_by"`
+	// Model は rank_by = "lgbm" のモデル（LightGBM のテキスト形式）。相対パスは
+	// **この項目を書いた設定ファイルのディレクトリから**（読み込み時に絶対パスにする。
+	// extends で継いだ子の設定からも同じファイルを指すため）。
+	Model string `toml:"model"`
 	// SkipOpened は 9:01 の時点で**既に寄っている**銘柄を候補から外す。
 	// ロング・ショートの**両方**に効く（気配そのものを落とすため）。
 	//
@@ -589,6 +597,22 @@ func load(configDir string, visited []string) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
+	// signal.model はこのファイルに書かれていたときだけ、このディレクトリから解決する
+	var own struct {
+		Signal struct {
+			Model string `toml:"model"`
+		} `toml:"signal"`
+	}
+	if err := toml.Unmarshal(raw, &own); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if own.Signal.Model != "" && !filepath.IsAbs(own.Signal.Model) {
+		model, err := filepath.Abs(filepath.Join(configDir, own.Signal.Model))
+		if err != nil {
+			return Config{}, fmt.Errorf("%s: signal.model: %w", path, err)
+		}
+		cfg.Signal.Model = model
+	}
 	return cfg, nil
 }
 
@@ -612,8 +636,18 @@ func (c Config) Validate() error {
 	if c.Universe.ExcludeCapTerciles < 0 || c.Universe.ExcludeCapTerciles > 2 {
 		return fmt.Errorf("universe.exclude_cap_terciles は 0〜2")
 	}
-	if c.Signal.RankBy != RankByGap && c.Signal.RankBy != RankByGapVol {
-		return fmt.Errorf("signal.rank_by は %s / %s: %q", RankByGap, RankByGapVol, c.Signal.RankBy)
+	switch c.Signal.RankBy {
+	case RankByGap, RankByGapVol:
+	case RankByLGBM:
+		if c.Signal.Model == "" {
+			return fmt.Errorf("signal.rank_by = %q には signal.model（モデルのファイル）が要る", RankByLGBM)
+		}
+		// 読めないモデルで朝を迎えないよう、設定を読んだ時点で確かめる（読んだものは使い回す）
+		if _, err := rerank.Cached(c.Signal.Model); err != nil {
+			return fmt.Errorf("signal.model: %w", err)
+		}
+	default:
+		return fmt.Errorf("signal.rank_by は %s / %s / %s: %q", RankByGap, RankByGapVol, RankByLGBM, c.Signal.RankBy)
 	}
 	if c.Signal.ValuePool < 0 {
 		return fmt.Errorf("signal.value_pool は 0 以上（0 / 1 は無効）")

@@ -35,6 +35,8 @@ type feature struct {
 	turnoverMed float64
 	mktCap      float64
 	vol20       *float64
+	// 並べ替えの機械学習の特徴量（Candidate.Ret1 ほか）
+	ret1, ret5, ret20, pos20, prevIntraday *float64
 }
 
 // Build は判定日 day の候補を作る。prevDay は前営業日。
@@ -106,6 +108,11 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 			TurnoverMed:   f.turnoverMed,
 			MktCap:        f.mktCap,
 			Vol20:         f.vol20,
+			Ret1:          f.ret1,
+			Ret5:          f.ret5,
+			Ret20:         f.ret20,
+			Pos20:         f.pos20,
+			PrevIntraday:  f.prevIntraday,
 			EarnPrev:      earnPrev[f.code],
 			DiscToday:     discToday[f.code],
 			Alert:         alert[f.code],
@@ -156,9 +163,14 @@ func loadFeatures(arch *archive.Archive, prevDay time.Time, cfg config.Universe)
 	// 出す（足りなければ NULL → 母集団に入らない）。バックテストのパネルと同じ条件——
 	// 上場間もない銘柄を、検証では外しているのに実運用だけ候補に入れないため。
 	// 日次リターンは分割・併合の日（AdjFactor ≠ 1）を係数で揃える。
+	//
+	// 並べ替えの機械学習の特徴量（ret1 / ret5 / ret20 / pos20 / prev_intraday）は、係数で
+	// 揃えた終値 z = c ÷ Π(その日までの AdjFactor) から作る。比と位置しか使わないので、
+	// 窓の起点で水準がずれても値は変わらない。backtest.panelCTEs と同じ定義。
 	query := fmt.Sprintf(`
 WITH bars AS (
   SELECT "Date" AS d, CAST("Code" AS VARCHAR) AS code,
+         TRY_CAST("O" AS DOUBLE) AS o,
          TRY_CAST("C" AS DOUBLE) AS c, TRY_CAST("Va" AS DOUBLE) AS va,
          coalesce(nullif(TRY_CAST("AdjFactor" AS DOUBLE), 0), 1) AS af,
          TRY_CAST("MktCap" AS DOUBLE) AS cap
@@ -166,9 +178,11 @@ WITH bars AS (
   WHERE "Date" <= %s AND TRY_CAST("C" AS DOUBLE) > 0
 ),
 ranked AS (
-  SELECT *, c / (lag(c) OVER (PARTITION BY code ORDER BY d) * af) - 1 AS ret,
+  SELECT *, c / (lag(c) OVER w * af) - 1 AS ret,
+         c / exp(sum(ln(af)) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS z,
          row_number() OVER (PARTITION BY code ORDER BY d DESC) AS rn
   FROM bars
+  WINDOW w AS (PARTITION BY code ORDER BY d)
 )
 SELECT code,
        max(d) AS last_date,
@@ -177,9 +191,16 @@ SELECT code,
             THEN median(va) FILTER (WHERE rn <= %[3]d) END AS turnover_med,
        arg_max(cap, d) AS mkt_cap,
        CASE WHEN count(ret) FILTER (WHERE rn <= %[4]d) = %[4]d
-            THEN stddev_samp(ret) FILTER (WHERE rn <= %[4]d) END AS vol20
+            THEN stddev_samp(ret) FILTER (WHERE rn <= %[4]d) END AS vol20,
+       max(z) FILTER (WHERE rn = 1) / max(z) FILTER (WHERE rn = 2) - 1 AS ret1,
+       max(z) FILTER (WHERE rn = 1) / max(z) FILTER (WHERE rn = 5) - 1 AS ret5,
+       max(z) FILTER (WHERE rn = 1) / max(z) FILTER (WHERE rn = %[5]d) - 1 AS ret20,
+       CASE WHEN count(z) FILTER (WHERE rn <= %[5]d) = %[5]d
+            THEN (max(z) FILTER (WHERE rn = 1) - min(z) FILTER (WHERE rn <= %[5]d))
+                 / nullif(max(z) FILTER (WHERE rn <= %[5]d) - min(z) FILTER (WHERE rn <= %[5]d), 0) END AS pos20,
+       max(c / nullif(o, 0) - 1) FILTER (WHERE rn = 1 AND o > 0) AS prev_intraday
 FROM ranked
-GROUP BY code`, source, archsql.Lit(prevDay), cfg.TurnoverDays, VolDays)
+GROUP BY code`, source, archsql.Lit(prevDay), cfg.TurnoverDays, VolDays, PosDays)
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -199,18 +220,20 @@ GROUP BY code`, source, archsql.Lit(prevDay), cfg.TurnoverDays, VolDays)
 			lastDate            time.Time
 			prevClose, turnover sql.NullFloat64
 			mktCap, vol20       sql.NullFloat64
+			ret1, ret5, ret20   sql.NullFloat64
+			pos20, prevIntra    sql.NullFloat64
 		)
-		if err := rows.Scan(&code, &lastDate, &prevClose, &turnover, &mktCap, &vol20); err != nil {
+		if err := rows.Scan(&code, &lastDate, &prevClose, &turnover, &mktCap, &vol20,
+			&ret1, &ret5, &ret20, &pos20, &prevIntra); err != nil {
 			return nil, err
 		}
 		if lastDate.After(latest) {
 			latest = lastDate
 		}
 		f := feature{code: code, prevClose: prevClose.Float64, turnoverMed: turnover.Float64, mktCap: mktCap.Float64}
-		if vol20.Valid {
-			v := vol20.Float64
-			f.vol20 = &v
-		}
+		f.vol20 = nullableFloat(vol20)
+		f.ret1, f.ret5, f.ret20 = nullableFloat(ret1), nullableFloat(ret5), nullableFloat(ret20)
+		f.pos20, f.prevIntraday = nullableFloat(pos20), nullableFloat(prevIntra)
 		all = append(all, struct {
 			f    feature
 			last time.Time
@@ -291,7 +314,7 @@ func loadMaster(arch *archive.Archive, day, prevDay time.Time) (map[string]maste
 // nil を返す（0 として扱われ、上限では落ちない）。
 func loadShortInterest(arch *archive.Archive, day time.Time) (map[string]*float64, error) {
 	frame, err := arch.ReadWhere(EPShortSale, archive.ReadOptions{
-		Start:   day.AddDate(0, 0, -120),
+		Start:   day.AddDate(0, 0, -ShortInterestLookbackDays),
 		End:     day.AddDate(0, 0, -1),
 		Columns: []string{"Code", "CalcDate", "ShrtPosToSO"},
 	})
@@ -522,4 +545,13 @@ func text(v *string) string {
 
 func sameDay(a, b time.Time) bool {
 	return a.Year() == b.Year() && a.Month() == b.Month() && a.Day() == b.Day()
+}
+
+// nullableFloat は NULL を nil にする。
+func nullableFloat(v sql.NullFloat64) *float64 {
+	if !v.Valid {
+		return nil
+	}
+	x := v.Float64
+	return &x
 }

@@ -190,6 +190,9 @@ func planFor(day time.Time) (dtplan.Plan, bool, error) {
 			Shortable: bOf(row["shortable"]), Eligible: bOf(row["eligible"]),
 			ShortEligible: bOf(row["short_eligible"]),
 			ShortInterest: fPtrOf(row["short_interest"]),
+			EarnYield:     fPtrOf(row["earn_yield"]),
+			Ret1:          fPtrOf(row["ret1"]), Ret5: fPtrOf(row["ret5"]), Ret20: fPtrOf(row["ret20"]),
+			Pos20: fPtrOf(row["pos20"]), PrevIntraday: fPtrOf(row["prev_intraday"]),
 		})
 	}
 	prevDay := ""
@@ -208,6 +211,7 @@ func planFor(day time.Time) (dtplan.Plan, bool, error) {
 			Eligible:       int(iOf(m["eligible"])),
 			CreatedAt:      strOf(m["created_at"]),
 			ShortEligible:  int(iOf(m["short_eligible"])),
+			RerankFeatures: int(iOf(m["rerank_features"])),
 		},
 		Candidates: candidates,
 	}, true, nil

@@ -75,6 +75,14 @@ var PlanSchema = []history.Column{
 	{Name: "margin_ratio", Type: history.TypeFloat64},
 	// short_interest は空売り残高（発行済に対する比）。margin.max_short_interest の判定に使う。
 	{Name: "short_interest", Type: history.TypeFloat64},
+	// earn_yield と ret1 以下は並べ替えの機械学習（signal.rank_by = "lgbm"）の特徴量。
+	// evaluate が履歴から plan を組み立て直すときにも同じ並べ方にするため残す。
+	{Name: "earn_yield", Type: history.TypeFloat64},
+	{Name: "ret1", Type: history.TypeFloat64},
+	{Name: "ret5", Type: history.TypeFloat64},
+	{Name: "ret20", Type: history.TypeFloat64},
+	{Name: "pos20", Type: history.TypeFloat64},
+	{Name: "prev_intraday", Type: history.TypeFloat64},
 	// corp_event は材料（TOB・MBO など）の種類。corp_event_headline / corp_event_at は見出しと配信の日時。
 	// 印の付いた銘柄はショートから外す（margin.exclude_corp_events）。無ければ空
 	{Name: "corp_event", Type: history.TypeString},
@@ -94,6 +102,8 @@ var PlanMetaSchema = []history.Column{
 	{Name: "eligible", Type: history.TypeInt64},
 	{Name: "short_eligible", Type: history.TypeInt64},
 	{Name: "created_at", Type: history.TypeString},
+	// rerank_features は plan に並べ替えの機械学習の特徴量を書いた版（0 は無し）。
+	{Name: "rerank_features", Type: history.TypeInt64},
 }
 
 // QuotesSchema は受け取った気配 1 銘柄。
@@ -145,6 +155,12 @@ var RankingSchema = []history.Column{
 	// sector_cap（業種の上限）/ value_pool（2 段階選定で益回りが足りない）/ too_small（按分が 1 単元未満）/
 	// beyond_n（N が埋まった後の順位）。2026-09-15 より前の順位表には無い。
 	{Name: "reason", Type: history.TypeString},
+	// rule_rank は既存規則（gap_vol）での順位、rule_picked は既存規則の順位なら選んでいたか、
+	// score は機械学習の予測値（signal.rank_by = "lgbm" の日だけ。rank はこの高い順）。
+	// 機械学習で並べた日に、既存規則を参考として並べて追うための列。2026-09-18 より前には無い。
+	{Name: "rule_rank", Type: history.TypeInt64},
+	{Name: "rule_picked", Type: history.TypeBool},
+	{Name: "score", Type: history.TypeFloat64},
 }
 
 // OpenRunSchema は open 1 回の要約。
@@ -177,6 +193,8 @@ var OpenRunSchema = []history.Column{
 	{Name: "n", Type: history.TypeInt64},
 	{Name: "budget", Type: history.TypeFloat64},
 	{Name: "weighting", Type: history.TypeString},
+	// rank_by はロングを並べた規則（gap_vol / lgbm。plan が古くて既存規則に戻した日は gap_vol）。
+	{Name: "rank_by", Type: history.TypeString},
 	{Name: "short_n", Type: history.TypeInt64},
 	{Name: "short_budget", Type: history.TypeFloat64},
 	{Name: "short_multiplier", Type: history.TypeFloat64},
@@ -218,6 +236,9 @@ func PlanFrames(p plan.Plan) (frame, meta history.Frame) {
 			"jsf_stop": c.JsfStop, "shortable": c.Shortable,
 			"eligible": c.Eligible, "short_eligible": c.ShortEligible,
 			"margin_ratio": floatOrNil(c.MarginRatio), "short_interest": floatOrNil(c.ShortInterest),
+			"earn_yield": floatOrNil(c.EarnYield),
+			"ret1":       floatOrNil(c.Ret1), "ret5": floatOrNil(c.Ret5), "ret20": floatOrNil(c.Ret20),
+			"pos20": floatOrNil(c.Pos20), "prev_intraday": floatOrNil(c.PrevIntraday),
 			"corp_event": c.CorpEvent, "corp_event_headline": c.CorpEventHeadline, "corp_event_at": c.CorpEventAt,
 		})
 	}
@@ -233,6 +254,7 @@ func PlanFrames(p plan.Plan) (frame, meta history.Frame) {
 		"eligible":         int64(p.Meta.Eligible),
 		"short_eligible":   int64(p.Meta.ShortEligible),
 		"created_at":       p.Meta.CreatedAt,
+		"rerank_features":  int64(p.Meta.RerankFeatures),
 	}
 	return history.NewFrame(PlanSchema, rows),
 		history.NewFrame(PlanMetaSchema, []map[string]any{metaRow})
@@ -328,10 +350,17 @@ func bookText(value any) any {
 
 // RankingFrame は順位表の全行に、選ばれた銘柄の株数・金額と、選ばれた／外れた理由
 // （selection.PickReasons。nil なら理由の列は null）を付ける。
-func RankingFrame(ranking []selection.Ranked, picks []selection.Pick, side string, n int, budget decimal.Decimal, reasons map[string]string) history.Frame {
+//
+// rulePicks は既存規則の順位で選んでいたら（selection.RulePicks）。機械学習で並べた日に
+// rule_picked の列へ残し、既存規則を参考として追えるようにする。
+func RankingFrame(ranking []selection.Ranked, picks, rulePicks []selection.Pick, side string, n int, budget decimal.Decimal, reasons map[string]string) history.Frame {
 	picked := make(map[string]selection.Pick, len(picks))
 	for _, p := range picks {
 		picked[p.Symbol] = p
+	}
+	rulePicked := make(map[string]bool, len(rulePicks))
+	for _, p := range rulePicks {
+		rulePicked[p.Symbol] = true
 	}
 	budgetF, _ := budget.Float64()
 	rows := make([]map[string]any, 0, len(ranking))
@@ -346,7 +375,9 @@ func RankingFrame(ranking []selection.Ranked, picks []selection.Pick, side strin
 			"quantity": nil, "amount": nil,
 			"n": int64(n), "budget": budgetF,
 			"over_budget": selection.OverBudget(budget, r.Price), "skipped": false,
-			"reason": nil,
+			"reason":    nil,
+			"rule_rank": int64(r.RuleRank), "rule_picked": rulePicked[r.Symbol],
+			"score": floatOrNil(r.Score),
 		}
 		if reason, ok := reasons[r.Symbol]; ok {
 			row["reason"] = reason

@@ -39,7 +39,14 @@ type Meta struct {
 	CreatedAt  string   `json:"created_at"`
 	// ShortEligible はショート（[margin]）の対象数。古い plan には無い。
 	ShortEligible int `json:"short_eligible"`
+	// RerankFeatures は並べ替えの機械学習の特徴量（Candidate.Ret1 ほか・EarnYield）を
+	// 書いた版。0 は書いていない古い plan で、signal.rank_by = "lgbm" は使えない
+	// （open は既存規則の並べ方に戻す）。
+	RerankFeatures int `json:"rerank_features,omitempty"`
 }
+
+// RerankFeaturesVersion は plan に書く特徴量の版（Meta.RerankFeatures）。
+const RerankFeaturesVersion = 1
 
 // Plan は候補と要約。
 type Plan struct {
@@ -91,6 +98,15 @@ func filterCandidates(rows []universe.Candidate, keep func(universe.Candidate) b
 	return out
 }
 
+// Signal は sig をこの plan で使える形にする。並べ替えの機械学習（rank_by = "lgbm"）は
+// 特徴量を書いた plan でしか使えないので、古い plan なら既存規則（gap_vol）に戻す。
+func (p Plan) Signal(sig config.Signal) config.Signal {
+	if sig.RankBy == config.RankByLGBM && p.Meta.RerankFeatures < RerankFeaturesVersion {
+		sig.RankBy = config.RankByGapVol
+	}
+	return sig
+}
+
 // Paths は plan の parquet と json の置き場。
 func Paths(directory string, day time.Time) (parquetPath, metaPath string) {
 	stem := filepath.Join(directory, "plan-"+day.Format(DateLayout))
@@ -139,6 +155,7 @@ func Build(arch *archive.Archive, cfg config.Config, day time.Time, cal *calenda
 			Eligible:       eligible,
 			CreatedAt:      now.UTC().Format(time.RFC3339),
 			ShortEligible:  shortEligible,
+			RerankFeatures: RerankFeaturesVersion,
 		},
 		Candidates: candidates,
 	}, nil
@@ -171,6 +188,14 @@ type record struct {
 	// ShortInterest は空売り残高（発行済に対する比）。ショートの母集団の条件
 	// （margin.max_short_interest）に使うので、**必ず書き出して読み戻す**。
 	ShortInterest *float64 `parquet:"short_interest,optional"`
+	// EarnYield と ret1 以下は並べ替えの機械学習の特徴量（Meta.RerankFeatures）。
+	// 古い plan には無い列で、読むと nil になる。
+	EarnYield    *float64 `parquet:"earn_yield,optional"`
+	Ret1         *float64 `parquet:"ret1,optional"`
+	Ret5         *float64 `parquet:"ret5,optional"`
+	Ret20        *float64 `parquet:"ret20,optional"`
+	Pos20        *float64 `parquet:"pos20,optional"`
+	PrevIntraday *float64 `parquet:"prev_intraday,optional"`
 	// CorpEvent は材料の印（TOB・MBO など。記録簿から付けた。無ければ空）。記録用で、
 	// open は読み戻さず朝の記録簿で付け直す。
 	CorpEvent         string `parquet:"corp_event"`
@@ -195,6 +220,8 @@ func Save(p Plan, directory string) (parquetPath, metaPath string, err error) {
 			JsfStop: c.JsfStop, Shortable: c.Shortable,
 			Eligible: c.Eligible, ShortEligible: c.ShortEligible,
 			MarginRatio: c.MarginRatio, ShortInterest: c.ShortInterest,
+			EarnYield: c.EarnYield,
+			Ret1:      c.Ret1, Ret5: c.Ret5, Ret20: c.Ret20, Pos20: c.Pos20, PrevIntraday: c.PrevIntraday,
 			CorpEvent: c.CorpEvent, CorpEventHeadline: c.CorpEventHeadline, CorpEventAt: c.CorpEventAt,
 		})
 	}
@@ -242,6 +269,8 @@ func Load(directory string, day time.Time) (Plan, bool, error) {
 			JsfStop: r.JsfStop, Shortable: r.Shortable,
 			Eligible: r.Eligible, ShortEligible: r.ShortEligible,
 			MarginRatio: r.MarginRatio, ShortInterest: r.ShortInterest,
+			EarnYield: r.EarnYield,
+			Ret1:      r.Ret1, Ret5: r.Ret5, Ret20: r.Ret20, Pos20: r.Pos20, PrevIntraday: r.PrevIntraday,
 		})
 	}
 	return Plan{Meta: meta, Candidates: candidates}, true, nil

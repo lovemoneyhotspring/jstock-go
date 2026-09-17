@@ -431,7 +431,15 @@ func runOpen(opts openOptions) error {
 		summary["spill"] = spill
 	}
 
-	ranking := selection.Rank(eligible, rankQuotes, cfg.Signal)
+	signal := p.Signal(cfg.Signal)
+	if signal.RankBy != cfg.Signal.RankBy {
+		// 前夜の plan が古い版で特徴量が無い。機械学習で並べられないので既存規則に戻す
+		logWarn("daytrade.rerank", "plan に並べ替えの特徴量が無いため既存規則で並べる",
+			map[string]any{"rank_by": cfg.Signal.RankBy, "fallback": signal.RankBy, "plan_features": p.Meta.RerankFeatures})
+		fmt.Printf("plan に並べ替えの特徴量が無いため、rank_by=%s ではなく %s で並べます\n", cfg.Signal.RankBy, signal.RankBy)
+	}
+	summary["rank_by"] = signal.RankBy
+	ranking := selection.Rank(eligible, rankQuotes, signal)
 	// 業種の上限を掛ける設定なのに業種が取れていないと、判定は黙って素通りする
 	// （2026-09-12 に発覚：plan の parquet に sector 列が無く、本番だけ無制限だった）。
 	// 古い plan を読んだときも気付けるように、ここで鳴らす。
@@ -457,9 +465,18 @@ func runOpen(opts openOptions) error {
 	picks := selection.PickFrom(ranking, longOpts)
 	longReasons := selection.PickReasons(ranking, longOpts, picks)
 	longPicks := len(picks)
-	frames := []history.Frame{dthistory.RankingFrame(ranking, picks, "BUY", n, budget, longReasons)}
+	rulePicks := selection.RulePicks(ranking, longOpts, picks)
+	frames := []history.Frame{dthistory.RankingFrame(ranking, picks, rulePicks, "BUY", n, budget, longReasons)}
 	summary["n"], summary["budget"], summary["weighting"], summary["weak"] = n, budget, weighting, weak
 	printPicks(picks, len(rankQuotes), p, watchOnly, "")
+	if signal.RankBy == dtconfig.RankByLGBM {
+		// 既存規則は参考として並べて出す（発注はしない。順位表の rule_picked にも残る）
+		names := make([]string, 0, len(rulePicks))
+		for _, rp := range rulePicks {
+			names = append(names, rp.Symbol)
+		}
+		fmt.Printf("  参考: 既存規則（gap_vol）なら %s\n", strings.Join(names, " "))
+	}
 	logRanking(day, "BUY", ranking, picks, longReasons, n, budget, verdict.Scale, weighting, len(rankQuotes))
 
 	if shortMultiplier.GreaterThan(decimal.Zero) {
@@ -470,7 +487,7 @@ func runOpen(opts openOptions) error {
 		fmt.Printf("ショート: %sの倍率 %s × 1 注文 %s 円 = %s 円  対象 %d 銘柄\n",
 			label, shortMultiplier.String(), yen(cfg.Margin.BudgetPerOrder()), yen(shortBudget), len(shortUniverse))
 		printPicks(shortPicks, len(rankQuotes), p, false, "寄付の売建（信用）")
-		frames = append(frames, dthistory.RankingFrame(shortRanking, shortPicks, "SELL", shortN, shortBudget, shortReasons))
+		frames = append(frames, dthistory.RankingFrame(shortRanking, shortPicks, shortPicks, "SELL", shortN, shortBudget, shortReasons))
 		summary["short_n"] = shortN
 		summary["short_budget"] = shortBudget
 		summary["short_multiplier"] = shortMultiplier
@@ -595,7 +612,7 @@ func appendSkippedRanking(cfg dtconfig.Config, p dtplan.Plan, quotes map[string]
 	var frames []history.Frame
 	for _, leg := range dtevaluate.NominalLegs(p, quotes, cfg) {
 		frames = append(frames, dthistory.MarkSkipped(
-			dthistory.RankingFrame(leg.Ranking, leg.Picks, leg.Side, leg.N, leg.Budget, leg.Reasons)))
+			dthistory.RankingFrame(leg.Ranking, leg.Picks, leg.RulePicks, leg.Side, leg.N, leg.Budget, leg.Reasons)))
 	}
 	if path := appendHistory(dthistory.KindRanking, concatFrames(frames), day); path != "" {
 		fmt.Printf("見送りの日の順位表（建てていたら）を履歴に追記 %s\n", path)
@@ -670,6 +687,9 @@ func logRanking(day time.Time, side string, ranking []selection.Ranked, picks []
 		}
 		if r.Vol != nil {
 			row["vol"] = *r.Vol
+		}
+		if r.Score != nil {
+			row["score"], row["rule_rank"] = *r.Score, r.RuleRank
 		}
 		if p, ok := picked[r.Symbol]; ok {
 			row["picked"] = true

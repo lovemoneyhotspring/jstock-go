@@ -7,6 +7,7 @@ package selection
 
 import (
 	"cmp"
+	"fmt"
 	"math"
 	"slices"
 	"sort"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/fees"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/rerank"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/universe"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
@@ -88,6 +90,11 @@ type Ranked struct {
 	EarnYield *float64
 	// Sector は 33 業種コード（PickOptions.MaxPerSector の判定に使う）。取れなければ空。
 	Sector string
+	// RuleRank は既存規則（gap_vol）での順位。rank_by が lgbm 以外なら Rank と同じ。
+	// 機械学習で並べた日も「既存規則ならどれを選んだか」を記録に残すために持つ。
+	RuleRank int
+	// Score は機械学習の予測値（rank_by = "lgbm" のときだけ。高いほど先）。
+	Score *float64
 }
 
 // LimitDownPrice は前日終値を基準値段とするストップ安の値段。
@@ -126,7 +133,7 @@ func Rank(candidates []universe.Candidate, quotes map[string]Quote, cfg config.S
 	return rankBy(candidates, quotes, gapFilter{
 		min: cfg.MinGap, max: cfg.MaxGap,
 		skipLimit: cfg.SkipLimitDown, limitDown: true,
-		rankBy: cfg.RankBy,
+		rankBy: cfg.RankBy, model: cfg.Model,
 	})
 }
 
@@ -148,13 +155,19 @@ type gapFilter struct {
 	skipLimit  bool
 	limitDown  bool
 	descending bool
-	// rankBy は並べる鍵（config.RankByGap / RankByGapVol。空は gap）。
+	// rankBy は並べる鍵（config.RankByGap / RankByGapVol / RankByLGBM。空は gap）。
 	rankBy string
+	// model は rankBy = lgbm のモデルのパス（config.Signal.Model）。
+	model string
 }
 
 // RankKey は並べ替えの鍵。gap_vol はギャップ ÷ max(20 日ボラ, VolFloor)。
 // ボラが無い銘柄は ok=false（並びの末尾）。バックテスト（backtest.pickDay）も同じ鍵を使う。
+// lgbm は既存規則（gap_vol）の鍵で先に並べ、その順位を特徴量に入れて並べ直す（rankBy）。
 func RankKey(rankBy string, gap float64, vol *float64) (float64, bool) {
+	if rankBy == config.RankByLGBM {
+		rankBy = config.RankByGapVol
+	}
 	if rankBy != config.RankByGapVol {
 		return gap, true
 	}
@@ -171,6 +184,8 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 		row Ranked
 		key float64
 		ok  bool
+		// in は機械学習の特徴量の材料（rankBy = lgbm のときだけ使う）
+		in rerank.Input
 	}
 	var scored []scoredRow
 	for _, c := range candidates {
@@ -207,7 +222,17 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 			Sector:    c.Sector,
 		}
 		key, ok := RankKey(f.rankBy, row.Gap.InexactFloat64(), row.Vol)
-		scored = append(scored, scoredRow{row: row, key: key, ok: ok})
+		sr := scoredRow{row: row, key: key, ok: ok}
+		if f.rankBy == config.RankByLGBM {
+			sr.in = rerank.Input{
+				Gap: gap.InexactFloat64(), Price: quote.Price.InexactFloat64(),
+				TurnoverMed: c.TurnoverMed, MktCap: c.MktCap,
+				Vol20: c.Vol20, Ret1: c.Ret1, Ret5: c.Ret5, Ret20: c.Ret20,
+				Pos20: c.Pos20, PrevIntraday: c.PrevIntraday,
+				ShortInterest: c.ShortInterest, EarnYield: c.EarnYield,
+			}
+		}
+		scored = append(scored, sr)
 	}
 	// 同じ鍵なら銘柄コード順（順位を実行ごとに揺らさない）。鍵の無い銘柄は末尾。
 	// 銘柄コードで最後まで決まる全順序なので、安定ソートでなくても並びは同じ。
@@ -230,6 +255,28 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 	for i := range scored {
 		out[i] = scored[i].row
 		out[i].Rank = i + 1
+		out[i].RuleRank = i + 1
+	}
+	if f.rankBy == config.RankByLGBM && len(out) > 0 {
+		inputs := make([]rerank.Input, len(scored))
+		for i := range scored {
+			inputs[i] = scored[i].in
+			inputs[i].RuleRank = i + 1
+		}
+		model, err := rerank.Cached(f.model)
+		if err != nil {
+			// config.Validate がモデルを読めることを確かめてから来る。ここに来るのは
+			// 検証を通さずに作った設定だけなので、黙って別の並べ方にせず止める
+			panic(fmt.Sprintf("並べ替えのモデルを読めません（config.Validate を通していない設定）: %v", err))
+		}
+		for i, v := range model.Scores(inputs) {
+			out[i].Score = &v
+		}
+		// 予測値の高い順。同値は既存規則の順位
+		slices.SortStableFunc(out, func(a, b Ranked) int { return cmp.Compare(*b.Score, *a.Score) })
+		for i := range out {
+			out[i].Rank = i + 1
+		}
 	}
 	return out
 }
@@ -359,6 +406,18 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 		})
 	}
 	return picks
+}
+
+// RulePicks は既存規則（gap_vol）の順位で、同じ opts の選定をやり直したもの。
+// 機械学習で並べた日（Score がある）でも「既存規則ならどれを建てたか」を記録に残す。
+// 機械学習で並べていなければ picks をそのまま返す。
+func RulePicks(ranked []Ranked, opts PickOptions, picks []Pick) []Pick {
+	if len(ranked) == 0 || ranked[0].Score == nil {
+		return picks
+	}
+	order := slices.Clone(ranked)
+	slices.SortFunc(order, func(a, b Ranked) int { return cmp.Compare(a.RuleRank, b.RuleRank) })
+	return PickFrom(order, opts)
 }
 
 // 選定で選ばれた／外れた理由（PickReasons）。順位表の記録に残し、「順位が上なのに

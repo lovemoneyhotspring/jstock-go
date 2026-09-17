@@ -168,7 +168,8 @@ jq -c 'select(.verify)' state/digest/prod-2026-09-06.jsonl
 | `daytrade.plan` | 前夜に候補を作った | `day`, `prev_day`, `candidates`（全銘柄）, `eligible`（対象）, `positions`, `budget`, `iv_prev`, `path` |
 | `daytrade.quotes` | 気配を取った／使えない気配を除外した | `source`, `requested`, `received`, `missing`, `missing_sample`（取れなかった銘柄、最大 20）, `elapsed_ms`, `from_book`（値段を板＝最良気配から取った銘柄の数。まだ寄っていない銘柄で、利益源はここに集まる）/ `stale`, `stale_sample`（`銘柄@時刻 年齢秒`）, `delayed`, `delayed_sample`, `future`（時刻が 1 分以上先の気配の数。寄り前に前日の時刻が返る罠の観測用）, `future_sample`, `max_age_sec` |
 | `daytrade.regime` | 危険信号を評価した（毎朝） | `day`, `trade`, `reasons`, `month`, `iv_prev`, `drift_bp`, `market_gap_bp`, `recent_pnl`, `us_ret_bp`, `vix` |
-| `daytrade.ranking` | ギャップ順の順位表（N と次点 5 件） | `day`, `n`, `budget`, `scale`, `weighting`, `quotes`, `rows`（`rank`, `symbol`, `gap`, `price`, `vol`, `quantity`, `picked`） |
+| `daytrade.ranking` | 順位表（N と次点 5 件） | `day`, `n`, `budget`, `scale`, `weighting`, `quotes`, `rows`（`rank`, `symbol`, `gap`, `price`, `vol`, `quantity`, `picked`。`rank_by = "lgbm"` の日は `score`（予測値）と `rule_rank`（gap_vol での順位）も） |
+| `daytrade.rerank`（warn） | `rank_by = "lgbm"` なのに plan に特徴量が無い（古い版の plan）。その日は gap_vol で並べる | `rank_by`, `fallback`, `plan_features` |
 | `daytrade.pick` | 買う銘柄を決めた（1 件ごと） | `day`, `symbol`, `code_`（J-Quants の 5 桁）, `rank`, `gap`, `prev_close`, `price`, `quantity`, `amount` |
 | `daytrade.order` | 注文にした結果（1 件ごと。買いも売りも） | `day`, `symbol`, `side`, `client_order_id`, `quantity`, `price`, `amount`, `live`, `outcome`（`発注` / `dry-run` / `見送り 余力不足 …` / `見送り 締め切り …` / `見送り 余力を照会できない …` / `失敗 …`） |
 | `daytrade.balance_failed` | 余力を照会できず、その銘柄だけ見送った（実行は止めない。次の銘柄へ進む） | `symbol`, `trade`, `error` |

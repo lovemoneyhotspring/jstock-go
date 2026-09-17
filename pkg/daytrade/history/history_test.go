@@ -94,7 +94,7 @@ func TestRankingFrameMarksPicks(t *testing.T) {
 		Symbol: "1000", Price: decimal.NewFromInt(950),
 		Quantity: decimal.NewFromInt(100), Side: domain.SideBuy,
 	}}
-	frame := RankingFrame(ranked, picks, "BUY", 1, decimal.NewFromInt(100_000), nil)
+	frame := RankingFrame(ranked, picks, picks, "BUY", 1, decimal.NewFromInt(100_000), nil)
 	// 順位表は**全行**を持つ（「なぜ X が選ばれなかったか」を後から追うため）
 	if frame.Height() != 2 {
 		t.Fatalf("行数 = %d, want 2", frame.Height())
@@ -119,7 +119,7 @@ func TestRankingFrameMarksOverBudgetAndSkipped(t *testing.T) {
 			Price: decimal.NewFromInt(4990), Gap: decimal.RequireFromString("-0.06")},
 	}
 	reasons := map[string]string{"4062": selection.ReasonOverBudget}
-	frame := RankingFrame(ranked, nil, "BUY", 3, decimal.NewFromInt(1_250_000), reasons)
+	frame := RankingFrame(ranked, nil, nil, "BUY", 3, decimal.NewFromInt(1_250_000), reasons)
 	if frame.Rows[0]["over_budget"] != true || frame.Rows[1]["over_budget"] != false {
 		t.Errorf("over_budget = %v / %v", frame.Rows[0]["over_budget"], frame.Rows[1]["over_budget"])
 	}
