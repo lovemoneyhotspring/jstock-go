@@ -48,6 +48,9 @@ var BookFixedColumns = []history.Column{
 	{Name: "slot", Type: history.TypeString},
 	{Name: "symbol", Type: history.TypeString},
 	{Name: "observed_at", Type: history.TypeTimestamp},
+	// received_at はその銘柄を含む応答を受け取った時刻（2026-09-17 から）。observed_at は
+	// 1 回の記録の開始時刻で全行同じなので、寄り直前の気配が何秒目の値かはこちらで見る
+	{Name: "received_at", Type: history.TypeTimestamp},
 }
 
 // PlanSchema は母集団 1 銘柄の列。
@@ -297,7 +300,9 @@ func QuotesFrame(received map[string]selection.Quote, usable map[string]selectio
 //
 // sIssueCode（銘柄コード）だけは symbol として先頭に立てる。突き合わせの鍵なので、
 // 応答の並びに関係なく同じ場所にある方がよい。
-func BookFrame(rows []map[string]any, slot string, observedAt time.Time) history.Frame {
+//
+// received は rows と同じ長さの受信時刻（broker.MarketPricesRawPartialAt）。nil なら received_at は null。
+func BookFrame(rows []map[string]any, received []time.Time, slot string, observedAt time.Time) history.Frame {
 	names := map[string]struct{}{}
 	for _, row := range rows {
 		for name := range row {
@@ -318,9 +323,12 @@ func BookFrame(rows []map[string]any, slot string, observedAt time.Time) history
 
 	at := clock.EnsureUTC(observedAt)
 	out := make([]map[string]any, 0, len(rows))
-	for _, row := range rows {
+	for i, row := range rows {
 		record := map[string]any{
-			"slot": slot, "symbol": bookText(row["sIssueCode"]), "observed_at": at,
+			"slot": slot, "symbol": bookText(row["sIssueCode"]), "observed_at": at, "received_at": nil,
+		}
+		if i < len(received) && !received[i].IsZero() {
+			record["received_at"] = clock.EnsureUTC(received[i])
 		}
 		for _, name := range extra {
 			value, ok := row[name]

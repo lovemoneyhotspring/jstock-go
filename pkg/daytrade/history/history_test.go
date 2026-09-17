@@ -193,12 +193,13 @@ func TestBookFrame(t *testing.T) {
 		// 列が銘柄ごとに揃わない応答でも落とさない（pQBV が無く、pDOP が増えている）
 		{"sIssueCode": "9984", "pDPP": "8000", "pQBP": "*", "pDOP": "8010"},
 	}
-	frame := BookFrame(rows, "0855", at)
+	got1 := at.Add(1500 * time.Millisecond)
+	frame := BookFrame(rows, []time.Time{got1, {}}, "0855", at)
 	if frame.Height() != 2 {
 		t.Fatalf("行数 = %d", frame.Height())
 	}
 	// 固定列が先頭に立つ（応答の並びに関係なく同じ場所にある）
-	for i, want := range []string{"slot", "symbol", "observed_at"} {
+	for i, want := range []string{"slot", "symbol", "observed_at", "received_at"} {
 		if frame.Columns[i].Name != want {
 			t.Errorf("先頭 %d 列目 = %s、期待 %s", i, frame.Columns[i].Name, want)
 		}
@@ -211,6 +212,10 @@ func TestBookFrame(t *testing.T) {
 	}
 	if frame.Rows[0]["symbol"] != "7203" || frame.Rows[0]["slot"] != "0855" {
 		t.Errorf("鍵の列が違う: %+v", frame.Rows[0])
+	}
+	// 受信時刻は行ごと。零値（取れなかった）は null
+	if frame.Rows[0]["received_at"] != got1 || frame.Rows[1]["received_at"] != nil {
+		t.Errorf("received_at = %v / %v", frame.Rows[0]["received_at"], frame.Rows[1]["received_at"])
 	}
 	if v, ok := frame.Rows[0]["pDOP"]; !ok || v != nil {
 		t.Errorf("他の銘柄にしか無い列が null でない: %v", v)
@@ -230,8 +235,8 @@ func TestBookFrameRoundTrip(t *testing.T) {
 	day := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
 	at := time.Date(2026, 9, 8, 0, 30, 0, 0, time.UTC)
 	// 列が増えた日と増える前の日が同じ種類に混在しても、どちらも読み戻せる
-	before := BookFrame([]map[string]any{{"sIssueCode": "7203", "pDPP": "2500"}}, "0855", at)
-	after := BookFrame([]map[string]any{{"sIssueCode": "7203", "pDPP": "2510", "pQBV": "900"}}, "0900", at)
+	before := BookFrame([]map[string]any{{"sIssueCode": "7203", "pDPP": "2500"}}, nil, "0855", at)
+	after := BookFrame([]map[string]any{{"sIssueCode": "7203", "pDPP": "2510", "pQBV": "900"}}, nil, "0900", at)
 	for _, frame := range []history.Frame{before, after} {
 		if _, err := store.Append(KindBook, frame, day, history.AppendOptions{RunID: "r1"}); err != nil {
 			t.Fatal(err)
