@@ -70,6 +70,7 @@ func Load(path string) (*Model, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 1<<26)
 	header := true
+	wantTrees := 0
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		switch {
@@ -95,6 +96,9 @@ func Load(path string) (*Model, error) {
 				continue
 			}
 			switch key {
+			case "tree_sizes":
+				// 木の本数。木の境目で切れたファイルを、少ない木のまま黙って読まないために照合する
+				wantTrees = len(strings.Fields(value))
 			case "max_feature_idx":
 				n, err := strconv.Atoi(value)
 				if err != nil {
@@ -120,6 +124,9 @@ func Load(path string) (*Model, error) {
 	}
 	if len(m.trees) == 0 || m.NumFeatures == 0 {
 		return nil, fmt.Errorf("%s に木がありません", path)
+	}
+	if wantTrees != len(m.trees) {
+		return nil, fmt.Errorf("%s の木が %d 本（tree_sizes は %d 本）。ファイルが途中で切れています", path, len(m.trees), wantTrees)
 	}
 	for i := range m.trees {
 		if err := m.trees[i].validate(m.NumFeatures); err != nil {

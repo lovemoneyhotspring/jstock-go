@@ -1,6 +1,7 @@
 package rerank
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"os"
@@ -120,7 +121,7 @@ func TestLoadRejectsMissingFile(t *testing.T) {
 
 // 節の番号が壊れたモデルは読み込みで弾く（predict が範囲の外を読む・回り続けるのを防ぐ）。
 func TestLoadRejectsBrokenTree(t *testing.T) {
-	const head = "max_feature_idx=1\nobjective=regression\n\nTree=0\nnum_leaves=3\nnum_cat=0\n" +
+	const head = "tree_sizes=100\nmax_feature_idx=1\nobjective=regression\n\nTree=0\nnum_leaves=3\nnum_cat=0\n" +
 		"threshold=0.5 0.5\ndecision_type=2 2\nleaf_value=1 2 3\n"
 	cases := map[string]string{
 		"正常":       "split_feature=0 1\nleft_child=1 -1\nright_child=-2 -3\n",
@@ -141,5 +142,24 @@ func TestLoadRejectsBrokenTree(t *testing.T) {
 		if name != "正常" && err == nil {
 			t.Errorf("%s: 誤りにならない", name)
 		}
+	}
+}
+
+// 木の境目で切れたモデル（tree_sizes より木が少ない）は読み込みで弾く。
+func TestLoadRejectsTruncatedModel(t *testing.T) {
+	full, err := os.ReadFile(modelPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := bytes.LastIndex(full, []byte("\nTree="))
+	if cut < 0 {
+		t.Fatal("モデルに Tree= が無い")
+	}
+	path := filepath.Join(t.TempDir(), "model.txt")
+	if err := os.WriteFile(path, full[:cut+1], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("途中で切れたモデルが誤りにならない")
 	}
 }
