@@ -189,17 +189,19 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 1 回の実行は execution.max_run_seconds（150 秒）と時間帯の終わりで切れるので、前の回が
 # 遅くても次の回は始められる。送れなかった分は次の回が「残りの枚数」として建て直す
 #
-# 9:00:03・9:01:03・9:03・9:06・9:09・9:13: 気配で並べてロング N・ショートを寄付で建てる。
+# 9:00:03・9:00:25・9:01:03・9:03・9:06・9:09・9:13: 気配で並べてロング N・ショートを寄付で建てる。
 # 窓は 9:15 まで。前の回が全部建てていれば以降は何もしない（冪等）
-# 9:01:03 は初回がすぐ落ちた朝（通信エラー等）の早い再試行。寄った銘柄は遅れるほど高く買い、
+# 9:00:25・9:01:03 は初回がすぐ落ちた朝（通信エラー等）の早い再試行。寄った銘柄は遅れるほど高く買い、
 # 9:05 に建てると優位がほぼ消える（vault 2026-09-jp-daytrade-minute-entry）ので 9:03 までは待たない。
-# 初回が長引いてロックを握っていれば 30 秒待って見送る（lock_busy。無害で、9:03 の回が拾う）
+# 初回や 9:00 の snap（最長 50 秒）が長引いてロックを握っていれば 30 秒待って見送る
+# （lock_busy。無害で、次の回が拾う）。9:00:25 は初回と 9:00 の snap（約 7 秒。初回の後なら 9:00:16 ごろに終わる）の後に置く
 # 2026-09-17 に 9:01 始まりから 9:00:03 始まりへ（vault 2026-09-jp-daytrade-ml-entry-timing）。
 # 9:00:00 に寄った銘柄は寄付の直後に上がるので、成行が遅れるほど高く買う（LightGBM の選定は 65% が
 # 9:00:00 に寄り、10 秒で始値 +14 bp、65 秒で +19 bp）。3 秒待つのは寄付を時価問合に反映させるため
 # （9:00:06 の snap では 9:00:00 台に寄った銘柄の 100% に始値が入っていた。9/16・9/17）。
 # 9:13 は us_stale_wait_until（09:12）の後に 1 回回すために残す
 0,1,3,6,9,13 9 * * 1-5 cd $WBJP_HOME && sleep 3 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
+0 9 * * 1-5           cd $WBJP_HOME && sleep 25 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
 # --- dry-run の open（2026-09-11〜）。--live / --yes が無いので**注文は出ない**。
 # 実際の気配で銘柄選定・株数・鮮度判定まで通し、判断の記録（ranking / open_run）を残す。
 # 信用取引口座が未開設なので発注はそもそもできない。口座が開いて実機検証が済んだら
