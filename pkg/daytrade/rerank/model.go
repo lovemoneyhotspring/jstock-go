@@ -70,6 +70,7 @@ func Load(path string) (*Model, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 1<<26)
 	header := true
+	wantTrees := 0
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		switch {
@@ -95,6 +96,9 @@ func Load(path string) (*Model, error) {
 				continue
 			}
 			switch key {
+			case "tree_sizes":
+				// 木の本数。木の境目で切れたファイルを、少ない木のまま黙って読まないために照合する
+				wantTrees = len(strings.Fields(value))
 			case "max_feature_idx":
 				n, err := strconv.Atoi(value)
 				if err != nil {
@@ -121,7 +125,35 @@ func Load(path string) (*Model, error) {
 	if len(m.trees) == 0 || m.NumFeatures == 0 {
 		return nil, fmt.Errorf("%s に木がありません", path)
 	}
+	if wantTrees != len(m.trees) {
+		return nil, fmt.Errorf("%s の木が %d 本（tree_sizes は %d 本）。ファイルが途中で切れています", path, len(m.trees), wantTrees)
+	}
+	for i := range m.trees {
+		if err := m.trees[i].validate(m.NumFeatures); err != nil {
+			return nil, fmt.Errorf("%s の木 %d: %w", path, i, err)
+		}
+	}
 	return m, nil
+}
+
+// validate は節の番号を確かめる。壊れたモデルで predict が範囲の外を読んだり、子が親へ戻って
+// 回り続けたりしないようにする（open が止まるとロックを握ったままになり、close まで見送られる）。
+// LightGBM は分岐のたびに節を末尾へ足すので、子の節の番号は必ず親より大きい。
+func (t *tree) validate(numFeatures int) error {
+	for i := range t.feature {
+		if t.feature[i] < 0 || t.feature[i] >= numFeatures {
+			return fmt.Errorf("節 %d の特徴量の番号 %d が範囲の外（0〜%d）", i, t.feature[i], numFeatures-1)
+		}
+		for _, child := range []int{t.left[i], t.right[i]} {
+			if child >= 0 && (child <= i || child >= len(t.feature)) {
+				return fmt.Errorf("節 %d の子 %d が範囲の外（%d〜%d）", i, child, i+1, len(t.feature)-1)
+			}
+			if child < 0 && ^child >= len(t.leaf) {
+				return fmt.Errorf("節 %d の葉 %d が範囲の外（0〜%d）", i, ^child, len(t.leaf)-1)
+			}
+		}
+	}
+	return nil
 }
 
 func parseTree(kv map[string]string) (tree, error) {
