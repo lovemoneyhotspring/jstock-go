@@ -116,14 +116,19 @@ func TestUsGateShortOnly(t *testing.T) {
 	if !v.Trade || !v.ShortOff || v.ShortOffReason == "" {
 		t.Errorf("ショートだけ休む日になっていない: trade=%v short_off=%v reasons=%v", v.Trade, v.ShortOff, v.Reasons)
 	}
+	if v.Notes["short_off"] != true {
+		t.Errorf("診断値の short_off が立っていない: %v", v.Notes["short_off"])
+	}
 	// 帯の外ならショートも建てる
 	if v := Evaluate(cfg, Signals{Day: day(6, 1), UsRet: f(0.02), Vix: f(15)}); !v.Trade || v.ShortOff {
 		t.Errorf("大幅高でショートを止めている: %+v", v)
 	}
-	// 12 月は両脚とも休む（ShortOff は立てない）
+	// 12 月は両脚とも休む（ShortOff は立てない）。診断値の short_off も Verdict と揃える——
+	// ログだけ「ショートだけ休む」に見えると、休んだ日の読み方を間違える
 	cfg.SkipMonths = []int{12}
-	if v := Evaluate(cfg, Signals{Day: day(12, 1), UsRet: f(0.005), Vix: f(15)}); v.Trade || v.ShortOff {
-		t.Errorf("12 月に取引している: trade=%v short_off=%v", v.Trade, v.ShortOff)
+	if v := Evaluate(cfg, Signals{Day: day(12, 1), UsRet: f(0.005), Vix: f(15)}); v.Trade || v.ShortOff ||
+		v.Notes["short_off"] != false {
+		t.Errorf("12 月に取引している: trade=%v short_off=%v notes=%v", v.Trade, v.ShortOff, v.Notes["short_off"])
 	}
 }
 
