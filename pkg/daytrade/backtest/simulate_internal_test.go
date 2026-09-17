@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/regime"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/shopspring/decimal"
@@ -119,5 +120,16 @@ func TestPickDayLimitsPerSector(t *testing.T) {
 			t.Errorf("選ばれた銘柄 = %v, 期待 %v", codes, want)
 			break
 		}
+	}
+}
+
+// ショートだけ休む日は、ロングはそのままでショートの倍率だけ 0（本番の execute.SizeDay と同じ）。
+func TestSeesawScalesShortOff(t *testing.T) {
+	m := config.Default().Margin
+	m.MultiplierNormal = decimal.NewFromInt(1)
+	v := regime.Verdict{Trade: true, Scale: 1, ShockLong: 1, ShockShort: 1, ShortOff: true}
+	long, short := seesawScales(v, m)
+	if long != 1 || short != 0 {
+		t.Errorf("long=%v short=%v, want 1 / 0", long, short)
 	}
 }

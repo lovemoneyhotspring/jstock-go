@@ -106,6 +106,27 @@ func TestUsGateAndVixOverride(t *testing.T) {
 	}
 }
 
+func TestUsGateShortOnly(t *testing.T) {
+	cfg := config.Default().Regime
+	high := decimal.RequireFromString("0.01")
+	cfg.UsSkipHigh = &high
+	cfg.UsSkipLegs = config.UsSkipLegsShort
+	// 小幅高 × 低 VIX → 取引はするが、ショートだけ休む
+	v := Evaluate(cfg, Signals{Day: day(6, 1), UsRet: f(0.005), Vix: f(15)})
+	if !v.Trade || !v.ShortOff || v.ShortOffReason == "" {
+		t.Errorf("ショートだけ休む日になっていない: trade=%v short_off=%v reasons=%v", v.Trade, v.ShortOff, v.Reasons)
+	}
+	// 帯の外ならショートも建てる
+	if v := Evaluate(cfg, Signals{Day: day(6, 1), UsRet: f(0.02), Vix: f(15)}); !v.Trade || v.ShortOff {
+		t.Errorf("大幅高でショートを止めている: %+v", v)
+	}
+	// 12 月は両脚とも休む（ShortOff は立てない）
+	cfg.SkipMonths = []int{12}
+	if v := Evaluate(cfg, Signals{Day: day(12, 1), UsRet: f(0.005), Vix: f(15)}); v.Trade || v.ShortOff {
+		t.Errorf("12 月に取引している: trade=%v short_off=%v", v.Trade, v.ShortOff)
+	}
+}
+
 func TestNotesAlwaysPresent(t *testing.T) {
 	// 診断値は「毎朝すべて計算してログに残す」ので、ゲートが無効でも欠けてはいけない
 	v := Evaluate(config.Default().Regime, Signals{Day: day(6, 1), Drift: f(0.0001)})

@@ -173,6 +173,14 @@ func SizeDay(in SizingInput) DaySizing {
 		if v.Shock {
 			d.ShortMultiplier = d.ShortMultiplier.Mul(decimal.NewFromFloat(v.ShockShort))
 		}
+		if v.ShortOff {
+			d.ShortMultiplier = decimal.Zero
+			d.note(SizingNote{
+				Text:  v.ShortOffReason,
+				Level: "info", Code: "daytrade.regime", Msg: "ショートだけ休む",
+				Fields: map[string]any{"reason": v.ShortOffReason},
+			})
+		}
 	}
 	if !d.ShortMultiplier.IsPositive() {
 		return d

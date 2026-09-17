@@ -222,6 +222,12 @@ type Signal struct {
 	MaxPerSector int `toml:"max_per_sector"`
 }
 
+// 米国のゲートで止める脚（Regime.UsSkipLegs）。
+const (
+	UsSkipLegsAll   = "all"
+	UsSkipLegsShort = "short"
+)
+
 // Regime は危険信号（[regime]）。詳細と検証は daytrade/regime と研究ノート。
 type Regime struct {
 	// IVGate は日経 225 オプションの前日 IV がこれを超える日だけ取引する。0 なら常時。
@@ -244,6 +250,9 @@ type Regime struct {
 	// UsSkipHigh が nil で無効。研究の既定は 0〜+1%。
 	UsSkipLow  decimal.Decimal  `toml:"us_skip_low"`
 	UsSkipHigh *decimal.Decimal `toml:"us_skip_high"`
+	// UsSkipLegs は米国のゲートで止める脚。"all"（両脚とも休む）か "short"（ショートだけ休み、
+	// ロングは取引する）。LightGBM で並べるロングはこの日も稼げる（研究ノート 2026-09-jp-daytrade-ml-skip-days）。
+	UsSkipLegs string `toml:"us_skip_legs"`
 	// UsVixOverride は VIX がこれを超えていれば米国のゲートを無視する。
 	UsVixOverride decimal.Decimal `toml:"us_vix_override"`
 	// UsStaleWaitUntil は前夜の米国セッションがまだ取れていないとき、この時刻（JST の "HH:MM"）
@@ -402,6 +411,7 @@ func Default() Config {
 			EquityCurveDays:  0,
 			EquityCurveScale: decimal.RequireFromString("0.5"),
 			UsSkipLow:        decimal.Zero,
+			UsSkipLegs:       UsSkipLegsAll,
 			UsVixOverride:    decimal.NewFromInt(24),
 			ShockLongScale:   decimal.NewFromInt(1),
 			ShockShortScale:  decimal.NewFromInt(1),
@@ -671,6 +681,9 @@ func (c Config) Validate() error {
 	}
 	if c.Regime.UsSkipHigh != nil && c.Regime.UsSkipHigh.LessThanOrEqual(c.Regime.UsSkipLow) {
 		return fmt.Errorf("regime.us_skip_high は us_skip_low より大きい値")
+	}
+	if c.Regime.UsSkipLegs != UsSkipLegsAll && c.Regime.UsSkipLegs != UsSkipLegsShort {
+		return fmt.Errorf("regime.us_skip_legs は %q か %q", UsSkipLegsAll, UsSkipLegsShort)
 	}
 	if c.Regime.UsStaleWaitUntil != "" {
 		if _, _, err := session.ParseTime(c.Regime.UsStaleWaitUntil, "regime.us_stale_wait_until"); err != nil {

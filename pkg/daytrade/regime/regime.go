@@ -11,7 +11,8 @@
 //     0 以下なら資金を半分にする。休むのではなく縮める（MaxDD −50→−30 万、利益 −2%）
 //   - IV（iv_gate）: 日経 225 オプションの前日 IV
 //   - 前夜の米国（us_skip_high）: S&P500 が小幅高（0〜+1%）で VIX が低い翌日は、東証の
-//     ギャップダウンが市場全体ではなく個別のニュースによるもので、逆張りが効かない
+//     ギャップダウンが市場全体ではなく個別のニュースによるもので、ギャップの深さで並べる逆張りが
+//     効かない。us_skip_legs = "short" ならショートだけ休む（LightGBM で並べるロングはこの日も稼げる）
 //
 // 市場のギャップ（|中央値ギャップ| > 1% の日）は例外で、ドリフトが負でも取引する。
 // 急落・急騰の寄付は逆張りが最も効く日で、ゲートで外すと損をする。
@@ -63,6 +64,10 @@ type Verdict struct {
 	ShockReason string
 	ShockLong   float64
 	ShockShort  float64
+	// ShortOff はロングは取引するがショートだけ建てない日か（us_skip_legs = "short" の米国のゲート）。
+	// ShortOffReason はその理由。Trade が偽の日には意味を持たない。
+	ShortOff       bool
+	ShortOffReason string
 }
 
 // Weak は「取引はするが資産曲線の合図で縮められた日」か（地合いが弱い日）。
@@ -99,6 +104,7 @@ func Evaluate(cfg config.Regime, s Signals) Verdict {
 		}
 	}
 
+	shortOff, shortOffReason := false, ""
 	if cfg.UsSkipHigh != nil && s.UsRet != nil &&
 		floatOf(cfg.UsSkipLow) <= *s.UsRet && *s.UsRet < floatOf(*cfg.UsSkipHigh) &&
 		(s.Vix == nil || decimal.NewFromFloat(*s.Vix).LessThanOrEqual(cfg.UsVixOverride)) {
@@ -107,7 +113,11 @@ func Evaluate(cfg config.Regime, s Signals) Verdict {
 		if s.Vix != nil {
 			reason += fmt.Sprintf("、VIX %.1f", *s.Vix)
 		}
-		reasons = append(reasons, reason)
+		if cfg.UsSkipLegs == config.UsSkipLegsShort {
+			shortOff, shortOffReason = true, reason+" → ショートだけ休む"
+		} else {
+			reasons = append(reasons, reason)
+		}
 	}
 
 	// ショック日: 止めるのではなく、脚ごとの倍率を変える（既定は 1 = 記録だけ）。
@@ -139,17 +149,24 @@ func Evaluate(cfg config.Regime, s Signals) Verdict {
 		"us_ret_bp":     scaledPtr(s.UsRet, 1e4, 1),
 		"vix":           floatPtr(s.Vix),
 		"scale":         scale,
+		"short_off":     shortOff,
+	}
+	if len(reasons) > 0 {
+		// 止めた日はショートも建たないので、ショートだけの休みは取引する日にだけ立てる
+		shortOff, shortOffReason = false, ""
 	}
 	return Verdict{
-		Trade:       len(reasons) == 0,
-		Reasons:     reasons,
-		Notes:       notes,
-		Scale:       scale,
-		ScaleReason: scaleReason,
-		Shock:       shock,
-		ShockReason: shockReason,
-		ShockLong:   shockLong,
-		ShockShort:  shockShort,
+		Trade:          len(reasons) == 0,
+		Reasons:        reasons,
+		Notes:          notes,
+		Scale:          scale,
+		ScaleReason:    scaleReason,
+		Shock:          shock,
+		ShockReason:    shockReason,
+		ShockLong:      shockLong,
+		ShockShort:     shockShort,
+		ShortOff:       shortOff,
+		ShortOffReason: shortOffReason,
 	}
 }
 

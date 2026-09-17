@@ -282,6 +282,7 @@ Sharpe の頂点（[research/2026-09-jp-shock-days.md](research/2026-09-jp-shock
 | | `drift_days` / `drift_gate` / `drift_gap_override` | 市場の日中ドリフトのゲート（下記）。既定は無効 |
 | | `equity_curve_days` / `equity_curve_scale` | 戦略自身の直近 N 日の実現損益が 0 以下なら資金を `scale` 倍に縮める（既定 20 日・0.5）。scale 0 で休む |
 | | `us_skip_low` / `us_skip_high` / `us_vix_override` | 前夜の S&P500 が帯の中（既定 0〜+1%）で VIX ≤ 24 なら休む。`us_skip_high` 無しで無効 |
+| | `us_skip_legs` | 米国のゲートで休む脚。`all`（既定、両脚）/ `short`（ショートだけ休み、ロングは取引する）。本番は `short` |
 | | `shock_market_gap` / `shock_us_ret` | ショック日の条件: 9:00 の市場ギャップ／前夜の S&P500 がこれ以下（設定は −2% / −2%）。無ければ見ない |
 | | `shock_long_scale` / `shock_short_scale` | ショック日にロング／ショートの資金へ掛ける倍率（土台は 1 / 1 = 記録のみ、`config/daytrade_margin` は 1.5 / 0） |
 | `[execution]` | `quote_source` / `quote_file` | 気配の取得元 |
@@ -301,7 +302,7 @@ Sharpe の頂点（[research/2026-09-jp-shock-days.md](research/2026-09-jp-shock
 | 信号 | 検証（2017–2026、200 万円・N3） | 既定 |
 |---|---|---|
 | 12 月を休む | 9 年中 7 年の 12 月がマイナス。IS +23 万・OOS +25 万、Sharpe 1.45→1.63 | **有効** |
-| 前夜の S&P500 が 0〜+1% の小幅高（VIX ≤ 24） | その翌日は損益 ≈ 0（東証のギャップダウンが個別要因）。休むと Sharpe 1.45→1.63、閾値を動かしても崩れない。12 月休みと併用で合計 667 万・Sharpe 1.85・MaxDD −50 万・全年黒字（IS 1.62 / OOS 2.10） | **有効** |
+| 前夜の S&P500 が 0〜+1% の小幅高（VIX ≤ 24） | その翌日は損益 ≈ 0（東証のギャップダウンが個別要因）。休むと Sharpe 1.45→1.63、閾値を動かしても崩れない。12 月休みと併用で合計 667 万・Sharpe 1.85・MaxDD −50 万・全年黒字（IS 1.62 / OOS 2.10）。ただしこれは gap_vol で並べた場合。LightGBM で並べるロングはこの日も +20.95 bp/日（t 3.79）稼ぐので、2026-09-18 からはショートだけ休む（`us_skip_legs = "short"`、研究ノート 2026-09-jp-daytrade-ml-skip-days） | **有効（ショートだけ）** |
 | 市場の日中ドリフト（TOPIX 寄り→引け 20 日平均 ≤ 0） | 2018 −18→+13、2021 −19→+53 に転じるが、2022 年以降の利益を 3 割削る（IS 限定） | 無効（記録のみ） |
 | 資産曲線（戦略の直近 20 日損益 ≤ 0 なら資金を半分） | 休むのではなく縮める。ボラ逆比例の配分と合わせて MaxDD −50→−30 万、利益 −2%、Calmar 1.31→2.14 | **有効** |
 | IV（前日 ≤ 18） | CAGR 維持で MaxDD 半分、稼働 5 割 | 無効 |

@@ -121,6 +121,21 @@ func TestSizeDay(t *testing.T) {
 	}
 }
 
+// ショートだけ休む日（regime.us_skip_legs = "short"）はショートを建てず、ロングは通常どおり。
+// 余りもロングへ回さない（ショック日のショート 0 倍と同じ扱い）
+func TestSizeDayShortOff(t *testing.T) {
+	v := tradeDay()
+	v.ShortOff, v.ShortOffReason = true, "前夜の S&P500 が小幅高 → ショートだけ休む"
+	d := SizeDay(SizingInput{Cfg: sizingConfig(true, true), Verdict: v, WatchRows: watchRowsForTest})
+	if d.ShortOpen || !d.ShortMultiplier.IsZero() {
+		t.Errorf("ショートを建てようとしている: open=%v multiplier=%s", d.ShortOpen, d.ShortMultiplier)
+	}
+	long, spill, _ := d.WithSpill(nil)
+	if long.N != 3 || !long.Budget.Equal(yenOf(1_000_000)) || !spill.IsZero() {
+		t.Errorf("ロング = %+v 余り %s, want N=3 / 100 万 / 余り 0", long, spill)
+	}
+}
+
 // 1 回目（建てた分が無い）の件数と予算は、引く前の式（selection.SpillInto / CapByTied）と同じ。
 // バックテストと evaluate の再構成が同じ式を使っているので、ここがずれると検証と本番が食い違う。
 func TestSizeDayFirstRunMatchesBacktestFormula(t *testing.T) {
