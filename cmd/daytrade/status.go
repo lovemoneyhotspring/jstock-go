@@ -61,7 +61,7 @@ func newStatusCmd() *cobra.Command {
 			fmt.Printf("\n%s の注文\n", day.Format(DateLayout))
 			fmt.Printf("  %-25s %-6s %-4s %10s %10s %10s %12s %s\n",
 				"時刻", "銘柄", "売買", "株数", "約定", "価格", "約定単価", "状態")
-			verifying := 0
+			verifying, unqueried := 0, 0
 			for _, o := range orders {
 				// 実機検証の注文は成績に数えないので、一覧でも見分けが付くようにする
 				status := o.Status
@@ -69,10 +69,20 @@ func newStatusCmd() *cobra.Command {
 					status += "（検証）"
 					verifying++
 				}
+				// 台帳の約定はブローカーに照会したときだけ書き換わる（close / verify / 翌朝の持ち越し）。
+				// 未確定の行の「約定 0」は約定していないという意味ではない
+				if o.IsOpen() {
+					status += "（未照会）"
+					unqueried++
+				}
 				fmt.Printf("  %-25s %-6s %-4s %10s %10s %10s %12s %s\n",
 					clock.FmtISO(o.PlacedAt, clock.MustZone(appSettings.Timezone)),
 					o.Symbol, string(o.Side), yen(o.Quantity), yen(o.FilledQuantity),
 					yenPtr(o.Price), yenPtr(o.AvgFillPrice), status)
+			}
+			if unqueried > 0 {
+				fmt.Printf("\n  うち %d 件は未照会。台帳の約定は 15:20 の close（と引け後の verify）でブローカーに照会して書き込むので、\n"+
+					"  それまでは約定していても「約定 0」と表示されます\n", unqueried)
 			}
 			if verifying > 0 {
 				fmt.Printf("\n  うち %d 件は実機検証（--broker-verify）。成績の集計と資産曲線のゲートからは外れます\n",
