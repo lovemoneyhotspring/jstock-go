@@ -187,6 +187,15 @@ func (t *TachibanaBroker) MarketPricesRaw(symbols []string, columns string) ([]m
 // （1 本の通信エラーの送り直しは postTo が 1 回だけやるので、ここはその上の段）。
 // 31 バッチのうち 1 本が落ちただけで 30 本ぶんの板を捨てるのは、遡れない記録では痛い。
 func (t *TachibanaBroker) MarketPricesRawPartial(symbols []string, columns string) ([]map[string]any, []PriceBatchFailure) {
+	rows, _, failed := t.MarketPricesRawPartialAt(symbols, columns)
+	return rows, failed
+}
+
+// MarketPricesRawPartialAt は MarketPricesRawPartial に、行ごとの受信時刻（UTC）を添えて返す。
+// received[i] は rows[i] を含むバッチの応答を受け取った時刻。応答の行そのものには手を入れない
+// （発注経路の MarketPricesRaw と同じ行を返すため）。1 回の記録が数秒にまたがるので、
+// 寄り直前の気配が「何秒目の値か」を後から分けるのに使う（daytrade snap）。
+func (t *TachibanaBroker) MarketPricesRawPartialAt(symbols []string, columns string) ([]map[string]any, []time.Time, []PriceBatchFailure) {
 	if strings.TrimSpace(columns) == "" {
 		columns = MarketPriceColumns
 	}
@@ -213,6 +222,7 @@ func (t *TachibanaBroker) MarketPricesRawPartial(symbols []string, columns strin
 	}
 
 	found := make([]map[string]any, 0, len(wanted))
+	received := make([]time.Time, 0, len(wanted))
 	for pass := 1; pass <= 2 && len(pending) > 0; pass++ {
 		if pass == 2 {
 			if t.expired() {
@@ -239,11 +249,15 @@ func (t *TachibanaBroker) MarketPricesRawPartial(symbols []string, columns strin
 				}
 				continue
 			}
+			at := clock.NowUTC()
 			found = append(found, rows...)
+			for range rows {
+				received = append(received, at)
+			}
 		}
 		pending = failed
 	}
-	return found, pending
+	return found, received, pending
 }
 
 func indexOfBatch(batches []PriceBatchFailure, index int) int {

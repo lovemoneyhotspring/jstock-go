@@ -96,7 +96,7 @@ case "$holdiv" in
 esac
 
 # 朝に回るはずの snap の時刻帯（cron と同じ。15:00 / 15:19 は引け後なのでここでは見ない）
-EXPECTED_SLOTS=(0830 0845 0855 0859 0900 0902 0905 0911)
+EXPECTED_SLOTS=(0830 0845 0855 0859 085945 0900 0902 0905 0911)
 
 problems=0
 body="$(mktemp)"
@@ -124,7 +124,7 @@ trap 'rm -f "$body"' EXIT
     echo "$summary"
     echo '```'
     for slot in "${EXPECTED_SLOTS[@]}"; do
-      if ! grep -q "^$slot\|[[:space:]]$slot[[:space:]]" <<<"$summary"; then
+      if ! grep -q "^$slot[[:space:]]\|[[:space:]]$slot[[:space:]]" <<<"$summary"; then
         echo "❌ slot $slot の記録がありません"
         problems=$((problems + 1))
       fi

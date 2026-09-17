@@ -3,6 +3,7 @@ package broker
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,12 +97,27 @@ func TestMarketPricesRetriesOnlyFailedBatches(t *testing.T) {
 	second := symbols[120]
 	fake.priceFail = map[string]int{second: 2}
 
-	rows, failed := b.MarketPricesRawPartial(symbols, "")
+	before := clock.NowUTC()
+	rows, received, failed := b.MarketPricesRawPartialAt(symbols, "")
 	if len(failed) != 0 {
 		t.Fatalf("取り直しで揃うはず: %v", failed)
 	}
 	if len(rows) != 130 {
 		t.Fatalf("行数 %d, want 130", len(rows))
+	}
+	// 受信時刻は行と同じ数だけあり、バッチの中では同じ値。取り直した 2 本目は 1 本目より後
+	if len(received) != len(rows) {
+		t.Fatalf("受信時刻 %d 個、行 %d", len(received), len(rows))
+	}
+	if received[0].Before(before) || !received[0].Equal(received[119]) || received[120].Before(received[0]) {
+		t.Errorf("受信時刻がおかしい: 先頭 %v / 120 行目 %v / 121 行目 %v", received[0], received[119], received[120])
+	}
+	for _, r := range rows {
+		for k := range r {
+			if strings.HasPrefix(k, "_") {
+				t.Errorf("応答の行に余計な鍵 %q が入った", k)
+			}
+		}
 	}
 	if n := countBatches(fake.priceBatches, symbols[0]); n != 1 {
 		t.Errorf("成功したバッチを送り直している: %d 回", n)

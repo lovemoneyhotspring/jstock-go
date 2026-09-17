@@ -8,12 +8,14 @@ import (
 	dthistory "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/history"
 	dtplan "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/plan"
 	dtquotes "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/quotes"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/universe"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/spf13/cobra"
 )
 
 func newSnapCmd() *cobra.Command {
 	var symbolsFlag, slotFlag, columnsFlag string
+	var maxRunFlag int
 	cmd := &cobra.Command{
 		Use:   "snap",
 		Short: "板・気配をそのまま履歴に残す（発注しない。docs/OPENING_DATA.md）",
@@ -22,16 +24,17 @@ func newSnapCmd() *cobra.Command {
 			"記録を始めた日からしか手に入らない。選定には使わない——溜めてから、\n" +
 			"evaluate の結果と突き合わせて効きを確かめる。",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSnap(symbolsFlag, slotFlag, columnsFlag)
+			return runSnap(symbolsFlag, slotFlag, columnsFlag, maxRunFlag)
 		},
 	}
 	cmd.Flags().StringVar(&symbolsFlag, "symbols", "", "銘柄をカンマ区切りで指定（疎通確認用。既定は plan の全銘柄）")
 	cmd.Flags().StringVar(&slotFlag, "slot", "", "観測の時刻帯の名前（既定は今の HHMM）")
 	cmd.Flags().StringVar(&columnsFlag, "columns", "", "取りに行く列（既定は book.columns）")
+	cmd.Flags().IntVar(&maxRunFlag, "max-run", 0, "1 回に許す秒数（既定は book.max_run_seconds）。発注の直前の回を短く切るため")
 	return cmd
 }
 
-func runSnap(symbolsFlag, slotFlag, columnsFlag string) error {
+func runSnap(symbolsFlag, slotFlag, columnsFlag string, maxRun int) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -83,12 +86,17 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string) error {
 	tachibana.Broker.SetLogger(run)
 	// snap は open / close とロックを共有する。遅い日にここで粘ると 9:01 の発注がロックを
 	// 取れずに消えるので、book.max_run_seconds で切る（記録は次の回で足りる。発注が優先）
-	if cfg.Book.MaxRunSeconds > 0 {
-		tachibana.Broker.SetDeadline(now.Add(time.Duration(cfg.Book.MaxRunSeconds) * time.Second))
+	// 8:59:45 の回は 9:00:03 の open の直前なので、cron で --max-run を短くする（候補が先に並ぶので、
+	// 切れても落ちるのは候補の外の銘柄）
+	if maxRun <= 0 {
+		maxRun = cfg.Book.MaxRunSeconds
+	}
+	if maxRun > 0 {
+		tachibana.Broker.SetDeadline(now.Add(time.Duration(maxRun) * time.Second))
 	}
 	// 取れたバッチは積む。失敗したバッチは 1 度取り直され、それでも駄目なら落とす
 	// （記録は遡れないので、1 本の失敗で 30 本ぶんを捨てない）
-	rows, failed := tachibana.Broker.MarketPricesRawPartial(symbols, columns)
+	rows, received, failed := tachibana.Broker.MarketPricesRawPartialAt(symbols, columns)
 	missing := 0
 	for _, f := range failed {
 		missing += len(f.Symbols)
@@ -96,7 +104,7 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string) error {
 
 	path := ""
 	if len(rows) > 0 {
-		path = appendHistory(dthistory.KindBook, dthistory.BookFrame(rows, slot, now), day)
+		path = appendHistory(dthistory.KindBook, dthistory.BookFrame(rows, received, slot, now), day)
 	}
 	fmt.Printf("%s %s: %d 銘柄に問合せ、%d 行を記録（%s）\n",
 		day.Format(DateLayout), slot, len(symbols), len(rows), source)
@@ -106,7 +114,7 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string) error {
 	fields := map[string]any{
 		"day": day.Format(DateLayout), "slot": slot, "scope": source,
 		"requested": len(symbols), "rows": len(rows), "path": path,
-		"elapsed_ms": clock.NowUTC().Sub(now).Milliseconds(), "max_run_seconds": cfg.Book.MaxRunSeconds,
+		"elapsed_ms": clock.NowUTC().Sub(now).Milliseconds(), "max_run_seconds": maxRun,
 	}
 	if len(failed) == 0 {
 		logInfo("daytrade.snap", "板を記録", fields)
@@ -128,6 +136,7 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string) error {
 //
 // scope = all は plan の**全行**（除外された銘柄も含む ＝ 実質全上場）。母集団の条件を
 // 将来変えたくなったとき、条件の外にあった銘柄の板が無いと検証できない。
+// 並びは対象の銘柄が先（orderSnapSymbols）。
 func snapSymbols(scope, symbolsFlag string, day time.Time) ([]string, string, error) {
 	if symbolsFlag != "" {
 		var out []string
@@ -146,19 +155,31 @@ func snapSymbols(scope, symbolsFlag string, day time.Time) ([]string, string, er
 		return nil, "", nil
 	}
 	onlyUniverse := scope == "universe"
-	out := make([]string, 0, len(p.Candidates))
-	for _, c := range p.Candidates {
-		if onlyUniverse && !c.Eligible && !c.ShortEligible {
-			continue
-		}
-		if c.Symbol == "" {
-			continue
-		}
-		out = append(out, c.Symbol)
-	}
+	out := orderSnapSymbols(p.Candidates, onlyUniverse)
 	label := "plan の全行"
 	if onlyUniverse {
 		label = "plan の母集団"
 	}
 	return out, label, nil
+}
+
+// orderSnapSymbols は記録の順。ロング・ショートの対象（Eligible / ShortEligible）を先に、
+// 残りを後に並べる（それぞれの中は plan の並び）。時価問合は 120 銘柄ずつ順に送るので、
+// 締め切りで切れても、寄り直前の回で候補の気配が先に・早い時刻で取れる。
+// onlyUniverse なら対象の外は含めない。
+func orderSnapSymbols(cands []universe.Candidate, onlyUniverse bool) []string {
+	first := make([]string, 0, len(cands))
+	var rest []string
+	for _, c := range cands {
+		if c.Symbol == "" {
+			continue
+		}
+		switch {
+		case c.Eligible || c.ShortEligible:
+			first = append(first, c.Symbol)
+		case !onlyUniverse:
+			rest = append(rest, c.Symbol)
+		}
+	}
+	return append(first, rest...)
 }
