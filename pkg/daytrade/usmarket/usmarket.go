@@ -77,20 +77,40 @@ func (f *FredFetcher) Closes(series string, start, end time.Time) (map[string]fl
 // firstOf は取得元を順に試す Fetcher。
 type firstOf []Fetcher
 
-// FirstOf は取得元を順に試し、最初に取れたものを返す（寄付は Cboe → Yahoo → FRED）。
+// FirstOf は取得元を順に試す（寄付は Cboe → Yahoo → FRED）。
 func FirstOf(fetchers ...Fetcher) Fetcher { return firstOf(fetchers) }
 
-// Closes は最初に取れた取得元の終値。全部だめならそれぞれのエラーをまとめて返す。
+// Closes は先の取得元の終値。end 以前で最新の NYSE の取引日が欠けていれば、次の取得元で
+// **欠けた日だけ**補う（先の取得元の値は上書きしない）。全部だめならそれぞれのエラーをまとめて返す。
+//
+// 「空でなければ採用」だと、Cboe の VIX 履歴が前夜の行をまだ載せていない朝（S&P500 は
+// 載っている）に 9/15 までの結果で止まり、前夜の VIX を持っている Yahoo へ回らない
+// （2026-09-16・17 の 2 朝続けて、open の 5 回とも VIX 無しで判定した）。
 func (fs firstOf) Closes(series string, start, end time.Time) (map[string]float64, error) {
+	want := ExpectedSession(end.AddDate(0, 0, 1)).Format(dateLayout)
+	needWant := want >= start.Format(dateLayout)
+	var out map[string]float64
 	var errs []error
 	for _, f := range fs {
-		out, err := f.Closes(series, start, end)
-		if err == nil && len(out) > 0 {
-			return out, nil
-		}
+		got, err := f.Closes(series, start, end)
 		if err != nil {
 			errs = append(errs, err)
+			continue
 		}
+		if out == nil {
+			out = make(map[string]float64, len(got))
+		}
+		for d, v := range got {
+			if _, ok := out[d]; !ok {
+				out[d] = v
+			}
+		}
+		if _, ok := out[want]; len(out) > 0 && (ok || !needWant) {
+			return out, nil
+		}
+	}
+	if len(out) > 0 {
+		return out, nil
 	}
 	if len(errs) == 0 {
 		return nil, fmt.Errorf("どの取得元にも %s の終値がありません", series)

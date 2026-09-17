@@ -160,6 +160,52 @@ func TestFirstOfFallsBack(t *testing.T) {
 	}
 }
 
+// TestFirstOfFillsMissingLatestDay は、先の取得元が前夜の行だけ欠いていれば次の取得元で
+// その日を補い、先の取得元の値は上書きしないこと（2026-09-17。Cboe の VIX が 9/16 を
+// まだ載せておらず、Yahoo に回らなかった）。
+func TestFirstOfFillsMissingLatestDay(t *testing.T) {
+	cboe := &stub{closes: map[string]map[string]float64{
+		"VIXCLS": {"2026-09-01": 14, "2026-09-02": 15},
+	}}
+	yahoo := &stub{closes: map[string]map[string]float64{
+		"VIXCLS": {"2026-09-01": 99, "2026-09-02": 99, "2026-09-03": 16},
+	}}
+	fred := newStub()
+	got, err := FirstOf(cboe, yahoo, fred).Closes("VIXCLS", day("2026-09-01"), day("2026-09-03"))
+	if err != nil || got["2026-09-03"] != 16 {
+		t.Fatalf("前夜の VIX を次の取得元で補わない: %v %v", got, err)
+	}
+	if got["2026-09-01"] != 14 || got["2026-09-02"] != 15 {
+		t.Errorf("先の取得元の値を上書きした: %v", got)
+	}
+	if fred.calls != 0 {
+		t.Errorf("揃った後も次の取得元に聞いた: %d 回", fred.calls)
+	}
+
+	// どこにも前夜の行が無ければ、手元の最新までを返す（エラーにしない）。
+	got, err = FirstOf(cboe, cboe).Closes("VIXCLS", day("2026-09-01"), day("2026-09-03"))
+	if err != nil || len(got) != 2 {
+		t.Errorf("前夜の行がどこにも無い回: %v %v", got, err)
+	}
+}
+
+// TestLatestBeforeCachedFillsVixFromSecondSource は、キャッシュに前夜の S&P500 だけがあり、
+// 先の取得元の VIX が前夜を欠く朝に、次の取得元の VIX で埋めて返すこと。
+func TestLatestBeforeCachedFillsVixFromSecondSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "us.json")
+	writeCache(path, []closes{
+		{Date: "2026-09-02", Spx: 5025, Vix: 15},
+		{Date: "2026-09-03", Spx: 5075},
+	})
+	cboe := &stub{closes: map[string]map[string]float64{
+		"VIXCLS": {"2026-09-01": 14, "2026-09-02": 15},
+	}}
+	s, source, err := LatestBeforeCached(FirstOf(cboe, newStub()), path, day("2026-09-04"))
+	if err != nil || s == nil || s.Vix != 16 || source != SourceFetched {
+		t.Fatalf("VIX を埋めない: %+v %s %v", s, source, err)
+	}
+}
+
 // TestLatestBeforeCachedFallsBackToCache は、取りに行って失敗したらキャッシュの最新で代用し、
 // エラーも返すこと（ログには残す。判断は止めない）。
 func TestLatestBeforeCachedFallsBackToCache(t *testing.T) {
