@@ -62,7 +62,7 @@ test/.venv/bin/python test/dt_slippage.py --from 2026-09-18
 
 「検証との差」を「寄付→発注の値動き」「15:20→引けの値動き」「執行」に分けて出す。建玉を増やすと
 大きくなるのは**ザラ場の執行（= I0 の目安）**だけ。試算（vault 2026-09-jp-daytrade-margin-80pct-compound）は
-I0 = 5 / 10 / 20bp で上限 1500 万の最終資産が 8,655 / 8,140 / 7,109 万。**本発注 60 件（約 20 営業日）に
+I0 = 5 / 10 / 20bp で上限 1500 万の最終資産が 8,655 / 8,140 / 7,109 万。**本発注 60 件（ショート停止でロング 4 銘柄/日なので約 15 営業日）に
 満たないうちは結論しない**。60 件を超えたら、I0 がどの帯にあるかと、増額（長短の上限 1500 万）の可否を
 改善案に書く。寄付→発注の値動きが大きく続くなら、それは滑りではなく発注の遅れ（検証との乖離）として書く。
 
@@ -180,3 +180,26 @@ bin/jquants query "SELECT day, side, rank_group, avg(net_bp) AS net_bp, count(*)
 - **取引の明細だけはコードブロック**（` ``` `）で桁を揃える。1 行 1 取引で、
   `09-04 買 77470 朝日インテック 200株 3,468→3,521 +147.1bp +10,205円 地合い勝ち` の形。
 - **1 行目は見出しにしない**（呼び出し元が付ける）。いきなり本文から始める。
+
+## ロングの並べ方（LightGBM と既存規則 gap_vol）を期間で比べる
+
+2026-09-18 からロングは LightGBM で並べ、既存規則（gap_vol）なら選んでいた銘柄も評価表に残している
+（`rule_picked`）。**週次・月次では期間の合計で比べる**——1 日の勝ち負けは意味が無い。
+
+```bash
+bin/jquants query "SELECT sum(CASE WHEN picked THEN even_pnl ELSE 0 END) AS lgbm,
+  sum(CASE WHEN rule_picked THEN even_pnl ELSE 0 END) AS rule,
+  avg(CASE WHEN picked THEN net_bp END) AS lgbm_bp, avg(CASE WHEN rule_picked THEN net_bp END) AS rule_bp,
+  count(*) FILTER (WHERE picked) AS n_lgbm
+  FROM read_parquet('state/daytrade/history/evaluation/*.parquet', union_by_name = true)
+  WHERE side = 'BUY' AND NOT skipped AND NOT coalesce(later_run, false) AND day >= '<開始日>'"
+```
+
+列は 2026-09-18 の改修から（それ以前のファイルには `even_pnl` / `later_run` / `rule_off` が無いので
+`union_by_name` で読む）。円で比べるのは `even_pnl`（1 注文 = 予算の等金額に揃えた想定損益）。`hypo_pnl` は LightGBM 側だけ
+按分の株数なので引き算しない。`rule_off = true` の日は既存規則なら建てない日（米国小幅高）で、
+gap_vol 側は 0 円が正しい。20〜40 営業日たって LightGBM が負けていれば、`rank_by` を gap_vol に戻す
+（`us_skip_legs` も "all" に戻す）ことを改善案に書く。
+
+**ショートは 2026-09-18 から一時停止中**（`margin.paused`）。期間の集計にはそれ以前の売建が混ざるので、
+ショートの成績は「停止前まで」と断って書く。停止後の SELL 0 件は異常ではない。

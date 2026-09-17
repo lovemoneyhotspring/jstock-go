@@ -7,6 +7,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/evaluate"
 	dtledger "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/plan"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/history"
 	"github.com/shopspring/decimal"
 )
@@ -557,5 +558,25 @@ func TestPickRankingRunWithoutTimestamps(t *testing.T) {
 	got, info := evaluate.PickRankingRun(frame)
 	if info.Runs != 0 || got.Height() != 1 {
 		t.Errorf("素通ししていない: %+v %+v", info, got.Rows)
+	}
+}
+
+// ショートの一時停止中（margin.paused）は「建てていたら」の組み立てにも売建を作らず、
+// 枠を丸ごとロングに回す。架空の売建を残すと、見送りの日の集計に建てていない脚が並び、
+// 順位表を作り直した日はロングの銘柄数が本番と食い違う（2026-09-18 のレビュー）。
+func TestNominalLegsPausedSpillsWholeShortBudget(t *testing.T) {
+	cfg, err := config.Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	if !cfg.Margin.Paused {
+		t.Skip("margin.paused = false（停止を解除したら通常日の形に書き替える）")
+	}
+	legs := evaluate.NominalLegs(plan.Plan{}, nil, cfg)
+	if len(legs) != 1 || legs[0].Side != "BUY" {
+		t.Fatalf("脚 = %d 本（%v）, want ロング 1 本", len(legs), legs)
+	}
+	if legs[0].N != 4 || legs[0].Budget.String() != "1749999" {
+		t.Errorf("ロング N=%d 1 注文 %s, want N=4 1 注文 1749999", legs[0].N, legs[0].Budget)
 	}
 }

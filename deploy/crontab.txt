@@ -82,7 +82,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 20 6 * * *      cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 5                                               >> state/logs/news-sync.log        2>&1
 # 平日は open と plan の前にも当日ぶんを取り直す（TOB などの材料をショートから外すため）。
 # 適時開示は配信時刻から 2〜4 分で電文に載る（2026-09-15 の実測。15:30 の 67 件で最大 4.3 分）。
-# 8:52 は 08:30・08:45 の開示を 9:01 の open に、20:20 は 15:30〜20:15 の開示を 20:30 の plan に間に合わせる。
+# 8:52 は 08:30・08:45 の開示を 9:00:03 の open に、20:20 は 15:30〜20:15 の開示を 20:30 の plan に間に合わせる。
 # 8:52 だけは前日ぶんも取り直す（--days 2 --recent 2）: 前夜 20:20 より後の開示は 06:20 の回でしか入らず、
 # 06:20 が失敗した朝に 8:52 が当日ぶんだけ取ると、記録簿は「新しい」のに前夜遅くの TOB を知らないまま売る。
 # ほかは当日ぶんだけなので --days 1 --recent 1（1 回 4 秒ほど）。ロックは news.lock で daytrade と別
@@ -119,26 +119,33 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 別で、snap は板を読むだけなので**実機検証を待たずに開けてよい**——むしろ発注を開けるまでの
 # 期間がそのまま観測期間になる。1 日遅らせれば 1 日ぶん永久に欠ける
 # snap は待たない（wait 0）。open / close が握っていれば見送る（発注が優先）。snap 自身は
-# book.max_run_seconds（50 秒）で切れるので、9:00 の snap が 9:01 の open を長く塞ぐことはない。
+# book.max_run_seconds（50 秒）で切れる。9:00 台は open の回が 22〜38 秒おきなので、その時間帯の
+# snap（8:59:00・8:59:45・9:00:05）は --max-run と WITH_LOCK_TIMEOUT でさらに短く切る。
 # snap は open と同じ分に置かない（同時に始まると open が 30 秒待っても取れない日が出る）。
 # 9:02・9:05・9:11 は open（9:00・9:03・9:06・9:09・9:13）の間。取れなかったバッチは snap が
 # 1 度取り直し、取れた分だけでも記録する。
 # 9:00 の回はロックを取る前に 5 秒待つ。9:00:00 に始めると 31 バッチが板寄せの前後に
 # またがり、「板寄せの結果」の点にならない（寄り前は 8:59 の回が持つ）。
 # 2026-09-17 から open が 9:00:03 に先にロックを握るので、この回だけは 30 秒待つ（発注が優先。
-# open が終わってから 9:00:10〜20 ごろに記録する）。open が 30 秒を超えて握れば見送り、ログに残る
+# open が終わってから 9:00:10〜20 ごろに記録する）。open が 30 秒を超えて握れば見送り、ログに残る。
+# 既定の 50 秒（book.max_run_seconds）のままだと、初回の open がすぐ落ちた朝にこの snap が
+# 9:00:55 までロックを握り、**9:00:25 の再試行を押し出す**。--max-run 15 と打ち切り 18 秒にして、
+# 遅くとも 9:00:23 には手放す（記録より発注が優先。2026-09-18 のレビュー）
 # 8:59:45（slot 085945、2026-09-18〜）: 寄り直前の気配。8:59 の寄前気配は真のギャップに近く
 # （+5% 以上で相関 0.92。9:00 以降の特別気配は約 +2% に潰れる）、寄る前に発注する案の材料にする。
 # 8:59:00 の回も残して、どちらが始値に近いかを同じ日で比べる。対象の銘柄が先に並ぶ（snap.go）。
+# 8:59:00 の回だけ打ち切りを 40 秒にする——既定の 170 秒だと、接続や書き出しで固まったときに
+# 9:01:50 までロックを握り、9:00 台の open 3 回がまとめて見送りになる。
 # 9:00:03 の open を塞がないよう --max-run 10 で電文を止め（ふつう 7 秒で終わる）、
 # 固まっても WITH_LOCK_TIMEOUT=14 で 8:59:59 までに打ち切る
-30,45,55,59 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+30,45,55 8 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+59 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=40 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 35
 59 8 * * 1-5          cd $WBJP_HOME && sleep 45 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=14 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085945 --max-run 10
-0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=18 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 15
 2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 
-# 8:53: 委託保証金を照会して data/daytrade/margin.json に焼く。9:01 の open はこのファイルを
+# 8:53: 委託保証金を照会して data/daytrade/margin.json に焼く。9:00:03 からの open はこのファイルを
 # 読んで建玉の上限を**下げ方向のみ**上書きする——寄付の判断にブローカーの遅さを持ち込まないため、
 # open 自身は保証金を取りに行かない。
 # **前夜ではなく朝に取る**: 代用有価証券の評価は前営業日終値 × 掛目で、受入保証金は夜間更新
@@ -199,7 +206,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 窓は 9:15 まで。前の回が全部建てていれば以降は何もしない（冪等）
 # 9:00:25・9:01:03 は初回がすぐ落ちた朝（通信エラー等）の早い再試行。寄った銘柄は遅れるほど高く買い、
 # 9:05 に建てると優位がほぼ消える（vault 2026-09-jp-daytrade-minute-entry）ので 9:03 までは待たない。
-# 初回や 9:00 の snap（最長 50 秒）が長引いてロックを握っていれば 30 秒待って見送る
+# 初回や 9:00 の snap（最長 15 秒・打ち切り 18 秒）が長引いてロックを握っていれば 30 秒待って見送る
 # （lock_busy。無害で、次の回が拾う）。9:00:25 は初回と 9:00 の snap（約 7 秒。初回の後なら 9:00:16 ごろに終わる）の後に置く
 # 2026-09-17 に 9:01 始まりから 9:00:03 始まりへ（vault 2026-09-jp-daytrade-ml-entry-timing）。
 # 9:00:00 に寄った銘柄は寄付の直後に上がるので、成行が遅れるほど高く買う（LightGBM の選定は 65% が

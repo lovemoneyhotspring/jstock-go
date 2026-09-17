@@ -425,6 +425,22 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 	return picks
 }
 
+// Keep は順位表から、今日まだ建てられる銘柄（quotes に残っているもの）だけを取り出す。
+// 順位・既存規則の順位・予測値は**落とす前の候補全体**で付けた値をそのまま持つ。
+//
+// 再実行のたびに「建て済みを落とした候補」で採点し直すと、機械学習の特徴量（候補の中での
+// 百分位）が 1 回目と変わり、残りの枠に入る銘柄が 1 回目の順位とも検証ともずれる
+// （2026-09-18 のレビュー）。1 日の順位は 1 回目のものを使い、建てた銘柄だけを除く。
+func Keep(ranked []Ranked, quotes map[string]Quote) []Ranked {
+	out := make([]Ranked, 0, len(ranked))
+	for _, r := range ranked {
+		if _, ok := quotes[r.Symbol]; ok {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // RulePicks は既存規則（gap_vol）の順位で、同じ opts の選定をやり直したもの。
 // 機械学習で並べた日（Score がある）でも「既存規則ならどれを建てたか」を記録に残す。
 // 機械学習で並べていなければ picks をそのまま返す。

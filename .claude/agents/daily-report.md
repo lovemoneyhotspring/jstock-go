@@ -94,13 +94,13 @@ bin/daytrade history execution --from <日付> --json
 Parquet を直接開く必要はない。`history` が読んで JSON にする（`--limit` で行数を絞る）。
 横断して集計したいときだけ `bin/jquants query "SELECT ... FROM read_parquet('...')"` を使う。
 
-**9:01 の候補と理想の候補の差**（欠け）は毎日見る。読むだけで副作用は無い。
+**9:00:03 の候補と理想の候補の差**（欠け）は毎日見る。読むだけで副作用は無い。
 
 ```bash
 test/.venv/bin/python test/dt_missed.py <日付>
 ```
 
-前夜の母集団のうち 9:01 の順位表に**載らなかった**銘柄と、その寄→引が出る。載らない原因は
+前夜の母集団のうち最初の回（9:00:03）の順位表に**載らなかった**銘柄と、その寄→引が出る。載らない原因は
 「その時刻にまだ値段が取れていない」で、寄付が遅れる銘柄は利益源（2026-09-jp-gap-minute）
 ——欠けていると選定の良し悪し以前に利益を取り逃がしている。レポートには
 **「母集団 N / 欠け M / 理想の上位 3 のうち欠け K」の 3 つの数字**を必ず 1 行で書く。
@@ -118,17 +118,28 @@ test/.venv/bin/python test/dt_missed.py <日付>
 
 **ロングの並べ方（LightGBM と既存規則 gap_vol）を毎日比べる。** 2026-09-18 からロングは
 LightGBM で並べ、既存規則なら選んでいた銘柄も記録している（評価表の `rule_picked`）。
-17:05 の evaluate が構造化ログに `daytrade.rule_compare` を 1 行残す:
+evaluate のたびに構造化ログに `daytrade.rule_compare` が 1 行残る（17:05・17:20 の 2 回走るので、
+17:35 の時点では**同じ日に 2 行**ある。最後の行を見る）:
 
 ```bash
-jq -c 'select(.code == "daytrade.rule_compare" and .day == "<日付>")' state/logs/daytrade-prod.jsonl
+jq -c 'select(.code == "daytrade.rule_compare" and .day == "<日付>")' state/logs/daytrade-prod.jsonl | tail -1
 ```
 
 レポートには **「LightGBM 平均 net bp / 想定損益 ・ gap_vol 平均 net bp / 想定損益 ・ 重なり件数」を
-1 行**で書く（`lgbm_*` / `rule_*` / `overlap`）。1 日の勝ち負けで良し悪しを言わない——
-20 営業日ほど溜まってから差の向きを見る（`bin/jquants query` で評価表の `rule_picked` を横断集計）。
+1 行**で書く（`lgbm_avg_net_bp` / `rule_avg_net_bp` / `lgbm_even_pnl` / `rule_even_pnl` / `overlap`）。
+**円で比べるのは `*_even_pnl`**（1 注文 = 予算の等金額で揃えた想定損益）。`*_hypo_pnl` は
+LightGBM 側だけ実際の按分の株数なので、2 つを引き算しない。
+`rule_off: true` の日は**既存規則なら建てない日**（米国小幅高）で、gap_vol 側 0 件が正しい姿
+——「候補なし」と書かない。`later_runs` が 0 でなければ、その日の比べは 1 回目の選定だけを見ている。
+1 日の勝ち負けで良し悪しを言わない——20 営業日ほど溜まってから差の向きを見る
+（`bin/jquants query` で評価表の `rule_picked` を横断集計）。
 行が無い日は LightGBM で並べていない日。**`daytrade.rerank`（LightGBM で並べられず gap_vol で取引）
 が出ていたら異常として書く**——その日は gap_vol の規則で、米国小幅高なら両脚とも休んでいる。
+
+**ショートは 2026-09-18 から一時停止中**（`margin.paused`）。SELL が 0 件・売建なしは異常ではない
+（open の要約に `short_paused: true`、表示は「ショート: 一時停止中」）。枠 200 万は毎日ロングに
+回るので、ロングは N=4・1 注文 175 万になる。`review --days` にはそれ以前のショートの成績が
+混ざるので、**今のショートの成績としては書かない**。
 
 ### 層 3: 構造化ログ（異常の深掘りのときだけ）
 

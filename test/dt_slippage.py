@@ -28,7 +28,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-MIN_TRADES = 60   # 20 営業日 × 3 銘柄。これに満たないうちは判断に使わない
+MIN_TRADES = 60   # ショート停止でロング 4 銘柄/日なので約 15 営業日。これに満たないうちは判断に使わない
 
 
 def load(since):

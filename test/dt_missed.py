@@ -1,4 +1,4 @@
-# 敗因分析の型: 9:01 の候補と「理想の候補」の差を測る。
+# 敗因分析の型: 9:00:03 の候補と「理想の候補」の差を測る。
 #
 # 実運用の順位表（history/ranking、ranking_source = quotes）には、その時刻に**気配が取れた
 # 銘柄しか載らない**。2026-09-11 に分かったとおり、寄り前・未寄付の銘柄は始値も現在値も
@@ -6,7 +6,7 @@
 # 消えるのは寄付が遅れる銘柄＝利益源なので、ここが最大の敗因になりうる。
 #
 # この型が出すのは 2 つ:
-#   1. 欠け      … 前夜の母集団のうち 9:01 の順位表に載らなかった銘柄
+#   1. 欠け      … 前夜の母集団のうち最初の回（9:00:03）の順位表に載らなかった銘柄
 #   2. 逃した利益 … そのうちギャップが建てる条件を満たしていた銘柄の、当日の寄→引
 #
 # 2 は「建てていれば取れた」ではない（同じ資金で別の銘柄を建てている）。**順位の上位に
@@ -30,14 +30,14 @@ c = con()
 c.execute(f"CREATE VIEW plan AS SELECT * FROM read_parquet('{STATE}/plan/*.parquet', union_by_name=true)")
 c.execute(f"CREATE VIEW rank_hist AS SELECT * FROM read_parquet('{STATE}/ranking/*.parquet', union_by_name=true)")
 
-# 前夜の母集団（eligible）× 当日の日足 → 理想のギャップ。9:01 の順位表に載ったかを突き合わせる。
+# 前夜の母集団（eligible）× 当日の日足 → 理想のギャップ。最初の回の順位表に載ったかを突き合わせる。
 # plan は 1 日に複数回走るので、その日の最後の run_id だけを使う。
 df = c.execute(f"""
 WITH p AS (
   SELECT * FROM plan WHERE eligible
     AND day BETWEEN DATE '{frm}' AND DATE '{to}'
     AND run_id = (SELECT run_id FROM plan p2 WHERE p2.day = plan.day ORDER BY recorded_at DESC LIMIT 1)),
-first AS (  -- その日の最初の open（9:01）の順位表。後の回は寄った銘柄が増えるので欠けが埋もれる
+first AS (  -- その日の最初の open（9:00:03）の順位表。後の回は寄った銘柄が増えるので欠けが埋もれる
   SELECT day, arg_min(run_id, recorded_at) AS run_id FROM rank_hist
   WHERE day BETWEEN DATE '{frm}' AND DATE '{to}' AND hour(recorded_at AT TIME ZONE 'Asia/Tokyo') = 9
   GROUP BY day),
@@ -54,7 +54,7 @@ FROM p JOIN b ON b.Code = p.Code AND b.Date = p.day
 """).df()
 
 if df.empty:
-    print('突き合わせる記録がありません（9:01 の順位表は ranking_source = quotes の日だけ）'); sys.exit(0)
+    print('突き合わせる記録がありません（最初の回の順位表は ranking_source = quotes の日だけ）'); sys.exit(0)
 
 # その日の最初の open の結末。順位表が無い日を「全部欠け」と数えないため
 # （2026-09-14 までの危険信号の見送りは順位表を書いていなかった）
@@ -68,13 +68,13 @@ for day, g in df.groupby('day'):
     how = outcome.get(day.date() if hasattr(day, 'date') else day)
     if not g.ranked.any():
         why = SKIP_LABEL.get(how) or (f'open の結末 {how}' if how else 'open の記録なし（cron が動いていない・発注経路が止まっている）')
-        print(f"\n=== {day:%Y-%m-%d}  母集団 {len(g)}  9:01 の順位表なし: {why}。欠けは数えない")
+        print(f"\n=== {day:%Y-%m-%d}  母集団 {len(g)}  最初の回の順位表なし: {why}。欠けは数えない")
         continue
     cand = g[g.gap < MAX_GAP].sort_values('gap_vol')   # 買う条件を満たす候補を理想の順で
     missed = cand[~cand.ranked]
     top = cand.head(N)
     label = f"（{SKIP_LABEL[how]}。picked は建てていたら）" if how in SKIP_LABEL else ''
-    print(f"\n=== {day:%Y-%m-%d}{label}  母集団 {len(g)}  9:01 の順位表に載った {int(g.ranked.sum())}"
+    print(f"\n=== {day:%Y-%m-%d}{label}  母集団 {len(g)}  最初の回の順位表に載った {int(g.ranked.sum())}"
           f"  欠け {int((~g.ranked).sum())}")
     print(f"  買う条件を満たす候補 {len(cand)}  うち欠け {len(missed)}"
           f"  理想の上位 {N} のうち欠け {int((~top.ranked).sum())}")

@@ -289,9 +289,12 @@ func printRuleComparison(result history.Frame) {
 	if !ok {
 		return
 	}
-	title := "\nロング: LightGBM と既存規則（gap_vol）の比べ（想定損益は「建てていたら」）"
+	title := "\nロング: LightGBM と既存規則（gap_vol）の比べ（想定損益は等金額で揃えた「建てていたら」）"
 	if cmp.Skipped {
 		title += "  ※見送りの日"
+	}
+	if cmp.RuleOff {
+		title += "  ※gap_vol なら建てない日（米国小幅高）"
 	}
 	fmt.Println(title)
 	fmt.Printf("  %-10s %6s %12s %14s  %s\n", "並べ方", "件数", "平均 net bp", "想定損益", "銘柄")
@@ -304,7 +307,10 @@ func printRuleComparison(result history.Frame) {
 			avg = *row.set.AvgNetBP
 		}
 		fmt.Printf("  %-10s %6d %12s %14s  %s\n", row.label, row.set.Count, bpText(avg),
-			pnlText(row.set.HypoPnL), strings.Join(row.set.Symbols, " "))
+			pnlText(row.set.EvenPnL), strings.Join(row.set.Symbols, " "))
 	}
-	fmt.Printf("  重なり %d 件  差（LightGBM − gap_vol）%s\n", cmp.Overlap, pnlText(cmp.LGBM.HypoPnL-cmp.Rule.HypoPnL))
+	fmt.Printf("  重なり %d 件  差（LightGBM − gap_vol）%s\n", cmp.Overlap, pnlText(cmp.LGBM.EvenPnL-cmp.Rule.EvenPnL))
+	if cmp.LaterRuns > 0 {
+		fmt.Printf("  ※後の回で建てた %d 件は比べから外した（1 回目の選定どうしで比べる）\n", cmp.LaterRuns)
+	}
 }

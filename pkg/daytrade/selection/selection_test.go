@@ -411,3 +411,23 @@ func symbolsOf(rows []Ranked) []string {
 	}
 	return out
 }
+
+// Keep は建て済みの銘柄だけを落とし、順位・既存規則の順位・予測値は 1 回目のまま保つ。
+func TestKeepPreservesRanks(t *testing.T) {
+	score := 0.7
+	ranked := []Ranked{
+		{Symbol: "A", Rank: 1, RuleRank: 2, Score: &score},
+		{Symbol: "B", Rank: 2, RuleRank: 1},
+		{Symbol: "C", Rank: 3, RuleRank: 3},
+	}
+	kept := Keep(ranked, map[string]Quote{"A": {}, "C": {}})
+	if len(kept) != 2 || kept[0].Symbol != "A" || kept[1].Symbol != "C" {
+		t.Fatalf("残った銘柄 = %+v", kept)
+	}
+	if kept[1].Rank != 3 || kept[1].RuleRank != 3 {
+		t.Errorf("順位が振り直された: %+v", kept[1])
+	}
+	if kept[0].Score == nil || *kept[0].Score != score {
+		t.Errorf("予測値が消えた: %+v", kept[0])
+	}
+}

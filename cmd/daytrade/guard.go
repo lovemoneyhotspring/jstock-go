@@ -47,7 +47,7 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 	if err != nil {
 		return err
 	}
-	if skipHoliday(day, "guard") {
+	if skipHolidayFor(day, "guard", live) {
 		return nil
 	}
 	if !cfg.Margin.Enabled || !cfg.Margin.CancelOnCorpEvent {

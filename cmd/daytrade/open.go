@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
@@ -112,7 +114,7 @@ func runOpen(opts openOptions) error {
 	if watchOnly {
 		fmt.Println("資金 0（max_capital = 0）: スクリーニングと候補の表示だけ行い、買いません")
 	}
-	if skipHoliday(day, "open") {
+	if skipHolidayFor(day, "open", opts.live) {
 		return nil
 	}
 	if opts.live && !opts.ignoreWindow && !cfg.Execution.InWindow("entry", now, jst) {
@@ -169,11 +171,10 @@ func runOpen(opts openOptions) error {
 	led.Verify = opts.brokerVerify
 	defer led.Close()
 	// 実行品質の記録は最後にまとめて書き出す（1 発注 1 ファイルにしない）
-	defer func() {
-		if err := execution.Flush(historyStore(), day); err != nil {
-			logWarn("daytrade.execution", "実行品質の記録に失敗", map[string]any{"error": err.Error()})
-		}
-	}()
+	defer flushExecution(day)
+	// with-lock.sh の打ち切り（SIGTERM）では defer が走らない。固まった回の滑りが丸ごと
+	// 消えるので、受け取った時点で貯めた分だけ書き出してから終える（Flush は mutex 付き）
+	defer flushOnSignal(day)()
 
 	env := execute.Env{
 		Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout,
@@ -432,12 +433,10 @@ func runOpen(opts openOptions) error {
 		long, spill, spillNotes = sizing.Long, decimal.Zero, nil
 	}
 	n, budget := long.N, long.Budget
-	if spill.IsPositive() {
-		execute.EmitNotes(env, spillNotes)
-		summary["spill"] = spill
-	}
 
-	ranking, err := selection.TryRank(eligible, rankQuotes, cfg.Signal)
+	// 並べるのは**落とす前の**気配で。建て済みを落としてから採点すると、機械学習の特徴量
+	// （候補の中での百分位）が 1 回目と変わる。落とすのは順位を付けた後（selection.Keep）
+	ranking, err := selection.TryRank(eligible, quotes, cfg.Signal)
 	if err != nil {
 		// 試し並べ（resolveRankBy）は通ったのに、候補を絞った後で失敗した。寄付の判定は済んでいるので
 		// gap_vol で並べて続ける。米国小幅高で「ショートだけ休む」と判定した日は、gap_vol なら
@@ -448,12 +447,28 @@ func runOpen(opts openOptions) error {
 		fmt.Printf("LightGBM で並べられないため gap_vol で並べます: %v\n", err)
 		cfg = cfg.FallbackToGapVol()
 		summary["rank_by"] = cfg.Signal.RankBy
-		ranking = selection.Rank(eligible, rankQuotes, cfg.Signal)
+		ranking = selection.Rank(eligible, quotes, cfg.Signal)
 		if verdict.ShortOff {
+			// gap_vol はこの日を両脚とも休む（us_skip_legs = "all"）。危険信号で見送った日と
+			// 同じ形で終える——余りをロングに回した通知だけ出して no_picks で終わると、
+			// 見送りの印の無い順位表が残り、評価が「候補なし」と読む
 			fmt.Printf("gap_vol の米国小幅高の日なのでロングも休みます（%s）\n", verdict.ShortOffReason)
-			n = 0
+			logInfo("daytrade.skip", "gap_vol に戻して見送り",
+				map[string]any{"reason": "regime", "reasons": verdict.ShortOffReason})
+			digest.Note(map[string]any{"regime_skip": verdict.ShortOffReason})
+			appendSkippedRanking(cfg, p, rankQuotes, day)
+			finish("regime", map[string]any{"trade": false, "reasons": verdict.ShortOffReason})
+			return nil
 		}
 	}
+	// 余りをロングに回す通知は、並べ替えの失敗で見送る日を除いてから出す
+	if spill.IsPositive() {
+		execute.EmitNotes(env, spillNotes)
+		summary["spill"] = spill
+	}
+	// 今日すでに建てた銘柄・返済に回した銘柄（と signal.skip_opened なら寄った銘柄）を、
+	// 順位を付けた後に落とす
+	ranking = selection.Keep(ranking, rankQuotes)
 	// 業種の上限を掛ける設定なのに業種が取れていないと、判定は黙って素通りする
 	// （2026-09-12 に発覚：plan の parquet に sector 列が無く、本番だけ無制限だった）。
 	// 古い plan を読んだときも気付けるように、ここで鳴らす。
@@ -480,7 +495,19 @@ func runOpen(opts openOptions) error {
 	longReasons := selection.PickReasons(ranking, longOpts, picks)
 	longPicks := len(picks)
 	rulePicks := selection.RulePicks(ranking, longOpts, picks)
-	frames := []history.Frame{dthistory.RankingFrame(ranking, picks, rulePicks, "BUY", n, budget, longReasons)}
+	// 既存規則（gap_vol）は米国小幅高の日を両脚とも休む（us_skip_legs = "all"）。LightGBM だけが
+	// 取引するこの日に同じ N で選んだことにすると、gap_vol が建てない日の成績が比べに混ざるので
+	// 比べる相手を 0 件にして、候補なしと区別する印（rule_off）を残す
+	ruleOff := verdict.ShortOff && cfg.Signal.RankBy == dtconfig.RankByLGBM
+	if ruleOff {
+		rulePicks = nil
+	}
+	summary["rule_off"] = ruleOff
+	longFrame := dthistory.RankingFrame(ranking, picks, rulePicks, "BUY", n, budget, longReasons)
+	if ruleOff {
+		longFrame = dthistory.MarkRuleOff(longFrame)
+	}
+	frames := []history.Frame{longFrame}
 	summary["n"], summary["budget"], summary["weighting"], summary["weak"] = n, budget, weighting, weak
 	printPicks(picks, len(rankQuotes), p, watchOnly, "")
 	if cfg.Signal.RankBy == dtconfig.RankByLGBM && len(ranking) > 0 && ranking[0].Score != nil {
@@ -493,7 +520,18 @@ func runOpen(opts openOptions) error {
 	}
 	logRanking(day, "BUY", ranking, picks, longReasons, n, budget, verdict.Scale, weighting, len(rankQuotes))
 
-	if shortMultiplier.GreaterThan(decimal.Zero) {
+	switch {
+	case cfg.Margin.Enabled && !watchOnly && cfg.Margin.Paused:
+		// 一時停止中は倍率を 1 のまま残して枠をロングへ回す（execute.SizeDay）。ショートの候補も
+		// 取らないので SELL の順位表は積まない——0 件の SELL を「候補なし」と読ませないため。
+		// 倍率 0 のショック日は回す枠が無いので、そのことも書き分ける
+		if spill.IsPositive() {
+			fmt.Printf("ショート: 一時停止中（margin.paused）。枠 %s 円はロングに回しました\n", yen(spill))
+		} else {
+			fmt.Println("ショート: 一時停止中（margin.paused）。この回にロングへ回す枠はありません")
+		}
+		summary["short_paused"] = true
+	case shortMultiplier.GreaterThan(decimal.Zero):
 		label := "通常日"
 		if weak {
 			label = "弱い日"
@@ -507,12 +545,9 @@ func runOpen(opts openOptions) error {
 		summary["short_multiplier"] = shortMultiplier
 		logRanking(day, "SELL", shortRanking, shortPicks, shortReasons, shortN, shortBudget, verdict.Scale, cfg.Margin.Weighting, len(rankQuotes))
 		picks = append(picks, shortPicks...)
-	} else if cfg.Margin.Enabled && !watchOnly && remainingShort <= 0 && placed.Short > 0 {
+	case cfg.Margin.Enabled && !watchOnly && remainingShort <= 0 && placed.Short > 0:
 		fmt.Printf("ショート: 発注済み（%d 件）\n", placed.Short)
-	} else if cfg.Margin.Enabled && !watchOnly && cfg.Margin.Paused {
-		fmt.Println("ショート: 一時停止中（margin.paused）。枠はロングに回す")
-		summary["short_paused"] = true
-	} else if cfg.Margin.Enabled && !watchOnly {
+	case cfg.Margin.Enabled && !watchOnly:
 		fmt.Println("ショート: この日は建てない（倍率 0）")
 	}
 	if path := appendHistory(dthistory.KindRanking, concatFrames(frames), day); path != "" {
@@ -655,6 +690,36 @@ func appendSkippedRanking(cfg dtconfig.Config, p dtplan.Plan, quotes map[string]
 	}
 	if path := appendHistory(dthistory.KindRanking, concatFrames(frames), day); path != "" {
 		fmt.Printf("見送りの日の順位表（建てていたら）を履歴に追記 %s\n", path)
+	}
+}
+
+// flushExecution は貯めた実行品質（滑り）の記録を書き出す。
+func flushExecution(day time.Time) {
+	if err := execution.Flush(historyStore(), day); err != nil {
+		logWarn("daytrade.execution", "実行品質の記録に失敗", map[string]any{"error": err.Error()})
+	}
+}
+
+// flushOnSignal は打ち切り（SIGTERM / Ctrl-C）を受けたら実行品質の記録を書き出して終える。
+// 返り値を defer で呼んで後始末する。売買そのものは止めない——記録は付帯物で、
+// 送信済みの注文は台帳の PENDING から次の回が判定する。
+func flushOnSignal(day time.Time) (stop func()) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM, os.Interrupt)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-ch:
+			logWarn("daytrade.signal", "打ち切りを受けたので実行品質の記録を書き出して終了",
+				map[string]any{"signal": sig.String()})
+			flushExecution(day)
+			os.Exit(143)
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(ch)
+		close(done)
 	}
 }
 

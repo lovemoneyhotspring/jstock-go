@@ -192,7 +192,10 @@ Sharpe の頂点（[research/2026-09-jp-shock-days.md](research/2026-09-jp-shock
 （ロングは 4 銘柄 × 175 万。米国小幅高で「ショートだけ休む」日も回し、ショック日は回さない）。9:00 以降の特別気配は
 +5% 以上のギャップを平均 −6.9pt 潰すので、9:00:03 の気配で選ぶショートは 2 年の模擬で平均が負だった
 （vault 20-research/2026-09-jp-daytrade-preopen-order）。寄る前（8:59:45）のショートを 20 営業日の記録で測り直したら外す。
-一時停止中は open がショートの気配を取らず、ニュースの記録簿の鮮度も見ない。
+一時停止中は open がショートの気配を取らず、ニュースの記録簿の鮮度も見ない。SELL の順位表も積まない
+（0 件の順位表を「候補なし」と読ませないため）。画面は「ショート: 一時停止中（margin.paused）」、
+open の要約は `short_paused = true` で `short_n` / `short_multiplier` は空。見送りの日の「建てていたら」
+（`evaluate.NominalLegs`）も同じ形で、架空の売建を作らず枠を丸ごとロングへ回す。
 
 **余りはロングへ**（`margin.spill_to_long = true`）: ショートは候補 0 の日が 33%、1 銘柄の日が 29% あり、200 万の枠が
 遊ぶ。使わなかった分（候補 0 なら 200 万、上限で頭打ちにした残り）をその日のロングに回し、ロングの銘柄数を
@@ -437,7 +440,7 @@ toml でよい。
 | `plan` | 母集団の 1 銘柄（`eligible` / `short_eligible` と除外理由の列ごと。`margin_ratio` は記録だけ。`earn_yield` / `ret1` / `ret5` / `ret20` / `pos20` / `prev_intraday` は LightGBM の特徴量） | `plan` のたび |
 | `plan_meta` | `plan` 1 回の要約（件数・IV・ドリフト。`rerank_features` は特徴量を書いた版で、0 なら `lgbm` で並べられない） | `plan` のたび |
 | `quotes` | 9:00 に受け取った気配 1 銘柄。`usable`（鮮度の検査を通った）・`opened`（もう寄っていた）・`gap` 付き | `open` が気配を取ったとき |
-| `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount`。`over_budget` は 1 単元が 1 注文の予算を超えて飛ばされた銘柄（順位が上でも picked にならない）。`skipped` は危険信号で見送った日の順位表で、picked は「建てていたら」（N と予算は通常日の値）。`reason` は選ばれた／外れた理由（`picked` / `over_budget` / `sector_cap` 業種の上限 / `value_pool` 益回りで N に入らず / `too_small` 按分が 1 単元未満 / `beyond_n` N の外。2026-09-15 から）。`rule_rank` は gap_vol での順位、`rule_picked` は gap_vol の順位なら選んでいたか、`score` は LightGBM の予測値（`rank` はこの高い順。`rank_by = "lgbm"` の日だけ。2026-09-18 から） | `open` が順位を付けたとき（見送りの日も） |
+| `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount`。`over_budget` は 1 単元が 1 注文の予算を超えて飛ばされた銘柄（順位が上でも picked にならない）。`skipped` は危険信号で見送った日の順位表で、picked は「建てていたら」（N と予算は通常日の値）。`reason` は選ばれた／外れた理由（`picked` / `over_budget` / `sector_cap` 業種の上限 / `value_pool` 益回りで N に入らず / `too_small` 按分が 1 単元未満 / `beyond_n` N の外。2026-09-15 から）。`rule_rank` は gap_vol での順位、`rule_picked` は gap_vol の順位なら選んでいたか、`score` は LightGBM の予測値（`rank` はこの高い順。`rank_by = "lgbm"` の日だけ。2026-09-18 から）。`rule_off` は既存規則なら建てない日（米国小幅高）で、`rule_picked` が 0 件なのは候補なしではない | `open` が順位を付けたとき（見送りの日も） |
 | `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数、`rank_by`（ロングを実際に並べた規則） | `open` が判断まで進んだとき |
 | `open_run` の `broker_verify` | 実機検証の実行（`--broker-verify`）だったか | `open` のたび |
 | `book` | 板・気配 1 銘柄 × 1 観測時刻（`slot` = JST の HHMM）。時価問合の応答をそのまま（値は文字列） | `snap` のたび（1 日 10 回。[OPENING_DATA.md](OPENING_DATA.md)） |
@@ -510,20 +513,26 @@ daytrade history book --date 2026-09-08 --csv /tmp/book.csv
   `open` を回していない間でも評価は毎日積める
 - 1 行 = 候補 1 銘柄。`rank_group`（picked / next / rest）、始値・終値、`gross_bp`（寄付 → 大引を
   建て方向で見た bp）、`cost_bp`（滑り・貸株料等の見込み）、`net_bp`、`hypo_quantity` / `hypo_pnl`
-  （選んだ銘柄は記録の株数、それ以外は予算で買える株数）、`limit_up_close` / `limit_down_close`
+  （選んだ銘柄は記録の株数、それ以外は予算で買える株数）、`even_quantity` / `even_pnl`（全行を
+  「1 注文 = 予算の等金額」で揃えた株数と損益。**選び方どうしを円で比べるのはこちら**——
+  `hypo_pnl` は選んだ銘柄だけ按分の株数なので物差しが違う）、`limit_up_close` / `limit_down_close`
   （売建の持ち越しリスク）、`traded` / `actual_pnl`（台帳の本発注の約定）
 - `rule_rank` / `rule_picked` / `score` は LightGBM で並べた日の既存規則（gap_vol）での順位・
   既存規則なら選んでいたか・予測値（2026-09-18 から。それより前は null）。表示では既存規則の選定に
   `r` が付き、「LightGBM と既存規則の比べ」（件数・平均 net bp・想定損益・重なり）が出る。
-  同じ中身をログ `daytrade.rule_compare` に残す。横断で比べるなら:
+  同じ中身をログ `daytrade.rule_compare` に残す。`rule_off` は**既存規則なら建てない日**
+  （米国小幅高。gap_vol は `us_skip_legs = "all"` で両脚とも休む）で、その日の `rule_picked` は
+  0 件が正しい姿。`later_run` は 1 回目の後の回で建てた行で、実績には入るが選び方の比べからは外す。
+  横断で比べるなら:
 
   ```bash
   jquants query "WITH e AS (SELECT * FROM read_parquet('state/daytrade/history/evaluation/*.parquet', union_by_name = true)
                  QUALIFY run_id = arg_max(run_id, recorded_at) OVER (PARTITION BY day))  -- 1 日は最後の評価だけ
                  SELECT count(DISTINCT day) AS days,
-                        avg(net_bp) FILTER (WHERE picked) AS lgbm_bp, sum(hypo_pnl) FILTER (WHERE picked) AS lgbm_pnl,
-                        avg(net_bp) FILTER (WHERE rule_picked) AS rule_bp, sum(hypo_pnl) FILTER (WHERE rule_picked) AS rule_pnl
-                 FROM e WHERE side = 'BUY' AND score IS NOT NULL AND NOT skipped"
+                        avg(net_bp) FILTER (WHERE picked) AS lgbm_bp, sum(even_pnl) FILTER (WHERE picked) AS lgbm_pnl,
+                        avg(net_bp) FILTER (WHERE rule_picked) AS rule_bp, sum(even_pnl) FILTER (WHERE rule_picked) AS rule_pnl
+                 FROM e WHERE side = 'BUY' AND score IS NOT NULL AND NOT skipped
+                        AND NOT coalesce(later_run, false)"  -- 後の回で建てた行は 1 回目の選定ではない
   ```
 - `actual_entry` / `actual_exit` は約定単価、`ref_entry` / `ref_exit` は**注文を送る直前**に
   照会した時価（台帳の `ref_price`）。約定単価と日足の差には「判断から発注までの遅れ」が
