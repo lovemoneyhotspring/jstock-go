@@ -29,7 +29,7 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 | 15:20〜15:30 | `daytrade close --live --yes` | 台帳の当日買いをブローカーに照会し、約定数量を成行売り（15:20 はその場で約定。15:25 以降はクロージング・オークションで引け値） | 台帳 + ブローカー |
 | 15:40 | `daytrade verify` | 今日の売りが全部約定したか照会し、売れ残り（持ち越し）を通知。翌朝の `open` が自動で返済する | 台帳 + ブローカー |
 | 8:30〜9:11 / 15:00・15:19 | `daytrade snap` | 板・気配をそのまま履歴に残す（**発注しない**。[OPENING_DATA.md](OPENING_DATA.md)） | plan + 時価問合 |
-| 随時 | `daytrade status` | 候補と当日の注文 | |
+| 随時 | `daytrade status` | 候補と当日の注文（約定は close / verify の照会で反映。それまでの行は「（未照会）」付き） | |
 
 すべて既定は dry-run。`--live` が無ければ判断と記録だけで注文は出さない。本番口座では
 `WBJP_ENV=prod` と `--live`、cron では `--yes` も要る（`accum` と同じ規律）。
