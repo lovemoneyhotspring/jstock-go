@@ -683,8 +683,10 @@ func (c Config) Validate() error {
 	if c.Margin.MaxOrder.IsNegative() {
 		return fmt.Errorf("margin.max_order は 0 以上（0 は上限なし）")
 	}
-	if c.Margin.ExcludeCorpEvents && (c.Margin.CorpEventLookbackDays < 1 || c.Margin.CorpEventMaxStalenessMinutes < 1) {
-		return fmt.Errorf("margin.exclude_corp_events を使うなら corp_event_lookback_days と corp_event_max_staleness_minutes は 1 以上")
+	// guard（cancel_on_corp_event）も同じ窓と鮮度で記録簿を読むので、どちらか一方だけ使うときも検査する
+	if (c.Margin.ExcludeCorpEvents || c.Margin.CancelOnCorpEvent) &&
+		(c.Margin.CorpEventLookbackDays < 1 || c.Margin.CorpEventMaxStalenessMinutes < 1) {
+		return fmt.Errorf("margin.exclude_corp_events か cancel_on_corp_event を使うなら corp_event_lookback_days と corp_event_max_staleness_minutes は 1 以上")
 	}
 	if err := validateGap(c.Margin.MinGap, "margin.min_gap"); err != nil {
 		return err
