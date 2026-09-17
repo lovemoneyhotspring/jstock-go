@@ -28,7 +28,7 @@ SNAP_LOG="$HOME_DIR/state/logs/daytrade-snap.log"
 # せいで「一致しているのに失敗」になる。本番の朝に dry-run（9/14 で止まったログ）を数え、
 # 完了 0・見送り 0 で誤報を出した（2026-09-16。~/obsidian-vault/30-projects/daytrade-morning-check-open-log.md）。
 #
-# 9:01〜9:13 JST は同じ UTC 日付の 00:01〜00:13 なので、UTC の日付で朝の回を拾える
+# 9:00〜9:13 JST は同じ UTC 日付の 00:00〜00:13 なので、UTC の日付で朝の回を拾える
 # （下の「判断の経過」の deploy/open-pipeline.jq と同じ前提）。
 JSONL="$HOME_DIR/state/logs/daytrade-prod.jsonl"
 OPEN_LOG_LIVE="$HOME_DIR/state/logs/daytrade-open.log"
