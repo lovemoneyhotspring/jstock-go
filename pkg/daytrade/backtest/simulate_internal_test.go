@@ -133,3 +133,19 @@ func TestSeesawScalesShortOff(t *testing.T) {
 		t.Errorf("long=%v short=%v, want 1 / 0", long, short)
 	}
 }
+
+// ショートの一時停止中は「ショートだけ休む」日も倍率を残す（枠をロングへ回すため。execute.SizeDay と同じ）。
+// ショック日の 0 倍はそのまま。
+func TestSeesawScalesPausedKeepsShortOffBudget(t *testing.T) {
+	m := config.Default().Margin
+	m.MultiplierNormal = decimal.NewFromInt(1)
+	m.Paused = true
+	v := regime.Verdict{Trade: true, Scale: 1, ShockLong: 1, ShockShort: 1, ShortOff: true}
+	if long, short := seesawScales(v, m); long != 1 || short != 1 {
+		t.Errorf("ショートだけ休む日: long=%v short=%v, want 1 / 1", long, short)
+	}
+	v = regime.Verdict{Trade: true, Scale: 1, ShockLong: 1.5, ShockShort: 0, Shock: true}
+	if long, short := seesawScales(v, m); long != 1.5 || short != 0 {
+		t.Errorf("ショック日: long=%v short=%v, want 1.5 / 0", long, short)
+	}
+}
