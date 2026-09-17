@@ -136,6 +136,44 @@ func TestSizeDayShortOff(t *testing.T) {
 	}
 }
 
+// ショートの一時停止（margin.paused）: ショートは建てず、枠（300 万）を毎日ロングへ回す。
+// 「ショートだけ休む」日も回す。ショック日の倍率 0 は回す元が無い。再実行は回した分を建て終えていれば何もしない
+func TestSizeDayPaused(t *testing.T) {
+	cfg := sizingConfig(true, true)
+	cfg.Margin.Paused = true
+	shortOff := tradeDay()
+	shortOff.ShortOff, shortOff.ShortOffReason = true, "前夜の S&P500 が小幅高 → ショートだけ休む"
+	shock := tradeDay()
+	shock.Shock, shock.ShockShort = true, 0
+	for _, c := range []struct {
+		name      string
+		verdict   regime.Verdict
+		placed    Placed
+		wantN     int
+		wantSpill int64
+	}{
+		{name: "通常の日", verdict: tradeDay(), wantN: 6, wantSpill: 3_000_000},
+		{name: "ショートだけ休む日", verdict: shortOff, wantN: 6, wantSpill: 3_000_000},
+		{name: "ショック日", verdict: shock, wantN: 3, wantSpill: 0},
+		{name: "再実行で回した分まで建て終えている", verdict: tradeDay(),
+			placed: Placed{Long: 6, LongAmount: yenOf(6_000_000)}, wantN: 0, wantSpill: 3_000_000},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := SizeDay(SizingInput{Cfg: cfg, Verdict: c.verdict, Placed: c.placed})
+			if d.ShortOpen || d.Short.N != 0 {
+				t.Errorf("ショートを建てようとしている: open=%v short=%+v", d.ShortOpen, d.Short)
+			}
+			long, spill, _ := d.WithSpill(nil)
+			if long.N != c.wantN || !spill.Equal(yenOf(c.wantSpill)) {
+				t.Errorf("ロング N=%d 余り %s, want N=%d 余り %d", long.N, spill, c.wantN, c.wantSpill)
+			}
+			if _, short := Remaining(cfg, c.placed, false); short != 0 {
+				t.Errorf("一時停止中のショートの残り = %d", short)
+			}
+		})
+	}
+}
+
 // 1 回目（建てた分が無い）の件数と予算は、引く前の式（selection.SpillInto / CapByTied）と同じ。
 // バックテストと evaluate の再構成が同じ式を使っているので、ここがずれると検証と本番が食い違う。
 func TestSizeDayFirstRunMatchesBacktestFormula(t *testing.T) {

@@ -139,7 +139,8 @@ func runOpen(opts openOptions) error {
 	// 売らないようにショートを見送る（ロングは止めない）
 	corpStale := ""
 	var corpDropped []string
-	if cfg.Margin.Enabled && cfg.Margin.ExcludeCorpEvents {
+	// ショートの一時停止中（margin.paused）は売らないので、記録簿の鮮度でショートを見送る判定も要らない
+	if cfg.Margin.Enabled && cfg.Margin.ExcludeCorpEvents && !cfg.Margin.Paused {
 		ev, dropped, err := markPlanCorpEvents(cfg, &p, day, now)
 		age := now.Sub(ev.lastFetched)
 		switch {
@@ -237,7 +238,7 @@ func runOpen(opts openOptions) error {
 	eligible := p.Eligible()
 	symbols := p.Symbols(eligible)
 	shortUniverse := p.ShortEligible()
-	if corpStale != "" {
+	if corpStale != "" || cfg.Margin.Paused {
 		shortUniverse = nil
 	}
 	if cfg.Margin.Enabled && !watchOnly {
@@ -508,6 +509,9 @@ func runOpen(opts openOptions) error {
 		picks = append(picks, shortPicks...)
 	} else if cfg.Margin.Enabled && !watchOnly && remainingShort <= 0 && placed.Short > 0 {
 		fmt.Printf("ショート: 発注済み（%d 件）\n", placed.Short)
+	} else if cfg.Margin.Enabled && !watchOnly && cfg.Margin.Paused {
+		fmt.Println("ショート: 一時停止中（margin.paused）。枠はロングに回す")
+		summary["short_paused"] = true
 	} else if cfg.Margin.Enabled && !watchOnly {
 		fmt.Println("ショート: この日は建てない（倍率 0）")
 	}

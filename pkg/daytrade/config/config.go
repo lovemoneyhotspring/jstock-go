@@ -135,6 +135,11 @@ type Margin struct {
 	// ので保証金の枠も変わらない。ショートは候補が中央値 1 銘柄/日で、10 年の 33% の日は
 	// 候補 0（研究ノート 2026-09-jp-shock-days）。
 	SpillToLong bool `toml:"spill_to_long"`
+	// Paused が真ならショートを建てない（一時停止）。予算の枠は残し、SpillToLong なら
+	// 毎日その全額をロングに回す（米国小幅高で「ショートだけ休む」日も回す）。ショック日の
+	// 倍率 0 は回す元が無いまま。2026-09-18 から、寄る前のショートを測り直すまでの措置
+	// （研究ノート 2026-09-jp-daytrade-preopen-order: 9:00:03 の気配で選ぶショートは 2 年で平均が負の疑い）。
+	Paused bool `toml:"paused"`
 	// ExtraCostBP はショートの往復コスト（bp）。信用手数料 0 円 + 貸株料 + 滑り。
 	ExtraCostBP decimal.Decimal `toml:"extra_cost_bp"`
 	// LongViaMargin はロング側も信用買い（日計り）で建てる。手数料 0 円になり、

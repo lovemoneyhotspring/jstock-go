@@ -91,6 +91,9 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 		},
 	})
 	shortTrades = applyCarry(shortTrades, byKey, -1, carryPenalty)
+	if cfg.Margin.Paused {
+		shortTrades = nil // 一時停止: ショートは建てず、枠は SpillToLong でロングへ
+	}
 
 	if cfg.Margin.SpillToLong {
 		return simulateMarginSpill(panel, cfg, signals, spillInputs{
@@ -180,8 +183,8 @@ func seesawScales(verdict regime.Verdict, m config.Margin) (longScale, shortMul 
 		longScale = verdict.Scale
 	}
 	switch {
-	case !verdict.Trade, verdict.ShortOff:
-		shortMul = 0 // 危険信号そのものはショートも止める（ShortOff はショートだけ）
+	case !verdict.Trade, verdict.ShortOff && !m.Paused:
+		shortMul = 0 // 危険信号そのものはショートも止める（ShortOff はショートだけ。一時停止中は枠をロングへ回すので残す）
 	case weak:
 		shortMul = multiplierWeak // シーソーで増強
 	default:

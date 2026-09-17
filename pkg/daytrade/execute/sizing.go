@@ -14,10 +14,10 @@ import (
 )
 
 // Remaining は今日まだ建てられる件数（N − 建てた数）。負になりうる（余りをロングに回した
-// 前の回が N を超えて建てた）。様子見（資金 0）ではショートは 0。
+// 前の回が N を超えて建てた）。様子見（資金 0）とショートの一時停止（margin.paused）ではショートは 0。
 func Remaining(cfg config.Config, placed Placed, watchOnly bool) (long, short int) {
 	long = cfg.Capital.Positions() - placed.Long
-	if cfg.Margin.Enabled && !watchOnly {
+	if cfg.Margin.Enabled && !watchOnly && !cfg.Margin.Paused {
 		short = cfg.Margin.Positions() - placed.Short
 	}
 	return long, short
@@ -173,7 +173,8 @@ func SizeDay(in SizingInput) DaySizing {
 		if v.Shock {
 			d.ShortMultiplier = d.ShortMultiplier.Mul(decimal.NewFromFloat(v.ShockShort))
 		}
-		if v.ShortOff {
+		// 一時停止中はショートを建てないので「ショートだけ休む」日も倍率を残し、枠をロングへ回す
+		if v.ShortOff && !cfg.Margin.Paused {
 			d.ShortMultiplier = decimal.Zero
 			d.note(SizingNote{
 				Text:  v.ShortOffReason,
@@ -184,6 +185,13 @@ func SizeDay(in SizingInput) DaySizing {
 	}
 	if !d.ShortMultiplier.IsPositive() {
 		return d
+	}
+	if cfg.Margin.Paused {
+		d.note(SizingNote{
+			Text:  "ショートは一時停止中（margin.paused）。枠はロングに回す",
+			Level: "info", Code: "daytrade.regime", Msg: "ショートの一時停止",
+			Fields: map[string]any{"reason": "margin.paused"},
+		})
 	}
 	shortDayN := cfg.Margin.Positions()
 	shortBudget := cfg.Margin.BudgetPerOrder().Mul(d.ShortMultiplier).Round(0)
