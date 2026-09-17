@@ -294,8 +294,10 @@ type Leg struct {
 	Picks   []selection.Pick
 	// Reasons は銘柄ごとの選ばれた／外れた理由（selection.PickReasons）。
 	Reasons map[string]string
-	N       int
-	Budget  decimal.Decimal
+	// RulePicks は既存規則の順位で選んでいたら（selection.RulePicks。記録用）。
+	RulePicks []selection.Pick
+	N         int
+	Budget    decimal.Decimal
 }
 
 // NominalLegs は**通常日**の件数と予算で、open と同じ規則の順位表と選定を作る（ロングが先）。
@@ -318,7 +320,7 @@ func NominalLegs(p plan.Plan, quotes map[string]selection.Quote, cfg config.Conf
 			MaxAmount: cfg.Margin.MaxOrder,
 		}
 		shortPicks := selection.PickFrom(shortRanking, shortOpts)
-		short = &Leg{Side: "SELL", Ranking: shortRanking, Picks: shortPicks, N: shortN, Budget: shortBudget,
+		short = &Leg{Side: "SELL", Ranking: shortRanking, Picks: shortPicks, RulePicks: shortPicks, N: shortN, Budget: shortBudget,
 			Reasons: selection.PickReasons(shortRanking, shortOpts, shortPicks)}
 		if cfg.Margin.SpillToLong {
 			used := decimal.Zero
@@ -329,14 +331,15 @@ func NominalLegs(p plan.Plan, quotes map[string]selection.Quote, cfg config.Conf
 			n, budget = selection.SpillInto(n, budget, cfg.Capital.BudgetPerOrder(), spill, cfg.Capital.MaxPositions)
 		}
 	}
-	longRanking := selection.Rank(p.Eligible(), quotes, cfg.Signal)
+	longRanking := selection.Rank(p.Eligible(), quotes, p.Signal(cfg.Signal))
 	longOpts := selection.PickOptions{
 		N: n, Budget: budget, Weighting: cfg.Capital.Weighting, Side: domain.SideBuy,
 		ValuePool: cfg.Signal.ValuePool, MaxPerSector: cfg.Signal.MaxPerSector,
 	}
 	longPicks := selection.PickFrom(longRanking, longOpts)
 	legs := []Leg{{Side: "BUY", Ranking: longRanking, Picks: longPicks, N: n, Budget: budget,
-		Reasons: selection.PickReasons(longRanking, longOpts, longPicks)}}
+		RulePicks: selection.RulePicks(longRanking, longOpts, longPicks),
+		Reasons:   selection.PickReasons(longRanking, longOpts, longPicks)}}
 	if short != nil {
 		legs = append(legs, *short)
 	}

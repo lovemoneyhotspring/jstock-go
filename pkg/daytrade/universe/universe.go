@@ -26,6 +26,13 @@ const StockProduct = "011"
 // VolDays は銘柄ごとのボラティリティ（日次リターンの標準偏差）を取る日数。配分の重みに使う。
 const VolDays = 20
 
+// ShortInterestLookbackDays は空売り残高の報告を遡る日数（公表日。暦日）。
+// これより前に公表された報告しか無い銘柄は「残高無し」とする（plan とパネルで共通）。
+const ShortInterestLookbackDays = 120
+
+// PosDays は並べ替えの機械学習の特徴量 pos20（終値レンジ内の位置）と ret20 の窓（本数）。
+const PosDays = 20
+
 // Candidate は母集団の 1 銘柄。条件に合わない行も残す（なぜ外れたかを見せるため）。
 type Candidate struct {
 	Code        string
@@ -65,6 +72,15 @@ type Candidate struct {
 	// Loss は直近の本決算が赤字（当期純利益 ≤ 0）。EarnYield が nil なら偽
 	// （判定できない銘柄を赤字扱いにして落とさない）。
 	Loss bool
+	// Ret1 / Ret5 / Ret20 は前日終値までの 1・4・19 本前からの騰落率、Pos20 は前日終値の
+	// 直近 20 本の終値レンジ内の位置（0〜1）、PrevIntraday は前日の始値→終値。
+	// 分割・併合は AdjFactor で揃える。足が足りなければ nil。
+	// **並べ替えの機械学習（signal.rank_by = "lgbm"）の特徴量**で、母集団の判定には使わない。
+	Ret1         *float64
+	Ret5         *float64
+	Ret20        *float64
+	Pos20        *float64
+	PrevIntraday *float64
 	// CorpEvent は価格の行き先が決まった材料の種類（news.Kind*。TOB・MBO など外す種類だけ）。
 	// 無ければ空。CorpEventHeadline / CorpEventAt は記録用（見出しと配信の日時 "YYYY-MM-DD HHMM"）。
 	// J-Quants からは作れず、plan / open が記録簿から付ける。バックテストでは常に空。

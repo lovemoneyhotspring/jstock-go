@@ -40,7 +40,7 @@ max_order = 2500000        # 1 銘柄の上限（1 注文予算の 1.5 倍）。
                            # 150 万据え置きは order_budget 167 万を下回って毎日張り付くが、結果は「壊れる」ではなく
                            # 「小さく回る」（損益 −17%、Sharpe 2.95 → 2.90）。下げない理由は Sharpe が下がるから
 
-# [signal]（rank_by = gap_vol を含む）は土台 config/daytrade をそのまま継ぐ。
+# [signal]（rank_by = lgbm とモデルを含む）は土台 config/daytrade をそのまま継ぐ。
 # ロングの規則は土台と子で同一であること（config_test の TestMarginConfigMatchesBaseLongRules）。
 
 # [regime] の equity_curve_days / equity_curve_scale は土台と同じ値。ここでは

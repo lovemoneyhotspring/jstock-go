@@ -8,8 +8,12 @@
 
 前夜に「プライム・売買代金 20 日中央値 1 億円以上・時価総額下位 1/3 除外・前日引け後の決算なし・
 当日決算予定なし・日々公表信用残の対象でない・直近の本決算が赤字でない」銘柄を母集団にし、9:00 の気配で
-**ギャップ（寄付 ÷ 前日終値 − 1）が最も小さい N 銘柄**を成行で買い、15:20 以降の成行売りで
+**ギャップ（寄付 ÷ 前日終値 − 1）が負の銘柄を並べた上位 N 銘柄**を成行で買い、15:20 以降の成行売りで
 手仕舞う（15:25 以降ならクロージング・オークションで引け値）。持ち越さない。
+
+並べ方は 2026-09-18 から **LightGBM の予測値の高い順**（`signal.rank_by = "lgbm"`、`pkg/daytrade/rerank`）。
+それまでは gap_vol（ギャップ ÷ 20 日ボラの小さい順）。候補・帯・N の取り方・業種の上限・配分は変わらず、
+並べる順番だけが変わる。gap_vol の順位と「gap_vol なら選んだ銘柄」は順位表の履歴に毎日残す（下記「履歴」）。
 
 N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万円 ÷ 67 万円 → 3）。
 1 注文は `max_capital ÷ N`。手数料は立花証券の定額コース（`daytrade.fees`。現物は 1 日の約定代金
@@ -269,6 +273,8 @@ Sharpe の頂点（[research/2026-09-jp-shock-days.md](research/2026-09-jp-shock
 | `[signal]` | `max_gap` / `min_gap` | ギャップの範囲。既定は「負なら全部」 |
 | | `skip_limit_down` | 気配がストップ安の銘柄は買わない（既定 true） |
 | | `skip_opened` | 9:01 に**既に寄っている**銘柄を候補から外す（ロング・ショート両方。既定 false。下記） |
+| | `rank_by` | ロングの並べ方。`gap`（既定。ギャップの小さい順）／`gap_vol`（ギャップ ÷ 20 日ボラの小さい順）／`lgbm`（LightGBM の予測値の高い順。設定は `lgbm`）。`lgbm` の特徴量は gap・gap_vol の鍵と順位・20 日ボラ・騰落率（1/4/19 本）・20 日レンジ内の位置・前日の日中・売買代金・時価総額・株価・空売り残高（公表済みで 120 日以内）・益回り・候補数で、その日の候補の中の百分位に直してから渡す。**特徴量の無い古い plan を読んだ日は gap_vol で並べる**（ログ `daytrade.rerank`）。根拠は vault の 2026-09-jp-daytrade-ml-open-quote（差 +8.58 bp/日・t 1.96。事前登録の基準 t ≥ 2.0 には届かず、境目のまま採用） |
+| | `model` | `rank_by = "lgbm"` のモデル（LightGBM のテキスト形式）。相対パスは**この項目を書いた設定ファイルのディレクトリから**（設定は `models/lgbm_rank.txt`）。設定を読んだ時点で読み込み、読めなければ誤りにする。学習し直すのは `test/dt_si_pit.py` → `test/dt_lgbm_train.py`（モデルと Go の照合用データ `pkg/daytrade/rerank/testdata/parity.json` を同時に書く。`go test ./pkg/daytrade/rerank/` が Python の予測との一致を確かめる） |
 | | `max_per_sector` | 同じ日に同じ 33 業種（master の S33）から建ててよい銘柄数の上限。**既定 0 = 無制限**。1 にすると 10 年で損益 +5.3%・Sharpe 2.90→3.12・MaxDD −21%（IS/OOS とも損益・Sharpe が改善、ただし効果の大半は IS 由来）。上限 2 では効かない。上限を超えた銘柄は落ちて次点が繰り上がる。ロング側だけ（研究ノート 2026-09-jp-sector-crowding）。業種は `plan` の `sector` 列から読む——この列が無いと判定は黙って素通りする（2026-09-12 まで本番だけ無制限だった）。業種の取れない候補があると `open` が警告を出す |
 | | `value_pool` | 益回りの 2 段階選定（ギャップ順の上位 N × この倍率から益回り上位 N）。**既定 0 = 無効**。検証では損益 −3.8%（×2）と引き換えに MaxDD −23%。DD を減らす道具としてだけ有効 |
 | `[regime]` | `iv_gate` | 0 で常時。18 で高ボラ局面だけ（DD 半分、稼働 5 割） |
@@ -312,6 +318,9 @@ FRED（`SP500` / `VIXCLS`。前夜の値が出るのは 9:10 JST ごろで、寄
 ドリフトのゲートを入れる場合は `drift_gate = -0.0003`（−3 bp）を目安に。
 
 ## バックテスト
+
+**`rank_by = "lgbm"` の backtest は学習期間（〜2026-09-16）と重なる**ので、成績は割り引いて読む
+（仕組みの確認用。成績の比較は既存規則か、学習期間の外で）。
 
 ```bash
 daytrade backtest --since 2017-01-01          # 設定どおり（資金固定・100 株単位・段階手数料）
@@ -418,11 +427,11 @@ toml でよい。
 
 | 種類 | 1 行 | いつ |
 |---|---|---|
-| `plan` | 母集団の 1 銘柄（`eligible` / `short_eligible` と除外理由の列ごと。`margin_ratio` は記録だけ） | `plan` のたび |
-| `plan_meta` | `plan` 1 回の要約（件数・IV・ドリフト） | `plan` のたび |
+| `plan` | 母集団の 1 銘柄（`eligible` / `short_eligible` と除外理由の列ごと。`margin_ratio` は記録だけ。`earn_yield` / `ret1` / `ret5` / `ret20` / `pos20` / `prev_intraday` は LightGBM の特徴量） | `plan` のたび |
+| `plan_meta` | `plan` 1 回の要約（件数・IV・ドリフト。`rerank_features` は特徴量を書いた版で、0 なら `lgbm` で並べられない） | `plan` のたび |
 | `quotes` | 9:00 に受け取った気配 1 銘柄。`usable`（鮮度の検査を通った）・`opened`（もう寄っていた）・`gap` 付き | `open` が気配を取ったとき |
-| `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount`。`over_budget` は 1 単元が 1 注文の予算を超えて飛ばされた銘柄（順位が上でも picked にならない）。`skipped` は危険信号で見送った日の順位表で、picked は「建てていたら」（N と予算は通常日の値）。`reason` は選ばれた／外れた理由（`picked` / `over_budget` / `sector_cap` 業種の上限 / `value_pool` 益回りで N に入らず / `too_small` 按分が 1 単元未満 / `beyond_n` N の外。2026-09-15 から） | `open` が順位を付けたとき（見送りの日も） |
-| `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数 | `open` が判断まで進んだとき |
+| `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount`。`over_budget` は 1 単元が 1 注文の予算を超えて飛ばされた銘柄（順位が上でも picked にならない）。`skipped` は危険信号で見送った日の順位表で、picked は「建てていたら」（N と予算は通常日の値）。`reason` は選ばれた／外れた理由（`picked` / `over_budget` / `sector_cap` 業種の上限 / `value_pool` 益回りで N に入らず / `too_small` 按分が 1 単元未満 / `beyond_n` N の外。2026-09-15 から）。`rule_rank` は gap_vol での順位、`rule_picked` は gap_vol の順位なら選んでいたか、`score` は LightGBM の予測値（`rank` はこの高い順。`rank_by = "lgbm"` の日だけ。2026-09-18 から） | `open` が順位を付けたとき（見送りの日も） |
+| `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数、`rank_by`（ロングを実際に並べた規則） | `open` が判断まで進んだとき |
 | `open_run` の `broker_verify` | 実機検証の実行（`--broker-verify`）だったか | `open` のたび |
 | `book` | 板・気配 1 銘柄 × 1 観測時刻（`slot` = JST の HHMM）。時価問合の応答をそのまま（値は文字列） | `snap` のたび（1 日 10 回。[OPENING_DATA.md](OPENING_DATA.md)） |
 

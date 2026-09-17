@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,8 @@ type Row struct {
 	// 判定（signal.max_per_sector）に使う。取れなければ空。
 	Sector string
 	Gap    float64
+	// Ret1 ほかは並べ替えの機械学習の特徴量（universe.Candidate と同じ定義。無ければ nil）。
+	Ret1, Ret5, Ret20, Pos20, PrevIntraday *float64
 	// ShortInterest は空売り残高（発行済に対する比。報告が無ければ nil）。
 	// ショートの母集団の条件（margin.max_short_interest）に使う。
 	ShortInterest *float64
@@ -188,7 +191,7 @@ func floorOf(popts PanelOptions, cfg config.Config) float64 {
 // ——前夜の plan と同じ関数（universe）を使うため。
 const panelSelectColumns = `d, code, o, c, prev_close, next_open, vol20, earn_yield, sector,
        segment, shortable, turnover_med, mkt_cap, earn_prev, disc_today, alert, jsf_stop, is_loss,
-       short_interest`
+       short_interest, ret1, ret5, ret20, pos20, prev_intraday`
 
 // LoadPanel は (Date, Code) ごとの特徴量と当日の寄付・終値を作る。
 // eligible / short_eligible のどちらかに入る行だけを返す（全銘柄 × 10 年を持つと
@@ -278,13 +281,16 @@ func LoadPanelWith(arch *archive.Archive, start, end time.Time, cfg config.Confi
 				sector, segment   sql.NullString
 				mktCap            sql.NullFloat64
 				shortInterest     sql.NullFloat64
+				ret1, ret5, ret20 sql.NullFloat64
+				pos20, prevIntra  sql.NullFloat64
 				gap               sql.NullFloat64
 				limitLow, limitHi sql.NullFloat64
 			)
 			if err := rows.Scan(&r.Date, &r.Code, &r.Open, &r.Close, &prevClose,
 				&nextOpen, &vol20, &earnYield, &sector, &segment, &r.Shortable,
 				&r.TurnoverMed, &mktCap, &r.EarnPrev, &r.DiscToday, &r.Alert, &r.JsfStop, &r.Loss,
-				&shortInterest, &gap, &limitLow, &limitHi); err != nil {
+				&shortInterest, &ret1, &ret5, &ret20, &pos20, &prevIntra,
+				&gap, &limitLow, &limitHi); err != nil {
 				return err
 			}
 			r.Date = r.Date.UTC()
@@ -304,10 +310,9 @@ func LoadPanelWith(arch *archive.Archive, start, end time.Time, cfg config.Confi
 				v := earnYield.Float64
 				r.EarnYield = &v
 			}
-			if shortInterest.Valid {
-				v := shortInterest.Float64
-				r.ShortInterest = &v
-			}
+			r.ShortInterest = nullable(shortInterest)
+			r.Ret1, r.Ret5, r.Ret20 = nullable(ret1), nullable(ret5), nullable(ret20)
+			r.Pos20, r.PrevIntraday = nullable(pos20), nullable(prevIntra)
 			r.Sector, r.Segment = sector.String, segment.String
 			r.LimitLow, r.LimitHigh = limitLow.Float64, limitHi.Float64
 			day = append(day, r)
@@ -406,7 +411,8 @@ ORDER BY d, code`,
 // start は joined の絞り込みにだけ効くので、キャッシュ作成では最古を渡す。
 func panelCTEs(src panelSources, start, end time.Time, cfg config.Config) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, `
+	// {{pos_days}} は universe.PosDays（書式の番号付き引数と混ぜると後ろの %d がずれるので置換で埋める）
+	b.WriteString(strings.ReplaceAll(fmt.Sprintf(`
 WITH bars AS (
   SELECT "Date" AS d, CAST("Code" AS VARCHAR) AS code,
          TRY_CAST("O" AS DOUBLE) AS o, TRY_CAST("C" AS DOUBLE) AS c,
@@ -431,17 +437,27 @@ lagged AS (
          -- （キャッシュは全期間で作るので、end 以降の足を見た next_open を無効にする）。
          lead(b.d) OVER w AS next_open_d,
          b.c / (lag(b.c) OVER w * b.af) - 1 AS ret,
-         lag(b.cap) OVER w AS mkt_cap
+         lag(b.cap) OVER w AS mkt_cap,
+         -- 並べ替えの機械学習の特徴量の材料。z は係数で揃えた終値（universe.loadFeatures と同じ）
+         b.c / exp(sum(ln(b.af)) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS z,
+         lag(b.c) OVER w / nullif(lag(b.o) OVER w, 0) - 1 AS prev_intraday
   FROM bars b
   WINDOW w AS (PARTITION BY b.code ORDER BY b.d)
 ),
 rolled AS (
   SELECT l.*,
          CASE WHEN count(l.va) OVER win = %d THEN median(l.va) OVER win END AS turnover_med,
-         CASE WHEN count(l.ret) OVER vwin = %d THEN stddev_samp(l.ret) OVER vwin END AS vol20
+         CASE WHEN count(l.ret) OVER vwin = %d THEN stddev_samp(l.ret) OVER vwin END AS vol20,
+         lag(l.z, 1) OVER w / lag(l.z, 2) OVER w - 1 AS ret1,
+         lag(l.z, 1) OVER w / lag(l.z, 5) OVER w - 1 AS ret5,
+         lag(l.z, 1) OVER w / lag(l.z, {{pos_days}}) OVER w - 1 AS ret20,
+         CASE WHEN count(l.z) OVER pwin = {{pos_days}}
+              THEN (lag(l.z, 1) OVER w - min(l.z) OVER pwin) / nullif(max(l.z) OVER pwin - min(l.z) OVER pwin, 0) END AS pos20
   FROM lagged l
   WINDOW win AS (PARTITION BY l.code ORDER BY l.d ROWS BETWEEN %d PRECEDING AND 1 PRECEDING),
-         vwin AS (PARTITION BY l.code ORDER BY l.d ROWS BETWEEN %d PRECEDING AND 1 PRECEDING)
+         vwin AS (PARTITION BY l.code ORDER BY l.d ROWS BETWEEN %d PRECEDING AND 1 PRECEDING),
+         pwin AS (PARTITION BY l.code ORDER BY l.d ROWS BETWEEN {{pos_days}} PRECEDING AND 1 PRECEDING),
+         w AS (PARTITION BY l.code ORDER BY l.d)
 ),
 master AS (
   SELECT "Date" AS d, CAST("Code" AS VARCHAR) AS code,
@@ -462,7 +478,7 @@ joined AS (
 		cfg.Universe.TurnoverDays, universe.VolDays,
 		cfg.Universe.TurnoverDays, universe.VolDays,
 		segmentSQL(`"MktNm"`), src.master,
-		archsql.Lit(start), universe.StockProduct)
+		archsql.Lit(start), universe.StockProduct), "{{pos_days}}", strconv.Itoa(universe.PosDays)))
 
 	// 決算（前日引け後）→ 翌営業日にフラグ
 	if src.hasFins {
@@ -517,17 +533,29 @@ joined AS (
 		b.WriteString("alerts AS (SELECT NULL::VARCHAR AS code, NULL::BIGINT AS di, false AS jsf_stop WHERE false),\n")
 	}
 
-	// 空売り残高（markets/short-sale-report）。計算日ごとに報告者ぶんを合計し、
-	// **判定日より前**の最新の計算日を ASOF で当てる（当日の報告は前夜には無い）。
+	// 空売り残高（markets/short-sale-report）。**判定日より前に公表された**報告だけを使う
+	// （前夜の plan が読めるのはそれだけ。universe.loadShortInterest と同じ意味）。
+	// 公表日 dd ごとに「それまでに公表された最新の計算日 lc と、その計算日の報告の合計」を持ち、
+	// 判定日より前の最新の dd を ASOF で当てる。lc の報告の公表が窓より古ければ無し。
+	// 以前は計算日で当てていて、公表前（計算日の 2 営業日後に公表）の値を使っていた。
 	if src.hasSSR {
-		fmt.Fprintf(&b, `ssr AS (
-  SELECT CAST(s."Code" AS VARCHAR) AS code, s."CalcDate" AS cd,
-         sum(TRY_CAST(s."ShrtPosToSO" AS DOUBLE)) AS si
-  FROM %s s GROUP BY 1, 2
+		fmt.Fprintf(&b, `ssr_raw AS (
+  SELECT CAST(s."Code" AS VARCHAR) AS code, s."CalcDate" AS cd, s."DiscDate" AS dd,
+         TRY_CAST(s."ShrtPosToSO" AS DOUBLE) AS v
+  FROM %s s WHERE s."CalcDate" IS NOT NULL AND s."DiscDate" IS NOT NULL
+),
+ssr_last AS (
+  SELECT code, dd, max(max(cd)) OVER (PARTITION BY code ORDER BY dd ROWS UNBOUNDED PRECEDING) AS lc
+  FROM ssr_raw GROUP BY code, dd
+),
+ssr AS (
+  SELECT l.code, l.dd, sum(r.v) AS si, max(r.dd) AS ld
+  FROM ssr_last l JOIN ssr_raw r ON r.code = l.code AND r.cd = l.lc AND r.dd <= l.dd
+  GROUP BY l.code, l.dd
 ),
 `, src.ssr)
 	} else {
-		b.WriteString("ssr AS (SELECT NULL::VARCHAR AS code, NULL::DATE AS cd, NULL::DOUBLE AS si WHERE false),\n")
+		b.WriteString("ssr AS (SELECT NULL::VARCHAR AS code, NULL::DATE AS dd, NULL::DOUBLE AS si, NULL::DATE AS ld WHERE false),\n")
 	}
 
 	fmt.Fprintf(&b, `flagged AS (
@@ -536,12 +564,12 @@ joined AS (
          coalesce(s.code IS NOT NULL, false) AS disc_today,
          coalesce(al.code IS NOT NULL, false) AS alert,
          coalesce(al.jsf_stop, false) AS jsf_stop,
-         ss.si AS short_interest
+         CASE WHEN ss.ld >= j.d - INTERVAL %[2]d DAY THEN ss.si END AS short_interest
   FROM joined j
   LEFT JOIN earn e ON e.code = j.code AND e.di = j.di
   LEFT JOIN sched s ON s.code = j.code AND s.d = j.d
   LEFT JOIN alerts al ON al.code = j.code AND al.di = j.di
-  ASOF LEFT JOIN ssr ss ON ss.code = j.code AND ss.cd < j.d
+  ASOF LEFT JOIN ssr ss ON ss.code = j.code AND ss.dd < j.d
 ),
 -- 本決算は「その日から %[1]d 日以内に開示されたもの」だけを見る。実運用の plan が
 -- 判定日から遡って探すのと同じ窓にする（universe.FinsLookbackDays）。絶対の窓で切ると
@@ -556,7 +584,7 @@ valued AS (
   ) t
 )
 `,
-		universe.FinsLookbackDays)
+		universe.FinsLookbackDays, universe.ShortInterestLookbackDays)
 	return b.String()
 }
 
@@ -564,7 +592,7 @@ valued AS (
 // 設定に依存する判定（eligible / short_eligible・ギャップ・制限値幅）は読み出し側で当てる。
 const panelCacheColumns = `SELECT d, code, o, c, prev_close, next_open, next_open_d, vol20, earn_yield,
        sector, segment, shortable, turnover_med, mkt_cap, earn_prev, disc_today, alert, jsf_stop, is_loss,
-       short_interest`
+       short_interest, ret1, ret5, ret20, pos20, prev_intraday`
 
 // buildCacheQuery はキャッシュに落とす行を作る SQL。期間は切らず（読み出し側で切る）、
 // 流動性の下限だけで絞る——下限を満たさない行はどの設定でも母集団に入らないため。
@@ -596,6 +624,7 @@ func buildCachedPanelQuery(cachePath string, start, end time.Time, floor float64
        CASE WHEN next_open_d > %[2]s THEN NULL ELSE next_open END AS next_open,
        vol20, earn_yield, sector, segment, shortable, turnover_med, mkt_cap,
        earn_prev, disc_today, alert, jsf_stop, is_loss, short_interest,
+       ret1, ret5, ret20, pos20, prev_intraday,
        o / prev_close - 1 AS gap,
        prev_close - (%[3]s) AS limit_low,
        prev_close + (%[3]s) AS limit_high
@@ -653,4 +682,13 @@ func limitWidthSQL(column string) string {
 		fmt.Fprintf(&b, "WHEN %s < %s THEN %s ", column, bound.String(), width.String())
 	}
 	return b.String()
+}
+
+// nullable は NULL を nil にする。
+func nullable(v sql.NullFloat64) *float64 {
+	if !v.Valid {
+		return nil
+	}
+	x := v.Float64
+	return &x
 }
