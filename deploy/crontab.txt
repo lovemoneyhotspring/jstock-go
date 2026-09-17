@@ -120,13 +120,15 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 期間がそのまま観測期間になる。1 日遅らせれば 1 日ぶん永久に欠ける
 # snap は待たない（wait 0）。open / close が握っていれば見送る（発注が優先）。snap 自身は
 # book.max_run_seconds（50 秒）で切れるので、9:00 の snap が 9:01 の open を長く塞ぐことはない。
-# 9:10 は open と同じ分なので snap は 9:11 に置く（同時に始まると open が 30 秒待っても
-# 取れない日が出る）。取れなかったバッチは snap が 1 度取り直し、取れた分だけでも記録する。
+# snap は open と同じ分に置かない（同時に始まると open が 30 秒待っても取れない日が出る）。
+# 9:02・9:05・9:11 は open（9:00・9:03・9:06・9:09・9:13）の間。取れなかったバッチは snap が
+# 1 度取り直し、取れた分だけでも記録する。
 # 9:00 の回はロックを取る前に 5 秒待つ。9:00:00 に始めると 31 バッチが板寄せの前後に
-# またがり、「板寄せの結果」の点にならない（寄り前は 8:59 の回が持つ）。ロックは寝ている間
-# 握らず、最悪でも 9:00:55 に終わるので 9:01 の open（30 秒待つ）は塞がない
+# またがり、「板寄せの結果」の点にならない（寄り前は 8:59 の回が持つ）。
+# 2026-09-17 から open が 9:00:03 に先にロックを握るので、この回だけは 30 秒待つ（発注が優先。
+# open が終わってから 9:00:10〜20 ごろに記録する）。open が 30 秒を超えて握れば見送り、ログに残る
 30,45,55,59 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
-0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 
@@ -187,9 +189,14 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 1 回の実行は execution.max_run_seconds（150 秒）と時間帯の終わりで切れるので、前の回が
 # 遅くても次の回は始められる。送れなかった分は次の回が「残りの枚数」として建て直す
 #
-# 9:01・9:04・9:07・9:10・9:13: 気配でギャップ下位 N（ロング）／上位（ショート）を寄付で建てる。
+# 9:00:03・9:03・9:06・9:09・9:13: 気配で並べてロング N・ショートを寄付で建てる。
 # 窓は 9:15 まで。前の回が全部建てていれば以降は何もしない（冪等）
-1,4,7,10,13 9 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
+# 2026-09-17 に 9:01 始まりから 9:00:03 始まりへ（vault 2026-09-jp-daytrade-ml-entry-timing）。
+# 9:00:00 に寄った銘柄は寄付の直後に上がるので、成行が遅れるほど高く買う（LightGBM の選定は 65% が
+# 9:00:00 に寄り、10 秒で始値 +14 bp、65 秒で +19 bp）。3 秒待つのは寄付を時価問合に反映させるため
+# （9:00:06 の snap では 9:00:00 台に寄った銘柄の 100% に始値が入っていた。9/16・9/17）。
+# 9:13 は us_stale_wait_until（09:12）の後に 1 回回すために残す
+0,3,6,9,13 9 * * 1-5  cd $WBJP_HOME && sleep 3 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
 # --- dry-run の open（2026-09-11〜）。--live / --yes が無いので**注文は出ない**。
 # 実際の気配で銘柄選定・株数・鮮度判定まで通し、判断の記録（ranking / open_run）を残す。
 # 信用取引口座が未開設なので発注はそもそもできない。口座が開いて実機検証が済んだら
