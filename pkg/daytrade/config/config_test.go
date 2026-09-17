@@ -39,6 +39,10 @@ func TestLoadRealConfigs(t *testing.T) {
 		if cfg.Regime.UsSkipHigh == nil {
 			t.Errorf("%s: us_skip_high が読めていない", dir)
 		}
+		// 米国小幅高の日は LightGBM のロングだけ取引し、ショートは休む
+		if cfg.Regime.UsSkipLegs != UsSkipLegsShort {
+			t.Errorf("%s: us_skip_legs = %q, want %q", dir, cfg.Regime.UsSkipLegs, UsSkipLegsShort)
+		}
 	}
 	margin, err := Load("../../../config/daytrade_margin")
 	if err != nil {
@@ -81,6 +85,7 @@ func TestValidateRanges(t *testing.T) {
 		"skip_months が範囲外":          "[regime]\nskip_months = [13]\n",
 		"equity_curve_scale が範囲外":   "[regime]\nequity_curve_scale = 1.5\n",
 		"us_skip_high が low 以下":     "[regime]\nus_skip_low = 0.02\nus_skip_high = 0.01\n",
+		"us_skip_legs が不正":          "[regime]\nus_skip_legs = \"long\"\n",
 		"時間帯の開始が終了より後":              "[execution]\nentry_window = [\"09:30\", \"09:00\"]\n",
 		"carry_penalty が範囲外":        "[margin]\ncarry_penalty = 2\n",
 	}

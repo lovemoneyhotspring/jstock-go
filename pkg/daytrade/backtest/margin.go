@@ -180,8 +180,8 @@ func seesawScales(verdict regime.Verdict, m config.Margin) (longScale, shortMul 
 		longScale = verdict.Scale
 	}
 	switch {
-	case !verdict.Trade:
-		shortMul = 0 // 危険信号そのものはショートも止める
+	case !verdict.Trade, verdict.ShortOff:
+		shortMul = 0 // 危険信号そのものはショートも止める（ShortOff はショートだけ）
 	case weak:
 		shortMul = multiplierWeak // シーソーで増強
 	default:
