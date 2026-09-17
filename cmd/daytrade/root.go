@@ -114,11 +114,31 @@ func describeWindow(cfg dtconfig.Config, name string) string {
 	return fmt.Sprintf("%02d:%02d〜%02d:%02d JST", sh, sm, eh, em)
 }
 
-// skipHoliday は休場日なら真（何もしない）。
+// skipHoliday は休場日なら真（何もしない）。発注しない経路（snap・warm-margin・evaluate）用。
+func skipHoliday(day time.Time, phase string) bool { return skipHolidayFor(day, phase, false) }
+
+// skipHolidayFor は休場日なら真（何もしない）。
 //
 // 気配が取れずに毎回アラートを飛ばさないため、休場の判定を発注経路より前に置く。
-func skipHoliday(day time.Time, phase string) bool {
-	if calendar.FromArchive(openArchive()).IsTradingDay(day) {
+//
+// カレンダーそのものが空（取り込みが無い・壊れた）ときは平日で代用するが、発注する経路
+// （live）では見送る——祝日を営業日と読んで成行を出すと、翌営業日の寄りで約定しうる。
+// 代用のままにすると、年 16 日ある祝日に黙って注文を出す側に倒れる。
+func skipHolidayFor(day time.Time, phase string, live bool) bool {
+	cal := calendar.FromArchive(openArchive())
+	if cal.Empty() {
+		logWarn("daytrade.calendar", "取引カレンダーが空（平日で代用）",
+			map[string]any{"phase": phase, "day": day.Format(DateLayout), "live": live})
+		digest.Anomaly("daytrade.calendar", "取引カレンダーが空: "+phase)
+		if live {
+			fmt.Println("取引カレンダーが空です（休場日か分かりません）。発注しません")
+			logError("daytrade.skip", "カレンダーが無いため見送り",
+				map[string]any{"reason": "no_calendar", "phase": phase, "day": day.Format(DateLayout)})
+			digest.Skipped("no_calendar")
+			return true
+		}
+	}
+	if cal.IsTradingDay(day) {
 		return false
 	}
 	fmt.Printf("%s は休場日。何もしません\n", day.Format(DateLayout))

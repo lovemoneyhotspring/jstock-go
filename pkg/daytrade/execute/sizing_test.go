@@ -225,3 +225,49 @@ func TestRankQuotesKeepsExclusionsWithSkipOpened(t *testing.T) {
 }
 
 const watchRowsForTest = 5
+
+// TestSizeDayLiveConfigPaused は**本番の設定そのまま**（config/daytrade_margin）で、ショートの
+// 一時停止中に建てる形を固定する。仮の設定だけで試すと、order_budget や max_capital を変えた
+// ときに「枠がロングへ回る」形が崩れても気付けない（2026-09-18 のレビュー）。
+func TestSizeDayLiveConfigPaused(t *testing.T) {
+	cfg, err := config.Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	if !cfg.Margin.Paused {
+		t.Skip("margin.paused = false（停止を解除したら、この試験は通常日の形に書き替える）")
+	}
+	normal := regime.Verdict{Trade: true, Scale: 1}
+	shortOff := regime.Verdict{Trade: true, Scale: 1, ShortOff: true, ShortOffReason: "米国小幅高"}
+	shock := regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: 1.5, ShockShort: 0}
+	for _, c := range []struct {
+		name                  string
+		verdict               regime.Verdict
+		wantN                 int
+		wantBudget, wantSpill int64
+		wantTotalAtMost       int64
+	}{
+		// 枠 200 万がロングに回って N=4・1 注文 175 万（長短合計 700 万は停止前と同じ）
+		{name: "通常の日", verdict: normal, wantN: 4, wantBudget: 1_749_999, wantSpill: 1_999_998, wantTotalAtMost: 6_999_996},
+		// 米国小幅高の日もショートは停止のまま倍率を残すので、通常日と同じ形
+		{name: "米国小幅高の日", verdict: shortOff, wantN: 4, wantBudget: 1_749_999, wantSpill: 1_999_998, wantTotalAtMost: 6_999_996},
+		// ショック日はショート ×0 なので回す枠が無い（ロング 1.5 倍のまま 3 銘柄）
+		{name: "ショック日", verdict: shock, wantN: 3, wantBudget: 2_499_999, wantSpill: 0, wantTotalAtMost: 7_499_997},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := SizeDay(SizingInput{Cfg: cfg, Verdict: c.verdict})
+			if d.ShortOpen {
+				t.Errorf("一時停止中なのにショートを建てようとしている: %+v", d.Short)
+			}
+			long, spill, _ := d.WithSpill(nil)
+			if long.N != c.wantN || !long.Budget.Equal(yenOf(c.wantBudget)) || !spill.Equal(yenOf(c.wantSpill)) {
+				t.Errorf("ロング N=%d 1 注文 %s 余り %s, want N=%d 1 注文 %d 余り %d",
+					long.N, long.Budget, spill, c.wantN, c.wantBudget, c.wantSpill)
+			}
+			total := long.Budget.Mul(decimal.NewFromInt(int64(long.N)))
+			if total.GreaterThan(yenOf(c.wantTotalAtMost)) {
+				t.Errorf("建玉の合計 %s が %d を超えた", total, c.wantTotalAtMost)
+			}
+		})
+	}
+}

@@ -82,6 +82,12 @@ type RankingRow struct {
 	RuleRank   int
 	RulePicked bool
 	Score      *float64
+	// RuleOff は既存規則（gap_vol）なら建てない日（米国小幅高で LightGBM だけが取引する日）。
+	// この日の RulePicked は 0 件で、比べでは gap_vol 側を「建てない＝0 円」として数える。
+	RuleOff bool
+	// LaterRun は選んだ回より後の回で建てた行（1 回目が N 件に届かず別の銘柄を建てた分）。
+	// 実績の集計には入れるが、選定の比べからは外す。
+	LaterRun bool
 }
 
 // EvaluationSchema は評価結果 1 行の列。
@@ -94,6 +100,10 @@ var EvaluationSchema = []history.Column{
 	{Name: "over_budget", Type: history.TypeBool},
 	// ranking_run_id は元にした順位表の run_id（作り直しなら null）。
 	{Name: "ranking_run_id", Type: history.TypeString},
+	// rule_off は既存規則（gap_vol）なら建てない日、later_run は選んだ回より後の回で建てた行。
+	// どちらも LightGBM と既存規則の比べ（CompareRule）で使う。
+	{Name: "rule_off", Type: history.TypeBool},
+	{Name: "later_run", Type: history.TypeBool},
 	{Name: "side", Type: history.TypeString},
 	{Name: "rank", Type: history.TypeInt64},
 	{Name: "symbol", Type: history.TypeString},
@@ -136,9 +146,13 @@ var EvaluationSchema = []history.Column{
 	{Name: "midday", Type: history.TypeFloat64},
 	{Name: "midday_gross_bp", Type: history.TypeFloat64},
 	{Name: "midday_net_bp", Type: history.TypeFloat64},
-	// hypo_* は「建てていたら」の株数と円損益。
+	// hypo_* は「建てていたら」の株数と円損益（picked は実際の株数、ほかは 1 注文 = budget の等金額）。
 	{Name: "hypo_quantity", Type: history.TypeFloat64},
 	{Name: "hypo_pnl", Type: history.TypeFloat64},
+	// even_* は全行を「1 注文 = budget の等金額」で揃えた株数と円損益。選び方どうしを円で
+	// 比べるための列（picked は按分、rule_picked は等金額なので hypo_pnl では比べられない）。
+	{Name: "even_quantity", Type: history.TypeFloat64},
+	{Name: "even_pnl", Type: history.TypeFloat64},
 	// limit_*_close は大引がストップ高／安（売建は返済が約定せず持ち越す）。
 	{Name: "limit_up_close", Type: history.TypeBool},
 	{Name: "limit_down_close", Type: history.TypeBool},
@@ -320,9 +334,16 @@ func NominalLegs(p plan.Plan, quotes map[string]selection.Quote, cfg config.Conf
 	n := cfg.Capital.Positions()
 	budget := cfg.Capital.BudgetPerOrder()
 
-	// ショートを先に決め、余りをロングに回す（open と同じ順序）
+	// ショートを先に決め、余りをロングに回す（open と同じ順序）。一時停止中（margin.paused）は
+	// ショートの脚を作らず、枠を丸ごとロングに回す——建てていないショートを「選んだ」と記録すると、
+	// 見送りの日の集計に架空の売建が並び、作り直した日はロングの銘柄数が本番と食い違う
 	var short *Leg
-	if cfg.Margin.Enabled && cfg.Margin.Positions() > 0 {
+	if cfg.Margin.Enabled && cfg.Margin.Positions() > 0 && cfg.Margin.Paused && cfg.Margin.SpillToLong {
+		spill := cfg.Margin.BudgetPerOrder().Mul(cfg.Margin.MultiplierNormal).Round(0).
+			Mul(decimal.NewFromInt(int64(cfg.Margin.Positions())))
+		n, budget = selection.SpillInto(n, budget, cfg.Capital.BudgetPerOrder(), spill, cfg.Capital.MaxPositions)
+	}
+	if cfg.Margin.Enabled && cfg.Margin.Positions() > 0 && !cfg.Margin.Paused {
 		shortN := cfg.Margin.Positions()
 		shortBudget := cfg.Margin.BudgetPerOrder().Mul(cfg.Margin.MultiplierNormal).Round(0)
 		shortRanking := selection.RankShort(p.ShortEligible(), quotes, cfg.Margin)
@@ -350,6 +371,7 @@ func NominalLegs(p plan.Plan, quotes map[string]selection.Quote, cfg config.Conf
 	}
 	longOpts := selection.PickOptions{
 		N: n, Budget: budget, Weighting: cfg.Capital.Weighting, Side: domain.SideBuy,
+		MaxAmount: cfg.Capital.MaxOrder,
 		ValuePool: cfg.Signal.ValuePool, MaxPerSector: cfg.Signal.MaxPerSector,
 	}
 	longPicks := selection.PickFrom(longRanking, longOpts)
@@ -523,6 +545,12 @@ func PickRankingRun(frame history.Frame) (history.Frame, RankingRun) {
 	}
 	info.At, info.Extra = chosen, len(extra)
 	info.Picked = len(latest)
+	// 後の回から拾った行に印を付ける。実績（約定）の集計には要るが、選定の比べ
+	// （CompareRule）には入れられない——後の回の順位表は建て済みを外して並べ直した別の問い
+	for _, row := range frame.Rows {
+		at, ok := row["recorded_at"].(time.Time)
+		row["later_run"] = ok && !at.Equal(chosen)
+	}
 	return frame.Filter(func(row map[string]any) bool {
 		at, ok := row["recorded_at"].(time.Time)
 		if !ok {
@@ -589,6 +617,8 @@ func RowsFromFrame(frame history.Frame) (rows []RankingRow, runID string) {
 			// 2026-09-18 より前の順位表には列が無い（rule_rank 0 で「記録なし」）
 			RuleRank: int(intOf(raw["rule_rank"])), RulePicked: boolOf(raw["rule_picked"]),
 			Score: floatPtrOf(raw["score"]),
+			// rule_off は「既存規則なら建てない日」、later_run は「選んだ回より後の回で建てた行」
+			RuleOff: boolOf(raw["rule_off"]), LaterRun: boolOf(raw["later_run"]),
 		})
 	}
 	return rows, runID
@@ -712,12 +742,14 @@ func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg confi
 			"rule_rank":      nil,
 			"rule_picked":    nil,
 			"score":          floatOrNil(r.Score),
+			"rule_off":       r.RuleOff,
+			"later_run":      r.LaterRun,
 		}
 		if r.RuleRank > 0 {
 			row["rule_rank"], row["rule_picked"] = int64(r.RuleRank), r.RulePicked
 		}
 		for _, name := range []string{"open", "high", "low", "close", "gap_open", "ret_oc",
-			"gross_bp", "cost_bp", "net_bp", "hypo_quantity", "hypo_pnl",
+			"gross_bp", "cost_bp", "net_bp", "hypo_quantity", "hypo_pnl", "even_quantity", "even_pnl",
 			"midday", "midday_gross_bp", "midday_net_bp"} {
 			row[name] = nil
 		}
@@ -756,6 +788,14 @@ func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg confi
 			row["net_bp"] = gross - cost
 			row["hypo_quantity"] = quantity
 			row["hypo_pnl"] = quantity*sign*(bar.Close-bar.Open) - quantity*bar.Open*cost/1e4
+			// even_pnl は「1 注文 = budget の等金額」で揃えた想定損益。picked の株数は
+			// inverse_vol の按分なので、等金額で数える rule_picked と円では比べられない。
+			// LightGBM と既存規則を円で比べるのはこちらの列で（CompareRule）
+			evenQ, _ := selection.SharesFor(decimal.NewFromFloat(r.Budget),
+				decimal.NewFromFloat(bar.Open), marketrules.DefaultLotSize).Float64()
+			evenCost := costBP(r.Side, evenQ*bar.Open, cfg)
+			row["even_quantity"] = evenQ
+			row["even_pnl"] = evenQ*sign*(bar.Close-bar.Open) - evenQ*bar.Open*evenCost/1e4
 			// 浮動小数の丸めで制限値幅をわずかに外すことがあるので余裕を持たせる
 			row["limit_up_close"] = bar.Close >= highF-1e-6
 			row["limit_down_close"] = bar.Close <= lowF+1e-6

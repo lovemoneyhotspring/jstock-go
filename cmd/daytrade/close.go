@@ -54,7 +54,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 	if err != nil {
 		return err
 	}
-	if skipHoliday(day, "close") {
+	if skipHolidayFor(day, "close", live) {
 		return nil
 	}
 	if live && !ignoreWindow && !cfg.Execution.InWindow("exit", now, jst) {

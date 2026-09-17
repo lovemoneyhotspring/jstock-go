@@ -164,6 +164,10 @@ var RankingSchema = []history.Column{
 	{Name: "rule_rank", Type: history.TypeInt64},
 	{Name: "rule_picked", Type: history.TypeBool},
 	{Name: "score", Type: history.TypeFloat64},
+	// rule_off は「既存規則（gap_vol）なら建てない日」の印。gap_vol は米国小幅高の日に両脚とも
+	// 休む（us_skip_legs = "all"）ので、LightGBM だけが取引する日の rule_picked は 0 件になる。
+	// 候補が無かった日と区別するための列（この列が真の日は gap_vol 側の成績を 0 として数える）。
+	{Name: "rule_off", Type: history.TypeBool},
 }
 
 // OpenRunSchema は open 1 回の要約。
@@ -198,6 +202,11 @@ var OpenRunSchema = []history.Column{
 	{Name: "weighting", Type: history.TypeString},
 	// rank_by はロングを並べた規則（gap_vol / lgbm。plan が古くて既存規則に戻した日は gap_vol）。
 	{Name: "rank_by", Type: history.TypeString},
+	// short_paused はショートを一時停止している日（margin.paused）。倍率や候補の有無ではなく
+	// 設定で建てない日なので、SELL が 0 件でも異常ではない。枠は spill でロングへ回す。
+	{Name: "short_paused", Type: history.TypeBool},
+	// rule_off は既存規則（gap_vol）なら建てない日（RankingSchema の rule_off と同じ意味）。
+	{Name: "rule_off", Type: history.TypeBool},
 	{Name: "short_n", Type: history.TypeInt64},
 	{Name: "short_budget", Type: history.TypeFloat64},
 	{Name: "short_multiplier", Type: history.TypeFloat64},
@@ -385,7 +394,7 @@ func RankingFrame(ranking []selection.Ranked, picks, rulePicks []selection.Pick,
 			"over_budget": selection.OverBudget(budget, r.Price), "skipped": false,
 			"reason":    nil,
 			"rule_rank": int64(r.RuleRank), "rule_picked": rulePicked[r.Symbol],
-			"score": floatOrNil(r.Score),
+			"score": floatOrNil(r.Score), "rule_off": false,
 		}
 		if reason, ok := reasons[r.Symbol]; ok {
 			row["reason"] = reason
@@ -406,6 +415,15 @@ func RankingFrame(ranking []selection.Ranked, picks, rulePicks []selection.Pick,
 func MarkSkipped(frame history.Frame) history.Frame {
 	for _, row := range frame.Rows {
 		row["skipped"] = true
+	}
+	return frame
+}
+
+// MarkRuleOff は「既存規則（gap_vol）なら建てない日」の印を付ける（RankingSchema の rule_off）。
+// 米国小幅高の日に LightGBM だけが取引する形（signal.us_skip_legs = "short"）で使う。
+func MarkRuleOff(frame history.Frame) history.Frame {
+	for _, row := range frame.Rows {
+		row["rule_off"] = true
 	}
 	return frame
 }
