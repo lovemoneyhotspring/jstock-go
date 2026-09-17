@@ -16,6 +16,7 @@ import (
 	dtquotes "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/quotes"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/regime"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/universe"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/usmarket"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
@@ -328,6 +329,10 @@ func runOpen(opts openOptions) error {
 			gaps = append(gaps, price/prev-1)
 		}
 	}
+	// ロングの並べ方を寄付の判定より先に決める: LightGBM で並べられない日は gap_vol で取引し、
+	// 米国小幅高の日は両脚とも休む（us_skip_legs を all に戻す。config.FallbackToGapVol）
+	cfg = resolveRankBy(cfg, p, eligible, quotes)
+	summary["rank_by"] = cfg.Signal.RankBy
 	verdict, usStale, err := evaluateRegime(cfg, p, day, regime.MarketGapOf(gaps), led)
 	if err != nil {
 		return err
@@ -431,15 +436,23 @@ func runOpen(opts openOptions) error {
 		summary["spill"] = spill
 	}
 
-	signal := p.Signal(cfg.Signal)
-	if signal.RankBy != cfg.Signal.RankBy {
-		// 前夜の plan が古い版で特徴量が無い。機械学習で並べられないので既存規則に戻す
-		logWarn("daytrade.rerank", "plan に並べ替えの特徴量が無いため既存規則で並べる",
-			map[string]any{"rank_by": cfg.Signal.RankBy, "fallback": signal.RankBy, "plan_features": p.Meta.RerankFeatures})
-		fmt.Printf("plan に並べ替えの特徴量が無いため、rank_by=%s ではなく %s で並べます\n", cfg.Signal.RankBy, signal.RankBy)
+	ranking, err := selection.TryRank(eligible, rankQuotes, cfg.Signal)
+	if err != nil {
+		// 試し並べ（resolveRankBy）は通ったのに、候補を絞った後で失敗した。寄付の判定は済んでいるので
+		// gap_vol で並べて続ける。米国小幅高で「ショートだけ休む」と判定した日は、gap_vol なら
+		// ロングも休む日なので建てない（順位表は残す）
+		logWarn("daytrade.rerank", "LightGBM で並べられないため gap_vol で並べる（寄付の判定の後）",
+			map[string]any{"error": err.Error(), "short_off": verdict.ShortOff})
+		digest.Anomaly("daytrade.rerank", "LightGBM で並べられず gap_vol で取引（判定の後）: "+err.Error())
+		fmt.Printf("LightGBM で並べられないため gap_vol で並べます: %v\n", err)
+		cfg = cfg.FallbackToGapVol()
+		summary["rank_by"] = cfg.Signal.RankBy
+		ranking = selection.Rank(eligible, rankQuotes, cfg.Signal)
+		if verdict.ShortOff {
+			fmt.Printf("gap_vol の米国小幅高の日なのでロングも休みます（%s）\n", verdict.ShortOffReason)
+			n = 0
+		}
 	}
-	summary["rank_by"] = signal.RankBy
-	ranking := selection.Rank(eligible, rankQuotes, signal)
 	// 業種の上限を掛ける設定なのに業種が取れていないと、判定は黙って素通りする
 	// （2026-09-12 に発覚：plan の parquet に sector 列が無く、本番だけ無制限だった）。
 	// 古い plan を読んだときも気付けるように、ここで鳴らす。
@@ -469,7 +482,7 @@ func runOpen(opts openOptions) error {
 	frames := []history.Frame{dthistory.RankingFrame(ranking, picks, rulePicks, "BUY", n, budget, longReasons)}
 	summary["n"], summary["budget"], summary["weighting"], summary["weak"] = n, budget, weighting, weak
 	printPicks(picks, len(rankQuotes), p, watchOnly, "")
-	if signal.RankBy == dtconfig.RankByLGBM {
+	if cfg.Signal.RankBy == dtconfig.RankByLGBM && len(ranking) > 0 && ranking[0].Score != nil {
 		// 既存規則は参考として並べて出す（発注はしない。順位表の rule_picked にも残る）
 		names := make([]string, 0, len(rulePicks))
 		for _, rp := range rulePicks {
@@ -552,6 +565,28 @@ func runOpen(opts openOptions) error {
 		"phase": "open", "live": allowed, "picks": len(picks), "failures": len(failures),
 	})
 	return nil
+}
+
+// resolveRankBy はその日のロングの並べ方を決める。rank_by = "lgbm" でも、plan が古い・モデルが
+// 読めない・当日の気配で試しに並べて失敗した、のどれかなら gap_vol の設定（FallbackToGapVol）を返す。
+// 取引は止めない。戻した日は異常として残す（日次レポートと night-repair が拾う）。
+func resolveRankBy(cfg dtconfig.Config, p dtplan.Plan, eligible []universe.Candidate, quotes map[string]selection.Quote) dtconfig.Config {
+	resolved, reason := p.RankConfig(cfg)
+	if reason == "" && resolved.Signal.RankBy == dtconfig.RankByLGBM {
+		if _, err := selection.TryRank(eligible, quotes, resolved.Signal); err != nil {
+			resolved, reason = cfg.FallbackToGapVol(), err.Error()
+		}
+	}
+	if reason == "" {
+		return resolved
+	}
+	logWarn("daytrade.rerank", "LightGBM で並べられないため gap_vol で取引する", map[string]any{
+		"rank_by": cfg.Signal.RankBy, "fallback": resolved.Signal.RankBy, "reason": reason,
+		"plan_features": p.Meta.RerankFeatures, "us_skip_legs": resolved.Regime.UsSkipLegs,
+	})
+	digest.Anomaly("daytrade.rerank", "LightGBM で並べられず gap_vol で取引: "+reason)
+	fmt.Printf("LightGBM で並べられないため gap_vol で並べます（米国小幅高の日は両脚とも休む）: %s\n", reason)
+	return resolved
 }
 
 // evaluateRegime は危険信号を評価し、ログに残す。usStale は米国の信号を使う設定で、前夜の

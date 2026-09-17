@@ -98,13 +98,20 @@ func filterCandidates(rows []universe.Candidate, keep func(universe.Candidate) b
 	return out
 }
 
-// Signal は sig をこの plan で使える形にする。並べ替えの機械学習（rank_by = "lgbm"）は
-// 特徴量を書いた plan でしか使えないので、古い plan なら既存規則（gap_vol）に戻す。
-func (p Plan) Signal(sig config.Signal) config.Signal {
-	if sig.RankBy == config.RankByLGBM && p.Meta.RerankFeatures < RerankFeaturesVersion {
-		sig.RankBy = config.RankByGapVol
+// RankConfig は cfg をこの日に使える形にする。rank_by = "lgbm" で並べられない日——plan が
+// 特徴量を書いていない古い版か、モデルが読めない——は gap_vol に戻し（米国小幅高の日は
+// 両脚とも休む。config.FallbackToGapVol）、戻した理由を返す。並べられるなら理由は空。
+func (p Plan) RankConfig(cfg config.Config) (config.Config, string) {
+	if cfg.Signal.RankBy != config.RankByLGBM {
+		return cfg, ""
 	}
-	return sig
+	if p.Meta.RerankFeatures < RerankFeaturesVersion {
+		return cfg.FallbackToGapVol(), fmt.Sprintf("plan に並べ替えの特徴量が無い（版 %d）", p.Meta.RerankFeatures)
+	}
+	if err := cfg.Signal.ModelError(); err != nil {
+		return cfg.FallbackToGapVol(), err.Error()
+	}
+	return cfg, ""
 }
 
 // Paths は plan の parquet と json の置き場。

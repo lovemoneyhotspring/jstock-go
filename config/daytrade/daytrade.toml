@@ -109,7 +109,9 @@ us_vix_override = 24
 # 2026-09-18 から "short"。LightGBM で並べるロングはこの日も稼げる（5 年 405 日で +20.95 bp/日・t 3.79、
 # 9:01 の気配の形でも +30.37）。gap_vol に対する優位はほぼこの日にある（休まない日の差は約 0）。
 # ショートはこの日も +171 万（10 年）だが最大 DD が 75 → 107 万に増えるので休む。研究ノート 2026-09-jp-daytrade-ml-skip-days。
-# rank_by を gap_vol に戻すときは "all" に戻す（gap_vol のこの日は +3.88 bp・t 0.59）
+# rank_by を gap_vol に戻すときは "all" に戻す（gap_vol のこの日は +3.88 bp・t 0.59）。
+# LightGBM で並べられない日（plan が古い・モデルが読めない・並べ替えに失敗）は open が自動で
+# gap_vol と "all" に切り替える（ログ daytrade.rerank）
 us_skip_legs = "short"
 # 前夜の米国市場（us_skip_high / shock_us_ret の材料）がまだ取れていない回は 9:12 まで判定せずに待つ。
 # open の cron は 9:01〜9:13 の 3 分おきなので、9:13 の回は取れた値で判定する（取れなければ異常に載せる）。

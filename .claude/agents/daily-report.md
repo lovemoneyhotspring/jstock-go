@@ -116,6 +116,20 @@ test/.venv/bin/python test/dt_missed.py <日付>
 2 行に分かれる。成績の話は通常日の行で、見送りの日の行は「見送りが正しかったか」
 （picked が負けていれば正しい）の材料として書く。
 
+**ロングの並べ方（LightGBM と既存規則 gap_vol）を毎日比べる。** 2026-09-18 からロングは
+LightGBM で並べ、既存規則なら選んでいた銘柄も記録している（評価表の `rule_picked`）。
+17:05 の evaluate が構造化ログに `daytrade.rule_compare` を 1 行残す:
+
+```bash
+jq -c 'select(.code == "daytrade.rule_compare" and .day == "<日付>")' state/logs/daytrade-prod.jsonl
+```
+
+レポートには **「LightGBM 平均 net bp / 想定損益 ・ gap_vol 平均 net bp / 想定損益 ・ 重なり件数」を
+1 行**で書く（`lgbm_*` / `rule_*` / `overlap`）。1 日の勝ち負けで良し悪しを言わない——
+20 営業日ほど溜まってから差の向きを見る（`bin/jquants query` で評価表の `rule_picked` を横断集計）。
+行が無い日は LightGBM で並べていない日。**`daytrade.rerank`（LightGBM で並べられず gap_vol で取引）
+が出ていたら異常として書く**——その日は gap_vol の規則で、米国小幅高なら両脚とも休んでいる。
+
 ### 層 3: 構造化ログ（異常の深掘りのときだけ）
 
 層 1 で拾った `run_id` を鍵に降りる。**定型行（`routine: true`）は読み飛ばす。**

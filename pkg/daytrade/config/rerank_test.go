@@ -19,13 +19,34 @@ func TestValidateRankByLGBM(t *testing.T) {
 	if err := c.Validate(); err == nil {
 		t.Error("モデル未指定で通った")
 	}
+	// 無いモデルでも設定の読み込みは通す（close・verify・guard を止めない）。open が ModelError で確かめる
 	c.Signal.Model = filepath.Join(t.TempDir(), "none.txt")
-	if err := c.Validate(); err == nil {
-		t.Error("無いモデルで通った")
+	if err := c.Validate(); err != nil {
+		t.Errorf("無いモデルで設定の読み込みが止まった: %v", err)
+	}
+	if err := c.Signal.ModelError(); err == nil {
+		t.Error("無いモデルで ModelError が nil")
 	}
 	c.Signal.Model = repoModel(t)
 	if err := c.Validate(); err != nil {
 		t.Errorf("本番のモデルで通らない: %v", err)
+	}
+	if err := c.Signal.ModelError(); err != nil {
+		t.Errorf("本番のモデルで ModelError: %v", err)
+	}
+}
+
+// LightGBM で並べられない日は gap_vol に戻し、米国小幅高の日は両脚とも休む。
+func TestFallbackToGapVol(t *testing.T) {
+	c := Default()
+	c.Signal.RankBy = RankByLGBM
+	c.Regime.UsSkipLegs = UsSkipLegsShort
+	f := c.FallbackToGapVol()
+	if f.Signal.RankBy != RankByGapVol || f.Regime.UsSkipLegs != UsSkipLegsAll {
+		t.Errorf("rank_by=%s us_skip_legs=%s", f.Signal.RankBy, f.Regime.UsSkipLegs)
+	}
+	if c.Signal.RankBy != RankByLGBM || c.Regime.UsSkipLegs != UsSkipLegsShort {
+		t.Error("元の設定が書き換わった")
 	}
 }
 

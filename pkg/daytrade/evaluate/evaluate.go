@@ -77,6 +77,11 @@ type RankingRow struct {
 	OverBudget bool
 	// Skipped は危険信号で見送った日（Picked は「建てていたら」で、発注していない）。
 	Skipped bool
+	// RuleRank は既存規則（gap_vol）での順位、RulePicked は既存規則なら選んでいたか、
+	// Score は LightGBM の予測値（LightGBM で並べた日だけ）。RuleRank = 0 は記録の無い古い順位表。
+	RuleRank   int
+	RulePicked bool
+	Score      *float64
 }
 
 // EvaluationSchema は評価結果 1 行の列。
@@ -102,6 +107,12 @@ var EvaluationSchema = []history.Column{
 	{Name: "gap", Type: history.TypeFloat64},
 	{Name: "vol20", Type: history.TypeFloat64},
 	{Name: "picked", Type: history.TypeBool},
+	// rule_rank は既存規則（gap_vol）での順位、rule_picked は既存規則なら選んでいたか、score は
+	// LightGBM の予測値（LightGBM で並べた日だけ）。LightGBM と既存規則の成績を毎日並べて比べるための列。
+	// 2026-09-18 より前は null。
+	{Name: "rule_rank", Type: history.TypeInt64},
+	{Name: "rule_picked", Type: history.TypeBool},
+	{Name: "score", Type: history.TypeFloat64},
 	{Name: "quantity", Type: history.TypeFloat64},
 	{Name: "amount", Type: history.TypeFloat64},
 	{Name: "n", Type: history.TypeInt64},
@@ -282,7 +293,7 @@ func ReconstructRanking(p plan.Plan, bars map[string]Bar, cfg config.Config, at 
 	}
 	var rows []RankingRow
 	for _, leg := range NominalLegs(p, quotes, cfg) {
-		rows = append(rows, rowsOf(leg.Ranking, leg.Picks, leg.Side, leg.N, leg.Budget)...)
+		rows = append(rows, rowsOf(leg.Ranking, leg.Picks, leg.RulePicks, leg.Side, leg.N, leg.Budget)...)
 	}
 	return rows
 }
@@ -331,7 +342,12 @@ func NominalLegs(p plan.Plan, quotes map[string]selection.Quote, cfg config.Conf
 			n, budget = selection.SpillInto(n, budget, cfg.Capital.BudgetPerOrder(), spill, cfg.Capital.MaxPositions)
 		}
 	}
-	longRanking := selection.Rank(p.Eligible(), quotes, p.Signal(cfg.Signal))
+	rankCfg, _ := p.RankConfig(cfg)
+	longRanking, err := selection.TryRank(p.Eligible(), quotes, rankCfg.Signal)
+	if err != nil {
+		// 並べ替えが失敗した日は open と同じく gap_vol で並べる（作り直しを止めない）
+		longRanking = selection.Rank(p.Eligible(), quotes, cfg.FallbackToGapVol().Signal)
+	}
 	longOpts := selection.PickOptions{
 		N: n, Budget: budget, Weighting: cfg.Capital.Weighting, Side: domain.SideBuy,
 		ValuePool: cfg.Signal.ValuePool, MaxPerSector: cfg.Signal.MaxPerSector,
@@ -346,10 +362,14 @@ func NominalLegs(p plan.Plan, quotes map[string]selection.Quote, cfg config.Conf
 	return legs
 }
 
-func rowsOf(ranking []selection.Ranked, picks []selection.Pick, side string, n int, budget decimal.Decimal) []RankingRow {
+func rowsOf(ranking []selection.Ranked, picks, rulePicks []selection.Pick, side string, n int, budget decimal.Decimal) []RankingRow {
 	picked := map[string]selection.Pick{}
 	for _, p := range picks {
 		picked[p.Symbol] = p
+	}
+	rulePicked := make(map[string]bool, len(rulePicks))
+	for _, p := range rulePicks {
+		rulePicked[p.Symbol] = true
 	}
 	budgetF, _ := budget.Float64()
 	out := make([]RankingRow, 0, len(ranking))
@@ -361,6 +381,7 @@ func rowsOf(ranking []selection.Ranked, picks []selection.Pick, side string, n i
 			Side: side, Rank: r.Rank, Symbol: r.Symbol, Code: r.Code, Name: r.Name,
 			PrevClose: prevClose, Price: price, Gap: gap, Vol20: r.Vol,
 			N: n, Budget: budgetF, OverBudget: selection.OverBudget(budget, r.Price),
+			RuleRank: r.RuleRank, RulePicked: rulePicked[r.Symbol], Score: r.Score,
 		}
 		if p, ok := picked[r.Symbol]; ok {
 			quantity, _ := p.Quantity.Float64()
@@ -565,6 +586,9 @@ func RowsFromFrame(frame history.Frame) (rows []RankingRow, runID string) {
 			N:      int(intOf(raw["n"])), Budget: floatOf(raw["budget"]),
 			// 2026-09-15 より前の順位表には列が無い（null → false）
 			OverBudget: boolOf(raw["over_budget"]), Skipped: boolOf(raw["skipped"]),
+			// 2026-09-18 より前の順位表には列が無い（rule_rank 0 で「記録なし」）
+			RuleRank: int(intOf(raw["rule_rank"])), RulePicked: boolOf(raw["rule_picked"]),
+			Score: floatPtrOf(raw["score"]),
 		})
 	}
 	return rows, runID
@@ -685,6 +709,12 @@ func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg confi
 			"budget":         r.Budget,
 			"skipped":        r.Skipped,
 			"over_budget":    r.OverBudget,
+			"rule_rank":      nil,
+			"rule_picked":    nil,
+			"score":          floatOrNil(r.Score),
+		}
+		if r.RuleRank > 0 {
+			row["rule_rank"], row["rule_picked"] = int64(r.RuleRank), r.RulePicked
 		}
 		for _, name := range []string{"open", "high", "low", "close", "gap_open", "ret_oc",
 			"gross_bp", "cost_bp", "net_bp", "hypo_quantity", "hypo_pnl",
