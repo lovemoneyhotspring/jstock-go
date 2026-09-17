@@ -139,6 +139,12 @@ func Evaluate(cfg config.Regime, s Signals) Verdict {
 		shockReason = fmt.Sprintf("ショック日（%s）→ ロング ×%g、ショート ×%g", joinReasons(shockWhy), shockLong, shockShort)
 	}
 
+	if len(reasons) > 0 {
+		// 止めた日はショートも建たないので、ショートだけの休みは取引する日にだけ立てる。
+		// 診断値の short_off も Verdict と揃える（notes を作る前に消す）
+		shortOff, shortOffReason = false, ""
+	}
+
 	notes := map[string]any{
 		"month":         int(s.Day.Month()),
 		"shock":         shock,
@@ -150,10 +156,6 @@ func Evaluate(cfg config.Regime, s Signals) Verdict {
 		"vix":           floatPtr(s.Vix),
 		"scale":         scale,
 		"short_off":     shortOff,
-	}
-	if len(reasons) > 0 {
-		// 止めた日はショートも建たないので、ショートだけの休みは取引する日にだけ立てる
-		shortOff, shortOffReason = false, ""
 	}
 	return Verdict{
 		Trade:          len(reasons) == 0,
