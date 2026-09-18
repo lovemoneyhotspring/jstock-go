@@ -102,7 +102,7 @@ func filterCandidates(rows []universe.Candidate, keep func(universe.Candidate) b
 // 特徴量を書いていない古い版か、モデルが読めない——は gap_vol に戻し（米国小幅高の日は
 // 両脚とも休む。config.FallbackToGapVol）、戻した理由を返す。並べられるなら理由は空。
 func (p Plan) RankConfig(cfg config.Config) (config.Config, string) {
-	if cfg.Signal.RankBy != config.RankByLGBM {
+	if !cfg.Signal.UsesLGBM() {
 		return cfg, ""
 	}
 	if p.Meta.RerankFeatures < RerankFeaturesVersion {

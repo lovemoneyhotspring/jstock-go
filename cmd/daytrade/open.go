@@ -334,11 +334,15 @@ func runOpen(opts openOptions) error {
 	// ロングの並べ方を寄付の判定より先に決める: LightGBM で並べられない日は gap_vol で取引し、
 	// 米国小幅高の日は両脚とも休む（us_skip_legs を all に戻す。config.FallbackToGapVol）
 	cfg = resolveRankBy(cfg, p, eligible, quotes)
-	summary["rank_by"] = cfg.Signal.RankBy
 	verdict, usStale, err := evaluateRegime(cfg, p, day, regime.MarketGapOf(gaps), led)
 	if err != nil {
 		return err
 	}
+	// 並べ方は米国小幅高の日だけ替わる（signal.rank_by_us_low）。危険信号の判定より後でしか
+	// 決まらないので、summary への記録もここまで待つ
+	cfg.Signal = cfg.Signal.ForDay(verdict.UsLow)
+	summary["rank_by"] = cfg.Signal.RankBy
+	summary["us_low"] = verdict.UsLow
 	summary["trade"] = verdict.Trade
 	summary["reasons"] = strings.Join(verdict.Reasons, "、")
 	summary["scale"] = verdict.Scale
@@ -611,8 +615,10 @@ func runOpen(opts openOptions) error {
 // 取引は止めない。戻した日は異常として残す（日次レポートと night-repair が拾う）。
 func resolveRankBy(cfg dtconfig.Config, p dtplan.Plan, eligible []universe.Candidate, quotes map[string]selection.Quote) dtconfig.Config {
 	resolved, reason := p.RankConfig(cfg)
-	if reason == "" && resolved.Signal.RankBy == dtconfig.RankByLGBM {
-		if _, err := selection.TryRank(eligible, quotes, resolved.Signal); err != nil {
+	// 米国小幅高の日だけ LightGBM を使う設定（rank_by_us_low）でも、当日の気配で試し並べしておく。
+	// 小幅高の日の朝になって初めて失敗するより、毎朝 1 回試して落ちる日を先に見つけるほうがよい
+	if reason == "" && resolved.Signal.UsesLGBM() {
+		if _, err := selection.TryRank(eligible, quotes, resolved.Signal.ForDay(true)); err != nil {
 			resolved, reason = cfg.FallbackToGapVol(), err.Error()
 		}
 	}
