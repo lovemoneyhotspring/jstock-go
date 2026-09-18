@@ -153,6 +153,9 @@ type LegPosition struct {
 	Quantity decimal.Decimal
 	// CostPrice は建値（同じ脚に複数の建玉があれば加重平均）。
 	CostPrice decimal.Decimal
+	// LastPrice は証券会社が返した時価。脚は 1 銘柄なので束ねても 1 つ。
+	// 評価損益の表示にだけ使う（判断には建値と株数しか要らない）。
+	LastPrice decimal.Decimal
 }
 
 // LegPositions は脚ごとの建玉と、照会できなかった側の理由。
@@ -235,6 +238,7 @@ func newLegPositions(positions []domain.Position, cashErr, marginErr error) LegP
 			Quantity: total,
 			CostPrice: current.CostPrice.Mul(current.Quantity).
 				Add(pos.CostPrice.Mul(quantity)).Div(total),
+			LastPrice: pos.LastPrice,
 		}
 	}
 	return LegPositions{positions: held, CashErr: cashErr, MarginErr: marginErr}
