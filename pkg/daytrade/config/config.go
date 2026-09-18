@@ -329,6 +329,15 @@ type Execution struct {
 	// 次の cron まで潰す（発注の機会が丸ごと消える）のを防ぐ。cron の間隔より短くする。
 	// 0 なら時間帯の終わりだけを締め切りにする。
 	MaxRunSeconds int `toml:"max_run_seconds"`
+	// SpreadBPOpen は寄付の成行が払うスプレッドの片道（bp）。成行買いは最良売気配、成行売りは
+	// 最良買気配で約定するので、中値との差だけ必ず負ける。**寄っている銘柄にだけ掛かる**
+	// ——未寄付の銘柄は板寄せに参加して寄値で約定するので、スプレッドを払わない。
+	// 既定 27 は板の記録（state/daytrade/history/book の 9:00:06〜08、2026-09-11〜09-18 の
+	// 6 営業日）の実測。全上場の中央 26.6 bp、ギャップ −3〜0% の寄済み銘柄で 30.8 bp。
+	SpreadBPOpen decimal.Decimal `toml:"spread_bp_open"`
+	// SpreadBPClose は引けの成行が払うスプレッドの片道（bp）。15:20 の手仕舞いは必ず払う。
+	// 既定 11 は同じ板の 15:19 の実測（中央 21.7 bp の半分）で、朝の半分以下に狭い。
+	SpreadBPClose decimal.Decimal `toml:"spread_bp_close"`
 }
 
 // RunDeadline は now に始めた実行の締め切り。
@@ -452,6 +461,8 @@ func Default() Config {
 			GuardWindow:    []string{"09:00", "15:19"},
 			MaxQuoteAge:    90,
 			MaxRunSeconds:  150,
+			SpreadBPOpen:   decimal.NewFromInt(27),
+			SpreadBPClose:  decimal.NewFromInt(11),
 		},
 		Book: Book{Enabled: true, Scope: "all", MaxRunSeconds: 50},
 		Margin: Margin{
@@ -779,6 +790,8 @@ func (c Config) Validate() error {
 		"margin.multiplier_long_weak": c.Margin.MultiplierLongWeak,
 		"capital.max_order":           c.Capital.MaxOrder,
 		"margin.min_turnover":         c.Margin.MinTurnover,
+		"execution.spread_bp_open":    c.Execution.SpreadBPOpen,
+		"execution.spread_bp_close":   c.Execution.SpreadBPClose,
 	} {
 		if v.IsNegative() {
 			return fmt.Errorf("%s は 0 以上", name)

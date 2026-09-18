@@ -356,14 +356,18 @@ func TestSimulateMarginAddsShortLeg(t *testing.T) {
 	if len(result.ShortTrades) == 0 {
 		t.Fatal("ショートの取引が無い")
 	}
+	// 立花証券の信用取引は手数料 0 円。費用は extra_cost_bp と成行のスプレッド（寄付 + 引け）。
+	// この検証は分足を渡していないので「寄っていたか」が分からず、寄付のぶんも払う側に倒れる
+	extraBP, _ := cfg.Margin.ExtraCostBP.Float64()
+	openBP, _ := cfg.Execution.SpreadBPOpen.Float64()
+	closeBP, _ := cfg.Execution.SpreadBPClose.Float64()
 	for _, tr := range result.ShortTrades {
 		if tr.Code != "20000" {
 			t.Errorf("ギャップアップ以外を売建てている: %s（gap %v）", tr.Code, tr.Gap)
 		}
-		// 立花証券の信用取引は手数料 0 円。費用は extra_cost_bp だけ
-		wantFee := tr.Amount * 5 / 1e4
+		wantFee := tr.Amount * (extraBP + openBP + closeBP) / 1e4
 		if diff := tr.Fees - wantFee; diff > 1 || diff < -1 {
-			t.Errorf("ショートの費用 = %v, want ≈ %v（extra_cost_bp のみ）", tr.Fees, wantFee)
+			t.Errorf("ショートの費用 = %v, want ≈ %v（extra_cost_bp + スプレッド）", tr.Fees, wantFee)
 		}
 	}
 	// ギャップアップから −2% 下げる銘柄を売るので、ショート側もプラス
@@ -585,5 +589,59 @@ func TestRunGridMatchesSingleRun(t *testing.T) {
 	if len(grid[1].Margin.ShortTrades) != len(singleMargin.ShortTrades) {
 		t.Errorf("ショートの取引数 = %d, want %d",
 			len(grid[1].Margin.ShortTrades), len(singleMargin.ShortTrades))
+	}
+}
+
+// 成行のスプレッドは「既に寄っている銘柄」だけが寄付のぶんを払う。未寄付の銘柄は
+// 板寄せに参加して寄値で約定するので払わない（板の記録 6 営業日の実測でも食い上がりは 0 bp）。
+// 寄ったかどうかが分からない日は払う側に倒す——10 年の backtest が黙って甘くならないように。
+func TestSimulateSpreadOnlyForOpened(t *testing.T) {
+	days := fixture.BusinessDays(start, 60)
+	arch := buildArchive(t, days)
+	from, to := days[30], days[len(days)-1]
+	cfg := baseConfig()
+	panel, err := backtest.LoadPanel(arch, from, to, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(opened func(time.Time, string) (bool, bool)) *backtest.Result {
+		t.Helper()
+		r, err := backtest.SimulateWith(panel, cfg, nil, backtest.Options{Opened: opened})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Trades) == 0 {
+			t.Fatal("取引が 1 件も無い")
+		}
+		return r
+	}
+	sum := func(r *backtest.Result) (fees, amount float64) {
+		for _, tr := range r.Trades {
+			fees += tr.Fees
+			amount += tr.Amount
+		}
+		return fees, amount
+	}
+
+	allOpened := run(func(time.Time, string) (bool, bool) { return true, true })
+	noneOpened := run(func(time.Time, string) (bool, bool) { return false, true })
+	unknown := run(nil)
+
+	openedFees, amount := sum(allOpened)
+	unopenedFees, unopenedAmount := sum(noneOpened)
+	unknownFees, _ := sum(unknown)
+	if amount != unopenedAmount {
+		t.Fatalf("建てた金額が違う: %v vs %v（Opened は skip_opened = false では選定を変えない）", amount, unopenedAmount)
+	}
+
+	openBP, _ := cfg.Execution.SpreadBPOpen.Float64()
+	want := amount * openBP / 1e4
+	if diff := (openedFees - unopenedFees) - want; diff > 1 || diff < -1 {
+		t.Errorf("寄済みと未寄付の費用差 = %v, want ≈ %v（寄付のスプレッド片道）",
+			openedFees-unopenedFees, want)
+	}
+	if diff := unknownFees - openedFees; diff > 1 || diff < -1 {
+		t.Errorf("判定できない日の費用 = %v, want ≈ %v（払う側に倒す）", unknownFees, openedFees)
 	}
 }

@@ -173,6 +173,40 @@ type legParams struct {
 	margin config.Margin
 	// pick は株数の決め方（N と Budget は日ごとに入れる）。
 	pick selection.PickOptions
+	// spreadOpenBP / spreadCloseBP は成行が払うスプレッドの片道（bp、execution の設定）。
+	// 建値・手仕舞い値（FillModel）は約定値なので中値の近くに来るが、実際の成行買いは
+	// 最良売気配、成行売りは最良買気配で約定する。その差がどの FillModel にも入っていない。
+	spreadOpenBP, spreadCloseBP float64
+	// opened は「寄付の判断の時点でその銘柄が既に寄っていたか」（Options.Opened）。
+	// nil なら分からない。
+	opened func(day time.Time, code string) (opened, known bool)
+}
+
+// spreadBP は 1 往復の成行が払うスプレッドの片道の合計（bp）。引けの手仕舞いは必ず払い、
+// 寄付は**既に寄っている銘柄だけ**が払う——未寄付の銘柄は板寄せに参加して寄値で約定するので、
+// スプレッドを払わない（板の記録 6 営業日の実測でも、未寄付の食い上がりは 0 bp）。
+// 寄ったかどうかが分からない日（分足の無い 2024-09 より前）は払う側に倒す。成行がスプレッドを
+// 払わずに済むのは「未寄付だと確かめられたとき」だけで、分からない日を無料にすると
+// 10 年の backtest が黙って甘くなる。
+func (p legParams) spreadBP(day time.Time, code string) float64 {
+	bp := p.spreadCloseBP
+	if p.opened == nil {
+		return bp + p.spreadOpenBP
+	}
+	opened, known := p.opened(day, code)
+	if !known || opened {
+		bp += p.spreadOpenBP
+	}
+	return bp
+}
+
+// withSpread は成行のスプレッド（execution の設定）と寄済みの判定を脚に載せる。
+// 脚を組み立てる 3 か所（現物ロング・信用ロング・ショート）で同じものを渡すため。
+func withSpread(p legParams, cfg config.Config, opts Options) legParams {
+	p.spreadOpenBP, _ = cfg.Execution.SpreadBPOpen.Float64()
+	p.spreadCloseBP, _ = cfg.Execution.SpreadBPClose.Float64()
+	p.opened = opts.Opened
+	return p
 }
 
 // pickAndPrice はランク付け・按分・価格付け。simulate のロング側の計算を一般化したもの。
@@ -251,15 +285,15 @@ func pickDay(rows []Row, p legParams, n int, budget decimal.Decimal) []Trade {
 			continue
 		}
 		rank++ // 順位表の番号ではなく「建てた順」（--trades-csv の互換）
+		row := byCode[pick.Code]
 		amount := shares[i] * entries[i]
-		extra := amount * p.extraCostBP / 1e4
+		extra := amount * (p.extraCostBP + p.spreadBP(row.Date, pick.Code)) / 1e4
 		commission := 0.0
 		if dayTotal > 0 {
 			commission = dayFee * shares[i] * (entries[i] + exits[i]) / dayTotal
 		}
 		gross := shares[i] * p.sign * (exits[i] - entries[i])
 		fee := extra + commission
-		row := byCode[pick.Code]
 		trades = append(trades, Trade{
 			Date: row.Date, Code: pick.Code, Rank: rank, Gap: pick.Gap.InexactFloat64(),
 			Shares: shares[i], Entry: entries[i], Exit: exits[i],
@@ -414,7 +448,7 @@ func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options
 	carryPenalty, _ := cfg.Margin.CarryPenalty.Float64()
 
 	longRows := groupByDay(panel, longKeep(cfg, opts))
-	trades := pickAndPrice(longRows, panel.Days, legParams{
+	trades := pickAndPrice(longRows, panel.Days, withSpread(legParams{
 		n: n, budget: budget, sign: 1, commission: true, fill: opts.fill(),
 		side: domain.SideBuy, signal: cfg.Signal, margin: cfg.Margin,
 		pick: selection.PickOptions{
@@ -424,7 +458,7 @@ func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options
 			ValuePool:    cfg.Signal.ValuePool,
 			MaxPerSector: cfg.Signal.MaxPerSector,
 		},
-	})
+	}, cfg, opts))
 	trades = applyCarry(trades, rowsByKey(panel), 1, carryPenalty)
 
 	daily := dailyFromTrades(trades, panel.Days)

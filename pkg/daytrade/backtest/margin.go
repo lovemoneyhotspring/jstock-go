@@ -67,6 +67,7 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 	if cfg.Margin.LongViaMargin {
 		longParams.extraCostBP = longExtra
 	}
+	longParams = withSpread(longParams, cfg, opts)
 	longTrades := pickAndPrice(longRows, panel.Days, longParams)
 	longTrades = applyCarry(longTrades, byKey, 1, carryPenalty)
 
@@ -76,7 +77,7 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 	shortRows := groupByDay(panel, func(r Row) bool {
 		return r.ShortEligible && !outsideShortGap(r) && !skipOpened(r)
 	})
-	shortTrades := pickAndPrice(shortRows, panel.Days, legParams{
+	shortTrades := pickAndPrice(shortRows, panel.Days, withSpread(legParams{
 		n: nShort, budget: cfg.Margin.BudgetPerOrder(), sign: -1,
 		extraCostBP: shortExtra,
 		commission:  false, // 立花証券の信用取引は手数料 0 円
@@ -89,7 +90,7 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 			Side:      domain.SideSell,
 			MaxAmount: cfg.Margin.MaxOrder,
 		},
-	})
+	}, cfg, opts))
 	shortTrades = applyCarry(shortTrades, byKey, -1, carryPenalty)
 	if cfg.Margin.Paused {
 		shortTrades = nil // 一時停止: ショートは建てず、枠は SpillToLong でロングへ
