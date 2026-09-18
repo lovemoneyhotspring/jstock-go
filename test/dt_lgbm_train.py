@@ -16,6 +16,7 @@ test/dt_si_pit.py で空売り残高を「判定日の前日までに公表さ�
 """
 
 import json
+import os
 import sys
 
 import numpy as np
@@ -59,6 +60,9 @@ def ranked(raw, days):
 
 def main():
     cand_path, last_day = sys.argv[1], pd.Timestamp(sys.argv[2])
+    # 第 3 引数があればそこへ書く（学習期間を切った検証用のモデル）。本番のモデルを
+    # 上書きせずに「学習期間の外」を測るため。照合用データは本番のモデルのときだけ書く。
+    model_out = sys.argv[3] if len(sys.argv) > 3 else MODEL_OUT
     df = pd.read_parquet(cand_path)
     df["d"] = pd.to_datetime(df["d"])
     df = df[df["d"] <= last_day].copy()
@@ -78,8 +82,11 @@ def main():
     best = m.best_iteration_ or 200
     final = LGBMRegressor(n_estimators=best, **KW)
     final.fit(X.values, y.values)
-    final.booster_.save_model(MODEL_OUT)
-    print(f"学習 {len(df):,} 行 / {len(days):,} 日（{days[0]:%Y-%m-%d}〜{days[-1]:%Y-%m-%d}）、木 {best} 本 → {MODEL_OUT}")
+    os.makedirs(os.path.dirname(model_out) or ".", exist_ok=True)
+    final.booster_.save_model(model_out)
+    print(f"学習 {len(df):,} 行 / {len(days):,} 日（{days[0]:%Y-%m-%d}〜{days[-1]:%Y-%m-%d}）、木 {best} 本 → {model_out}")
+    if model_out != MODEL_OUT:
+        return  # 検証用のモデル。Go との照合データは本番のモデルの分だけ残す
 
     # 照合用: 直近 3 日の候補の生の値・順位化後・予測値。欠損と同順位を含む日を選ぶ
     cases = []
