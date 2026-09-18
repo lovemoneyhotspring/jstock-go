@@ -689,17 +689,27 @@ func actualsOf(orders []dtledger.Order) map[string]actual {
 }
 
 // costBP は往復の費用（bp）。信用は設定の見込み値、現物は手数料込みの実測式。
+// どちらにも成行のスプレッド（execution）を足す——寄付も引けも成行なので、中値との差を
+// 片道ずつ必ず払う。順位表には「その銘柄が寄っていたか」が残っていないので、未寄付なら
+// 払わずに済む寄付のぶんも払う側に倒す（backtest の legParams.spreadBP と同じ考え方）。
+//
+// **gross_bp は日足の始値→大引け終値**なので、これでも実運用より楽観的に出る。
+// 寄付から発注までの値動き（板の記録 6 営業日で中央 18 bp）と、大引けと 15:20 成行の差
+// （本発注 8 件で平均 15 bp）はまだ入っていない。
 func costBP(side string, amount float64, cfg config.Config) float64 {
+	spreadOpen, _ := cfg.Execution.SpreadBPOpen.Float64()
+	spreadClose, _ := cfg.Execution.SpreadBPClose.Float64()
+	spread := spreadOpen + spreadClose
 	if side == "SELL" {
 		f, _ := cfg.Margin.ExtraCostBP.Float64()
-		return f
+		return f + spread
 	}
 	if cfg.Margin.Enabled && cfg.Margin.LongViaMargin {
 		f, _ := cfg.Margin.LongExtraCostBP.Float64()
-		return f
+		return f + spread
 	}
 	f, _ := dtfees.RoundTripBP(decimal.NewFromFloat(amount)).Float64()
-	return f
+	return f + spread
 }
 
 // Evaluate は順位表の全行に日足と台帳を当てる。

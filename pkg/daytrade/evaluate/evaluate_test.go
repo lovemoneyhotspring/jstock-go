@@ -113,9 +113,13 @@ func TestEvaluateShortSideFlipsSign(t *testing.T) {
 	if row["hypo_pnl"].(float64) <= 0 {
 		t.Errorf("ショートの円損益 = %v", row["hypo_pnl"])
 	}
-	// 費用は信用の見込み値（extra_cost_bp = 5）
-	if cost := row["cost_bp"].(float64); cost != 5 {
-		t.Errorf("cost_bp = %v, want 5", cost)
+	// 費用は信用の見込み値（extra_cost_bp）と成行のスプレッド（寄付 + 引け）
+	extraBP, _ := cfg.Margin.ExtraCostBP.Float64()
+	openBP, _ := cfg.Execution.SpreadBPOpen.Float64()
+	closeBP, _ := cfg.Execution.SpreadBPClose.Float64()
+	want := extraBP + openBP + closeBP
+	if cost := row["cost_bp"].(float64); cost != want {
+		t.Errorf("cost_bp = %v, want %v（extra_cost_bp + スプレッド）", cost, want)
 	}
 }
 

@@ -83,3 +83,54 @@ func TestSignalModelResolvesFromDefiningFile(t *testing.T) {
 		}
 	}
 }
+
+// rank_by_us_low は米国小幅高の日だけ並べ方を替える（平常日は rank_by のまま）。
+func TestRankForDay(t *testing.T) {
+	c := Default()
+	c.Signal.RankBy = RankByGapVol
+	c.Signal.RankByUsLow = RankByLGBM
+	if got := c.Signal.RankForDay(false); got != RankByGapVol {
+		t.Errorf("平常日 = %s, want %s", got, RankByGapVol)
+	}
+	if got := c.Signal.RankForDay(true); got != RankByLGBM {
+		t.Errorf("米国小幅高の日 = %s, want %s", got, RankByLGBM)
+	}
+	// 空なら両日とも rank_by
+	c.Signal.RankByUsLow = ""
+	if got := c.Signal.RankForDay(true); got != RankByGapVol {
+		t.Errorf("rank_by_us_low が空の小幅高の日 = %s, want %s", got, RankByGapVol)
+	}
+	// ForDay は元の設定を書き換えない
+	c.Signal.RankByUsLow = RankByLGBM
+	if d := c.Signal.ForDay(true); d.RankBy != RankByLGBM || c.Signal.RankBy != RankByGapVol {
+		t.Errorf("ForDay = %s, 元 = %s（元が書き換わった）", d.RankBy, c.Signal.RankBy)
+	}
+}
+
+// rank_by_us_low = lgbm のときも、モデルが要るし、読めなければ gap_vol に落ちる。
+func TestRankByUsLowNeedsModel(t *testing.T) {
+	c := Default()
+	c.Signal.RankBy = RankByGapVol
+	c.Signal.RankByUsLow = RankByLGBM
+	if err := c.Validate(); err == nil {
+		t.Error("モデル未指定で通った")
+	}
+	c.Signal.Model = repoModel(t)
+	if err := c.Validate(); err != nil {
+		t.Errorf("モデルを指定しても通らない: %v", err)
+	}
+	if !c.Signal.UsesLGBM() {
+		t.Error("UsesLGBM が偽（小幅高の日に使う設定）")
+	}
+	c.Regime.UsSkipLegs = UsSkipLegsShort
+	f := c.FallbackToGapVol()
+	if f.Signal.RankByUsLow != "" || f.Signal.RankBy != RankByGapVol || f.Regime.UsSkipLegs != UsSkipLegsAll {
+		t.Errorf("フォールバック後: rank_by=%s rank_by_us_low=%q us_skip_legs=%s",
+			f.Signal.RankBy, f.Signal.RankByUsLow, f.Regime.UsSkipLegs)
+	}
+	// 値の検証
+	c.Signal.RankByUsLow = "いいかげんな値"
+	if err := c.Validate(); err == nil {
+		t.Error("知らない並べ方で通った")
+	}
+}

@@ -193,6 +193,13 @@ type Signal struct {
 	// 研究ノート 2026-09-jp-daytrade-selection-2: 探索 +6.7 bp/日（t 2.1）・確認 +6.7 bp（t 1.7）で
 	// 事前基準（t 2.5）には届かず、追跡中の仮説。
 	RankBy string `toml:"rank_by"`
+	// RankByUsLow は**前夜の米国市場が小幅高だった日だけ**使う並べ方（空なら RankBy と同じ）。
+	// 学習期間の外・スプレッド込みで測ると、gap_vol は小幅高の日に負け（その日を休むと 2 年で
+	// +166 万円）、LightGBM はその日に稼ぐ（休むと −116 万円）——逆に平常日は gap_vol が
+	// LightGBM に 2 年で 200 万円勝つ。日によって並べ方を替えるのはこの交互作用のため
+	// （2026-09-18 の測定。journal 2026-09-18）。**同じ 2 年で見つけた組み合わせなので、
+	// 日次の差の検定はまだしていない。**
+	RankByUsLow string `toml:"rank_by_us_low"`
 	// Model は rank_by = "lgbm" のモデル（LightGBM のテキスト形式）。相対パスは
 	// **この項目を書いた設定ファイルのディレクトリから**（読み込み時に絶対パスにする。
 	// extends で継いだ子の設定からも同じファイルを指すため）。
@@ -227,9 +234,28 @@ type Signal struct {
 	MaxPerSector int `toml:"max_per_sector"`
 }
 
-// ModelError は rank_by = "lgbm" のモデルが読めなければその誤り（lgbm 以外なら nil）。
+// UsesLGBM は LightGBM を使う日がある設定か（平常日か米国小幅高の日のどちらかで使う）。
+func (s Signal) UsesLGBM() bool {
+	return s.RankBy == RankByLGBM || s.RankByUsLow == RankByLGBM
+}
+
+// RankForDay はその日に使う並べ方。米国小幅高の日だけ rank_by_us_low（空なら rank_by）。
+func (s Signal) RankForDay(usLow bool) string {
+	if usLow && s.RankByUsLow != "" {
+		return s.RankByUsLow
+	}
+	return s.RankBy
+}
+
+// ForDay はその日の並べ方を RankBy に入れた設定。選定（selection）にはこれを渡す。
+func (s Signal) ForDay(usLow bool) Signal {
+	s.RankBy = s.RankForDay(usLow)
+	return s
+}
+
+// ModelError は LightGBM を使う設定でモデルが読めなければその誤り（使わないなら nil）。
 func (s Signal) ModelError() error {
-	if s.RankBy != RankByLGBM {
+	if !s.UsesLGBM() {
 		return nil
 	}
 	if _, err := rerank.Cached(s.Model); err != nil {
@@ -243,6 +269,7 @@ func (s Signal) ModelError() error {
 // gap_vol のこの日は稼げない（+3.88 bp・t 0.59）。なので両脚とも休む（"all"）に戻す。
 func (c Config) FallbackToGapVol() Config {
 	c.Signal.RankBy = RankByGapVol
+	c.Signal.RankByUsLow = "" // 小幅高の日だけ LightGBM にする設定も落とす（モデルが読めないので）
 	if c.Regime.UsSkipLegs == UsSkipLegsShort {
 		c.Regime.UsSkipLegs = UsSkipLegsAll
 	}
@@ -329,6 +356,15 @@ type Execution struct {
 	// 次の cron まで潰す（発注の機会が丸ごと消える）のを防ぐ。cron の間隔より短くする。
 	// 0 なら時間帯の終わりだけを締め切りにする。
 	MaxRunSeconds int `toml:"max_run_seconds"`
+	// SpreadBPOpen は寄付の成行が払うスプレッドの片道（bp）。成行買いは最良売気配、成行売りは
+	// 最良買気配で約定するので、中値との差だけ必ず負ける。**寄っている銘柄にだけ掛かる**
+	// ——未寄付の銘柄は板寄せに参加して寄値で約定するので、スプレッドを払わない。
+	// 既定 27 は板の記録（state/daytrade/history/book の 9:00:06〜08、2026-09-11〜09-18 の
+	// 6 営業日）の実測。全上場の中央 26.6 bp、ギャップ −3〜0% の寄済み銘柄で 30.8 bp。
+	SpreadBPOpen decimal.Decimal `toml:"spread_bp_open"`
+	// SpreadBPClose は引けの成行が払うスプレッドの片道（bp）。15:20 の手仕舞いは必ず払う。
+	// 既定 11 は同じ板の 15:19 の実測（中央 21.7 bp の半分）で、朝の半分以下に狭い。
+	SpreadBPClose decimal.Decimal `toml:"spread_bp_close"`
 }
 
 // RunDeadline は now に始めた実行の締め切り。
@@ -452,6 +488,8 @@ func Default() Config {
 			GuardWindow:    []string{"09:00", "15:19"},
 			MaxQuoteAge:    90,
 			MaxRunSeconds:  150,
+			SpreadBPOpen:   decimal.NewFromInt(27),
+			SpreadBPClose:  decimal.NewFromInt(11),
 		},
 		Book: Book{Enabled: true, Scope: "all", MaxRunSeconds: 50},
 		Margin: Margin{
@@ -673,8 +711,19 @@ func (c Config) Validate() error {
 	if c.Universe.ExcludeCapTerciles < 0 || c.Universe.ExcludeCapTerciles > 2 {
 		return fmt.Errorf("universe.exclude_cap_terciles は 0〜2")
 	}
+	if c.Signal.RankByUsLow != "" {
+		switch c.Signal.RankByUsLow {
+		case RankByGap, RankByGapVol, RankByLGBM:
+		default:
+			return fmt.Errorf("signal.rank_by_us_low は %s / %s / %s: %q",
+				RankByGap, RankByGapVol, RankByLGBM, c.Signal.RankByUsLow)
+		}
+	}
 	switch c.Signal.RankBy {
 	case RankByGap, RankByGapVol:
+		if c.Signal.RankByUsLow == RankByLGBM && c.Signal.Model == "" {
+			return fmt.Errorf("signal.rank_by_us_low = %q には signal.model（モデルのファイル）が要る", RankByLGBM)
+		}
 	case RankByLGBM:
 		if c.Signal.Model == "" {
 			return fmt.Errorf("signal.rank_by = %q には signal.model（モデルのファイル）が要る", RankByLGBM)
@@ -779,6 +828,8 @@ func (c Config) Validate() error {
 		"margin.multiplier_long_weak": c.Margin.MultiplierLongWeak,
 		"capital.max_order":           c.Capital.MaxOrder,
 		"margin.min_turnover":         c.Margin.MinTurnover,
+		"execution.spread_bp_open":    c.Execution.SpreadBPOpen,
+		"execution.spread_bp_close":   c.Execution.SpreadBPClose,
 	} {
 		if v.IsNegative() {
 			return fmt.Errorf("%s は 0 以上", name)

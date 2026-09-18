@@ -68,12 +68,25 @@ type Verdict struct {
 	// ShortOffReason はその理由。Trade が偽の日には意味を持たない。
 	ShortOff       bool
 	ShortOffReason string
+	// UsLow は前夜の米国市場が小幅高の帯に入る日か。どの脚を休むか（us_skip_legs）とは別で、
+	// **Trade が偽の日にも立つ**——並べ方をこの日だけ替える設定（signal.rank_by_us_low）が使う。
+	UsLow bool
 }
 
 // Weak は「取引はするが資産曲線の合図で縮められた日」か（地合いが弱い日）。
 func (v Verdict) Weak() bool { return v.Trade && v.Scale < 1.0 }
 
 // Evaluate は設定で有効なゲートだけを見て、取引してよいか決める。
+// IsUsLow は前夜の米国市場が「小幅高の帯」（us_skip_low 〜 us_skip_high）に入る日か。
+// VIX が us_vix_override を超える日は帯の中でも小幅高とみなさない（急落の前触れは別扱い）。
+// どの脚を休むか（us_skip_legs）とは切り離してあり、並べ方をこの日だけ替える設定
+// （signal.rank_by_us_low）も同じ判定を使う——二重に書くと片方だけ直して食い違うため。
+func IsUsLow(cfg config.Regime, usRet, vix *float64) bool {
+	return cfg.UsSkipHigh != nil && usRet != nil &&
+		floatOf(cfg.UsSkipLow) <= *usRet && *usRet < floatOf(*cfg.UsSkipHigh) &&
+		(vix == nil || decimal.NewFromFloat(*vix).LessThanOrEqual(cfg.UsVixOverride))
+}
+
 func Evaluate(cfg config.Regime, s Signals) Verdict {
 	var reasons []string
 
@@ -105,9 +118,8 @@ func Evaluate(cfg config.Regime, s Signals) Verdict {
 	}
 
 	shortOff, shortOffReason := false, ""
-	if cfg.UsSkipHigh != nil && s.UsRet != nil &&
-		floatOf(cfg.UsSkipLow) <= *s.UsRet && *s.UsRet < floatOf(*cfg.UsSkipHigh) &&
-		(s.Vix == nil || decimal.NewFromFloat(*s.Vix).LessThanOrEqual(cfg.UsVixOverride)) {
+	usLow := IsUsLow(cfg, s.UsRet, s.Vix)
+	if usLow {
 		reason := fmt.Sprintf("前夜の S&P500 %+.2f%% が小幅高（%+.1f%%〜%+.1f%%）",
 			*s.UsRet*100, floatOf(cfg.UsSkipLow)*100, floatOf(*cfg.UsSkipHigh)*100)
 		if s.Vix != nil {
@@ -169,6 +181,7 @@ func Evaluate(cfg config.Regime, s Signals) Verdict {
 		ShockShort:     shockShort,
 		ShortOff:       shortOff,
 		ShortOffReason: shortOffReason,
+		UsLow:          usLow,
 	}
 }
 
