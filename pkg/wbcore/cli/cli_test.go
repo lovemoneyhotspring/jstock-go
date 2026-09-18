@@ -248,3 +248,21 @@ func TestConnectBrokerPaper(t *testing.T) {
 		t.Error("未知の broker はエラー")
 	}
 }
+
+// 3 桁区切りは整数部だけ。小数点ごと数えると建玉の加重平均（2868.17）が
+// 「2,868,.17」になり、値段として読めなくなる。
+func TestAddCommasKeepsFraction(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"2868.17", "2,868.17"},
+		{"1923.56", "1,923.56"},
+		{"-60800", "-60,800"},
+		{"-1234.5", "-1,234.5"},
+		{"999", "999"},
+		{"1000", "1,000"},
+		{"0.5", "0.5"},
+	} {
+		if got := AddCommas(c.in); got != c.want {
+			t.Errorf("AddCommas(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

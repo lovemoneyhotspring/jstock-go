@@ -237,9 +237,16 @@ func Yen(v any) string {
 }
 
 // AddCommas は 3 桁区切り。金額は必ずこれを通す（画面とログで見た目を揃える）。
+//
+// 区切るのは整数部だけで、小数はそのまま後ろに付ける。小数点ごと 3 桁で数えると
+// 建玉の加重平均（2868.17）が「2,868,.17」になる。
 func AddCommas(text string) string {
 	negative := strings.HasPrefix(text, "-")
 	text = strings.TrimPrefix(text, "-")
+	frac := ""
+	if i := strings.IndexByte(text, '.'); i >= 0 {
+		text, frac = text[:i], text[i:]
+	}
 	var out []byte
 	for i, r := range []byte(text) {
 		if i > 0 && (len(text)-i)%3 == 0 {
@@ -248,9 +255,9 @@ func AddCommas(text string) string {
 		out = append(out, r)
 	}
 	if negative {
-		return "-" + string(out)
+		return "-" + string(out) + frac
 	}
-	return string(out)
+	return string(out) + frac
 }
 
 // Pct は割合を符号付きの % にする（0.0123 → +1.23%）。
