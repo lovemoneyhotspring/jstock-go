@@ -29,7 +29,11 @@ def reason_ja:
   }[.] // .)
   end;
 
-[ .[] | select(.command == "open" and (.ts_utc | startswith($d))) ]
+# $d は **JST の日付**。8:59:45（寄る前）の回は UTC では前日の 23:59 なので、
+# UTC の日付で絞ると漏れる。ts_utc を JST に直してから日付を比べる
+def jst_day: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 + 32400 | strftime("%Y-%m-%d");
+
+[ .[] | select(.command == "open" and ((.ts_utc | jst_day) == $d)) ]
 | group_by(.run_id)
 | sort_by(.[0].ts_utc)
 | .[]
