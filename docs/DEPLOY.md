@@ -364,6 +364,13 @@ flock /tmp/accum-run.lock deploy/build.sh      # 実行ファイルを作り直�
 
 - **cron の再起動は不要**。`wbjp run` / `accum run` は 20 分ごとに新しいプロセスで起動するので、`build.sh` を回した次の実行から新コードになる
 - **`build.sh` を忘れると古い実行ファイルのまま動く**。`git pull` だけでは反映されない（Go は実行ファイルに固める）
+- **設定（`config/`）に項目を足したコミットでは `build.sh` が必須。** 設定の読み込みは strict
+  （`DisallowUnknownFields`）なので、古い実行ファイルは知らない項目を見た時点で
+  `strict mode: fields in the document are missing in the target struct` で落ちる
+  ——`plan` `snap` `open` `close` `guard` `verify` が**全部**、設定を読む段階で止まる。
+  2026-09-19 に `preopen_legs` / `extra_symbols` を足して `crontab` は入れたのに `build.sh` を
+  忘れ、次の営業日（9/24）の朝が丸ごと止まる状態で数時間置いた。**確かめ方**:
+  `./bin/daytrade status --config-dir config/daytrade_margin` が設定のエラーを出さないこと
 - `data/`（台帳 DB・足・ログ）は git 管理外なので pull で消えない
 - `config/` は git 管理下。サーバー側で `accum.toml` を直接編集すると pull が衝突する。
   設定変更は **ローカルで commit → push → サーバーで pull** の一方向に揃える
