@@ -688,21 +688,45 @@ func actualsOf(orders []dtledger.Order) map[string]actual {
 	return out
 }
 
+// preopenLegs はその日の台帳から「どちらの脚を**寄成で**建てたか」を読む（脚 → 真偽）。
+//
+// **設定（execution.preopen_legs）ではなく台帳を見る。** 設定を見ると、今日の設定が過去の
+// 全営業日に遡って効いてしまう——`preopen_legs = "long"` にした瞬間に、ザラ場の成行で建てて
+// いた日のロングの費用まで spread_bp_open のぶん下がり、`結果.csv` に残した過去の数字と
+// 断絶する。台帳の condition 列はその日に実際に送った執行条件なので、遡らない。
+//
+// 約定が 1 件も無い日（候補なし・危険信号の見送り・発注を開ける前）は偽を返す ＝ 払う側に倒す。
+// 順位表の行は「もし建てていたら」の想定なので、材料が無いなら費用を多めに積む
+// （この関数の他の「分からないときは払う」と同じ倒し方）。
+func preopenLegs(orders []dtledger.Order) map[string]bool {
+	legs := map[string]bool{}
+	for _, o := range orders {
+		if o.IsDryRun() || o.IsDead() || o.Verify || !o.IsEntry() {
+			continue
+		}
+		if o.Condition == domain.ConditionOpening {
+			legs[string(o.Side)] = true
+		}
+	}
+	return legs
+}
+
 // costBP は往復の費用（bp）。信用は設定の見込み値、現物は手数料込みの実測式。
 // どちらにも成行のスプレッド（execution）を足す——寄付も引けも成行なので、中値との差を
 // 片道ずつ必ず払う。順位表には「その銘柄が寄っていたか」が残っていないので、未寄付なら
 // 払わずに済む寄付のぶんも払う側に倒す（backtest の legParams.spreadBP と同じ考え方）。
 //
-// **寄る前に寄成で建てる脚（execution.preopen_legs）は寄付のぶんを払わない。**
-// 寄成は始値を決める板寄せで約定するので、ザラ場の成行のように最良気配を食わない。
+// **その日を寄成で建てていれば（preopen が真）寄付のぶんは払わない。** 寄成は始値を決める
+// 板寄せで約定するので、ザラ場の成行のように最良気配を食わない。判定は台帳の condition 列
+// （preopenLegs）で、設定ではない——理由はそちらのコメント。
 //
 // **gross_bp は日足の始値→大引け終値**なので、これでも実運用より楽観的に出る。
 // 寄付から発注までの値動き（板の記録 6 営業日で中央 18 bp）と、大引けと 15:20 成行の差
 // （本発注 8 件で平均 15 bp）はまだ入っていない。
-func costBP(side string, amount float64, cfg config.Config) float64 {
+func costBP(side string, amount float64, cfg config.Config, preopen bool) float64 {
 	spreadOpen, _ := cfg.Execution.SpreadBPOpen.Float64()
 	spreadClose, _ := cfg.Execution.SpreadBPClose.Float64()
-	if cfg.Execution.PreopenFor(domain.Side(side)) {
+	if preopen {
 		spreadOpen = 0
 	}
 	spread := spreadOpen + spreadClose
@@ -722,6 +746,8 @@ func costBP(side string, amount float64, cfg config.Config) float64 {
 // 日足が無い銘柄は結果の列が null のまま残る（「なぜ評価できないか」を残すため）。
 func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg config.Config, orders []dtledger.Order, source string) history.Frame {
 	actuals := actualsOf(orders)
+	// その日に寄成で建てた脚（台帳の condition 列）。設定ではないので過去に遡らない
+	preopen := preopenLegs(orders)
 	rows := make([]map[string]any, 0, len(ranking))
 	for _, r := range ranking {
 		sign := 1.0
@@ -796,7 +822,7 @@ func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg confi
 			if r.Amount != nil {
 				amount = *r.Amount
 			}
-			cost := costBP(r.Side, amount, cfg)
+			cost := costBP(r.Side, amount, cfg, preopen[r.Side])
 			row["gap_open"] = bar.Open/r.PrevClose - 1
 			row["ret_oc"] = ret
 			row["gross_bp"] = gross
@@ -809,7 +835,7 @@ func Evaluate(ranking []RankingRow, runID string, bars map[string]Bar, cfg confi
 			// LightGBM と既存規則を円で比べるのはこちらの列で（CompareRule）
 			evenQ, _ := selection.SharesFor(decimal.NewFromFloat(r.Budget),
 				decimal.NewFromFloat(bar.Open), marketrules.DefaultLotSize).Float64()
-			evenCost := costBP(r.Side, evenQ*bar.Open, cfg)
+			evenCost := costBP(r.Side, evenQ*bar.Open, cfg, preopen[r.Side])
 			row["even_quantity"] = evenQ
 			row["even_pnl"] = evenQ*sign*(bar.Close-bar.Open) - evenQ*bar.Open*evenCost/1e4
 			// 浮動小数の丸めで制限値幅をわずかに外すことがあるので余裕を持たせる

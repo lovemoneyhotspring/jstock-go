@@ -8,6 +8,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/evaluate"
 	dtledger "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/plan"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/history"
 	"github.com/shopspring/decimal"
 )
@@ -582,5 +583,62 @@ func TestNominalLegsPausedSpillsWholeShortBudget(t *testing.T) {
 	}
 	if legs[0].N != 4 || legs[0].Budget.String() != "1749999" {
 		t.Errorf("ロング N=%d 1 注文 %s, want N=4 1 注文 1749999", legs[0].N, legs[0].Budget)
+	}
+}
+
+// 寄付のスプレッドを免除するかは**その日の台帳の執行条件**で決める。設定で決めると、
+// preopen_legs を long にした瞬間に過去の全営業日のロングの費用が下がり、
+// 20-research/結果.csv に残した数字と断絶する。
+func TestEvaluateCostUsesLedgerConditionNotConfig(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Execution.SpreadBPOpen = dec(27)
+	cfg.Execution.SpreadBPClose = dec(11)
+	// 今の設定はロングを寄る前に出す（本番 2026-09-24〜）
+	cfg.Execution.PreopenLegs = config.PreopenLegsLong
+
+	fill := dec(950)
+	entry := func(condition string) []dtledger.Order {
+		return []dtledger.Order{{
+			Symbol: "1000", Side: "BUY", Trade: "CASH", Status: "FILLED",
+			Quantity: dec(100), FilledQuantity: dec(100), AvgFillPrice: &fill,
+			Condition: domain.OrderCondition(condition),
+		}}
+	}
+	costOf := func(orders []dtledger.Order) float64 {
+		result := evaluate.Evaluate(ranking(), "", bars(), cfg, orders, evaluate.SourceQuotes)
+		for _, row := range result.Rows {
+			if row["code"] == "10000" {
+				return row["cost_bp"].(float64)
+			}
+		}
+		t.Fatal("選んだ銘柄の行が無い")
+		return 0
+	}
+
+	// ザラ場の成行で建てた過去の日。設定が long でも寄付のぶんを払う
+	past := costOf(entry(""))
+	// 寄成で建てた日。寄付のぶんは払わない
+	preopen := costOf(entry(string(domain.ConditionOpening)))
+	if diff := past - preopen; diff < 26.9 || diff > 27.1 {
+		t.Errorf("寄成の日と過去の日の費用の差 = %.2f bp, want ≈27（spread_bp_open ぶん）"+
+			"（過去 %.2f / 寄成 %.2f）", diff, past, preopen)
+	}
+	// 約定が 1 件も無い日（候補なし・見送り）は払う側に倒す——過去の日と同じ費用
+	if none := costOf(nil); none != past {
+		t.Errorf("約定の無い日の費用 = %.2f bp, want %.2f（払う側に倒す）", none, past)
+	}
+	// 脚ごとに見る。ロングを寄成で建てた日でも、ショートはザラ場の成行のまま
+	short := []evaluate.RankingRow{{
+		Side: "SELL", Rank: 1, Symbol: "2000", Code: "20000", Name: "売建",
+		PrevClose: 1000, Price: 970, Gap: -0.03, Picked: true,
+		Quantity: f(100), Amount: f(97000), N: 1, Budget: 100000,
+	}}
+	result := evaluate.Evaluate(short, "", bars(), cfg, entry(string(domain.ConditionOpening)),
+		evaluate.SourceQuotes)
+	shortCost := result.Rows[0]["cost_bp"].(float64)
+	extra, _ := cfg.Margin.ExtraCostBP.Float64()
+	if want := extra + 27 + 11; shortCost < want-0.1 || shortCost > want+0.1 {
+		t.Errorf("ショートの費用 = %.2f bp, want %.2f（ロングだけ寄成なので寄付のぶんを払う）",
+			shortCost, want)
 	}
 }
