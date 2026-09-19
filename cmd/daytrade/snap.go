@@ -58,7 +58,7 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string, maxRun int) error {
 		return nil
 	}
 
-	symbols, source, err := snapSymbols(cfg.Book.Scope, symbolsFlag, day)
+	symbols, source, err := snapSymbols(cfg.Book.Scope, symbolsFlag, day, cfg.Book.ExtraSymbols)
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string, maxRun int) error {
 // scope = all は plan の**全行**（除外された銘柄も含む ＝ 実質全上場）。母集団の条件を
 // 将来変えたくなったとき、条件の外にあった銘柄の板が無いと検証できない。
 // 並びは対象の銘柄が先（orderSnapSymbols）。
-func snapSymbols(scope, symbolsFlag string, day time.Time) ([]string, string, error) {
+func snapSymbols(scope, symbolsFlag string, day time.Time, extra []string) ([]string, string, error) {
 	if symbolsFlag != "" {
 		var out []string
 		for _, s := range strings.Split(symbolsFlag, ",") {
@@ -159,6 +159,26 @@ func snapSymbols(scope, symbolsFlag string, day time.Time) ([]string, string, er
 	label := "plan の全行"
 	if onlyUniverse {
 		label = "plan の母集団"
+	}
+	// ETF・指数（book.extra_symbols）は plan に載らない。**先頭に置く**——時価問合は 120 銘柄
+	// ずつ順に送るので、締め切りで切れても市場全体の地合いだけは必ず記録に残る
+	if len(extra) > 0 {
+		seen := make(map[string]bool, len(out))
+		merged := make([]string, 0, len(extra)+len(out))
+		for _, s := range extra {
+			if s = strings.TrimSpace(s); s != "" && !seen[s] {
+				seen[s] = true
+				merged = append(merged, s)
+			}
+		}
+		for _, s := range out {
+			if !seen[s] {
+				seen[s] = true
+				merged = append(merged, s)
+			}
+		}
+		out = merged
+		label += fmt.Sprintf(" + 追加 %d", len(extra))
 	}
 	return out, label, nil
 }
