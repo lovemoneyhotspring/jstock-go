@@ -134,8 +134,14 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 8:59 台（2026-09-18〜）: 寄り直前の気配。8:59 の寄前気配は真のギャップに近く
 # （+5% 以上で相関 0.92。9:00 以降の特別気配は約 +2% に潰れる）、寄る前に発注する材料にする。
 # 8:59:00 の回も残して、どちらが始値に近いかを同じ日で比べる。対象の銘柄が先に並ぶ（snap.go）。
-# 8:59:00 の回だけ打ち切りを 40 秒にする——既定の 170 秒だと、接続や書き出しで固まったときに
+# 8:59:00 の回だけ打ち切りを短くする——既定の 170 秒だと、接続や書き出しで固まったときに
 # 9:01:50 までロックを握り、9:00 台の open 3 回がまとめて見送りになる。
+# **--max-run 20 / 打ち切り 25 秒**（2026-09-19 に 35 / 40 から詰めた）。3,682 銘柄でも実測 8〜9 秒で
+# 終わるので 20 秒あれば足り、遅くとも 8:59:25 にはロックを手放す——35 / 40 のままだと固まった朝に
+# 8:59:40 まで握り、下の 8:59:35 の回（ロック待ち 0 秒）が黙って落ち、8:59:45 の open（待ち 5 秒）の
+# 余裕も 5 秒しか残らなかった。切られた回は取れたバッチだけ記録する（全部失うわけではない）。
+# 打ち切りの秒数がそのまま上限になる（timeout の -k 10 の猶予まで伸びるのは TERM を握り潰す
+# プロセスだけで、snap は既定の動作でその場で終わる。TERM を受けるのは open だけ）。
 #
 # **2026-09-19 に 8:59:45 の snap（slot 085945）を 8:59:35 と 8:59:55 に割った**——8:59:45 は
 # 寄る前の open（寄成）に明け渡したため。どちらも**ロックを待たず（wait 0）、取れなければ
@@ -146,7 +152,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 #   085955: 板寄せの 5 秒前。open（実測 4〜9 秒）の後の回で、取れた日の板は始値にいちばん近い
 # 8:57 は 8:55 と 8:59 の間を埋める（気配の動く速さを特徴量にするため。2026-09-19 追加）
 30,45,55,57 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
-59 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=40 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 35
+59 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=25 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 20
 59 8 * * 1-5          cd $WBJP_HOME && sleep 35 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=8 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085935 --max-run 8
 59 8 * * 1-5          cd $WBJP_HOME && sleep 55 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=3 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085955 --max-run 4
 0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=18 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 15
