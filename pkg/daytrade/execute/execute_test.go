@@ -405,6 +405,46 @@ func TestPlaceRefFallsBackToBook(t *testing.T) {
 	}
 }
 
+// 取ったばかりの気配を渡された回は時価を取り直さず、その値を台帳に控える
+// （順位表と 1 本目の注文の間の往復を省く）。足りない銘柄があれば従来どおり取り直す。
+func TestPlacePicksReusesFreshQuotes(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &pricedBroker{stubBroker: &stubBroker{balance: richBalance()}, prices: map[string]broker.MarketPrice{
+		"7203": {Symbol: "7203", Last: decimal.NewFromInt(999)},
+		"6758": {Symbol: "6758", Last: decimal.NewFromInt(888)},
+	}}
+	picks := []selection.Pick{pick("7203", domain.SideBuy)}
+	quotes := map[string]selection.Quote{
+		"7203": {Symbol: "7203", Price: decimal.NewFromInt(1000), Bid: decimal.NewFromInt(1000), Ask: decimal.NewFromInt(1010)},
+		"6758": {Symbol: "6758", Price: decimal.NewFromInt(2000)}, // 板も現在値も無い（CSV の取得元）
+	}
+	env.RefPrices = RefPricesFromQuotes(quotes, picks)
+	if _, _, err := PlacePicks(env, b, picks); err != nil {
+		t.Fatal(err)
+	}
+	if b.calls != 0 {
+		t.Errorf("気配を渡したのに時価を %d 回取り直した", b.calls)
+	}
+	if o := statusOf(t, env, "7203"); o.RefPrice == nil || !o.RefPrice.Equal(decimal.NewFromInt(1005)) {
+		t.Errorf("控えた時価 = %v, want 1005（渡した気配の仲値）", o.RefPrice)
+	}
+
+	more := []selection.Pick{pick("6758", domain.SideBuy)}
+	if got := RefPricesFromQuotes(quotes, more); got != nil {
+		t.Errorf("板も現在値も無い気配を時価として渡した: %v", got)
+	}
+	env.RefPrices = RefPricesFromQuotes(quotes, picks) // 6758 を含まない
+	if _, _, err := PlacePicks(env, b, more); err != nil {
+		t.Fatal(err)
+	}
+	if b.calls != 1 {
+		t.Errorf("足りない銘柄があるのに取り直していない（%d 回）", b.calls)
+	}
+	if o := statusOf(t, env, "6758"); o.RefPrice == nil || !o.RefPrice.Equal(decimal.NewFromInt(888)) {
+		t.Errorf("取り直した時価 = %v, want 888", o.RefPrice)
+	}
+}
+
 // 時価は記録のためだけの値。取れなくても注文は出す（測れないより買い漏れの方が高くつく）。
 func TestPlaceContinuesWhenRefPriceFails(t *testing.T) {
 	env, rep := newEnv(t)

@@ -687,7 +687,7 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 
 		// 発注・照会の口は上限に当たったら待つ（時価の口は marketPriceBatch が同じことをする）
 		if iface == interfaceRequest {
-			if _, err := requestLimiter().Acquire(); err != nil {
+			if _, err := requestLimiterFor(clmID).Acquire(); err != nil {
 				return nil, fmt.Errorf("%s の送信待ちに失敗しました: %w", clmID, err)
 			}
 		}

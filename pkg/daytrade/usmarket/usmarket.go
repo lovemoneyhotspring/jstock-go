@@ -74,6 +74,33 @@ func (f *FredFetcher) Closes(series string, start, end time.Time) (map[string]fl
 	return out, nil
 }
 
+// until は締め切りを過ぎたら取りに行かない Fetcher。
+type until struct {
+	inner    Fetcher
+	deadline time.Time
+}
+
+// Until は取得元のそれぞれに同じ締め切りを持たせる。過ぎていれば繋がずにエラーを返すので、
+// FirstOf は残りの取得元を素通りする。
+//
+// 取得元は 3 つを順に試し、系列は 2 本ある。1 回のタイムアウトだけでは合計が最悪 6 回ぶんに
+// なり、寄る前の回（8:59:45〜9:00:00）の窓を取得だけで使い切る。始まっている 1 回は切らない
+// ので、合計の上限は「締め切り + 1 回のタイムアウト」。
+func Until(deadline time.Time, fetchers ...Fetcher) []Fetcher {
+	out := make([]Fetcher, 0, len(fetchers))
+	for _, f := range fetchers {
+		out = append(out, until{inner: f, deadline: deadline})
+	}
+	return out
+}
+
+func (u until) Closes(series string, start, end time.Time) (map[string]float64, error) {
+	if !time.Now().Before(u.deadline) {
+		return nil, fmt.Errorf("米国市場の取得の締め切り（%s）を過ぎた: %s", u.deadline.Format("15:04:05"), series)
+	}
+	return u.inner.Closes(series, start, end)
+}
+
 // firstOf は取得元を順に試す Fetcher。
 type firstOf []Fetcher
 

@@ -160,6 +160,23 @@ func TestFirstOfFallsBack(t *testing.T) {
 	}
 }
 
+// TestUntilSkipsSourcesAfterDeadline は、締め切りを過ぎたら取得元に繋がずに落とすこと
+// （寄る前の回が米国市場の取得だけで窓を使い切らないため）。前なら素通しする。
+func TestUntilSkipsSourcesAfterDeadline(t *testing.T) {
+	late := newStub()
+	if _, err := FirstOf(Until(time.Now().Add(-time.Second), late)...).Closes("SP500", day("2026-09-01"), day("2026-09-03")); err == nil {
+		t.Error("締め切りを過ぎているのにエラーにならない")
+	}
+	if late.calls != 0 {
+		t.Errorf("締め切りを過ぎているのに取得元を呼んだ: %d 回", late.calls)
+	}
+	early := newStub()
+	got, err := FirstOf(Until(time.Now().Add(time.Minute), early)...).Closes("SP500", day("2026-09-01"), day("2026-09-03"))
+	if err != nil || got["2026-09-03"] != 5075 || early.calls != 1 {
+		t.Errorf("締め切りの前なのに取れない: %v %v（%d 回）", got, err, early.calls)
+	}
+}
+
 // TestFirstOfFillsMissingLatestDay は、先の取得元が前夜の行だけ欠いていれば次の取得元で
 // その日を補い、先の取得元の値は上書きしないこと（2026-09-17。Cboe の VIX が 9/16 を
 // まだ載せておらず、Yahoo に回らなかった）。

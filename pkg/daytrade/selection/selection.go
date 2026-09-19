@@ -53,6 +53,10 @@ type Quote struct {
 	// 空なので、気配が唯一の値段になる（docs/OPENING_DATA.md「実機で確かめること」3）。
 	// 記録用——選定の規則には使わない。
 	FromBook bool
+	// Last / Bid / Ask は取得元が返した現在値と最良気配そのまま（無ければゼロ）。
+	// 記録用——選定の規則には使わない。発注の直前に取り直す代わりに、取ったばかりの気配を
+	// 「送る直前の時価」として台帳に残すために持つ（execute.RefPricesFromQuotes）。
+	Last, Bid, Ask decimal.Decimal
 }
 
 // Pick は建てる銘柄 1 つ。Side が BUY なら寄付で買う（ロング）、SELL なら売建てる（ショート）。
