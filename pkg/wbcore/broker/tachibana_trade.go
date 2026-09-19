@@ -297,14 +297,24 @@ func (t *TachibanaBroker) Preview(req domain.OrderRequest) (*domain.OrderPreview
 	return &domain.OrderPreview{EstimatedCost: cost, EstimatedFee: fee}, nil
 }
 
-// marketEstimatePrice は成行を見積もるときの参照値段。
+// marketEstimatePrice は成行を見積もるときの参照値段（Preview 専用）。
 //
-// **寄り前と未寄付の銘柄は現在値（pDPP）も始値（pDOP）も空で、値段は気配にしかない。**
-// 現在値だけを見ていた頃は、寄る前に出す注文がここで必ず「時価がありません」に落ちた。
+// **寄り前と未寄付の銘柄は現在値（pDPP）も始値（pDOP）も空で、値段は気配にしかない**
+// （2026-09-11 の実機。docs/OPENING_DATA.md）。現在値だけを見ていた頃は、寄る前や
+// 未寄付の銘柄に成行を出すと、ここで必ず「時価がありません」に落ちて発注に進めなかった。
 //
 // 気配を使うときは**不利な側**（買いは売気配、売りは買気配）を採る。中値を採ると
 // スプレッドの半分だけ見積もりが甘くなり、余力ぎりぎりの注文が約定して余力割れになる。
 // 片側しか無ければその値（板寄せ中の特別気配は片側だけのことがある）。
+//
+// **効くのは Preview を呼ぶ側だけ ＝ 今は accum（pkg/accum/execute）。**
+// daytrade は Preview を呼ばない——寄付の発注は `GetBalance` の余力を取引区分ごとに
+// 引き算しながら回し、1 銘柄ぶんの必要額は選定時の `pick.Amount()`（寄り前は最良気配の
+// **中値**。quotes.bookPrice）で見る。つまり daytrade の寄る前の発注は、この関数の
+// 「不利な側を採る」保守側には乗っていない。乗せていない理由は、寄り前の見積りの誤差は
+// スプレッドの半分より**気配と始値のずれ**の方がずっと大きく（研究中。vault
+// 2026-09-jp-daytrade-preopen-order）、不利側に寄せても足りないから。足りない分は
+// 拒否されれば 9:00:03 以降の回が従来の成行で建て直す。
 func marketEstimatePrice(side domain.Side, quote MarketPrice) decimal.Decimal {
 	if quote.Last.IsPositive() {
 		return quote.Last
