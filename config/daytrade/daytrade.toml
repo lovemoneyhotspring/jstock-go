@@ -78,9 +78,18 @@ skip_opened = false
 #   常時 gap_vol・小幅高も取引        435 万円 / 1.60 / −117.9 万
 # gap_vol は小幅高の日に負け、LightGBM はその日に稼ぐ。逆に平常日は gap_vol が LightGBM に勝つ。
 # **同じ 2 年で見つけた組み合わせなので、日次の差の検定はまだしていない**（journal 2026-09-18）。
-rank_by = "gap_vol"
-rank_by_us_low = "lgbm"
-# lgbm のモデル（このファイルからの相対パス）。rank_by_us_low = "lgbm" でも要る。
+#
+# 2026-09-19 に常時 lgbm へ戻した。**寄る前の発注（preopen_legs）と組で決めた**——上の数字は
+# 9:00:03 のザラ場成行の形のもので、そこでは lgbm が選ぶ銘柄の 65%（gap_vol は 34%）が
+# 既に寄っており、板を食う 49.1 bp をほぼ全候補で払う。寄る前に出せばその滑りは掛からない。
+# 滑りを除いた上限（全銘柄を始値で建てる）は lgbm +37.07 対 gap_vol +32.08 bp/日で lgbm が上。
+# 今の実測（8:59:00 の気配の誤差込み）は lgbm +9.02 対 gap_vol +9.18 とほぼ同値で、差は
+# 8:59 の気配の誤差が lgbm の優位（+5 bp）をちょうど食い潰した形。**8:59:45 の誤差は
+# 8:59:00 より小さいはずで、それを測るのがこれから**（vault 2026-09-jp-daytrade-preopen-order）。
+rank_by = "lgbm"
+# rank_by が lgbm なので日による切り替えは要らない（空 = rank_by と同じ）。
+rank_by_us_low = ""
+# lgbm のモデル（このファイルからの相対パス）。
 model = "models/lgbm_rank.txt"
 # 2 段階選定: ギャップ順の上位 N × value_pool から益回り（直近本決算の純利益 ÷ 時価総額）の
 # 高い順に N 銘柄。**検証したが採用しない（既定 0 = 無効）。**
@@ -165,16 +174,18 @@ columns = "pDOP,pDPP,tDPP:T,pPRP,pDHP,pDLP,pDV,pDJ,pVWAP,pQAS,pQBS,pQAP,pQBP,pAV
 broker = "tachibana"
 tax_account_type = "SPECIFIC"
 quote_source = "tachibana"   # tachibana / csv。立花証券の時価問合（寄付後は始値、無ければ現在値）
-entry_window = ["09:00", "09:15"]
+entry_window = ["08:59", "09:15"]
 # 寄る前の回で**寄成**（執行条件「寄付」＝ sCondition 2）を出す脚。none / long / short / both。
 # 寄成はその銘柄の始値を決める板寄せに参加するので、寄った後の値を追わず始値で建つ。
 # none 以外にするなら entry_window の開始を 9:00 より前（8:59）にして、cron に 8:59:45 の回を足す
 # ——窓が 9:00 開始のままだと寄る前の回が走らず、設定の検査で止まる。
 # 9:00 以降の回は脚によらず従来どおりザラ場の成行（未寄付なら成行でも板寄せに入る）。
-# **まだ none。** 8:59:45 の気配の記録が 20 営業日溜まって測り直すまで本番には出さない
-# （vault 20-research/2026-09-jp-daytrade-preopen-order.md の事前登録）。
-# 立花の sCondition ≠ 0 は実機未検証（docs/BROKER_VERIFY.md）。
-preopen_legs = "none"
+# 2026-09-19 から long。**事前登録の「8:59:45 の記録が 20 営業日」を待たずに開けた**
+# （ユーザ判断。記録を溜めながら始値との誤差を測る）。ショートは margin.paused = true で
+# 建てていないので long のまま——再開するときに both にするか決める。
+# **立花の sCondition ≠ 0 は実機未検証**（docs/BROKER_VERIFY.md）。寄成が拒否されても
+# 9:00:03 以降の回が従来のザラ場成行で残りの枚数を埋めるので、最悪でも今の形に戻る。
+preopen_legs = "long"
 exit_window = ["15:20", "15:30"]  # 15:20 の成行はその場で約定（引け値ではない）。15:25 以降ならクロージング・オークションで引け値
 guard_window = ["09:00", "15:19"] # daytrade guard（材料の出た売建の取消・返済）。引けの手仕舞いと重ねない
 kill_switch = false

@@ -430,6 +430,16 @@ func (e Execution) RunDeadline(name string, now time.Time, useWindow bool, jst *
 			}
 		}
 	}
+	// 寄る前の回は**板寄せ（9:00:00）まで**。過ぎてから送る寄成は、既に寄った銘柄
+	// （ロング候補の 89.4%）の板寄せに間に合わず約定しない。送れなかった分は 9:00:03
+	// 以降の回が「残りの枚数」として従来のザラ場の成行で埋める。
+	if name == "entry" && e.PreopenAt(now, jst) {
+		local := now.In(jst)
+		auction := time.Date(local.Year(), local.Month(), local.Day(), TSEOpenHour, 0, 0, 0, jst)
+		if deadline.IsZero() || auction.Before(deadline) {
+			deadline = auction
+		}
+	}
 	return deadline
 }
 

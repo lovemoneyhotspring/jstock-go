@@ -49,3 +49,32 @@ func TestValidatePreopenNeedsEarlyWindow(t *testing.T) {
 		t.Error("未知の preopen_legs を通した")
 	}
 }
+
+// 寄る前の回の締め切りは板寄せ（9:00:00）。過ぎてから出す寄成は寄った銘柄に約定しない。
+func TestPreopenDeadlineIsTheAuction(t *testing.T) {
+	jst := time.FixedZone("JST", 9*60*60)
+	e := Default().Execution
+	e.PreopenLegs = PreopenLegsLong
+	e.EntryWindow = []string{"08:59", "09:15"}
+	now := time.Date(2026, 9, 19, 8, 59, 45, 0, jst)
+
+	got := e.RunDeadline("entry", now, true, jst)
+	want := time.Date(2026, 9, 19, 9, 0, 0, 0, jst)
+	if !got.Equal(want) {
+		t.Errorf("寄る前の締め切り = %s, want %s", got.In(jst), want)
+	}
+
+	// 9:00 以降の回は従来どおり（max_run_seconds と窓の終わりの早い方）
+	after := time.Date(2026, 9, 19, 9, 1, 0, 0, jst)
+	got = e.RunDeadline("entry", after, true, jst)
+	if !got.Equal(after.Add(time.Duration(e.MaxRunSeconds) * time.Second)) {
+		t.Errorf("9:00 以降の締め切り = %s", got.In(jst))
+	}
+
+	// 寄成を出さない設定なら寄る前でも従来どおり
+	none := e
+	none.PreopenLegs = PreopenLegsNone
+	if got := none.RunDeadline("entry", now, true, jst); got.Equal(want) {
+		t.Error("preopen_legs = none で板寄せの締め切りが付いた")
+	}
+}
