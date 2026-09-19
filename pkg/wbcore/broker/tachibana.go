@@ -922,6 +922,10 @@ func (t *TachibanaBroker) orderPayload(req domain.OrderRequest) (map[string]any,
 	if err != nil {
 		return nil, err
 	}
+	condition, err := conditionCodeOf(req.Condition)
+	if err != nil {
+		return nil, err
+	}
 
 	isMarket := req.OrderType == domain.OrderTypeMarket
 	if req.Trade == domain.TradeTypeMarginOpen && req.Side == domain.SideSell && isMarket {
@@ -971,7 +975,7 @@ func (t *TachibanaBroker) orderPayload(req domain.OrderRequest) (map[string]any,
 		"sIssueCode":                req.Symbol,
 		"sSizyouC":                  marketCodeTSE,
 		"sBaibaiKubun":              sideKubun,
-		"sCondition":                "0", // 執行条件なし
+		"sCondition":                condition, // 0 指定なし / 2 寄付
 		"sOrderPrice":               price,
 		"sOrderSuryou":              req.Quantity.String(),
 		"sGenkinShinyouKubun":       tradeKubun,

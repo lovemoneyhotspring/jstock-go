@@ -276,10 +276,14 @@ func (t *TachibanaBroker) Preview(req domain.OrderRequest) (*domain.OrderPreview
 			return nil, fmt.Errorf("成行の見積りに時価を取れません (%s): %w", req.Symbol, err)
 		}
 		quote, ok := prices[req.Symbol]
-		if !ok || !quote.Last.IsPositive() {
+		if !ok {
 			return nil, fmt.Errorf("成行の見積りに使える時価がありません: %s", req.Symbol)
 		}
-		cost = quote.Last.Mul(req.Quantity).Round(0)
+		ref := marketEstimatePrice(req.Side, quote)
+		if !ref.IsPositive() {
+			return nil, fmt.Errorf("成行の見積りに使える時価も気配もありません: %s", req.Symbol)
+		}
+		cost = ref.Mul(req.Quantity).Round(0)
 	}
 
 	if req.Trade.IsMargin() || cost.LessThanOrEqual(decimal.Zero) {
@@ -291,6 +295,31 @@ func (t *TachibanaBroker) Preview(req domain.OrderRequest) (*domain.OrderPreview
 	}
 	fee := MarginalFlatRateCommission(t.cashTradedToday, cost)
 	return &domain.OrderPreview{EstimatedCost: cost, EstimatedFee: fee}, nil
+}
+
+// marketEstimatePrice は成行を見積もるときの参照値段。
+//
+// **寄り前と未寄付の銘柄は現在値（pDPP）も始値（pDOP）も空で、値段は気配にしかない。**
+// 現在値だけを見ていた頃は、寄る前に出す注文がここで必ず「時価がありません」に落ちた。
+//
+// 気配を使うときは**不利な側**（買いは売気配、売りは買気配）を採る。中値を採ると
+// スプレッドの半分だけ見積もりが甘くなり、余力ぎりぎりの注文が約定して余力割れになる。
+// 片側しか無ければその値（板寄せ中の特別気配は片側だけのことがある）。
+func marketEstimatePrice(side domain.Side, quote MarketPrice) decimal.Decimal {
+	if quote.Last.IsPositive() {
+		return quote.Last
+	}
+	adverse, other := quote.Ask, quote.Bid
+	if side == domain.SideSell {
+		adverse, other = quote.Bid, quote.Ask
+	}
+	if adverse.IsPositive() {
+		return adverse
+	}
+	if other.IsPositive() {
+		return other
+	}
+	return quote.Open
 }
 
 // repaymentList は返済する建玉を個別指定する。

@@ -37,6 +37,12 @@ const (
 
 	// 市場コード（sSizyouC）。東証。
 	marketCodeTSE = "00"
+
+	// 執行条件（sCondition）。**0＝指定なし、2＝寄付、4＝引け、6＝不成**。
+	// 値段（sOrderPrice）とは別の項目なので、寄成は「sOrderPrice = 0 × sCondition = 2」。
+	// 銘柄・市場によっては寄付を受け付けない（エラー「商品市場別設定.執行条件寄付不可」）。
+	conditionNone    = "0"
+	conditionOpening = "2"
 )
 
 // ShortSaleMarketUnits は成行で出せる信用新規売りの上限**単元数**。
@@ -92,11 +98,17 @@ var (
 	}
 
 	// orderTypeFromCode は sOrderOrderPriceKubun → 注文種別。
+	//
+	// **3 / 4 の読みは疑わしい。** リファレンス（v4.5/v4.10）の CLMOrderList の
+	// sOrderOrderPriceKubun は「1 成行 / 2 指値 / 3 親注文より高い / 4 親注文より低い」で、
+	// 引け成行・引け指値ではない（引けは執行条件 sCondition = 4 の側に出るはず）。
+	// 3 / 4 を成行・指値として読んでも「板に出る値段の種類」としては大きく外れないので
+	// 値は変えていないが、照会の実データで確かめること（docs/BROKER_VERIFY.md）。
 	orderTypeFromCode = map[string]domain.OrderType{
 		"1": domain.OrderTypeMarket,
 		"2": domain.OrderTypeLimit,
-		"3": domain.OrderTypeMarket, // 引け成行
-		"4": domain.OrderTypeLimit,  // 引け指値
+		"3": domain.OrderTypeMarket,
+		"4": domain.OrderTypeLimit,
 	}
 
 	// statusFromCode は sOrderStatusCode → 注文の状態。
@@ -182,6 +194,18 @@ func tradeCodeOf(trade domain.TradeType) (string, error) {
 		return code, nil
 	}
 	return "", fmt.Errorf("立花証券に送れない取引種別です: %s", trade)
+}
+
+// conditionCodeOf は執行条件のコード。未知の条件は「指定なし」に落とさずエラー——
+// 落とすと寄成のつもりの注文がザラ場の成行として通り、寄った後の値で建つ。
+func conditionCodeOf(c domain.OrderCondition) (string, error) {
+	switch c {
+	case domain.ConditionNone:
+		return conditionNone, nil
+	case domain.ConditionOpening:
+		return conditionOpening, nil
+	}
+	return "", fmt.Errorf("立花証券に送れない執行条件です: %s", c)
 }
 
 // sideCodeOf は売買区分のコード。

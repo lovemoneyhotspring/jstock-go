@@ -253,3 +253,93 @@ func TestAllocateRepaymentRequiresPositionNumber(t *testing.T) {
 func testCreds() *credentials.TachibanaCredentials {
 	return &credentials.TachibanaCredentials{OrderPassword: "x"}
 }
+
+// 寄成は「成行（sOrderPrice = 0）× 執行条件 寄付（sCondition = 2）」。
+// 執行条件なしの注文は従来どおり sCondition = 0 のまま。
+func TestOrderPayloadOpeningCondition(t *testing.T) {
+	b := &TachibanaBroker{creds: testCreds()}
+	base := domain.OrderRequest{
+		ClientOrderID: "moo-1", Symbol: "7203", Side: domain.SideBuy,
+		OrderType: domain.OrderTypeMarket, Quantity: dec("100"),
+		TaxType: domain.TaxAccountSpecific, Trade: domain.TradeTypeCash,
+	}
+	params, err := b.orderPayload(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params["sCondition"] != "0" {
+		t.Errorf("執行条件なし: sCondition = %v, want 0", params["sCondition"])
+	}
+
+	opening, err := base.WithCondition(domain.ConditionOpening)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err = b.orderPayload(opening)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{"sCondition": "2", "sOrderPrice": "0"} {
+		if params[key] != want {
+			t.Errorf("寄成: %s = %v, want %v", key, params[key], want)
+		}
+	}
+
+	// 未知の執行条件は「指定なし」に落とさずエラー（落とすとザラ場の成行として通ってしまう）
+	bad := base
+	bad.Condition = domain.OrderCondition("CLOSING")
+	if _, err := b.orderPayload(bad); err == nil {
+		t.Error("未知の執行条件が通りました")
+	}
+}
+
+// 執行条件と逆指値は併用しない（どちらから付けても弾く）。
+func TestOrderConditionAndStopAreExclusive(t *testing.T) {
+	base := domain.OrderRequest{
+		ClientOrderID: "moo-2", Symbol: "7203", Side: domain.SideSell,
+		OrderType: domain.OrderTypeMarket, Quantity: dec("100"),
+		TaxType: domain.TaxAccountSpecific, Trade: domain.TradeTypeCash,
+	}
+	opening, err := base.WithCondition(domain.ConditionOpening)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := opening.WithStop(dec("2400"), nil); err == nil {
+		t.Error("寄成に逆指値が付きました")
+	}
+	stop, err := base.WithStop(dec("2400"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stop.WithCondition(domain.ConditionOpening); err == nil {
+		t.Error("逆指値に執行条件が付きました")
+	}
+}
+
+// 成行の見積りは現在値が無ければ気配に落ちる（寄り前・未寄付は現在値が空）。
+// 気配を使うときは不利な側——買いは売気配、売りは買気配。
+func TestMarketEstimatePrice(t *testing.T) {
+	cases := []struct {
+		name  string
+		side  domain.Side
+		quote MarketPrice
+		want  string
+	}{
+		{"現在値があればそれ", domain.SideBuy,
+			MarketPrice{Last: dec("2500"), Bid: dec("2490"), Ask: dec("2510")}, "2500"},
+		{"寄り前の買いは売気配", domain.SideBuy,
+			MarketPrice{Bid: dec("2490"), Ask: dec("2510")}, "2510"},
+		{"寄り前の売りは買気配", domain.SideSell,
+			MarketPrice{Bid: dec("2490"), Ask: dec("2510")}, "2490"},
+		{"片側だけの板はその値", domain.SideBuy,
+			MarketPrice{Bid: dec("2490")}, "2490"},
+		{"板が無ければ始値", domain.SideBuy,
+			MarketPrice{Open: dec("2480")}, "2480"},
+		{"どれも無ければ 0", domain.SideBuy, MarketPrice{}, "0"},
+	}
+	for _, c := range cases {
+		if got := marketEstimatePrice(c.side, c.quote); !got.Equal(dec(c.want)) {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
+		}
+	}
+}

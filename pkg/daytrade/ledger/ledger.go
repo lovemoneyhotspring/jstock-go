@@ -25,7 +25,7 @@ const dayLayout = "2006-01-02"
 // orderColumns は Order を読み出す列。query の Scan と同じ並び。
 const orderColumns = "client_order_id, broker_order_id, day, symbol, side, quantity," +
 	" filled_quantity, status, price, avg_fill_price, placed_at, updated_at, reason, trade, verify," +
-	" ref_price, ref_bid, ref_ask, ref_at"
+	" ref_price, ref_bid, ref_ask, ref_at, condition"
 
 // Ref は注文を**送る直前**の時価。約定単価と比べると執行そのものの滑りが出る。
 // 取れなければ記録しないだけで、発注は続ける。
@@ -69,6 +69,9 @@ type Order struct {
 	Reason    string
 	// Trade は現物 / 信用新規 / 信用返済。古い台帳（列が無い）は現物。
 	Trade domain.TradeType
+	// Condition は執行条件。空 = ザラ場の成行、OPENING = 寄成（寄る前に出した）。
+	// 滑り（RefPrice と AvgFillPrice の差）を寄成とザラ場の成行で分けて見るために残す。
+	Condition domain.OrderCondition
 	// Verify は発注経路の実機検証（docs/BROKER_VERIFY.md）で出した注文か。
 	// 建玉としては本物なので close / verify は同じように扱うが、成績の集計
 	//（資産曲線のゲート・evaluate・レポート）からは外す。戦略の判断ではないため。
@@ -171,6 +174,11 @@ var migrations = []storage.Migration{
 		"ref_ask":   "TEXT",
 		"ref_at":    "TEXT",
 	})},
+	// 執行条件。空文字 = 従来どおりザラ場の成行、OPENING = 寄成。
+	// 滑り（ref_price と約定単価の差）を寄成とザラ場の成行で分けて見るために残す
+	{Name: "orders.condition", Up: storage.AddColumns("orders", map[string]string{
+		"condition": "TEXT NOT NULL DEFAULT ''",
+	})},
 }
 
 // Open は台帳を開き、スキーマを最新に揃える。
@@ -194,11 +202,12 @@ func (l *Ledger) Record(req domain.OrderRequest, day time.Time, status string, p
 	_, err := l.db.Exec(
 		`INSERT OR REPLACE INTO orders (client_order_id, broker_order_id, day, symbol, side,
 			quantity, filled_quantity, status, price, avg_fill_price, reason, placed_at,
-			updated_at, trade, verify)
-		 VALUES (?, ?, ?, ?, ?, ?, '0', ?, ?, NULL, ?, ?, NULL, ?, ?)`,
+			updated_at, trade, verify, condition)
+		 VALUES (?, ?, ?, ?, ?, ?, '0', ?, ?, NULL, ?, ?, NULL, ?, ?, ?)`,
 		req.ClientOrderID, brokerOrderID, day.Format(dayLayout), req.Symbol, string(req.Side),
 		req.Quantity.String(), status, decimalPtrString(price), req.Reason,
-		clock.NowUTC().Format(time.RFC3339), string(req.Trade), boolToInt(l.Verify))
+		clock.NowUTC().Format(time.RFC3339), string(req.Trade), boolToInt(l.Verify),
+		string(req.Condition))
 	if err != nil {
 		return fmt.Errorf("台帳への記録に失敗しました: %w", err)
 	}
@@ -390,12 +399,15 @@ func (l *Ledger) query(query string, args ...any) ([]Order, error) {
 			trade                  *string
 			verify                 *int64
 			refPrice, refBid       *string
-			refAsk                 *string
+			refAsk, condition      *string
 		)
 		if err := rows.Scan(&o.ClientOrderID, &brokerOrderID, &dayText, &o.Symbol, &side,
 			&quantity, &filled, &o.Status, &price, &avgFillPrice, &o.PlacedAt, &updatedAt,
-			&reason, &trade, &verify, &refPrice, &refBid, &refAsk, &o.RefAt); err != nil {
+			&reason, &trade, &verify, &refPrice, &refBid, &refAsk, &o.RefAt, &condition); err != nil {
 			return nil, err
+		}
+		if condition != nil {
+			o.Condition = domain.OrderCondition(*condition)
 		}
 		o.RefPrice = parseDecimalPtr(refPrice)
 		o.RefBid = parseDecimalPtr(refBid)

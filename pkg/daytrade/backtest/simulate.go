@@ -183,6 +183,9 @@ type legParams struct {
 	// usLow は日ごとの「前夜の米国市場が小幅高か」。その日だけ並べ方を替える
 	// （signal.rank_by_us_low）。nil なら替えない。
 	usLow map[string]bool
+	// preopen はこの脚を寄る前に寄成で建てる設定か（execution.preopen_legs）。
+	// 真なら寄付のスプレッドを払わない（下の spreadBP）。
+	preopen bool
 }
 
 // spreadBP は 1 往復の成行が払うスプレッドの片道の合計（bp）。引けの手仕舞いは必ず払い、
@@ -191,8 +194,14 @@ type legParams struct {
 // 寄ったかどうかが分からない日（分足の無い 2024-09 より前）は払う側に倒す。成行がスプレッドを
 // 払わずに済むのは「未寄付だと確かめられたとき」だけで、分からない日を無料にすると
 // 10 年の backtest が黙って甘くなる。
+//
+// **寄る前に寄成で建てる脚（execution.preopen_legs）は、寄った銘柄でも払わない。**
+// 寄成は始値を決める板寄せに参加するので、ザラ場の成行のように最良気配を食わない。
 func (p legParams) spreadBP(day time.Time, code string) float64 {
 	bp := p.spreadCloseBP
+	if p.preopen {
+		return bp
+	}
 	if p.opened == nil {
 		return bp + p.spreadOpenBP
 	}
@@ -209,6 +218,7 @@ func (p legParams) spreadBP(day time.Time, code string) float64 {
 func withDayRules(p legParams, cfg config.Config, opts Options, signals *Inputs, days []time.Time) legParams {
 	p.spreadOpenBP, _ = cfg.Execution.SpreadBPOpen.Float64()
 	p.spreadCloseBP, _ = cfg.Execution.SpreadBPClose.Float64()
+	p.preopen = cfg.Execution.PreopenFor(p.side)
 	p.opened = opts.Opened
 	p.usLow = usLowByDay(days, cfg, signals)
 	return p

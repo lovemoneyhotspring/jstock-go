@@ -108,6 +108,7 @@ func runOpen(opts openOptions) error {
 		"day": day.Format(DateLayout), "live": opts.live,
 		"allow_delayed": opts.allowDelayed, "quote_override": opts.quoteSource,
 		"watch_only": watchOnly, "deadline": deadlineText(deadline),
+		"preopen": cfg.Execution.PreopenAt(now, jst), "preopen_legs": cfg.Execution.PreopenLegs,
 		"max_run_seconds": cfg.Execution.MaxRunSeconds,
 		"broker_verify":   opts.brokerVerify,
 	})
@@ -179,6 +180,8 @@ func runOpen(opts openOptions) error {
 	env := execute.Env{
 		Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout,
 		RetryWait: execute.DefaultRetryWait, Deadline: deadline,
+		// 寄る前の回か（9:00 より前）。真なら preopen_legs の脚を寄成で出す
+		Preopen: cfg.Execution.PreopenAt(now, jst),
 	}
 	var b broker.Broker
 	var carried []execute.Carried

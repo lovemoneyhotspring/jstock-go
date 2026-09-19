@@ -62,6 +62,26 @@ func (t OrderType) IsPlaceable() bool {
 	return t != OrderTypeOther
 }
 
+// OrderCondition は執行条件。**注文種別（成行・指値）とは直交する軸**で、立花の電文でも
+// 値段（sOrderPrice）と執行条件（sCondition）は別の項目。寄成は「成行 × 寄付」の組。
+//
+// 軸を分けているのは、OrderType 側に「寄成」を足すと成行かどうかを見ている判定
+// （IsStopOnly・limit_price の要否・空売り価格規制）を全部書き換えることになるから。
+type OrderCondition string
+
+const (
+	// ConditionNone は執行条件なし（ザラ場の注文）。ゼロ値が従来の挙動。
+	ConditionNone OrderCondition = ""
+	// ConditionOpening は寄付。その銘柄の**始値を決める板寄せ**に参加する。9:00 に寄らず
+	// 特別気配で切り上がる銘柄は、寄った時刻（9:07 など）の始値で約定する。
+	ConditionOpening OrderCondition = "OPENING"
+)
+
+// IsKnown は発注に使える執行条件か。
+func (c OrderCondition) IsKnown() bool {
+	return c == ConditionNone || c == ConditionOpening
+}
+
 // TradeType は現物・信用の取引区分。
 type TradeType string
 
@@ -314,15 +334,33 @@ type OrderRequest struct {
 	TaxType       TaxAccountType
 	Reason        string
 	Trade         TradeType
+	// Condition は執行条件（空なら指定なし＝ザラ場）。WithCondition で付ける。
+	Condition OrderCondition
 	// Stop があれば逆指値。OrderType が MARKET なら「逆指値だけ」（発火まで板に出ない）、
 	// LIMIT なら「通常＋逆指値」（指値で板に出し、発火したら Stop の値段に切り替わる）。
 	Stop *StopSpec
+}
+
+// WithCondition は執行条件を付ける。逆指値とは併用しない（立花の電文では
+// 執行条件と逆指値条件が別項目だが、寄付の板寄せで発火する逆指値に意味が無い）。
+func (r OrderRequest) WithCondition(c OrderCondition) (OrderRequest, error) {
+	if !c.IsKnown() {
+		return OrderRequest{}, fmt.Errorf("未知の執行条件: %s", c)
+	}
+	if c != ConditionNone && r.Stop != nil {
+		return OrderRequest{}, fmt.Errorf("逆指値に執行条件（%s）は付けられない", c)
+	}
+	r.Condition = c
+	return r, nil
 }
 
 // WithStop は逆指値を付ける。条件価格は正、発火後の値段は nil（成行）か正。
 func (r OrderRequest) WithStop(trigger decimal.Decimal, price *decimal.Decimal) (OrderRequest, error) {
 	if !r.OrderType.IsPlaceable() {
 		return OrderRequest{}, fmt.Errorf("%s に逆指値は付けられない", r.OrderType)
+	}
+	if r.Condition != ConditionNone {
+		return OrderRequest{}, fmt.Errorf("執行条件（%s）の注文に逆指値は付けられない", r.Condition)
 	}
 	if trigger.LessThanOrEqual(decimal.Zero) {
 		return OrderRequest{}, fmt.Errorf("逆指値の条件価格は正の数: %s", trigger)
@@ -409,6 +447,9 @@ type Order struct {
 	AvgFillPrice   *decimal.Decimal
 	CreatedAt      *time.Time
 	Trade          TradeType
+	// Condition は執行条件（空なら指定なし）。ブローカーの照会からは復元しない
+	// ——立花の注文一覧に執行条件の項目はあるが、まだ突き合わせていない。
+	Condition OrderCondition
 	// Stop は逆指値の条件（無ければ nil）。StopTriggered は発火済みか
 	// （発火後は条件を訂正できず、通常の注文として扱う）。
 	Stop          *StopSpec

@@ -370,3 +370,43 @@ func TestPaperBrokerSettlesOpenOrdersInDeterministicOrder(t *testing.T) {
 	}
 
 }
+
+// 寄成は始値を決める板寄せで約定するので、寄値ちょうどで建つ。
+// ザラ場の成行は最良気配に当たるので滑りを払う——dry-run で両者を混ぜないための区別。
+func TestPaperBrokerOpeningConditionFillsAtOpen(t *testing.T) {
+	pb := NewPaperBroker(decimal.NewFromInt(10_000_000), "open")
+	pb.Mark(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2000)})
+	place := func(id string, condition domain.OrderCondition) {
+		req, err := domain.NewOrderRequest(id, "7203", domain.SideBuy, domain.OrderTypeMarket,
+			decimal.NewFromInt(100), nil, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if req, err = req.WithCondition(condition); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pb.Place(req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	place("moo", domain.ConditionOpening)
+	place("mkt", domain.ConditionNone)
+
+	open := decimal.NewFromInt(2000)
+	pb.Settle(map[string]decimal.Decimal{"7203": open}, nil, nil, nil)
+
+	moo, err := pb.GetOrder("moo", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moo.AvgFillPrice == nil || !moo.AvgFillPrice.Equal(open) {
+		t.Errorf("寄成の約定値 = %v, want %s（寄値ちょうど）", moo.AvgFillPrice, open)
+	}
+	mkt, err := pb.GetOrder("mkt", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mkt.AvgFillPrice == nil || !mkt.AvgFillPrice.GreaterThan(open) {
+		t.Errorf("ザラ場の成行買いの約定値 = %v, want > %s（滑りを払う）", mkt.AvgFillPrice, open)
+	}
+}

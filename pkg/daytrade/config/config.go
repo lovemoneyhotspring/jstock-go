@@ -340,7 +340,15 @@ type Execution struct {
 	// QuoteFile は csv のときの置き場（symbol,price[,at] の CSV）。
 	QuoteFile string `toml:"quote_file"`
 	// EntryWindow は寄付買いを出してよい時間帯（JST）。外なら何もしない。
+	// 寄る前に発注する（preopen_legs）なら、開始を 9:00 より前にする。
 	EntryWindow []string `toml:"entry_window"`
+	// PreopenLegs は**寄る前の回で寄成（執行条件「寄付」）を出す脚**。
+	// none（従来どおり 9:00 以降にザラ場の成行）/ long / short / both。
+	//
+	// 寄成はその銘柄の始値を決める板寄せに参加するので、寄った後の値ではなく始値で建つ。
+	// 9:00 以降の回は脚によらず従来の成行（もう板寄せは終わっているか、未寄付なら
+	// 成行でも板寄せに入る）。研究ノート vault 2026-09-jp-daytrade-preopen-order。
+	PreopenLegs string `toml:"preopen_legs"`
 	// ExitWindow は手仕舞いの成行売りを出してよい時間帯（JST）。15:25 以降の注文は
 	// クロージング・オークションに回り引け値で約定する。
 	ExitWindow []string `toml:"exit_window"`
@@ -365,6 +373,43 @@ type Execution struct {
 	// SpreadBPClose は引けの成行が払うスプレッドの片道（bp）。15:20 の手仕舞いは必ず払う。
 	// 既定 11 は同じ板の 15:19 の実測（中央 21.7 bp の半分）で、朝の半分以下に狭い。
 	SpreadBPClose decimal.Decimal `toml:"spread_bp_close"`
+}
+
+// 寄る前に寄成を出す脚（Execution.PreopenLegs）。
+const (
+	PreopenLegsNone  = "none"
+	PreopenLegsLong  = "long"
+	PreopenLegsShort = "short"
+	PreopenLegsBoth  = "both"
+)
+
+// PreopenFor はその脚を寄る前に（寄成で）出す設定か。
+func (e Execution) PreopenFor(side domain.Side) bool {
+	switch e.PreopenLegs {
+	case PreopenLegsBoth:
+		return true
+	case PreopenLegsLong:
+		return side == domain.SideBuy
+	case PreopenLegsShort:
+		return side == domain.SideSell
+	}
+	return false
+}
+
+// PreopenEnabled はどちらかの脚を寄る前に出す設定か。
+func (e Execution) PreopenEnabled() bool {
+	return e.PreopenLegs != "" && e.PreopenLegs != PreopenLegsNone
+}
+
+// TSEOpenHour は東証の寄付（板寄せ）の時刻。これより前の回が「寄る前」。
+const TSEOpenHour = 9
+
+// PreopenAt は now（JST に直して見る）が寄る前の回で、かつ寄成を出す設定か。
+func (e Execution) PreopenAt(now time.Time, jst *time.Location) bool {
+	if !e.PreopenEnabled() {
+		return false
+	}
+	return now.In(jst).Hour() < TSEOpenHour
 }
 
 // RunDeadline は now に始めた実行の締め切り。
@@ -484,6 +529,7 @@ func Default() Config {
 			TaxAccountType: domain.TaxAccountSpecific,
 			QuoteSource:    "tachibana",
 			EntryWindow:    []string{"09:00", "09:15"},
+			PreopenLegs:    PreopenLegsNone,
 			ExitWindow:     []string{"15:20", "15:30"},
 			GuardWindow:    []string{"09:00", "15:19"},
 			MaxQuoteAge:    90,
@@ -782,6 +828,24 @@ func (c Config) Validate() error {
 	}
 	if _, _, _, _, err := c.Execution.Window("exit"); err != nil {
 		return err
+	}
+	switch c.Execution.PreopenLegs {
+	case "", PreopenLegsNone, PreopenLegsLong, PreopenLegsShort, PreopenLegsBoth:
+	default:
+		return fmt.Errorf("execution.preopen_legs は %q / %q / %q / %q",
+			PreopenLegsNone, PreopenLegsLong, PreopenLegsShort, PreopenLegsBoth)
+	}
+	// 窓が 9:00 開始のままだと寄る前の回がそもそも走らず、寄成が一度も出ない。
+	// 黙って従来の動きに戻るより、設定の食い違いとして止める
+	if c.Execution.PreopenEnabled() {
+		sh, sm, _, _, err := c.Execution.Window("entry")
+		if err != nil {
+			return err
+		}
+		if sh*60+sm >= 9*60 {
+			return fmt.Errorf("execution.preopen_legs = %q なら entry_window の開始を 9:00 より前にする（今は %s）",
+				c.Execution.PreopenLegs, c.Execution.EntryWindow[0])
+		}
 	}
 	// 書き間違えると guard が毎回「時間帯の外」で黙って何もしなくなる
 	if _, _, _, _, err := c.Execution.Window("guard"); err != nil {

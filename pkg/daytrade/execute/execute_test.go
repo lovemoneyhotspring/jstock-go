@@ -197,6 +197,45 @@ func TestPlacePicksDryRunRecordsOnly(t *testing.T) {
 	}
 }
 
+// 寄る前の回（Env.Preopen）は preopen_legs の脚を寄成でブローカーに送り、台帳にも残す。
+// 台帳の condition を見れば、あとから寄成とザラ場の成行の滑りを分けて測れる。
+func TestPlacePicksPreopenSendsOpeningCondition(t *testing.T) {
+	env, _ := newEnv(t)
+	env.Cfg.Margin.Enabled = true
+	env.Cfg.Execution.EntryWindow = []string{"08:59", "09:15"}
+	env.Cfg.Execution.PreopenLegs = config.PreopenLegsBoth
+	env.Preopen = true
+	b := &stubBroker{balance: richBalance()}
+
+	if _, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)}); err != nil || len(failures) != 0 {
+		t.Fatalf("failures=%v err=%v", failures, err)
+	}
+	if len(b.placed) != 1 || b.placed[0].Condition != domain.ConditionOpening {
+		t.Fatalf("送った注文の執行条件 = %q, want %q", b.placed[0].Condition, domain.ConditionOpening)
+	}
+	if b.placed[0].OrderType != domain.OrderTypeMarket {
+		t.Errorf("寄成は成行のまま: %s", b.placed[0].OrderType)
+	}
+	if o := statusOf(t, env, "7203"); o.Condition != domain.ConditionOpening {
+		t.Errorf("台帳の執行条件 = %q, want %q", o.Condition, domain.ConditionOpening)
+	}
+
+	// 9:00 以降の回は同じ設定でもザラ場の成行（台帳も空のまま）
+	env2, _ := newEnv(t)
+	env2.Cfg = env.Cfg
+	env2.Preopen = false
+	b2 := &stubBroker{balance: richBalance()}
+	if _, _, err := PlacePicks(env2, b2, []selection.Pick{pick("7203", domain.SideBuy)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(b2.placed) != 1 || b2.placed[0].Condition != domain.ConditionNone {
+		t.Errorf("9:00 以降の執行条件 = %q, want 空", b2.placed[0].Condition)
+	}
+	if o := statusOf(t, env2, "7203"); o.Condition != domain.ConditionNone {
+		t.Errorf("台帳の執行条件 = %q, want 空", o.Condition)
+	}
+}
+
 func TestPlacePicksLiveIsIdempotent(t *testing.T) {
 	env, _ := newEnv(t)
 	b := &stubBroker{balance: richBalance()}
@@ -474,13 +513,50 @@ func TestEntryRequestUsesMarginWhenConfigured(t *testing.T) {
 	cfg := config.Default()
 	cfg.Margin.Enabled = true
 	cfg.Margin.LongViaMargin = true
-	long := EntryRequest(pick("7203", domain.SideBuy), day, cfg, 0)
-	short := EntryRequest(pick("9984", domain.SideSell), day, cfg, 0)
+	long := EntryRequest(pick("7203", domain.SideBuy), day, cfg, 0, false)
+	short := EntryRequest(pick("9984", domain.SideSell), day, cfg, 0, false)
 	if long.Trade != domain.TradeTypeMarginOpen || short.Trade != domain.TradeTypeMarginOpen {
 		t.Errorf("信用: long=%s short=%s", long.Trade, short.Trade)
 	}
-	if EntryRequest(pick("7203", domain.SideBuy), day, config.Default(), 0).Trade != domain.TradeTypeCash {
+	if EntryRequest(pick("7203", domain.SideBuy), day, config.Default(), 0, false).Trade != domain.TradeTypeCash {
 		t.Error("既定は現物")
+	}
+}
+
+// 寄成になるのは「寄る前の回 × その脚が preopen_legs に挙がっている」ときだけ。
+// 9:00 以降の回（preopen = false）は設定にかかわらず従来のザラ場の成行。
+func TestEntryRequestOpeningCondition(t *testing.T) {
+	cfg := config.Default()
+	cfg.Margin.Enabled = true
+	cfg.Execution.EntryWindow = []string{"08:59", "09:15"}
+	cases := []struct {
+		legs    string
+		preopen bool
+		long    domain.OrderCondition
+		short   domain.OrderCondition
+	}{
+		{config.PreopenLegsNone, true, domain.ConditionNone, domain.ConditionNone},
+		{config.PreopenLegsShort, true, domain.ConditionNone, domain.ConditionOpening},
+		{config.PreopenLegsLong, true, domain.ConditionOpening, domain.ConditionNone},
+		{config.PreopenLegsBoth, true, domain.ConditionOpening, domain.ConditionOpening},
+		// 寄ってからの回は寄成にしない
+		{config.PreopenLegsBoth, false, domain.ConditionNone, domain.ConditionNone},
+	}
+	for _, c := range cases {
+		cfg.Execution.PreopenLegs = c.legs
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("legs=%s: %v", c.legs, err)
+		}
+		long := EntryRequest(pick("7203", domain.SideBuy), day, cfg, 0, c.preopen)
+		short := EntryRequest(pick("9984", domain.SideSell), day, cfg, 0, c.preopen)
+		if long.Condition != c.long || short.Condition != c.short {
+			t.Errorf("legs=%s preopen=%v: long=%q short=%q, want long=%q short=%q",
+				c.legs, c.preopen, long.Condition, short.Condition, c.long, c.short)
+		}
+		// 寄成でも成行のまま（値段は付かない）
+		if long.OrderType != domain.OrderTypeMarket || long.LimitPrice != nil {
+			t.Errorf("legs=%s: 種別 %s 値段 %v", c.legs, long.OrderType, long.LimitPrice)
+		}
 	}
 }
 
@@ -499,7 +575,7 @@ func TestEnsureNoUnrecordedPositions(t *testing.T) {
 	}
 
 	// 台帳が今日の建玉として知っていれば止めない（正常な再実行）
-	req := EntryRequest(picks[0], day, env.Cfg, 0)
+	req := EntryRequest(picks[0], day, env.Cfg, 0, false)
 	if err := env.Ledger.Record(req, day, string(domain.OrderStatusSubmitted), nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -845,7 +921,7 @@ func TestRefreshEntriesDoesNotQueryFinalizedOrders(t *testing.T) {
 		symbol string
 		status domain.OrderStatus
 	}{{"7203", domain.OrderStatusFilled}, {"9984", domain.OrderStatusRejected}, {"6758", domain.OrderStatusUnsent}} {
-		req := EntryRequest(pick(c.symbol, domain.SideBuy), env.Day, env.Cfg, 0)
+		req := EntryRequest(pick(c.symbol, domain.SideBuy), env.Day, env.Cfg, 0, false)
 		if err := env.Ledger.Record(req, env.Day, string(domain.OrderStatusSubmitted), &price, nil); err != nil {
 			t.Fatal(err)
 		}

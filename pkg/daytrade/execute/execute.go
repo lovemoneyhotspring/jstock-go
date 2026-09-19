@@ -45,6 +45,9 @@ type Env struct {
 	// RetryWait は送信結果が分からなかったとき、当日の注文一覧で判定するまでに待つ時間
 	// （受付が一覧に載るまでの猶予）。テストは 0。
 	RetryWait time.Duration
+	// Preopen はこの実行が**寄る前**（9:00 より前）か。真のとき、execution.preopen_legs に
+	// 挙げた脚は寄成（執行条件「寄付」）で出す。9:00 以降の回は偽。
+	Preopen bool
 	// Deadline はこの実行の締め切り（config.Execution.RunDeadline）。過ぎたら新しい注文は
 	// 送らず「締め切り」として見送る。ゼロ値なら締め切りなし。ブローカー側の締め切り
 	// （broker.SetDeadline）と同じ値を渡す——こちらは「次を始めない」、あちらは
@@ -178,7 +181,11 @@ func (e *ErrUnrecordedPositions) Error() string {
 }
 
 // EntryRequest は建てる注文。ロング（BUY）は現物か信用買い、ショート（SELL）は信用新規売り。
-func EntryRequest(pick selection.Pick, day time.Time, cfg config.Config, attempt int) domain.OrderRequest {
+//
+// preopen が真（寄る前の回）で、その脚が execution.preopen_legs に挙がっていれば**寄成**
+// にする。寄成はその銘柄の始値を決める板寄せに参加するので、寄った後の値を追わずに始値で建つ。
+// 9:00 以降の回は preopen が偽で、従来どおりザラ場の成行。
+func EntryRequest(pick selection.Pick, day time.Time, cfg config.Config, attempt int, preopen bool) domain.OrderRequest {
 	// 前回が拒否されていたら種を変える（同じ ID はブローカーが弾く）。attempt 0 は従来と同じ ID
 	seed := "daytrade|" + day.Format(cli.DateLayout)
 	if attempt > 0 {
@@ -190,6 +197,11 @@ func EntryRequest(pick selection.Pick, day time.Time, cfg config.Config, attempt
 		action = "売建"
 	}
 	gap, _ := pick.Gap.Float64()
+	condition := domain.ConditionNone
+	if preopen && cfg.Execution.PreopenFor(pick.Side) {
+		condition = domain.ConditionOpening
+		action += "（寄成）"
+	}
 	return domain.OrderRequest{
 		ClientOrderID: domain.MakeClientOrderID(seed, pick.Symbol, pick.Side, pick.Quantity),
 		Symbol:        pick.Symbol,
@@ -199,7 +211,8 @@ func EntryRequest(pick selection.Pick, day time.Time, cfg config.Config, attempt
 		TaxType:       cfg.Execution.TaxAccountType,
 		Reason: fmt.Sprintf("%s %s gap %s #%d %s",
 			cfg.StrategyName(), day.Format(cli.DateLayout), cli.Pct(gap), pick.Rank, action),
-		Trade: trade,
+		Trade:     trade,
+		Condition: condition,
 	}
 }
 
@@ -559,7 +572,7 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 	for _, pick := range picks {
 		pick := pick
 		attempt := env.Ledger.DeadCount(env.Day, pick.Symbol, pick.Side)
-		build := func(a int) domain.OrderRequest { return EntryRequest(pick, env.Day, env.Cfg, a) }
+		build := func(a int) domain.OrderRequest { return EntryRequest(pick, env.Day, env.Cfg, a, env.Preopen) }
 		request := build(attempt)
 		label := "買い"
 		if pick.Side == domain.SideSell {

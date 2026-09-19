@@ -205,8 +205,26 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
     TACHIBANA_PROD_PRIVATE_KEY_FILE=$PWD/e_api_private_key.der \
     TACHIBANA_ORDER_DETAIL_PROBE=<注文番号/営業日>,... go test ./pkg/wbcore/broker -run TestOrderDetailProbe -v -count=1
   ```
-- 寄付・引けの執行条件（`sCondition`）は使っていない。`daytrade` は `sCondition = 0`（条件なし）の成行を
-  時間帯の中で出すので、プローブと同じ電文になる
+- **寄付の執行条件（`sCondition = 2`）＝寄成は実装したが実機で出していない**（`execution.preopen_legs`、
+  既定 `none`）。今の本番は `sCondition = 0`（条件なし）の成行を時間帯の中で出すので、プローブと同じ電文。
+  寄成を本番に出す前に、デモ環境（`demo-kabuka.e-shiten.jp`）で次の 2 つを確かめる:
+
+  1. **電文が通るか。** `sOrderPrice = 0` × `sCondition = 2` の組で受け付けられるか。銘柄・市場に
+     よっては拒否される（エラー「商品市場別設定.執行条件寄付不可」）。51 単元以上の信用新規売りは
+     成行で出せないので、寄成も同じ規制に掛かるはず（下の「制約」）
+  2. **寄らなかったときにいつ失効するか。** 前場中に一度も寄らない銘柄（ストップ高の張り付き）で、
+     注文が前場引けで失効するのか、大引けまで残るのか、後場の寄付の板寄せに参加するのか。
+     リファレンスに記述が無い。**ここが分かるまで「寄らない銘柄の枠をいつ諦めるか」は決められない**
+     （取引所が失効させるなら何もしなくてよく、残るならこちらから取消を送ることになる）
+
+  執行条件のコード（リファレンス v4.5/v4.10）は **0 指定なし / 2 寄付 / 4 引け / 6 不成**。
+  引け（4）と不成（6）は使う予定が無い
+- **注文値段区分（`sOrderOrderPriceKubun`）の 3 / 4 の読みが仕様と食い違っている。**
+  `tachibana_codes.go` の `orderTypeFromCode` は 3 を「引け成行」、4 を「引け指値」と書いているが、
+  リファレンスの CLMOrderList では **1 成行 / 2 指値 / 3 親注文より高い / 4 親注文より低い**
+  （逆指値の親子関係）。引けは執行条件（`sCondition = 4`）の側に出るはず。
+  成行・指値として読む分には大きく外れないので値は変えていないが、注文照会の実データで確かめる。
+  影響しうるのは `tachibana_orders.go` の「`priceKubun` が 2 か 4 のときだけ `LimitPrice` を採る」判定
 
 ## 委託保証金の内訳（2026-09-16、本番口座・照会のみ）
 
@@ -248,6 +266,7 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 | 電文 | 使うところ | 実装 |
 |---|---|---|
 | `CLMOrderListDetail`（前営業日の注文） | 持ち越しの判定（`execute.CarriedPositions`） | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
+| `CLMKabuNewOrder` の `sCondition = 2`（寄成） | 寄る前の発注（`execution.preopen_legs`。既定 `none` なので本番では出ていない） | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
 | `daytrade` の台帳を通した信用の 1 周 | `open` → `close` → `verify` | [pkg/daytrade/execute](../pkg/daytrade/execute) |
 
 信用建玉（行あり）・信用新規／返済の発注・信用返済の逆指値は 2026-09-14 に本番口座で確認済み（上の節）。

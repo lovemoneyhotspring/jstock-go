@@ -693,12 +693,18 @@ func actualsOf(orders []dtledger.Order) map[string]actual {
 // 片道ずつ必ず払う。順位表には「その銘柄が寄っていたか」が残っていないので、未寄付なら
 // 払わずに済む寄付のぶんも払う側に倒す（backtest の legParams.spreadBP と同じ考え方）。
 //
+// **寄る前に寄成で建てる脚（execution.preopen_legs）は寄付のぶんを払わない。**
+// 寄成は始値を決める板寄せで約定するので、ザラ場の成行のように最良気配を食わない。
+//
 // **gross_bp は日足の始値→大引け終値**なので、これでも実運用より楽観的に出る。
 // 寄付から発注までの値動き（板の記録 6 営業日で中央 18 bp）と、大引けと 15:20 成行の差
 // （本発注 8 件で平均 15 bp）はまだ入っていない。
 func costBP(side string, amount float64, cfg config.Config) float64 {
 	spreadOpen, _ := cfg.Execution.SpreadBPOpen.Float64()
 	spreadClose, _ := cfg.Execution.SpreadBPClose.Float64()
+	if cfg.Execution.PreopenFor(domain.Side(side)) {
+		spreadOpen = 0
+	}
 	spread := spreadOpen + spreadClose
 	if side == "SELL" {
 		f, _ := cfg.Margin.ExtraCostBP.Float64()
