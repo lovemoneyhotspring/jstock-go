@@ -168,6 +168,14 @@ max_run_seconds = 50
 #   特別  pSAV・pSBV。引け後は空
 # pGAP0 / pGBP0 / pGAV0 / pGBV0 は空で返る（0 段は無い）。
 # 列は後から足しても過去は埋まらないので、空で返るものも含めて広く取る（docs/OPENING_DATA.md の原則 2）
+# plan に載らないが記録したい銘柄（ETF・指数）。**候補より先に問い合わせる**ので締め切りで切れても残る。
+# plan は株式だけなので、市場全体の地合いを**寄り前に**測る材料がここにしか無い——ETF は現物なので
+# 8:59 台に板が立つ（指数 101/102/151 は寄り前は動かないが、9:00 以降の動きを記録する）。
+# 気配値と始値のギャップを機械学習で補正する研究の材料（2026-09-19〜）。記録は遡れないので広めに取る。
+#   1321 日経225 ETF / 1306 TOPIX ETF / 1570 日経レバ / 1357 日経ダブルインバース
+#   1329 iS日経225 / 1348 MXS TOPIX / 1459 楽天日経レバ / 1360 日経ベア2倍
+#   101 日経平均 / 102 TOPIX / 151 JPX日経400（実機で確認済み。152・153 は空で返る）
+extra_symbols = ["1321", "1306", "1570", "1357", "1329", "1348", "1459", "1360", "101", "102", "151"]
 columns = "pDOP,pDPP,tDPP:T,pPRP,pDHP,pDLP,pDV,pDJ,pVWAP,pQAS,pQBS,pQAP,pQBP,pAV,pBV,pQOV,pQUV,pIEP,pIEV,pIET,pSAV,pSBV,pGAP1,pGAV1,pGBP1,pGBV1,pGAP2,pGAV2,pGBP2,pGBV2,pGAP3,pGAV3,pGBP3,pGBV3,pGAP4,pGAV4,pGBP4,pGBV4,pGAP5,pGAV5,pGBP5,pGBV5,pGAP6,pGAV6,pGBP6,pGBV6,pGAP7,pGAV7,pGBP7,pGBV7,pGAP8,pGAV8,pGBP8,pGBV8,pGAP9,pGAV9,pGBP9,pGBV9,pGAP10,pGAV10,pGBP10,pGBV10"
 
 [execution]
