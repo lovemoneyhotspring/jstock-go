@@ -160,27 +160,37 @@ func snapSymbols(scope, symbolsFlag string, day time.Time, extra []string) ([]st
 	if onlyUniverse {
 		label = "plan の母集団"
 	}
-	// ETF・指数（book.extra_symbols）は plan に載らない。**先頭に置く**——時価問合は 120 銘柄
-	// ずつ順に送るので、締め切りで切れても市場全体の地合いだけは必ず記録に残る
-	if len(extra) > 0 {
-		seen := make(map[string]bool, len(out))
-		merged := make([]string, 0, len(extra)+len(out))
-		for _, s := range extra {
-			if s = strings.TrimSpace(s); s != "" && !seen[s] {
-				seen[s] = true
-				merged = append(merged, s)
-			}
-		}
-		for _, s := range out {
-			if !seen[s] {
-				seen[s] = true
-				merged = append(merged, s)
-			}
-		}
+	if merged, n := mergeExtraSymbols(extra, out); n > 0 {
 		out = merged
-		label += fmt.Sprintf(" + 追加 %d", len(extra))
+		label += fmt.Sprintf(" + 追加 %d", n)
 	}
 	return out, label, nil
+}
+
+// mergeExtraSymbols は ETF・指数（book.extra_symbols）を plan の銘柄の**前に**置く。
+//
+// 時価問合は 120 銘柄ずつ順に送るので、先頭に置けば締め切りで切れても市場全体の地合いだけは
+// 必ず記録に残る。plan に既にある銘柄は重ねない。2 つ目の返り値は実際に足した数。
+func mergeExtraSymbols(extra, symbols []string) ([]string, int) {
+	if len(extra) == 0 {
+		return symbols, 0
+	}
+	seen := make(map[string]bool, len(symbols)+len(extra))
+	merged := make([]string, 0, len(extra)+len(symbols))
+	for _, s := range extra {
+		if s = strings.TrimSpace(s); s != "" && !seen[s] {
+			seen[s] = true
+			merged = append(merged, s)
+		}
+	}
+	added := len(merged)
+	for _, s := range symbols {
+		if !seen[s] {
+			seen[s] = true
+			merged = append(merged, s)
+		}
+	}
+	return merged, added
 }
 
 // orderSnapSymbols は記録の順。ロング・ショートの対象（Eligible / ShortEligible）を先に、
