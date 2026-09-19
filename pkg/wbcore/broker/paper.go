@@ -331,6 +331,7 @@ func (p *PaperBroker) Place(req domain.OrderRequest) (*domain.OrderAck, error) {
 		LimitPrice:     req.LimitPrice,
 		CreatedAt:      &now,
 		Trade:          req.Trade,
+		Condition:      req.Condition,
 	}
 	if req.Stop != nil {
 		spec := *req.Stop
@@ -556,6 +557,12 @@ func (p *PaperBroker) executionPriceLocked(order *domain.Order, openPrice decima
 	}
 
 	if order.OrderType == domain.OrderTypeMarket {
+		// 寄成は始値を決める板寄せで約定するので、スプレッドも板を食う分も払わない
+		// （成行が最良気配に当たるのはザラ場の注文だけ）
+		if order.Condition == domain.ConditionOpening {
+			price := openPrice
+			return &price
+		}
 		price := p.marketFillPrice(order.Side, openPrice)
 		return &price
 	}

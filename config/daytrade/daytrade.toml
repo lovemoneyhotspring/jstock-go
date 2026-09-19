@@ -166,6 +166,15 @@ broker = "tachibana"
 tax_account_type = "SPECIFIC"
 quote_source = "tachibana"   # tachibana / csv。立花証券の時価問合（寄付後は始値、無ければ現在値）
 entry_window = ["09:00", "09:15"]
+# 寄る前の回で**寄成**（執行条件「寄付」＝ sCondition 2）を出す脚。none / long / short / both。
+# 寄成はその銘柄の始値を決める板寄せに参加するので、寄った後の値を追わず始値で建つ。
+# none 以外にするなら entry_window の開始を 9:00 より前（8:59）にして、cron に 8:59:45 の回を足す
+# ——窓が 9:00 開始のままだと寄る前の回が走らず、設定の検査で止まる。
+# 9:00 以降の回は脚によらず従来どおりザラ場の成行（未寄付なら成行でも板寄せに入る）。
+# **まだ none。** 8:59:45 の気配の記録が 20 営業日溜まって測り直すまで本番には出さない
+# （vault 20-research/2026-09-jp-daytrade-preopen-order.md の事前登録）。
+# 立花の sCondition ≠ 0 は実機未検証（docs/BROKER_VERIFY.md）。
+preopen_legs = "none"
 exit_window = ["15:20", "15:30"]  # 15:20 の成行はその場で約定（引け値ではない）。15:25 以降ならクロージング・オークションで引け値
 guard_window = ["09:00", "15:19"] # daytrade guard（材料の出た売建の取消・返済）。引けの手仕舞いと重ねない
 kill_switch = false
