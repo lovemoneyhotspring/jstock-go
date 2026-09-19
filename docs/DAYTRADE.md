@@ -26,6 +26,7 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 | 時刻 | コマンド | 何をするか | 入力 |
 |---|---|---|---|
 | 20:30（前夜） | `daytrade plan` | 翌営業日の母集団を `state/daytrade/plan-<日付>.parquet` に保存 | J-Quants アーカイブ（`jquants sync` 済みの前日足・銘柄一覧・決算・日々公表） |
+| 7:30・8:20・8:50 | `daytrade warm-us` | 前夜の米国市場（S&P500・VIX）を `data/daytrade/us.json` に焼く。`open` は読むだけになり、寄付の判断の途中で外（Cboe → Yahoo → FRED）へ取りに行かない。前夜の行が VIX つきで入っていれば何もしない（冪等）。3 回とも取れなかった朝は `open` が取りに行く——寄る前の回は 1 リクエスト 3 秒・合計 5 秒まで、9:00:03 からの回は 1 リクエスト 8 秒。20:30 の `plan` も温めるが、その時刻には当夜の米国市場が開いていないので朝の判定に要る行は入らない | Cboe / Yahoo / FRED |
 | 8:53 | `daytrade warm-margin` | 委託保証金を照会して `data/daytrade/margin.json` に焼く。9:01 の `open` が読んで建玉の上限を下げ方向のみ上書きする。**前夜でなく朝に取る**（代用有価証券の評価替えが夜間更新で確定するため） | ブローカー |
 | 8:59:45 | `daytrade open --live --yes` | **寄る前の回。** 候補の気配を取って並べ、ロングを**寄成**で出す（`execution.preopen_legs = "long"`）。締め切りは 9:00:00（板寄せ） | plan + 気配 |
 | 09:00〜09:15 | `daytrade open --live --yes` | 8:59:45 で建たなかった残りの枚数を、従来どおりザラ場の成行で買う。台帳に記録 | plan + 気配（`execution.quote_source`） |
@@ -609,7 +610,9 @@ daytrade history book --date 2026-09-08 --csv /tmp/book.csv
   ```
 - `actual_entry` / `actual_exit` は約定単価、`ref_entry` / `ref_exit` は**注文を送る直前**に
   照会した時価（台帳の `ref_price`）。約定単価と日足の差には「判断から発注までの遅れ」が
-  混じるので、執行そのものの滑りはこの `ref_*` との差で見る
+  混じるので、執行そのものの滑りはこの `ref_*` との差で見る。`open` は選定の気配を取り始めてから
+  3 秒以内に発注へ進んだ回に限り、取り直さずにその気配を `ref_entry` に使う（往復 1 つ、約 0.26 秒を
+  省く。ログ `daytrade.ref_price` の `reused`）。判定が長引いた回と `close` / `guard` は従来どおり取り直す
 - `midday` / `midday_gross_bp` / `midday_net_bp` は**前場引け**（11:30 までの最後の約定値）で
   手仕舞っていたら。ロングの利益は前場で出尽くし、10:30〜11:25 に前倒しすると利益 −6〜10% で
   MaxDD が半分になる（2 年の検証。[research/2026-09-jp-gap-minute.md](research/2026-09-jp-gap-minute.md)

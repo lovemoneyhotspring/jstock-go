@@ -20,6 +20,7 @@ import (
 // 待ちが要求されること自体は TestRequestEndpointIsRateLimited が別に確かめる。
 func TestMain(m *testing.M) {
 	requestLimiter().SetSleep(func(time.Duration) {})
+	orderLimiter().SetSleep(func(time.Duration) {})
 	os.Exit(m.Run())
 }
 
@@ -349,6 +350,17 @@ func TestRequestEndpointIsRateLimited(t *testing.T) {
 	}
 	if fake.countCLM(clmOrderDetail) != lim.Limit().Calls+1 {
 		t.Errorf("待ったうえで全部送るはず: %v", fake.clmIDs)
+	}
+	// 注文は別枠（余力の照会が注文を遅らせない）。枠はプロセスに 1 つで、先のテストの注文が
+	// 残りを減らしているので、ここでは電文と枠の対応だけを確かめる
+	if requestLimiterFor(clmNewOrder) != orderLimiter() || requestLimiterFor(clmCancelOrder) != orderLimiter() ||
+		requestLimiterFor(clmCorrectOrder) != orderLimiter() {
+		t.Error("注文（新規・訂正・取消）が注文の枠を使っていない")
+	}
+	for _, clm := range []string{clmBalanceSummary, clmCashPositions, clmMarginPositions, clmOrderList, clmOrderDetail} {
+		if requestLimiterFor(clm) != lim {
+			t.Errorf("%s が照会の枠を使っていない", clm)
+		}
 	}
 	// 時価の口はこの制限を使わない
 	before := len(waited)

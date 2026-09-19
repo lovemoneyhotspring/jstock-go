@@ -260,6 +260,38 @@ func prefetchRefPrices(env Env, b broker.Broker, symbols []string) (map[string]b
 	return prices, false
 }
 
+// RefPricesFromQuotes は選定に使った気配を「送る直前の時価」の形にする（Env.RefPrices に渡す）。
+//
+// 使ってよいのは**取ったばかり**のときだけ——古い気配を渡すと、判断から発注までの遅れが
+// 滑りに混じる（refPriceOf）。新しさは呼び出し側が確かめる。板も現在値も持たない気配
+// （CSV の取得元など）が 1 つでも混じれば nil を返し、PlacePicks が従来どおり取り直す。
+func RefPricesFromQuotes(quotes map[string]selection.Quote, picks []selection.Pick) map[string]broker.MarketPrice {
+	out := make(map[string]broker.MarketPrice, len(picks))
+	for _, pick := range picks {
+		q, ok := quotes[pick.Symbol]
+		if !ok || !(q.Last.IsPositive() || q.Bid.IsPositive() || q.Ask.IsPositive()) {
+			return nil
+		}
+		out[pick.Symbol] = broker.MarketPrice{
+			Symbol: q.Symbol, Last: q.Last, Bid: q.Bid, Ask: q.Ask, At: q.At, PrevClose: q.PrevClose,
+		}
+	}
+	return out
+}
+
+// coversRefPrices は渡された時価が対象の銘柄を全部持っているか。
+func coversRefPrices(prices map[string]broker.MarketPrice, symbols []string) bool {
+	if len(prices) == 0 {
+		return false
+	}
+	for _, symbol := range symbols {
+		if _, ok := prices[symbol]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // refPriceOf は**送る直前**の時価。約定単価と比べると執行そのものの滑りが出る。
 //
 // 選定に使った 9:00 の気配では、判断から発注までの遅れ（危険信号の再試行や余力の照会で
@@ -567,7 +599,11 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 	for _, pick := range picks {
 		symbols = append(symbols, pick.Symbol)
 	}
-	env.RefPrices, env.refBatchFailed = prefetchRefPrices(env, b, symbols)
+	// 呼び出し側が取ったばかりの気配を渡していれば（RefPricesFromQuotes）取り直さない。
+	// 取り直しは順位表と 1 本目の注文の間に往復を 1 つ挟む（実測 0.26 秒。2026-09-18）
+	if !coversRefPrices(env.RefPrices, symbols) {
+		env.RefPrices, env.refBatchFailed = prefetchRefPrices(env, b, symbols)
+	}
 
 	for _, pick := range picks {
 		pick := pick

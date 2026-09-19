@@ -250,6 +250,7 @@ func runOpen(opts openOptions) error {
 		symbols = mergeSymbols(symbols, p.Symbols(shortUniverse))
 	}
 
+	quotesStarted := clock.NowUTC()
 	received, err := fetchQuotes(cfg, b, symbols, opts.quoteSource, opts.quoteFile, deadline)
 	if err != nil {
 		fmt.Println(err)
@@ -337,7 +338,7 @@ func runOpen(opts openOptions) error {
 	// ロングの並べ方を寄付の判定より先に決める: LightGBM で並べられない日は gap_vol で取引し、
 	// 米国小幅高の日は両脚とも休む（us_skip_legs を all に戻す。config.FallbackToGapVol）
 	cfg = resolveRankBy(cfg, p, eligible, quotes)
-	verdict, usStale, err := evaluateRegime(cfg, p, day, regime.MarketGapOf(gaps), led)
+	verdict, usStale, err := evaluateRegime(cfg, p, day, regime.MarketGapOf(gaps), led, env.Preopen)
 	if err != nil {
 		return err
 	}
@@ -591,6 +592,14 @@ func runOpen(opts openOptions) error {
 		}
 	}
 
+	// 台帳に残す「送る直前の時価」は、取ったばかりの気配があればそれを使う（取り直すと順位表と
+	// 1 本目の注文の間に往復が 1 つ挟まる）。年齢は**取り始め**から測る——120 銘柄ずつの直列なので
+	// 先頭のバッチがいちばん古い。古ければ渡さず、PlacePicks が従来どおり取り直す
+	if age := clock.NowUTC().Sub(quotesStarted); allowed && age <= refReuseMaxAge {
+		env.RefPrices = execute.RefPricesFromQuotes(received, picks)
+		logInfo("daytrade.ref_price", "執行時の時価に選定の気配を使う", map[string]any{
+			"age_ms": age.Milliseconds(), "reused": env.RefPrices != nil, "picks": len(picks)})
+	}
 	orders, failures, err := execute.PlacePicks(env, b, picks)
 	if err != nil {
 		return err
@@ -639,7 +648,7 @@ func resolveRankBy(cfg dtconfig.Config, p dtplan.Plan, eligible []universe.Candi
 
 // evaluateRegime は危険信号を評価し、ログに残す。usStale は米国の信号を使う設定で、前夜の
 // セッション（usmarket.ExpectedSession）がまだ取れていないか（取得元の公開遅れ・障害）。
-func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap *float64, led *dtledger.Ledger) (regime.Verdict, bool, error) {
+func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap *float64, led *dtledger.Ledger, preopen bool) (regime.Verdict, bool, error) {
 	signals := regime.Signals{
 		Day:       day,
 		IVPrev:    p.Meta.IVPrev,
@@ -657,7 +666,13 @@ func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap
 	if usmarketNeeded(cfg) {
 		// 前夜の plan が温めたキャッシュを先に見る。取りに行くときも 1 本 8 秒まで——
 		// 寄付の判断に FRED の遅さを持ち込まない（取れなければゲートは効かせない）
-		session, source, err := usmarketLatest(day, usFetchTimeout)
+		// 朝の warm-us が焼いていればキャッシュを読むだけ。焼けていない朝だけ取りに行く。
+		// 寄る前の回は 9:00:00 までに寄成を届けなければ意味が無いので、待つ上限を詰める
+		timeout, budget := usFetchTimeout, time.Duration(0)
+		if preopen {
+			timeout, budget = usFetchTimeoutPreopen, usFetchBudgetPreopen
+		}
+		session, source, err := usmarketLatest(day, timeout, budget)
 		if err != nil {
 			// 取得元の障害で寄付の判断を止めない
 			logWarn("daytrade.us_missing", "米国市場の取得に失敗", map[string]any{"error": err.Error(), "source": source})
@@ -854,6 +869,21 @@ func truncate(text string, limit int) string {
 
 // usFetchTimeout は寄付の判断で FRED を待つ上限（1 リクエスト）。
 const usFetchTimeout = 8 * time.Second
+
+// 寄る前の回（8:59:45〜9:00:00）が米国市場を待つ上限。1 リクエスト 3 秒、合計 5 秒を過ぎたら
+// 残りの取得元には繋がない（最悪でも 5 + 3 = 8 秒。取得元 3 つ × 系列 2 本を 8 秒ずつ待つと
+// 最悪 48 秒で、窓の 14 秒を取得だけで使い切る）。取れなければ us_stale で見送り、
+// 9:00:03 からの回が従来どおり取りに行く。実測は取れる朝で 1〜2 秒（2026-09-15〜17）。
+const (
+	usFetchTimeoutPreopen = 3 * time.Second
+	usFetchBudgetPreopen  = 5 * time.Second
+)
+
+// refReuseMaxAge は選定の気配を「送る直前の時価」として使い回してよい年齢の上限（取り始めから）。
+// 普段は気配 1.5〜1.9 秒 + 判定 0.3 秒で約 2 秒。取り直しても 4 本目の注文を送る頃には
+// 1.5 秒ほど経っているので、3 秒までなら記録の意味は変わらない。判定が長引いた回
+// （米国市場を取りに行った・材料の付け直しが重い）は超えるので、従来どおり取り直す。
+const refReuseMaxAge = 3 * time.Second
 
 // futureSlack は気配の時刻が「未来」とみなす余裕（時計のずれぶん）。
 const futureSlack = time.Minute

@@ -159,6 +159,7 @@ func (t *Tachibana) Fetch(symbols []string) (map[string]selection.Quote, error) 
 			Symbol: symbol, Price: price, At: row.At, Source: t.Name(),
 			PrevClose: row.PrevClose, Opened: opened,
 			FromBook: fromBook, HasBook: hasBook,
+			Last: row.Last, Bid: row.Bid, Ask: row.Ask,
 		}
 	}
 	return found, nil

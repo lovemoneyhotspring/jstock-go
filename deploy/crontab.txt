@@ -159,6 +159,16 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 
+# 7:30・8:20・8:50: 前夜の米国市場（S&P500・VIX）を data/daytrade/us.json に焼く。open はこれを読むだけになる。
+# 20:30 の plan も温めるが、その時刻には当夜の米国市場がまだ開いていないので朝の判定に要る行は入らない
+# ——2026-09-15〜17 は 3 朝とも初回の open が 9:00 台に Cboe / Yahoo へ取りに行っていた（1〜2 秒。
+# 取得元が詰まれば 1 リクエスト 8 秒 × 取得元 3 × 系列 2）。寄る前の回（8:59:45〜9:00:00）は窓が
+# 14 秒しかないので、外へ取りに行かせない。
+# 前夜の行が VIX つきで入っていれば何も取りに行かない（冪等）。3 回置くのは、取得元の反映が遅い朝と
+# VIX だけ欠けた朝を後の回で埋めるため。ブローカーに繋がないので /tmp/daytrade.lock は取らない。
+# 3 回とも取れなければ open が従来どおり取りに行く（寄る前の回は合計 5 秒まで。cmd/daytrade/open.go）
+30 7 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_TIMEOUT=120 deploy/with-lock.sh /tmp/daytrade-warm-us.lock 0 state/logs/daytrade-warm-us.log $WBJP_BIN/daytrade warm-us --config-dir config/daytrade_margin
+20,50 8 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_TIMEOUT=120 deploy/with-lock.sh /tmp/daytrade-warm-us.lock 0 state/logs/daytrade-warm-us.log $WBJP_BIN/daytrade warm-us --config-dir config/daytrade_margin
 # 8:53: 委託保証金を照会して data/daytrade/margin.json に焼く。9:00:03 からの open はこのファイルを
 # 読んで建玉の上限を**下げ方向のみ**上書きする——寄付の判断にブローカーの遅さを持ち込まないため、
 # open 自身は保証金を取りに行かない。

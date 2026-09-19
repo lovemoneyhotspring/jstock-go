@@ -82,14 +82,33 @@ var priceLimiter = sync.OnceValue(func() *RateLimiter {
 	return NewRateLimiter(Limit{Calls: 4, PerSeconds: 1.0})
 })
 
-// requestLimiter は発注・照会の口（sUrlRequest）の送信上限（2 回 / 秒）。
+// requestLimiter は発注・照会の口（sUrlRequest）のうち**照会**の送信上限（2 回 / 秒）。
 //
 // 引けの手仕舞いは注文ごとに単品照会（CLMOrderListDetail）を送るので、銘柄数ぶん連射
 // することになる。移植元の Python 実装は残高 2 回/秒・発注 2 回/秒・注文照会 4 回/秒に
-// 分けていたが、口は 1 つなので最も厳しい 2 回/秒に揃える（上限に当たったら待つ）。
+// 分けていた。ここは照会をまとめて最も厳しい 2 回/秒に揃える（上限に当たったら待つ）。
 var requestLimiter = sync.OnceValue(func() *RateLimiter {
 	return NewRateLimiter(Limit{Calls: 2, PerSeconds: 1.0})
 })
+
+// orderLimiter は同じ口の**注文**（新規・訂正・取消）の送信上限（2 回 / 秒）。
+//
+// 2026-09-19 まで照会と 1 つの枠だった。寄付の open は注文の直前に余力（CLMZanKaiSummary）を
+// 聞くので、その 1 回が注文の枠を食い、2 本目の注文が約 0.4 秒待たされていた（電文そのものは
+// 平均 89 ms。2026-09-15〜18 の実測）。移植元と同じく注文は別枠にする。注文そのものの上限は
+// 上げない——実機の上限を確かめていない。口への送信は合計で最大 4 回/秒になる（移植元は 8 回/秒）。
+var orderLimiter = sync.OnceValue(func() *RateLimiter {
+	return NewRateLimiter(Limit{Calls: 2, PerSeconds: 1.0})
+})
+
+// requestLimiterFor は発注・照会の口へ送る電文が使う枠。
+func requestLimiterFor(clmID string) *RateLimiter {
+	switch clmID {
+	case clmNewOrder, clmCorrectOrder, clmCancelOrder:
+		return orderLimiter()
+	}
+	return requestLimiter()
+}
 
 const (
 	// MarketPriceBatch は時価問合 1 リクエストの銘柄数の上限。
