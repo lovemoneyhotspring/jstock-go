@@ -116,11 +116,28 @@ func minuteOptionsFor(skipOpened bool, start, end time.Time, entryAt, exitAt str
 	}
 }
 
+// printPreopenNote は「寄る前に寄成で建てる」前提で出した結果だと断る。
+//
+// execution.preopen_legs を none 以外にすると、その脚は寄付のスプレッドを払わなくなる
+// （backtest.legParams.spreadBP）。これは**過去 10 年ぶん全部に遡って効く**——2026-09-19 に
+// long にした時点で、それまでに 20-research/結果.csv へ残した行と物差しが違う。
+// 黙って混ぜられないよう毎回断る。8:59:45 の気配と始値の誤差も入っていないので上限側の数字。
+func printPreopenNote(cfg dtconfig.Config) {
+	if !cfg.Execution.PreopenEnabled() {
+		return
+	}
+	fmt.Printf("注意: execution.preopen_legs = %q。その脚は寄成で**始値ちょうど**に建つ想定で、"+
+		"寄付のスプレッド %s bp を払っていません\n", cfg.Execution.PreopenLegs, cfg.Execution.SpreadBPOpen.String())
+	fmt.Println("      8:59 台の気配と始値の誤差も入っていないので上限側の数字です。" +
+		`preopen_legs = "none" の結果（結果.csv の過去の行）とは物差しが違います`)
+}
+
 func printBacktest(cfg dtconfig.Config, result *dtbacktest.Result, start, end time.Time, showTrades bool) {
 	s := result.Summary
 	fmt.Printf("%s〜%s  資金 %s 円  N=%d  営業日 %d（取引 %d）  往復手数料 %.1f bp\n",
 		start.Format(DateLayout), end.Format(DateLayout), yen(s.Capital),
 		cfg.Capital.Positions(), s.Days, s.TradedDays, s.RoundTripBP)
+	printPreopenNote(cfg)
 	fmt.Printf("損益合計 %s 円  日平均 %s 円  年率 %.1f%%  Sharpe %.2f  最大 DD %s 円  勝率(日) %.1f%%\n",
 		yen(s.TotalPnL), yen(s.MeanDaily), s.AnnualReturn*100, s.Sharpe,
 		yen(s.MaxDrawdown), s.WinRate*100)
@@ -158,6 +175,7 @@ func runMarginBacktest(cfg dtconfig.Config, start, end time.Time, fetcher usmark
 		cfg.Capital.Positions(), yen(cfg.Capital.MaxCapital), shrink,
 		m.Positions(), yen(m.MaxCapital), m.MultiplierNormal.String(), m.MultiplierLongWeak.String(),
 		result.Summary.Days)
+	printPreopenNote(cfg)
 	if m.ExcludeCorpEvents {
 		// 材料の印はニュースの記録簿（2026-06-17 から）でしか付かない。検証では常に空
 		fmt.Println("注意: margin.exclude_corp_events（TOB・MBO などを外す）は検証では効きません（電文が 2026-06-17 からしか無い）")

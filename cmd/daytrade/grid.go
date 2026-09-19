@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	dtbacktest "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/backtest"
@@ -68,6 +69,29 @@ func printGrid(results []dtbacktest.GridResult, start, end time.Time, elapsed ti
 			g.Name, yen(s.TotalPnL), annual*100, s.Sharpe, yen(s.MaxDrawdown),
 			s.TradedDays, pinned, g.Elapsed.Seconds())
 	}
+	var preopen []string
+	for _, g := range results {
+		if g.Config.Execution.PreopenEnabled() {
+			preopen = append(preopen, g.Name+preopenTag(g.Config))
+		}
+	}
+	if len(preopen) > 0 {
+		fmt.Printf("注意: %s は寄成で**始値ちょうど**に建つ想定で、寄付のスプレッドを払っていません"+
+			"（--csv の subject にも同じ印が付きます）\n", strings.Join(preopen, " / "))
+	}
+}
+
+// preopenTag は結果に付ける「寄る前に寄成で建てる想定」の印（none なら空）。
+//
+// **20-research/結果.csv の subject に混ぜる。** execution.preopen_legs を none 以外にすると、
+// その脚は検証の全期間で寄付のスプレッドを払わなくなる（backtest.legParams.spreadBP）ので、
+// none で測った過去の行と同じ subject に並べると物差しの違いが消える。印を付けて
+// 「同じ名前の別物」が 1 つの subject に混ざらないようにする。
+func preopenTag(cfg dtconfig.Config) string {
+	if !cfg.Execution.PreopenEnabled() {
+		return ""
+	}
+	return "（寄成 " + cfg.Execution.PreopenLegs + "）"
 }
 
 // writeGridCSV は 20-research/結果.csv と同じ列で書く（そのまま追記できる形）。
@@ -85,6 +109,8 @@ func writeGridCSV(path, note string, results []dtbacktest.GridResult, start, end
 	period := fmt.Sprintf("%s〜%s", start.Format("2006-01"), end.Format("2006-01"))
 	for _, g := range results {
 		s := g.Summary()
+		// 寄成で建てる想定の行は subject に印を付ける（preopenTag。物差しが違う）
+		subject := g.Name + preopenTag(g.Config)
 		years := float64(s.Days) / dtbacktest.TradingDays
 		annual := 0.0
 		if years > 0 && g.Capital() > 0 {
@@ -105,7 +131,7 @@ func writeGridCSV(path, note string, results []dtbacktest.GridResult, start, end
 			{"max_dd", dd, "pct"},
 			{"traded_days", float64(s.TradedDays), "days"},
 		} {
-			_ = w.Write([]string{note, "daytrade", "日本株", "backtest", g.Name, period,
+			_ = w.Write([]string{note, "daytrade", "日本株", "backtest", subject, period,
 				m.metric, strconv.FormatFloat(m.value, 'f', -1, 64), m.unit, "候補"})
 		}
 	}
