@@ -256,3 +256,110 @@ func TestRefreshEntriesExitsOnlyRemainder(t *testing.T) {
 		t.Errorf("targets = %+v err=%v, want 残り 300 株", targets, err)
 	}
 }
+
+// recordLongToday は今日の買い建て（送信済み・台帳で未確定）を台帳に残す。
+func recordLongToday(t *testing.T, env Env, symbol string, qty int64) string {
+	t.Helper()
+	req, err := domain.NewOrderRequest("l-"+symbol, symbol, domain.SideBuy, domain.OrderTypeMarket,
+		decimal.NewFromInt(qty), nil, domain.TaxAccountSpecific, "test", domain.TradeTypeMarginOpen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "B/" + req.ClientOrderID
+	price := decimal.NewFromInt(761)
+	if err := env.Ledger.Record(req, env.Day, string(domain.OrderStatusSubmitted), &price, &id); err != nil {
+		t.Fatal(err)
+	}
+	return req.ClientOrderID
+}
+
+// 引け: 寄らないまま板に残っている買いは取り消す。約定が無ければ手仕舞いは出さない。
+func TestRefreshEntriesCancelsUnfilledEntry(t *testing.T) {
+	env, _ := newEnv(t)
+	id := recordLongToday(t, env, "7203", 400)
+	ob := &orderBook{qty: 400, finalStatus: domain.OrderStatusCancelled}
+	b := ob.broker()
+
+	entries, _, _ := LiveEntries(env)
+	targets, unconfirmed, err := RefreshEntries(env, b, entries)
+	if err != nil || len(targets) != 0 || len(unconfirmed) != 0 {
+		t.Fatalf("targets=%+v unconfirmed=%v err=%v, want 手仕舞いなし", targets, unconfirmed, err)
+	}
+	if len(b.cancelled) != 1 || b.cancelled[0] != id {
+		t.Fatalf("cancelled = %v, want %s", b.cancelled, id)
+	}
+	if entry, _, _ := env.Ledger.Get(id); entry.Status != string(domain.OrderStatusCancelled) {
+		t.Errorf("台帳 = %s, want CANCELLED", entry.Status)
+	}
+	// 次の回（15:24）は確定済みなので聞かない・取り消さない
+	entries, _, _ = LiveEntries(env)
+	if _, _, err := RefreshEntries(env, b, entries); err != nil || len(b.cancelled) != 1 {
+		t.Errorf("2 回目: cancelled=%d err=%v", len(b.cancelled), err)
+	}
+}
+
+// 引け: 一部約定の残りを取り消し、取消の間に増えた分も含めた確定数量で手仕舞う。
+func TestRefreshEntriesCancelsRestAndExitsConfirmedFill(t *testing.T) {
+	env, _ := newEnv(t)
+	recordLongToday(t, env, "7203", 400)
+	ob := &orderBook{qty: 400, before: 100, finalFilled: 200, finalStatus: domain.OrderStatusCancelled}
+	b := ob.broker()
+
+	entries, _, _ := LiveEntries(env)
+	targets, unconfirmed, err := RefreshEntries(env, b, entries)
+	if err != nil || len(unconfirmed) != 0 {
+		t.Fatalf("unconfirmed=%v err=%v", unconfirmed, err)
+	}
+	if len(b.cancelled) != 1 || len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(200)) {
+		t.Fatalf("cancelled=%v targets=%+v, want 取消 1 件・手仕舞い 200 株", b.cancelled, targets)
+	}
+}
+
+// 引け: 全部約定した買いには取消を送らない。
+func TestRefreshEntriesDoesNotCancelFilledEntry(t *testing.T) {
+	env, _ := newEnv(t)
+	recordLongToday(t, env, "7203", 400)
+	b := &stubBroker{getOrder: func(id string) (*domain.Order, error) {
+		p := decimal.NewFromInt(761)
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled, Quantity: decimal.NewFromInt(400),
+			FilledQuantity: decimal.NewFromInt(400), AvgFillPrice: &p}, nil
+	}}
+	entries, _, _ := LiveEntries(env)
+	targets, _, err := RefreshEntries(env, b, entries)
+	if err != nil || len(b.cancelled) != 0 || len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(400)) {
+		t.Errorf("cancelled=%v targets=%+v err=%v, want 取消なし・400 株", b.cancelled, targets, err)
+	}
+}
+
+// 引け: 取消の完了を確かめられないときは、分かっている約定分を手仕舞い、人に知らせる。
+// 次の回で約定が増えていたら、増えた分だけを足して手仕舞う。
+func TestRefreshEntriesCancelUnconfirmedExitsKnownFillThenGrowth(t *testing.T) {
+	env, rep := newEnv(t)
+	recordLongToday(t, env, "7203", 400)
+	status, filled := domain.OrderStatusPartiallyFilled, int64(100)
+	b := &stubBroker{balance: richBalance(), getOrder: func(id string) (*domain.Order, error) {
+		p := decimal.NewFromInt(761)
+		return &domain.Order{ClientOrderID: id, Status: status, Quantity: decimal.NewFromInt(400),
+			FilledQuantity: decimal.NewFromInt(filled), AvgFillPrice: &p}, nil
+	}}
+
+	entries, _, _ := LiveEntries(env)
+	targets, unconfirmed, err := RefreshEntries(env, b, entries)
+	if err != nil || len(unconfirmed) != 1 || !rep.warned("daytrade.entry_cancel") {
+		t.Fatalf("unconfirmed=%v err=%v, want 取消未確認 1 件と警告", unconfirmed, err)
+	}
+	if len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("targets=%+v, want 100 株", targets)
+	}
+	if failures := PlaceExits(env, b, targets); len(failures) != 0 {
+		t.Fatal(failures)
+	}
+
+	// 次の回: 取消が通り、その間に 300 株まで約定していた。増えた 200 株だけを手仕舞う
+	status, filled = domain.OrderStatusCancelled, 300
+	entries, _, _ = LiveEntries(env)
+	targets, unconfirmed, err = RefreshEntries(env, b, entries)
+	if err != nil || len(unconfirmed) != 0 || len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(200)) {
+		t.Errorf("2 回目: targets=%+v unconfirmed=%v err=%v, want 残り 200 株", targets, unconfirmed, err)
+	}
+}

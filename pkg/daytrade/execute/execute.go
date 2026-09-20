@@ -66,6 +66,10 @@ type Env struct {
 // DefaultRetryWait は RetryWait の既定。
 const DefaultRetryWait = 5 * time.Second
 
+// closeCancelWait は引けで建て注文を取り消した後、照会し直すまでの間隔の上限。
+// 引けは締め切り（15:30）があり、後ろに他の銘柄の手仕舞いが並ぶので RetryWait より短くする。
+const closeCancelWait = time.Second
+
 func (e Env) printf(format string, a ...any) {
 	if e.Out != nil {
 		fmt.Fprintf(e.Out, format, a...)
@@ -809,49 +813,39 @@ func LiveEntries(env Env) (entries []ledger.Order, dryRun int, err error) {
 	return entries, dryRun, nil
 }
 
-// exitState は同じ銘柄・脚の今日の手仕舞い。
-type exitState struct {
-	// done は生きている（未確定の）か全部約定した手仕舞いがある——重ねて出さない。
-	// FILLED は台帳に約定数量が入っていないことがあるので、数量ではなく状態で見る。
-	done bool
-	// filled は一部だけ約定して終わった（取消・失効）手仕舞いの約定数量の合計。
-	filled decimal.Decimal
-}
-
-// placedExits は今日の手仕舞い（銘柄|脚 → 状態）。約定 0 で終わった拒否・失効は数えない。
-func placedExits(env Env) (map[string]exitState, error) {
+// placedExits は今日の手仕舞いが**もう引き受けている株数**（銘柄|脚 → 株数）。
+//
+//   - 生きている（未確定の）か全部約定した手仕舞い … 注文数量。FILLED は台帳に約定数量が
+//     入っていないことがあるので、約定数量ではなく注文数量で数える
+//   - 一部だけ約定して終わった（取消・失効）手仕舞い … 約定数量
+//   - 約定 0 で終わった拒否・失効 … 数えない
+//
+// 状態（ある／なし）でなく株数で持つのは、手仕舞いを出した後に建て注文の約定が増えた
+// （取消を確かめられないまま残りが約定した）ときに、増えた分を次の回が拾えるようにするため。
+func placedExits(env Env) (map[string]decimal.Decimal, error) {
 	all, err := env.Ledger.ExitsOn(env.Day)
 	if err != nil {
 		return nil, err
 	}
-	exits := map[string]exitState{}
+	exits := map[string]decimal.Decimal{}
 	for _, o := range all {
 		if o.IsDryRun() || o.IsDead() {
 			continue
 		}
 		key := o.Symbol + "|" + o.Leg()
-		s := exits[key]
 		if o.IsOpen() || o.Status == string(domain.OrderStatusFilled) {
-			s.done = true
+			exits[key] = exits[key].Add(o.Quantity)
 		} else {
-			s.filled = s.filled.Add(o.FilledQuantity)
+			exits[key] = exits[key].Add(o.FilledQuantity)
 		}
-		exits[key] = s
 	}
 	return exits, nil
 }
 
 // remainingToExit は建玉の約定数量 filled のうち、まだ手仕舞っていない株数。
-// 手仕舞いが生きている・全部約定しているなら 0。
-func remainingToExit(exits map[string]exitState, order ledger.Order, filled decimal.Decimal) decimal.Decimal {
-	s, ok := exits[order.Symbol+"|"+order.Leg()]
-	if !ok {
-		return filled
-	}
-	if s.done {
-		return decimal.Zero
-	}
-	return decimal.Max(filled.Sub(s.filled), decimal.Zero)
+// 手仕舞いが引き受けている株数を差し引く。
+func remainingToExit(exits map[string]decimal.Decimal, order ledger.Order, filled decimal.Decimal) decimal.Decimal {
+	return decimal.Max(filled.Sub(exits[order.Symbol+"|"+order.Leg()]), decimal.Zero)
 }
 
 // RefreshEntries は建玉の約定数量をブローカーに聞き、手仕舞う対象を組む。
@@ -859,6 +853,9 @@ func remainingToExit(exits map[string]exitState, order ledger.Order, filled deci
 // 聞けなかったときに台帳の値（発注直後は 0）へ黙って落ちてはいけない。
 // 0 は「手仕舞う数量なし」として扱われるので、建玉があっても売らずに
 // 終わり、そのまま持ち越しになる。確かめられなかった銘柄は unconfirmed に積む。
+//
+// まだ板に残っている建て注文（寄らないままの寄成・一部約定の残り）は**取り消してから**
+// 数量を確定する。引けの回しか呼ばないので、ここより後に建つ理由は無い。
 //
 // b が nil（dry-run）なら送信済み・送信中を全約定とみなして対象を示す。
 func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets []ExitTarget, unconfirmed []string, err error) {
@@ -889,6 +886,30 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 					"client_order_id": order.ClientOrderID, "status": order.Status,
 				})
 				continue
+			}
+			if current != nil && !current.Status.IsTerminal() {
+				// まだ板に残っている（寄らないままの寄成・一部約定の残り）。取り消してから数量を
+				// 確定する。放っておくと、手仕舞いの後（大引け・ストップ安の比例配分）に約定して
+				// 手仕舞いの無い建玉が残り、持ち越しになる
+				if env.expired() {
+					env.printf("  %s: 締め切り（%s）を過ぎたため取消を送りません\n", order.Symbol, env.deadlineText())
+				} else {
+					env.printf("  %s: 未約定の %s 株が板に残っている。取り消します\n",
+						order.Symbol, order.Quantity.Sub(current.FilledQuantity))
+					current, _ = cancelOpen(env, b, order, current, min(env.RetryWait, closeCancelWait), "daytrade.entry_cancel")
+				}
+				if !current.Status.IsTerminal() {
+					// 取消の完了を確かめられない。いま分かっている約定分は手仕舞い、残りは人に知らせる
+					// （次の回が照会し直し、増えた約定は remainingToExit が拾う）
+					unconfirmed = append(unconfirmed,
+						fmt.Sprintf("%s（取消の完了を確かめられません: %s / 約定 %s / %s 株）",
+							order.Symbol, current.Status, current.FilledQuantity, order.Quantity))
+					env.Report.Warn("daytrade.entry_cancel", "建て注文の取消の完了を確かめられません", map[string]any{
+						"day": env.dayText(), "symbol": order.Symbol,
+						"client_order_id": order.ClientOrderID, "status": string(current.Status),
+						"filled": current.FilledQuantity.String(), "quantity": order.Quantity.String(),
+					})
+				}
 			}
 			if current != nil {
 				filled, fillPrice = current.FilledQuantity, current.AvgFillPrice

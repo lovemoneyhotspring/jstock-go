@@ -2,6 +2,7 @@ package execute
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
@@ -111,6 +112,39 @@ func settledQuantity(o ledger.Order) decimal.Decimal {
 	return o.FilledQuantity
 }
 
+// cancelOpen は板に残っている注文 o（current は直前の照会の結果で、まだ終わっていない）を取り消し、
+// 終わるまで wait おきに guardPolls 回まで照会し直す。最後に見た状態と「取り消したと言えるか」を返す。
+// 返った状態がまだ終わっていなければ、取消の完了を確かめられなかった（呼ぶ側が決める）。
+// code は取消がエラーだったときの警告のコード。
+func cancelOpen(env Env, b broker.Broker, o ledger.Order, current *domain.Order, wait time.Duration, code string) (*domain.Order, bool) {
+	brokerID := current.BrokerOrderID
+	if brokerID == nil {
+		brokerID = o.BrokerOrderID
+	}
+	cancelErr := b.Cancel(o.ClientOrderID, brokerID)
+	if cancelErr != nil {
+		// 取消の間に全部約定した・すでに取消中など。照会し直して結末で決める
+		env.Report.Warn(code, "取消がエラー。照会し直して決める", map[string]any{
+			"day": env.dayText(), "symbol": o.Symbol, "client_order_id": o.ClientOrderID, "error": cancelErr.Error(),
+		})
+	}
+	for i := 0; i < guardPolls && !current.Status.IsTerminal(); i++ {
+		if !env.boundedWait(wait) && env.expired() {
+			break
+		}
+		next, err := b.GetOrder(o.ClientOrderID, brokerID)
+		if err != nil {
+			env.printf("  %s: 取消の後の照会に失敗: %v\n", o.Symbol, err)
+		}
+		if next != nil {
+			current = next
+		}
+	}
+	// 取消が受け付けられたか、結末が取消のときだけ「取り消した」と言う（取消がエラーで
+	// 実は全部約定していたなら、通知は返済だけにする）
+	return current, cancelErr == nil || current.Status == domain.OrderStatusCancelled
+}
+
 func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAction {
 	filled, price := settledQuantity(o), o.AvgFillPrice
 	if o.IsOpen() {
@@ -132,32 +166,7 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 				act.Err = fmt.Errorf("締め切り（%s）を過ぎたため取消を送りませんでした", env.deadlineText())
 				return act
 			}
-			brokerID := current.BrokerOrderID
-			if brokerID == nil {
-				brokerID = o.BrokerOrderID
-			}
-			cancelErr := b.Cancel(o.ClientOrderID, brokerID)
-			if cancelErr != nil {
-				// 取消の間に全部約定した・すでに取消中など。照会し直して結末で決める
-				env.Report.Warn("daytrade.corp_guard", "取消がエラー。照会し直して決める", map[string]any{
-					"day": env.dayText(), "symbol": o.Symbol, "client_order_id": o.ClientOrderID, "error": cancelErr.Error(),
-				})
-			}
-			for i := 0; i < guardPolls && !current.Status.IsTerminal(); i++ {
-				if !env.boundedWait(env.RetryWait) && env.expired() {
-					break
-				}
-				next, err := b.GetOrder(o.ClientOrderID, brokerID)
-				if err != nil {
-					env.printf("  %s: 取消の後の照会に失敗: %v\n", o.Symbol, err)
-				}
-				if next != nil {
-					current = next
-				}
-			}
-			// 取消が受け付けられたか、結末が取消のときだけ「取り消した」と言う（取消がエラーで
-			// 実は全部約定していたなら、通知は返済だけにする）
-			act.Cancelled = cancelErr == nil || current.Status == domain.OrderStatusCancelled
+			current, act.Cancelled = cancelOpen(env, b, o, current, env.RetryWait, "daytrade.corp_guard")
 		}
 		recordFill(env, o, current, current.FilledQuantity, current.AvgFillPrice, "材料の出た売建の取消")
 		o.Status, o.FilledQuantity, o.AvgFillPrice = string(current.Status), current.FilledQuantity, current.AvgFillPrice
