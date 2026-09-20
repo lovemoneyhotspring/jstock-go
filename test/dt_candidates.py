@@ -3,7 +3,10 @@
 根拠: vault 20-research/2026-09-jp-daytrade-ml-rerank.md「候補表の再現」
 （元の /tmp/dt_rebuild.py は消えたので、Go の規則を読み直して書き直したもの。2026-09-20）
 
-  test/.venv/bin/python test/dt_candidates.py [パネル] [出力]
+  test/.venv/bin/python test/dt_candidates.py [--panel パネル] [--out 出力] [--max-gap 0.0]
+
+--max-gap を 0 より上にすると、ギャップが少し正の銘柄も残す（気配の誤差の模擬で、始値のギャップは
+正だが気配では負に見える銘柄を候補に入れるため。test/dt_preopen_sim.py が 0.03 で使う）。
 
 規則は本番のロング脚（pkg/daytrade/universe・selection）と同じ:
   プライム・売買代金の 20 日中央値 1 億以上・時価総額 3 分位の下を除く・
@@ -11,9 +14,9 @@
 パネルの short_interest は公表日基準、ret1 などの lag も正しい定義なので test/dt_si_pit.py は要らない。
 """
 
+import argparse
 import glob
 import os
-import sys
 
 import numpy as np
 import pandas as pd
@@ -45,9 +48,14 @@ def cap_tercile(g):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--panel", default="")
+    ap.add_argument("--out", default=OUT)
+    ap.add_argument("--max-gap", type=float, default=0.0)
+    a = ap.parse_args()
     # キャッシュの名前は鍵のハッシュなので、名前順ではなく更新時刻の新しいものを使う
-    panel = sys.argv[1] if len(sys.argv) > 1 else max(glob.glob("data/jquants/_panel_cache/panel-*.parquet"), key=os.path.getmtime)
-    out = sys.argv[2] if len(sys.argv) > 2 else OUT
+    panel = a.panel or max(glob.glob("data/jquants/_panel_cache/panel-*.parquet"), key=os.path.getmtime)
+    out = a.out
     df = pd.read_parquet(panel)
     df["d"] = pd.to_datetime(df["d"])
     df["mkt_cap"] = df["mkt_cap"].fillna(0.0)
@@ -61,7 +69,7 @@ def main():
              & ~base["earn_prev"].fillna(False) & ~base["disc_today"].fillna(False)
              & ~base["alert"].fillna(False) & ~base["is_loss"].fillna(False)].copy()
     c["gap"] = c["o"] / c["prev_close"] - 1
-    c = c[(c["gap"] >= -1.0) & (c["gap"] < 0.0)]
+    c = c[(c["gap"] >= -1.0) & (c["gap"] < a.max_gap)]
     c = c[c["o"] > limit_down(c["prev_close"].values)]
 
     c["y_raw"] = c["c"] / c["o"] - 1
