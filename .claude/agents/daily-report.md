@@ -144,6 +144,7 @@ LightGBM 側だけ実際の按分の株数なので、2 つを引き算しない
 ### 層 3: 構造化ログ（異常の深掘りのときだけ）
 
 層 1 で拾った `run_id` を鍵に降りる。**定型行（`routine: true`）は読み飛ばす。**
+ログは JST の 0 時で退避される。当日ぶんは接尾辞なし、過去の日を見るときは `daytrade-prod.jsonl.<日付>`。
 
 ```bash
 jq -c 'select(.run_id == "<run_id>" and .routine != true and (.verify | not))' state/logs/daytrade-prod.jsonl

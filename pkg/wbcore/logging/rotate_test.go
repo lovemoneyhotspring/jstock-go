@@ -22,10 +22,10 @@ func writeLogAt(t *testing.T, path, content string, modTime time.Time) {
 func TestRotateLogMovesPreviousDay(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wbjp-prod.jsonl")
-	yesterday := time.Date(2026, 9, 2, 23, 30, 0, 0, time.UTC)
+	yesterday := time.Date(2026, 9, 2, 14, 30, 0, 0, time.UTC) // JST 9/2 23:30
 	writeLogAt(t, path, "{\"msg\":\"きのう\"}\n", yesterday)
 
-	now := time.Date(2026, 9, 3, 0, 5, 0, 0, time.UTC)
+	now := time.Date(2026, 9, 2, 15, 5, 0, 0, time.UTC) // JST 9/3 0:05
 	if err := rotateLog(path, now, RetainDays); err != nil {
 		t.Fatalf("退避に失敗: %v", err)
 	}
@@ -50,12 +50,36 @@ func TestRotateLogKeepsSameDay(t *testing.T) {
 	morning := time.Date(2026, 9, 3, 1, 0, 0, 0, time.UTC)
 	writeLogAt(t, path, "{}\n", morning)
 
-	now := time.Date(2026, 9, 3, 20, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 9, 3, 14, 0, 0, 0, time.UTC)
 	if err := rotateLog(path, now, RetainDays); err != nil {
 		t.Fatalf("退避に失敗: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Error("同じ日なのに退避されました")
+	}
+}
+
+// 境界は JST の 0 時。JST 8:59:45 の open（UTC では前日の 23:59:45）は、9:00 を過ぎても
+// 同じ日のファイルに残る（UTC で切ると前日の退避に入り、朝の点検から見えなかった）。
+func TestRotateLogBoundaryIsJST(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "daytrade-prod.jsonl")
+	preopen := time.Date(2026, 9, 17, 23, 59, 45, 0, time.UTC) // JST 9/18 8:59:45
+	writeLogAt(t, path, "{}\n", preopen)
+
+	if err := rotateLog(path, time.Date(2026, 9, 18, 0, 0, 3, 0, time.UTC), RetainDays); err != nil {
+		t.Fatalf("退避に失敗: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("JST では同じ日（9/18）なのに退避されました")
+	}
+
+	// JST の日付が変わった最初の回（9/19 6:00 JST = 9/18 21:00 UTC）で、JST の日付の名前で退避する
+	if err := rotateLog(path, time.Date(2026, 9, 18, 21, 0, 0, 0, time.UTC), RetainDays); err != nil {
+		t.Fatalf("退避に失敗: %v", err)
+	}
+	if _, err := os.Stat(path + ".2026-09-18"); err != nil {
+		t.Errorf("JST の日付（2026-09-18）で退避されていません: %v", err)
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 )
 
 // ログの日次ローテーション。
@@ -18,8 +20,14 @@ import (
 // 増え続けていた（1 日 数 MB）。
 //
 // 退避したファイルは `<name>.jsonl.YYYY-MM-DD`。日付は**その中身が書かれた日**
-// （UTC）で、退避した日ではない。日付ごとに分かれるので、ある日のログを読むのに
+// （JST）で、退避した日ではない。日付ごとに分かれるので、ある日のログを読むのに
 // 他の日を読まずに済む。
+//
+// JST で切るのは digest.DayOf と同じ理由。UTC で切ると境界が JST 9:00 ちょうどになり、
+// 寄る前の回（8:59:45 の open、8:53 の warm-margin、8:30〜8:59 の snap）が前日の退避に入って、
+// 現行ファイルだけを読む朝の点検・日報から見えない。8:59:45 の回が 9:00:00 を跨いで書くと
+// 退避そのものが 1 日ずれる。JST の 0 時を跨ぐ回は無い。2026-09-20 までの退避は UTC の日付で
+// 切られている（移行はしない。読むときはその境界だけ注意する）。
 
 // RetainDays は退避したログを残す日数。
 const RetainDays = 90
@@ -52,9 +60,9 @@ func rotateLog(path string, now time.Time, retainDays int) error {
 		return pruneRotated(path, now, retainDays)
 	}
 
-	// 中身が書かれた日（UTC）。今日と同じならまだ退避しない
-	day := info.ModTime().UTC().Format(rotatedSuffix)
-	if day == now.UTC().Format(rotatedSuffix) {
+	// 中身が書かれた日（JST）。今日と同じならまだ退避しない
+	day := info.ModTime().In(clock.Tokyo).Format(rotatedSuffix)
+	if day == now.In(clock.Tokyo).Format(rotatedSuffix) {
 		return pruneRotated(path, now, retainDays)
 	}
 
@@ -81,7 +89,7 @@ func pruneRotated(path string, now time.Time, retainDays int) error {
 		return err
 	}
 
-	cutoff := now.UTC().AddDate(0, 0, -retainDays).Format(rotatedSuffix)
+	cutoff := now.In(clock.Tokyo).AddDate(0, 0, -retainDays).Format(rotatedSuffix)
 	var stale []string
 	for _, entry := range entries {
 		name := entry.Name()

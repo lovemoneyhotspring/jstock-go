@@ -63,8 +63,10 @@ live フラグに触れるときは「live フラグ」と書く。PR の本文�
    jq -c 'select((.anomalies or .outcome == "error") and (.verify | not) and .command != "backtest")' state/digest/prod-$YESTERDAY.jsonl state/digest/prod-$TODAY.jsonl 2>/dev/null
    ```
 2. **`run_id` を鍵に層 3（`state/logs/<app>-prod.jsonl`）へ降りて、何が起きたかを特定する。**
+   ログは JST の 0 時で退避される（`<app>-prod.jsonl.<日付>`）。**前夜の実行は退避ファイルに入っている**
+   ので、きのうの退避と現行の両方を渡す。
    ```bash
-   jq -c 'select(.run_id == "<run_id>" and .routine != true and (.verify | not))' state/logs/<app>-prod.jsonl
+   jq -c 'select(.run_id == "<run_id>" and .routine != true and (.verify | not))' state/logs/<app>-prod.jsonl.$YESTERDAY state/logs/<app>-prod.jsonl 2>/dev/null
    ```
    `pending_ambiguous` が絡む異常は、`docs/FEEDBACK.md`「自己修復の手順」の対象（`pending resolve`
    コマンドで直る）。**それは既存の仕組みで直るのでコードは触らない**——次の実行で自動的に
