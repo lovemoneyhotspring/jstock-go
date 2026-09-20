@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -140,6 +141,45 @@ func (r *Run) Crash(title, code string, err error) error {
 	digest.Fail(code, err.Error())
 	r.Alert(fmt.Sprintf("%s: %sが異常終了", r.App, title), err.Error())
 	return err
+}
+
+// ExitPanic は panic で落ちたときの終了コード（ふつうの失敗は 1）。
+const ExitPanic = 2
+
+// Guarded は execute（rootCmd.Execute）を包み、panic を記録・通知してからエラーに直す。
+//
+// 何もしないと panic は stderr に出るだけで、通知もダイジェストも残らない。close で起きると
+// 15:24・15:28 の回も同じ所で落ち、気づくのは夕方の日報になる。run は PersistentPreRun が
+// 起こすので、その変数へのポインタで受ける（起きる前の panic なら nil のまま）。
+// 戻りの panicked が真なら main は ExitPanic で終わる。
+func Guarded(app string, run **Run, execute func() error) (panicked bool, err error) {
+	defer func() {
+		p := recover()
+		if p == nil {
+			return
+		}
+		panicked = true
+		err = fmt.Errorf("panic: %v", p)
+		stack := string(debug.Stack())
+		fmt.Fprintf(os.Stderr, "%v\n%s", err, stack)
+		var r *Run
+		if run != nil {
+			r = *run
+		}
+		command := ""
+		if r != nil {
+			command = r.Command
+		}
+		r.Error(app+".panic", "panic で異常終了", map[string]any{"error": err.Error(), "stack": stack})
+		digest.Fail(app+".panic", err.Error())
+		title := fmt.Sprintf("%s %s: panic で異常終了", app, command)
+		if r != nil {
+			r.Alert(title, err.Error())
+		} else {
+			notify.Alert(title, err.Error(), nil)
+		}
+	}()
+	return false, execute()
 }
 
 // ConnectBroker は Run の記録先を付けてブローカーに繋ぐ。

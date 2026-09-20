@@ -266,3 +266,36 @@ func TestAddCommasKeepsFraction(t *testing.T) {
 		}
 	}
 }
+
+// panic は記録・通知してからエラーに直す（何もしないと stderr に出るだけで誰も気づかない）。
+func TestGuardedRecoversPanicAndAlerts(t *testing.T) {
+	defer digest.Reset()
+	defer logging.ResetRunContext()
+	s := &settings.AppSettings{Env: settings.EnvUAT, StateDir: t.TempDir(), LogDir: t.TempDir()}
+	var run *Run
+	var got string
+	panicked, err := Guarded("daytrade", &run, func() error {
+		// PersistentPreRun の体: 実行の途中で run が起きる
+		run = StartRun("daytrade", s, "close")
+		run.Alerter = func(title, body string, _ *logging.Logger) bool {
+			got = title + "|" + body
+			return true
+		}
+		var m map[string]int
+		m["x"] = 1
+		return nil
+	})
+	if !panicked || err == nil || !strings.Contains(err.Error(), "panic:") {
+		t.Fatalf("panicked=%v err=%v, want panic をエラーに直す", panicked, err)
+	}
+	if !strings.HasPrefix(got, "daytrade close: panic で異常終了|panic:") {
+		t.Errorf("通知の内容: %q", got)
+	}
+	run.Finish(err)
+
+	// ふつうの失敗・成功はそのまま通す
+	boom := errors.New("boom")
+	if panicked, err := Guarded("daytrade", &run, func() error { return boom }); panicked || err != boom {
+		t.Errorf("panicked=%v err=%v, want 元のエラー", panicked, err)
+	}
+}

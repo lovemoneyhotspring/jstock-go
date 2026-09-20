@@ -43,8 +43,12 @@ func main() {
 	// os.Exit は defer を飛ばすので、ダイジェストはここで必ず書き出す。
 	// 「今日ちゃんと動いたか」を AI が 1 ファイルで読めることが目的なので、
 	// 失敗した実行こそ残さなければならない。
-	err := rootCmd.Execute()
+	// panic も記録・通知してから終わる（cli.Guarded）
+	panicked, err := cli.Guarded("accum", &run, rootCmd.Execute)
 	run.Finish(err)
+	if panicked {
+		os.Exit(cli.ExitPanic)
+	}
 	if err != nil {
 		os.Exit(1)
 	}
