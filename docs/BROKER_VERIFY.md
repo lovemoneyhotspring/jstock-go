@@ -517,6 +517,8 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env TACHIBANA_PROD_PRIVATE_KEY_FILE=$PWD/e_api
   go test ./pkg/wbcore/broker -run TestPriceParallelProbe -v -count=1
 ```
 
+プローブは実験のあいだ（10 秒以上）本番のセッションのロックを握り続ける。**場の時間外・cron の発注系と重ならない時刻に走らせる。**
+
 **残り**: 測ったのは連休の深夜。9:00 台の混んだ回線で到着が入れ替わる頻度は未確認——構造化ログの `broker.price_retry`
-（弾かれたバッチを直列で取り直した）が朝に出るかを見る。頻発するなら cron の行に `TACHIBANA_PRICE_STAGGER_MS=100`、
+（弾かれたバッチを直列で取り直した）が朝に出るかを見る。送った形と間隔は毎回 `broker.price_pipelined`（`stagger_ms`・`failed`・`elapsed_ms`）に残る。頻発するなら cron の行に `TACHIBANA_PRICE_STAGGER_MS=100`、
 直列に戻すなら `=0`（bin の作り直しは不要）。

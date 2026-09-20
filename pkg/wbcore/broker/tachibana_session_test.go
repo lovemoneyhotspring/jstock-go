@@ -52,6 +52,8 @@ type fakeTachibana struct {
 	// priceRejectPNo は時価問合で、先頭の銘柄がこのコードのバッチをあと n 回 p_errno=6 で弾く
 	// （ずらして送ったバッチの到着が入れ替わった、の再現）。
 	priceRejectPNo map[string]int
+	// priceSessionLost は時価問合で、先頭の銘柄がこのコードのバッチをあと n 回 p_errno=2（失効）で返す。
+	priceSessionLost map[string]int
 	// priceOmitRows は時価問合の応答から配列のキーを落とす（形が違う応答の模型）。
 	priceOmitRows bool
 	// responses は電文（sCLMID）ごとの応答の固定値。無ければ既定の {"p_errno":"0","sResultCode":"0"}。
@@ -144,6 +146,11 @@ func (f *fakeTachibana) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/price/" {
 		codes := strings.Split(text(req["sTargetIssueCode"]), ",")
 		f.priceBatches = append(f.priceBatches, codes[0])
+		if f.priceSessionLost[codes[0]] > 0 {
+			f.priceSessionLost[codes[0]]--
+			_ = json.NewEncoder(w).Encode(map[string]any{"p_errno": "2", "p_err": "session lost"})
+			return
+		}
 		if f.priceRejectPNo[codes[0]] > 0 {
 			f.priceRejectPNo[codes[0]]--
 			_ = json.NewEncoder(w).Encode(map[string]any{"p_errno": "6", "p_err": "引数（p_no:[1] <= 前要求.p_no:[2]）エラー。"})

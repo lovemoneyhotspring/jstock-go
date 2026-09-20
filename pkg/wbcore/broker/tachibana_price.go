@@ -94,13 +94,16 @@ var priceLimiter = sync.OnceValue(func() *RateLimiter {
 // 通った下限（10 ms）でなく 50 ms を採る。弾かれたバッチは 2 周目が直列で取り直す。
 //
 // TACHIBANA_PRICE_STAGGER_MS で上書きできる。0 なら従来の直列（bin を作り直さずに cron の 1 行で戻せる）。
-func marketPriceStagger() time.Duration {
+func marketPriceStagger() (stagger time.Duration, invalid string) {
 	if raw := strings.TrimSpace(os.Getenv("TACHIBANA_PRICE_STAGGER_MS")); raw != "" {
-		if ms, err := strconv.Atoi(raw); err == nil && ms >= 0 && ms <= 1000 {
-			return time.Duration(ms) * time.Millisecond
+		ms, err := strconv.Atoi(raw)
+		if err != nil || ms < 0 || ms > 1000 {
+			// 直列に戻したつもりの書き間違い（=O、=0ms）を黙って既定にしない。呼び出し側が警告を出す
+			return 50 * time.Millisecond, raw
 		}
+		return time.Duration(ms) * time.Millisecond, ""
 	}
-	return 50 * time.Millisecond
+	return 50 * time.Millisecond, ""
 }
 
 // requestLimiter は発注・照会の口（sUrlRequest）のうち**照会**の送信上限（2 回 / 秒）。
@@ -273,7 +276,13 @@ func (t *TachibanaBroker) MarketPricesRawPartialAt(symbols []string, columns str
 			})
 		}
 		var failed []PriceBatchFailure
-		if stagger := marketPriceStagger(); pass == 1 && stagger > 0 && len(pending) > 1 {
+		stagger, invalid := marketPriceStagger()
+		if pass == 1 && invalid != "" {
+			t.logWarn("broker.price_stagger_invalid", "TACHIBANA_PRICE_STAGGER_MS を読めないので既定の間隔で送る（直列に戻すなら 0）", map[string]any{
+				"value": invalid, "stagger_ms": stagger.Milliseconds(),
+			})
+		}
+		if pass == 1 && stagger > 0 && len(pending) > 1 {
 			// 1 周目は応答を待たずにずらして送る。取り直し（2 周目）は下の直列——弾かれた理由が
 			// 順番なら直列で確実に通り、失効なら postTo がログインし直す
 			for _, r := range t.marketPricePipelined(pending, columns, stagger, started) {
@@ -287,6 +296,11 @@ func (t *TachibanaBroker) MarketPricesRawPartialAt(symbols []string, columns str
 					received = append(received, r.at)
 				}
 			}
+			// どの形で送ったかを毎回残す（戻したつもりで戻っていない、を朝のログで見分ける）
+			t.logInfo("broker.price_pipelined", "時価問合をずらして送った", map[string]any{
+				"stagger_ms": stagger.Milliseconds(), "batches": batches, "failed": len(failed),
+				"elapsed_ms": time.Since(started).Milliseconds(),
+			})
 			pending = failed
 			continue
 		}
@@ -368,6 +382,13 @@ func (t *TachibanaBroker) marketPricePipelined(pending []PriceBatchFailure, colu
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				// この goroutine の panic は cli.Guarded の網に掛からず、通知もなくプロセスが落ちる。
+				// バッチの失敗に落とす——気配が揃わないので発注に進まず、通常のエラーとして通知される
+				defer func() {
+					if p := recover(); p != nil {
+						fail(fmt.Errorf("時価問合のバッチで panic: %v", p))
+					}
+				}()
 				res, err := t.sendTo(endpoint, timeout, interfacePrice, pNo, clmMarketPrice, map[string]any{
 					"sTargetIssueCode": strings.Join(b.Symbols, ","),
 					"sTargetColumn":    columns,
