@@ -474,3 +474,25 @@ func TestRepaymentQueryFailureIsNotSent(t *testing.T) {
 		}
 	}
 }
+
+// 本番は state の無い場所からブローカーを作らせない（別のセッションファイルで新規ログインし、
+// 動いている本番のセッションを切るため）。UAT は従来どおり作れる。
+func TestNewTachibanaBrokerRefusesProdWithoutStateDir(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, _ := writeTestKey(t, dir)
+	creds := &credentials.TachibanaCredentials{AuthID: "test", PrivateKeyFile: keyPath, OrderPassword: "x"}
+	missing := filepath.Join(dir, "無い", "state")
+
+	if _, err := NewTachibanaBroker(settings.EnvProd, creds, missing); err == nil {
+		t.Error("state が無いのに本番のブローカーを作れました")
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Error("state を黙って作っています")
+	}
+	if _, err := NewTachibanaBroker(settings.EnvProd, creds, dir); err != nil {
+		t.Errorf("state が在るのに拒否されました: %v", err)
+	}
+	if _, err := NewTachibanaBroker(settings.EnvUAT, creds, missing); err != nil {
+		t.Errorf("UAT まで拒否されました: %v", err)
+	}
+}

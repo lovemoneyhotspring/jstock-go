@@ -114,3 +114,45 @@ func TestLoadAppSettingsDoesNotOverrideExistingEnv(t *testing.T) {
 		t.Errorf("既存の環境変数が .env で上書きされた: got %q", got)
 	}
 }
+
+// 相対パスは .env のある場所から解く。作業ディレクトリから解くと、別の場所から動かした実行が
+// 別の state を作り、本番のセッションを切る。
+func TestLoadAppSettingsResolvesRelativePathsFromDotenvDir(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("WBJP_STATE_DIR=state\nWBJP_DATA_DIR=/srv/data\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WBJP_ENV_FILE", envPath)
+	for _, key := range []string{"WBJP_STATE_DIR", "WBJP_DATA_DIR", "WBJP_CONFIG_DIR", "WBJP_LOG_DIR"} {
+		t.Setenv(key, "") // 空は「無い」と同じ扱い。.env の値が使われる
+	}
+
+	app := LoadAppSettings()
+
+	if want := filepath.Join(dir, "state"); app.StateDir != want {
+		t.Errorf("StateDir = %q, want %q（.env の場所から）", app.StateDir, want)
+	}
+	if app.DataDir != "/srv/data" {
+		t.Errorf("DataDir = %q, want 絶対パスはそのまま", app.DataDir)
+	}
+	if want := filepath.Join(dir, "state", "logs"); app.LogDir != want {
+		t.Errorf("LogDir = %q, want %q", app.LogDir, want)
+	}
+	if want := filepath.Join(dir, "config"); app.ConfigDir != want {
+		t.Errorf("ConfigDir = %q, want %q", app.ConfigDir, want)
+	}
+}
+
+// .env が無ければ作業ディレクトリから解く（絶対パスにはする）。
+func TestLoadAppSettingsWithoutDotenvUsesWorkingDir(t *testing.T) {
+	t.Setenv("WBJP_ENV_FILE", filepath.Join(t.TempDir(), "無い.env"))
+	t.Setenv("WBJP_STATE_DIR", "")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app := LoadAppSettings(); app.StateDir != filepath.Join(cwd, "state") {
+		t.Errorf("StateDir = %q, want %q", app.StateDir, filepath.Join(cwd, "state"))
+	}
+}

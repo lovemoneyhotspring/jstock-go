@@ -89,12 +89,16 @@ func newProbeBroker(t *testing.T) *TachibanaBroker {
 	return b
 }
 
-// probeStateDir は相対の state ディレクトリを go.mod のある階層（リポジトリ root）から解決する。
-// 絶対パス（WBJP_STATE_DIR で指定した等）はそのまま。
+// probeStateDir は state ディレクトリを決める。設定のパスが在ればそのまま。無ければ（.env を
+// 読まずにパッケージの下で走らせた——設定は作業ディレクトリから解かれている）go.mod のある階層
+// （リポジトリ root）の同名のディレクトリを使う。
 func probeStateDir(t *testing.T, stateDir string) string {
 	t.Helper()
 	if filepath.IsAbs(stateDir) {
-		return stateDir
+		if info, err := os.Stat(stateDir); err == nil && info.IsDir() {
+			return stateDir
+		}
+		stateDir = filepath.Base(stateDir)
 	}
 	cwd, err := os.Getwd()
 	if err != nil {

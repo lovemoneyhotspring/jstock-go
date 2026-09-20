@@ -40,9 +40,15 @@ func LoadAppSettings() *AppSettings {
 		envFile = ".env"
 	}
 
+	// 相対パス（state・data・config・logs）を解く起点。.env を読めたらその場所、無ければ作業ディレクトリ。
+	// 作業ディレクトリのまま解くと、別の場所から動かした実行（パッケージの下で走る go test など）が
+	// 別の state を作り、別のセッションファイルで新規ログインして本番のセッションを切る
+	// （2026-09-11・09-14 の broker.retry）。
+	base := ""
 	dotenvMap := make(map[string]string)
 	if envs, err := godotenv.Read(envFile); err == nil {
 		dotenvMap = envs
+		base = filepath.Dir(envFile)
 		// notify.Alert 等、AppSettings を経由せず os.Getenv を直接見る箇所が
 		// .env の値を拾えるよう、既存の環境変数を上書きしない形でプロセスにも
 		// 反映する（cron は .env を source しないので、ここでしか読めない）
@@ -69,10 +75,10 @@ func LoadAppSettings() *AppSettings {
 		env = EnvProd
 	}
 
-	configDir := lookup("WBJP_CONFIG_DIR", "config")
-	dataDir := lookup("WBJP_DATA_DIR", "data")
-	stateDir := lookup("WBJP_STATE_DIR", "state")
-	logDir := lookup("WBJP_LOG_DIR", filepath.Join(stateDir, "logs"))
+	configDir := absFrom(base, lookup("WBJP_CONFIG_DIR", "config"))
+	dataDir := absFrom(base, lookup("WBJP_DATA_DIR", "data"))
+	stateDir := absFrom(base, lookup("WBJP_STATE_DIR", "state"))
+	logDir := absFrom(base, lookup("WBJP_LOG_DIR", filepath.Join(stateDir, "logs")))
 	logLevel := lookup("WBJP_LOG_LEVEL", "INFO")
 	logJSON := lookup("WBJP_LOG_JSON", "false") == "true"
 	timezone := lookup("WBJP_TIMEZONE", "UTC")
@@ -88,6 +94,19 @@ func LoadAppSettings() *AppSettings {
 		Timezone:  timezone,
 		DotenvMap: dotenvMap,
 	}
+}
+
+// absFrom は相対パス path を base（空なら作業ディレクトリ）から絶対パスにする。
+// 絶対化できなければ元のまま返す（作業ディレクトリが消えているなど。後段の open が理由を言う）。
+func absFrom(base, path string) string {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	abs, err := filepath.Abs(filepath.Join(base, path))
+	if err != nil {
+		return path
+	}
+	return abs
 }
 
 func (s *AppSettings) DBPath() string {
