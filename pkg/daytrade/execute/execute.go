@@ -858,6 +858,52 @@ func placedExits(env Env, withProtection bool) (map[string]decimal.Decimal, erro
 	return exits, nil
 }
 
+// refreshOpenExits は台帳で未確定の今日の手仕舞い（成行）をブローカーに聞き直し、結果を台帳に残す。
+//
+// 終わっていれば（拒否・失効・取消）placedExits が数えなくなり、その株数は次の手仕舞いの対象に戻る
+// （ID の種は DeadCount と AlreadyExited で変わる）。まだ板に生きていれば数えたまま（二重に出さない）。
+// 照会できなかった注文も数えたままにする——生きているかもしれない返済にもう 1 本重ねない。
+//
+// 照会の約定数量が台帳より**減って**いたら書き戻さない。建て注文は数量が減っても「売らない」側に
+// 倒れるが、手仕舞いは逆で、一部約定して終わった返済が約定 0 に見えると死んだ注文（IsDead）になり、
+// 返済済みの株数まで送り直す（反対建玉）。
+//
+// 保険（引け）は ReleaseProtection が、送信結果不明（PENDING）は ResolvePending が見るので除く。
+func refreshOpenExits(env Env, b broker.Broker) error {
+	if b == nil {
+		return nil
+	}
+	all, err := env.Ledger.ExitsOn(env.Day)
+	if err != nil {
+		return err
+	}
+	for _, o := range all {
+		if !o.IsOpen() || o.IsProtective() || o.Status == string(domain.OrderStatusPending) {
+			continue
+		}
+		current, qerr := b.GetOrder(o.ClientOrderID, o.BrokerOrderID)
+		reason := ""
+		switch {
+		case current == nil && qerr != nil:
+			reason = qerr.Error()
+		case current == nil:
+			reason = "応答に該当の注文がありません"
+		case current.FilledQuantity.LessThan(o.FilledQuantity):
+			reason = fmt.Sprintf("照会の約定数量 %s が台帳の %s より少ない（%s）",
+				current.FilledQuantity, o.FilledQuantity, current.Status)
+		}
+		if reason != "" {
+			env.Report.Warn("daytrade.exit_refresh", "手仕舞い注文を確かめられません（発注済みとして数えたまま）", map[string]any{
+				"day": env.dayText(), "symbol": o.Symbol,
+				"client_order_id": o.ClientOrderID, "error": reason,
+			})
+			continue
+		}
+		recordFill(env, o, current, current.FilledQuantity, current.AvgFillPrice, "手仕舞い注文の約定状況")
+	}
+	return nil
+}
+
 // remainingToExit は建玉の約定数量 filled のうち、まだ手仕舞っていない株数。
 // 手仕舞いが引き受けている株数を差し引く。
 //
@@ -888,6 +934,12 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 	// 取り消せたと確かめられない銘柄は保険に任せる（引け値で手仕舞われる。二重に出さない）
 	held, err := ReleaseProtection(env, b, nil)
 	if err != nil {
+		return nil, nil, err
+	}
+	// 前の回（15:20）に受理された手仕舞いが、その後ブローカー側で終わっていないか聞き直す。
+	// 聞かないと台帳は送信済みのままで、受理の後に拒否・失効した返済を「発注済み（冪等）」と数え、
+	// 15:24・15:28 の回が送り直さずに持ち越す（気づくのは 15:40 の verify）
+	if err := refreshOpenExits(env, b); err != nil {
 		return nil, nil, err
 	}
 	// 取り消せた保険は終わった注文（取消済み）なので数えない。取り消せなかった保険は生きたままなので、
