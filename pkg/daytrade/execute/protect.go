@@ -5,7 +5,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 )
 
@@ -32,7 +34,8 @@ type ProtectAction struct {
 // ProtectEntries は今日の建玉のうち約定した株数のぶん、まだ保険が置かれていない株数に保険の
 // 手仕舞いを置く。何度呼んでも重ならない（置いた株数を差し引く）。b が nil（dry-run）なら何もしない。
 //
-// 保険が 1 件でも拒否された日は、それ以上置かない（毎回同じ理由で拒否され、通知が増えるだけ）。
+// 保険が拒否された銘柄は、その日はもう置かない（毎回同じ理由で拒否され、通知が増えるだけ。
+// 銘柄単位なので、その銘柄だけ通らない場合に他の銘柄の安全網まで止めない）。
 // 置けなくても close は従来どおり 15:20 に手仕舞うので、売買は止めない。
 func ProtectEntries(env Env, b broker.Broker) ([]ProtectAction, error) {
 	if b == nil {
@@ -42,10 +45,10 @@ func ProtectEntries(env Env, b broker.Broker) ([]ProtectAction, error) {
 	if err != nil {
 		return nil, err
 	}
+	rejected := map[string]bool{}
 	for _, o := range all {
 		if o.IsProtective() && !o.IsDryRun() && o.Status == string(domain.OrderStatusRejected) {
-			env.printf("  保険の引け注文は今日すでに拒否されている（%s）。置きません\n", o.Symbol)
-			return nil, nil
+			rejected[o.Symbol] = true
 		}
 	}
 	entries, _, err := LiveEntries(env)
@@ -59,6 +62,10 @@ func ProtectEntries(env Env, b broker.Broker) ([]ProtectAction, error) {
 	var actions []ProtectAction
 	for _, order := range entries {
 		if order.IsDead() {
+			continue
+		}
+		if rejected[order.Symbol] {
+			env.printf("  %s: 保険の引け注文は今日すでに拒否されている。置きません\n", order.Symbol)
 			continue
 		}
 		fill := queryFill(env, b, order, "保険の手仕舞いの前の約定照会")
@@ -101,9 +108,14 @@ func ProtectEntries(env Env, b broker.Broker) ([]ProtectAction, error) {
 // ReleaseProtection は今日の生きている保険の手仕舞いを取り消し、結末（約定数量）を台帳に残す。
 // symbols が nil なら全銘柄、あればその銘柄だけ。b が nil（dry-run）なら何もしない。
 //
-// 取り消したと確かめられなかった保険は held（"銘柄|脚" → 理由）に返す。呼び出し側はその脚に
-// 成行の手仕舞いを出さない。照会が空・エラー・取消中のままは全部これに入る（生きているかも
-// しれない注文の上に出すと二重の手仕舞い）。
+// 取消は**全部に先に送ってから**終わりを確かめる（1 銘柄ずつ待つと、最初の成行が出るまでに
+// 銘柄数 × 数秒かかる。成行は 15:20 の約定を狙うので遅らせたくない）。
+//
+// 取り消したと確かめられなかった保険は held（"銘柄|脚" → 理由）に返す。照会が空・エラー・
+// 取消中のままは全部これに入る（生きているかもしれない注文）。同じ銘柄に保険が複数あって一部だけ
+// 取り消せたときも、取り消せなかった保険は生きたまま数えられる（呼び出し側は残りの株数だけ出す）。
+// 取り消せずに約定していた（引けの前に約定してしまった）保険は「手仕舞い済み」として台帳に残し、警告する。
+// 通知は呼び出し側が出す（close は unconfirmed、guard は GuardAction.Err）。
 func ReleaseProtection(env Env, b broker.Broker, symbols map[string]bool) (held map[string]string, err error) {
 	held = map[string]string{}
 	if b == nil {
@@ -113,7 +125,13 @@ func ReleaseProtection(env Env, b broker.Broker, symbols map[string]bool) (held 
 	if err != nil {
 		return nil, err
 	}
-	var released []string
+	type pending struct {
+		order    ledger.Order
+		current  *domain.Order
+		brokerID *string
+	}
+	var open []pending
+	// 1 周目: 照会して、生きているものに取消を送る
 	for _, o := range all {
 		if !o.IsProtective() || o.IsDryRun() || !o.IsOpen() {
 			continue
@@ -131,23 +149,46 @@ func ReleaseProtection(env Env, b broker.Broker, symbols map[string]bool) (held 
 			held[key] = "照会できません: " + reason
 			continue
 		}
+		p := pending{order: o, current: current, brokerID: current.BrokerOrderID}
+		if p.brokerID == nil {
+			p.brokerID = o.BrokerOrderID
+		}
 		if !current.Status.IsTerminal() {
 			if env.expired() {
 				held[key] = fmt.Sprintf("締め切り（%s）を過ぎたため取消を送れません", env.deadlineText())
 				continue
 			}
-			current, _ = cancelOpen(env, b, o, current, min(env.RetryWait, closeCancelWait), "daytrade.protect_cancel")
+			sendCancel(env, b, o, p.brokerID, "daytrade.protect_cancel")
 		}
+		open = append(open, p)
+	}
+	// 2 周目: 終わりを確かめて台帳に残す（最初の 1 本だけ待ち、あとは待たずに見る）
+	var released, filledEarly []string
+	for i, p := range open {
+		o := p.order
+		key := o.Symbol + "|" + o.Leg()
+		current := pollOrder(env, b, o, p.current, p.brokerID, min(env.RetryWait, closeCancelWait), i == 0)
 		recordFill(env, o, current, current.FilledQuantity, current.AvgFillPrice, "保険の引け注文の取消")
-		if !current.Status.IsTerminal() {
+		switch {
+		case !current.Status.IsTerminal():
 			held[key] = fmt.Sprintf("取消の完了を確かめられません（%s）", current.Status)
-			continue
+		case current.Status == domain.OrderStatusCancelled && !current.FilledQuantity.IsPositive():
+			released = append(released, o.Symbol)
+		default:
+			// 引けの前に約定・失効した。約定した株数は手仕舞い済みとして数える（placedExits）
+			filledEarly = append(filledEarly, fmt.Sprintf("%s（%s / 約定 %s 株）", o.Symbol, current.Status, current.FilledQuantity))
 		}
-		released = append(released, o.Symbol)
 	}
 	if len(released) > 0 {
 		sort.Strings(released)
 		env.printf("  保険の引け注文を取り消した: %s\n", strings.Join(released, " "))
+	}
+	if len(filledEarly) > 0 {
+		sort.Strings(filledEarly)
+		env.printf("  保険の引け注文が引けの前に終わっていた: %s\n", strings.Join(filledEarly, " "))
+		env.Report.Warn("daytrade.protect_filled_early", "保険の引け注文が引けの前に約定・失効していた（実機の挙動を確かめる）",
+			map[string]any{"day": env.dayText(), "orders": filledEarly})
+		digest.Anomaly("daytrade.protect_filled_early", strings.Join(filledEarly, "、"))
 	}
 	if len(held) > 0 {
 		lines := make([]string, 0, len(held))
@@ -155,8 +196,7 @@ func ReleaseProtection(env Env, b broker.Broker, symbols map[string]bool) (held 
 			lines = append(lines, key+": "+reason)
 		}
 		sort.Strings(lines)
-		env.Report.Alert("デイトレ: 保険の引け注文を取り消せません（引け値で手仕舞われます）", strings.Join(lines, "\n"))
-		env.Report.Warn("daytrade.protect_held", "保険の引け注文を取り消せず成行の手仕舞いを見送る",
+		env.Report.Warn("daytrade.protect_held", "保険の引け注文を取り消せず、その株数は引け値の手仕舞いに任せる",
 			map[string]any{"day": env.dayText(), "held": lines})
 	}
 	return held, nil

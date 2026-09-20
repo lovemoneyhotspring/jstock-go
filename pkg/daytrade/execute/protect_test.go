@@ -17,6 +17,7 @@ type protectBroker struct {
 	entryQty     int64
 	filled       int64
 	cancelWorks  bool
+	noCancel     map[string]bool // この注文だけ取消が効かない
 	protectState map[string]domain.OrderStatus
 }
 
@@ -40,7 +41,7 @@ func newProtectBroker(entryID string, qty, filled int64) *protectBroker {
 		return &domain.Order{ClientOrderID: id, Status: st, Quantity: decimal.NewFromInt(1)}, nil
 	}
 	pb.stubBroker.cancel = func(id string) error {
-		if pb.cancelWorks {
+		if pb.cancelWorks && !pb.noCancel[id] {
 			pb.protectState[id] = domain.OrderStatusCancelled
 		}
 		return nil
@@ -108,20 +109,39 @@ func TestProtectEntriesTopsUpGrowth(t *testing.T) {
 	}
 }
 
-// 拒否された日は、それ以上置かない（毎回同じ理由で拒否され、通知が増えるだけ）。
-func TestProtectEntriesStopsAfterRejection(t *testing.T) {
+// 拒否された銘柄は、その日はもう置かない（毎回同じ理由で拒否され、通知が増えるだけ）。
+// ほかの銘柄の保険は止めない。
+func TestProtectEntriesStopsPerSymbolAfterRejection(t *testing.T) {
 	env, _ := newEnv(t)
-	id := recordLongToday(t, env, "7203", 400)
-	pb := newProtectBroker(id, 400, 400)
-	pb.stubBroker.place = func(domain.OrderRequest) (*domain.OrderAck, error) {
-		return nil, &broker.OrderRejectedError{Message: "執行条件が受け付けられません"}
+	idA := recordLongToday(t, env, "7203", 400)
+	recordLongToday(t, env, "6758", 300)
+	pb := newProtectBroker(idA, 400, 400)
+	base := pb.stubBroker.getOrder
+	pb.stubBroker.getOrder = func(cid string) (*domain.Order, error) {
+		p := decimal.NewFromInt(761)
+		if cid != idA && !strings.HasPrefix(cid, "N/") {
+			// もう 1 本の建て注文（6758）も全部約定
+			if o, ok, _ := env.Ledger.Get(cid); ok && o.Symbol == "6758" && o.IsEntry() {
+				return &domain.Order{ClientOrderID: cid, Status: domain.OrderStatusFilled, Quantity: decimal.NewFromInt(300),
+					FilledQuantity: decimal.NewFromInt(300), AvgFillPrice: &p}, nil
+			}
+		}
+		return base(cid)
+	}
+	pb.stubBroker.place = func(req domain.OrderRequest) (*domain.OrderAck, error) {
+		if req.Symbol == "7203" {
+			return nil, &broker.OrderRejectedError{Message: "執行条件が受け付けられません"}
+		}
+		id := "N/" + req.Symbol
+		return &domain.OrderAck{ClientOrderID: req.ClientOrderID, BrokerOrderID: &id, Status: domain.OrderStatusSubmitted}, nil
 	}
 	actions, err := ProtectEntries(env, pb)
-	if err != nil || len(actions) != 1 || actions[0].Err == nil {
-		t.Fatalf("1 回目: actions=%+v err=%v, want 失敗 1 件", actions, err)
+	if err != nil || len(actions) != 2 {
+		t.Fatalf("1 回目: actions=%+v err=%v, want 2 件（7203 は失敗・6758 は成功）", actions, err)
 	}
-	if _, err := ProtectEntries(env, pb); err != nil || len(pb.placed) != 1 {
-		t.Errorf("2 回目: placed=%d err=%v, want 送らない", len(pb.placed), err)
+	before := len(pb.placed)
+	if _, err := ProtectEntries(env, pb); err != nil || len(pb.placed) != before {
+		t.Errorf("2 回目: placed=%d → %d err=%v, want 拒否された 7203 も成功した 6758 も送らない", before, len(pb.placed), err)
 	}
 }
 
@@ -166,7 +186,8 @@ func TestRefreshEntriesReleasesProtectionAndExitsAtMarket(t *testing.T) {
 	}
 }
 
-// 取消の完了を確かめられないときは成行を出さず、保険に任せて知らせる（二重に手仕舞わない）。
+// 取消の完了を確かめられないときは成行を出さず（返済できる建玉は保険が押さえている）、
+// unconfirmed に積んで close が知らせる・異常終了する（安全網の cron がもう一度回す）。
 func TestRefreshEntriesLeavesProtectionWhenCancelUnconfirmed(t *testing.T) {
 	env, rep := newEnv(t)
 	id := recordLongToday(t, env, "7203", 400)
@@ -178,11 +199,136 @@ func TestRefreshEntriesLeavesProtectionWhenCancelUnconfirmed(t *testing.T) {
 
 	entries, _, _ := LiveEntries(env)
 	targets, unconfirmed, err := RefreshEntries(env, pb, entries)
-	if err != nil || len(targets) != 0 || len(unconfirmed) != 0 {
-		t.Fatalf("targets=%+v unconfirmed=%v err=%v, want 成行を出さない", targets, unconfirmed, err)
+	if err != nil || len(targets) != 0 {
+		t.Fatalf("targets=%+v err=%v, want 成行を出さない", targets, err)
 	}
-	if !rep.warned("daytrade.protect_held") || len(rep.alerts) != 1 || !strings.Contains(rep.alerts[0], "保険") {
-		t.Errorf("警告=%v alerts=%v, want 保険を取り消せない通知", rep.warned("daytrade.protect_held"), rep.alerts)
+	if len(unconfirmed) != 1 || !strings.Contains(unconfirmed[0], "保険") || !rep.warned("daytrade.protect_held") {
+		t.Errorf("unconfirmed=%v warned=%v, want 保険を取り消せない 1 件", unconfirmed, rep.warned("daytrade.protect_held"))
+	}
+}
+
+// 保険を取り消せない銘柄でも、板に残った建て注文の取消は飛ばさない（飛ばすと、引けで約定して
+// 保険にも成行にも覆われない建玉ができる）。取消のあとに増えた約定は、保険が覆っていない
+// 株数だけを成行で手仕舞う。
+func TestRefreshEntriesStillCancelsEntryWhenProtectionHeld(t *testing.T) {
+	env, _ := newEnv(t)
+	id := recordLongToday(t, env, "7203", 400)
+	pb := newProtectBroker(id, 400, 200)
+	if _, err := ProtectEntries(env, pb); err != nil || len(pb.placed) != 1 {
+		t.Fatalf("保険: placed=%d err=%v", len(pb.placed), err)
+	}
+	protectID := pb.placed[0].ClientOrderID
+	pb.noCancel = map[string]bool{protectID: true}
+	// 建て注文は生きていて（一部約定 200）、取消を受けると 300 株で取り消される
+	pb.stubBroker.getOrder = func(cid string) (*domain.Order, error) {
+		p := decimal.NewFromInt(761)
+		if cid == id {
+			status, filled := domain.OrderStatusPartiallyFilled, int64(200)
+			if len(pb.cancelled) > 0 && pb.cancelled[len(pb.cancelled)-1] == id {
+				status, filled = domain.OrderStatusCancelled, 300
+			}
+			return &domain.Order{ClientOrderID: cid, Status: status, Quantity: decimal.NewFromInt(400),
+				FilledQuantity: decimal.NewFromInt(filled), AvgFillPrice: &p}, nil
+		}
+		return &domain.Order{ClientOrderID: cid, Status: domain.OrderStatusSubmitted, Quantity: decimal.NewFromInt(200)}, nil
+	}
+
+	entries, _, _ := LiveEntries(env)
+	targets, unconfirmed, err := RefreshEntries(env, pb, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelledEntry := false
+	for _, c := range pb.cancelled {
+		if c == id {
+			cancelledEntry = true
+		}
+	}
+	if !cancelledEntry {
+		t.Errorf("cancelled = %v, want 建て注文の取消を飛ばさない", pb.cancelled)
+	}
+	if len(unconfirmed) != 1 {
+		t.Errorf("unconfirmed = %v, want 保険を取り消せない 1 件", unconfirmed)
+	}
+	if len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(100)) {
+		t.Errorf("targets = %+v, want 保険の覆っていない 100 株（約定 300 − 保険 200）", targets)
+	}
+}
+
+// 同じ銘柄に保険が 2 本あり、1 本だけ取り消せた場合は、取り消せた分の株数を成行で手仕舞う
+// （取り消せなかった保険はそのまま引けで手仕舞う）。
+func TestRefreshEntriesPartialReleaseExitsReleasedShares(t *testing.T) {
+	env, _ := newEnv(t)
+	id := recordLongToday(t, env, "7203", 400)
+	pb := newProtectBroker(id, 400, 200)
+	if _, err := ProtectEntries(env, pb); err != nil {
+		t.Fatal(err)
+	}
+	pb.filled = 400
+	if _, err := ProtectEntries(env, pb); err != nil || len(pb.placed) != 2 {
+		t.Fatalf("追い足し: placed=%d err=%v", len(pb.placed), err)
+	}
+	pb.noCancel = map[string]bool{pb.placed[1].ClientOrderID: true} // 2 本目は取消が効かない
+
+	entries, _, _ := LiveEntries(env)
+	targets, unconfirmed, err := RefreshEntries(env, pb, entries)
+	if err != nil || len(unconfirmed) != 1 {
+		t.Fatalf("unconfirmed=%v err=%v", unconfirmed, err)
+	}
+	if len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(200)) {
+		t.Errorf("targets = %+v, want 取り消せた 1 本目のぶん 200 株を成行で", targets)
+	}
+}
+
+// 取消を全部に先に送ってから、終わりを確かめる（1 銘柄ずつ待たない）。
+func TestReleaseProtectionSendsAllCancelsFirst(t *testing.T) {
+	env, _ := newEnv(t)
+	idA := recordLongToday(t, env, "7203", 400)
+	idB := recordLongToday(t, env, "6758", 300)
+	order := []string{}
+	pb := newProtectBroker(idA, 400, 400)
+	base := pb.stubBroker.getOrder
+	pb.stubBroker.getOrder = func(cid string) (*domain.Order, error) {
+		if cid == idB {
+			p := decimal.NewFromInt(761)
+			return &domain.Order{ClientOrderID: cid, Status: domain.OrderStatusFilled, Quantity: decimal.NewFromInt(300),
+				FilledQuantity: decimal.NewFromInt(300), AvgFillPrice: &p}, nil
+		}
+		order = append(order, "get:"+cid)
+		return base(cid)
+	}
+	prevCancel := pb.stubBroker.cancel
+	pb.stubBroker.cancel = func(cid string) error { order = append(order, "cancel:"+cid); return prevCancel(cid) }
+	if _, err := ProtectEntries(env, pb); err != nil || len(pb.placed) != 2 {
+		t.Fatalf("保険: placed=%d err=%v", len(pb.placed), err)
+	}
+	order = nil
+	if _, err := ReleaseProtection(env, pb, nil); err != nil {
+		t.Fatal(err)
+	}
+	cancels := 0
+	for _, o := range order {
+		if strings.HasPrefix(o, "cancel:") {
+			cancels++
+		}
+	}
+	if cancels != 2 {
+		t.Fatalf("order = %v, want 取消 2 件", order)
+	}
+	// 取消の前に照会が 2 件、取消が 2 件続いてから確認の照会（取消が全部先）
+	lastCancel := -1
+	firstConfirm := -1
+	seenCancels := 0
+	for i, o := range order {
+		if strings.HasPrefix(o, "cancel:") {
+			seenCancels++
+			lastCancel = i
+		} else if seenCancels == 2 && firstConfirm < 0 {
+			firstConfirm = i
+		}
+	}
+	if firstConfirm >= 0 && firstConfirm < lastCancel {
+		t.Errorf("order = %v, want 取消を全部送ってから確認", order)
 	}
 }
 

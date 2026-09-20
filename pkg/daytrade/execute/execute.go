@@ -874,6 +874,10 @@ func remainingToExit(exits map[string]decimal.Decimal, order ledger.Order, fille
 // 0 は「手仕舞う数量なし」として扱われるので、建玉があっても売らずに
 // 終わり、そのまま持ち越しになる。確かめられなかった銘柄は unconfirmed に積む。
 //
+// 生きている保険の手仕舞い（引け）は先に取り消す（ReleaseProtection）。取り消せなかった銘柄は
+// unconfirmed に積み（close が通知して異常終了する。安全網の cron が引けの前にもう一度回す）、
+// 保険が覆っている株数を除いた残りだけを成行で手仕舞う。
+//
 // まだ板に残っている建て注文（寄らないままの寄成・一部約定の残り）は**取り消してから**
 // 数量を確定する。引けの回しか呼ばないので、ここより後に建つ理由は無い。
 //
@@ -886,14 +890,20 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 	if err != nil {
 		return nil, nil, err
 	}
-	exits, err := placedExits(env, false)
+	// 取り消せた保険は終わった注文（取消済み）なので数えない。取り消せなかった保険は生きたままなので、
+	// その株数は手仕舞い済みと数える——残りの株数（取消済みの保険が覆っていた分・保険を置いた後に増えた
+	// 約定）だけを成行で手仕舞う。返済できる建玉は生きている保険に押さえられているので、その分は
+	// 出しても通らない（二重にならない）
+	exits, err := placedExits(env, true)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, order := range entries {
+		// 保険を取り消せなかった銘柄でも、建て注文の取消と約定の確認は従来どおり行う（飛ばすと、
+		// 板に残った建て注文が引けで約定して、保険も成行も掛からない建玉になる）
 		if reason, ok := held[order.Symbol+"|"+order.Leg()]; ok {
-			env.printf("  %s: 保険の引け注文を取り消せません（%s）。引けの手仕舞いに任せます\n", order.Symbol, reason)
-			continue
+			unconfirmed = append(unconfirmed,
+				fmt.Sprintf("%s（保険の引け注文を取り消せず、その株数は引け値の手仕舞いに任せます: %s）", order.Symbol, reason))
 		}
 		// FILLED なのに約定数量が入っていない台帳行は注文数量とみなす（settledQuantity。0 と読むと
 		// 全部約定した建玉を「約定なし」として手仕舞わず、台帳外の掃除にも掛からず黙って持ち越す）

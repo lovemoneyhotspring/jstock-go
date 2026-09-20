@@ -115,33 +115,46 @@ crontab の内容は [`deploy/crontab.txt`](../deploy/crontab.txt) に置いて�
 発注経路の行は立花証券の認証情報を入れるまでコメントアウトしてあり、データ取得・監視・
 前夜の候補作成（`daytrade plan`）だけが回る。
 
-crontab には**暗号資産の他ジョブと rcguard が同居している**（合わせて 190 行超）。
-`grep -v` で jstock-go の行を落とす形だと、コメント行や `WBJP_HOME=` の定義が取りこぼされて
-二重に入る。**ブロックごと差し替える**のが確実:
+crontab には**暗号資産の他ジョブと rcguard が同居している**（合わせて 390 行超）。
+`crontab deploy/crontab.txt` で丸ごと入れると他のジョブが消える。**jstock-go のブロックだけ差し替える**
+スクリプトを使う（ブロックの先頭は `# wbjp（` の行、末尾は `# >>> rcguard` の直前。目印が見つからなければ何もしない）:
 
 ```bash
-# 1. 必ずバックアップを取る
-mkdir -p state/backup/crontab
-crontab -l > "state/backup/crontab/crontab-$(date +%Y%m%d-%H%M%S).txt"
-
-# 2. jstock-go ブロックの範囲を確かめる（先頭は deploy/crontab.txt の 1 行目、
-#    末尾は rcguard の "# >>> rcguard" の直前）
-BK=$(ls -t state/backup/crontab/*.txt | head -1)
-grep -n '^# wbjp（/home/abobo/jstock-go）の cron' "$BK"   # → 開始行
-grep -n '# >>> rcguard' "$BK"                              # → rcguard の開始行
-
-# 3. 前後を残して真ん中を差し替える（下の 62 / 158 は 2. で調べた値に置き換える）
-{ sed -n '1,62p' "$BK"; cat deploy/crontab.txt; echo; sed -n '158,$p' "$BK"; } > /tmp/crontab.new
-
-# 4. 他のジョブが残っているか数えてから入れる
-for p in gmo_coin binance hyliq bitbank rcguard; do
-  printf '%-10s 旧 %2d → 新 %2d\n' "$p" "$(grep -c $p "$BK")" "$(grep -c $p /tmp/crontab.new)"
-done
-crontab /tmp/crontab.new
-crontab -l | grep -cF 'env $JQ_MEM'    # 上限が全行に渡っているか
+deploy/install-crontab.sh --dry-run   # 入れたあとの crontab との差分だけ見る
+deploy/install-crontab.sh             # バックアップを取り、構文を検査し、ブロックの外が 1 行も変わらないことを確かめて差し替える
 ```
 
-戻すときは `crontab state/backup/crontab/<バックアップ>.txt`。
+バックアップは `state/backup/crontab/`、差し替えた全体の控えは `state/crontab.good`
+（下の「cron とは別系統の実行役」が、crontab が消えたときにここから戻す）。戻すときは
+`crontab state/backup/crontab/<バックアップ>.txt`。
+
+### cron とは別系統の実行役（人が気づく前提にしない）
+
+運用者は別の作業をしていて、通知に気づかず端末も触れない。cron が走らなかったときに人手なしで安全側に
+倒れるよう、**systemd のユーザタイマー**（cron と別のデーモン）と**ブローカーに置く保険の注文**を持つ。
+
+| 起きること | 効く手段 |
+|---|---|
+| cron が止まった・crontab が消えた・cron の行が壊れた | `jstock-close-net`（平日 15:22・15:26）が、当日の close の成功記録（ダイジェスト）が無ければ代わりに `close` を走らせる |
+| crontab から jstock-go のブロックが消えた（上書き・空） | `jstock-guard`（平日 8:42・15:12）が `state/crontab.good` から戻す |
+| 寄る前の点検が落ちた（設定を読めない・plan が無い） | `jstock-guard`（8:42）が直す: 設定は `deploy/build.sh` で作り直し（作業ツリーが**コミット済みの main** のときだけ）→ まだ動かなければ `deploy/rollback-bin.sh` で 1 世代前へ。plan は `daytrade plan --if-missing`。台帳・ディスクは通知のみ |
+| **マシン停止・ネット断** | ローカルの仕組みでは救えない。**ブローカーに置いた保険の引け注文**（`execution.protect_exit`。`daytrade protect`）が引けで手仕舞う。実機で未検証のため既定は無効（`docs/BROKER_VERIFY.md`「引けの保険注文」） |
+
+```bash
+deploy/install-systemd.sh           # 入れて有効にする（sudo 不要。linger が有効なこと）
+deploy/install-systemd.sh --remove  # 外す
+systemctl --user list-timers 'jstock-*'
+deploy/tests/guards_test.sh         # スクリプトの試験（スタブの隔離環境。本物には触れない）
+```
+
+- ログは `state/logs/systemd-guard.log`。**通知は「自動で対応した／できなかった」の結果**を 1 通（何も問題が
+  無ければ出さない）
+- crontab を**意図して止める**ときは `state/crontab.paused` を作る（あると crontab の復元を飛ばす）。
+  jstock-go の行だけをコメントアウトして止めた場合（`# wbjp（` の目印が残っている）は、戻さず通知だけ。
+  ふつうの止め方は `execution.kill_switch = true`（cron は消さなくてよい）
+- 8:40 の cron の点検（`daytrade preflight`）と 8:42 の `jstock-guard` は、問題のある朝は通知が 2 通になる
+  （点検結果と復旧結果）。cron が止まっていても 8:42 の側は動く
+- 実行ファイルを作り直すたびに、いまの一式が `bin/.prev` に 1 世代残る（1 つでも中身が変わったとき。ハードリンク）
 
 `daytrade open` は 8:59:45（寄る前。下記）と 9:00:03・9:00:25・9:01:03・9:03・9:06・9:09・9:13 の計 8 回呼ぶ（窓は 8:59〜9:15）。9:00:25・9:01:03 は初回がすぐ落ちた朝の早い再試行（2026-09-17 追加。9:00:25 は 9:00 の snap の後に回る）——寄った銘柄は遅れるほど高く買い、9:05 に建てると優位がほぼ消えるので、9:03 まで待たせない。初回が長引いてロックを握っていれば 30 秒待って見送り、9:03 の回が拾う。2026-09-17 までは 9:01 始まりだった——板寄せ直後は約定時刻が前日のままで「古い」と判定されるのを避けるためだったが、鮮度の検査は板が返れば落とさない形に直っており（2026-09-12）、9:00:06 の snap では 9:00:00 台に寄った銘柄の 100% に始値が入っていた。寄った銘柄は寄付の直後に上がるので、成行は早いほど安く買える（LightGBM の選定で 10 秒 +14 bp・65 秒 +19 bp。vault 2026-09-jp-daytrade-ml-entry-timing）。3 秒待つのは寄付を時価問合に反映させるため。9:00 の snap は open の後に回るよう 30 秒までロックを待つ。再実行は**残りの枚数だけ**建てる——前の回が N 銘柄すべて建てていれば何もせず、途中で落ちていれば（通信エラー・締め切り）N − 建てた数を別の銘柄で埋める。同じ銘柄は重ねて建てない。
 **8:59:45 の回（2026-09-19〜）は寄る前の発注**（`execution.preopen_legs = "long"`）。ここで出した

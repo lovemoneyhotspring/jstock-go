@@ -123,15 +123,31 @@ func cancelOpen(env Env, b broker.Broker, o ledger.Order, current *domain.Order,
 	if brokerID == nil {
 		brokerID = o.BrokerOrderID
 	}
+	cancelErr := sendCancel(env, b, o, brokerID, code)
+	current = pollOrder(env, b, o, current, brokerID, wait, true)
+	// 取消が受け付けられたか、結末が取消のときだけ「取り消した」と言う（取消がエラーで
+	// 実は全部約定していたなら、通知は返済だけにする）
+	return current, cancelErr == nil || current.Status == domain.OrderStatusCancelled
+}
+
+// sendCancel は取消を 1 回送る。エラーでも照会し直して結末で決める（取消の間に全部約定した・
+// すでに取消中など）ので、警告して返すだけ。
+func sendCancel(env Env, b broker.Broker, o ledger.Order, brokerID *string, code string) error {
 	cancelErr := b.Cancel(o.ClientOrderID, brokerID)
 	if cancelErr != nil {
-		// 取消の間に全部約定した・すでに取消中など。照会し直して結末で決める
 		env.Report.Warn(code, "取消がエラー。照会し直して決める", map[string]any{
 			"day": env.dayText(), "symbol": o.Symbol, "client_order_id": o.ClientOrderID, "error": cancelErr.Error(),
 		})
 	}
+	return cancelErr
+}
+
+// pollOrder は current が終わるまで、最大 guardPolls 回照会し直す。waitFirst が偽なら 1 回目は
+// 待たずに見る（取消を全部送ってから確かめるとき、2 本目以降はもう待たなくてよい）。
+func pollOrder(env Env, b broker.Broker, o ledger.Order, current *domain.Order, brokerID *string,
+	wait time.Duration, waitFirst bool) *domain.Order {
 	for i := 0; i < guardPolls && !current.Status.IsTerminal(); i++ {
-		if !env.boundedWait(wait) && env.expired() {
+		if (i > 0 || waitFirst) && !env.boundedWait(wait) && env.expired() {
 			break
 		}
 		next, err := b.GetOrder(o.ClientOrderID, brokerID)
@@ -142,9 +158,7 @@ func cancelOpen(env Env, b broker.Broker, o ledger.Order, current *domain.Order,
 			current = next
 		}
 	}
-	// 取消が受け付けられたか、結末が取消のときだけ「取り消した」と言う（取消がエラーで
-	// 実は全部約定していたなら、通知は返済だけにする）
-	return current, cancelErr == nil || current.Status == domain.OrderStatusCancelled
+	return current
 }
 
 func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAction {

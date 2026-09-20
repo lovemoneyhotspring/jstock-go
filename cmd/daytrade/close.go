@@ -139,7 +139,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 	}
 	if len(unconfirmed) > 0 {
 		// 建玉が残っている可能性がある。人が板を見て手で処理する必要がある
-		alert("デイトレ: 建玉の有無を確かめられません（持ち越しの恐れ）",
+		alert("デイトレ: 手仕舞いを確かめられない建玉があります（持ち越し・引け値の手仕舞いの恐れ）",
 			strings.Join(unconfirmed, "\n"))
 		digest.Anomaly("daytrade.unconfirmed_entries",
 			fmt.Sprintf("%d 件の買い注文を照会できませんでした", len(unconfirmed)))

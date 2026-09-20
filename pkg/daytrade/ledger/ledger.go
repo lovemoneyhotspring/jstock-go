@@ -69,7 +69,8 @@ type Order struct {
 	Reason    string
 	// Trade は現物 / 信用新規 / 信用返済。古い台帳（列が無い）は現物。
 	Trade domain.TradeType
-	// Condition は執行条件。空 = ザラ場の成行、OPENING = 寄成（寄る前に出した）。
+	// Condition は執行条件。空 = ザラ場の成行、OPENING = 寄成（寄る前に出した）、
+	// CLOSING = 引け（保険の手仕舞い。IsProtective——手仕舞いの判定がこの列で分かれる）。
 	// 滑り（RefPrice と AvgFillPrice の差）を寄成とザラ場の成行で分けて見るために残す。
 	Condition domain.OrderCondition
 	// Verify は発注経路の実機検証（docs/BROKER_VERIFY.md）で出した注文か。

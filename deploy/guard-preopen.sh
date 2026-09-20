@@ -22,19 +22,31 @@ summary=()
 failed=0
 
 # --- 1. crontab ------------------------------------------------------------
+# 戻すのは「jstock-go のブロックごと消えた」とき（別の内容で上書きされた・空になった）だけ。
+#   - ブロックの目印（`# wbjp（`）が残っていて行だけ無効なら、人がコメントアウトして止めたとみなして
+#     戻さず、通知だけ（止めるなら execution.kill_switch。crontab で止めるなら state/crontab.paused を作る）
+#   - state/crontab.paused があれば何もしない
 good="$HOME_DIR/state/crontab.good"
-if [ -f "$good" ]; then
+if [ -f "$HOME_DIR/state/crontab.paused" ]; then
+  log "state/crontab.paused があるので crontab の点検を飛ばす"
+elif [ -f "$good" ]; then
   want=$(grep -v '^[[:space:]]*#' "$good" | grep -c 'WBJP_BIN/daytrade' || true)
-  have=$("$CRONTAB" -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -c 'WBJP_BIN/daytrade' || true)
+  current=$("$CRONTAB" -l 2>/dev/null || true)
+  have=$(printf '%s\n' "$current" | grep -v '^[[:space:]]*#' | grep -c 'WBJP_BIN/daytrade' || true)
   if [ "${want:-0}" -gt 0 ] && [ "${have:-0}" -lt $((want / 2)) ]; then
-    mkdir -p "$HOME_DIR/state/backup/crontab"
-    "$CRONTAB" -l > "$HOME_DIR/state/backup/crontab/crontab-$(date +%Y%m%d-%H%M%S)-before-restore.txt" 2>/dev/null || true
-    if "$CRONTAB" -n "$good" >/dev/null 2>&1 && "$CRONTAB" "$good"; then
-      summary+=("crontab の daytrade の行が $have 本（控えは $want 本）だったので、控えから戻しました")
-      log "[restore] crontab を控えから戻した（$have → $want 本）"
+    if printf '%s\n' "$current" | grep -q '^# wbjp（'; then
+      log "[warn] crontab の daytrade の行が有効なのは $have 本（控えは $want 本）だが、ブロックの目印は残っている。止めたとみなして戻さない"
+      summary+=("crontab の daytrade の行が有効なのは $have 本（控えは $want 本）です。ブロックの目印は残っているので、止めた状態とみなして戻していません。意図した停止でなければ deploy/install-crontab.sh で入れ直してください（止めておくなら state/crontab.paused を作る）")
     else
-      summary+=("crontab の daytrade の行が $have 本（控えは $want 本）ですが、控えから戻せませんでした")
-      failed=1
+      mkdir -p "$HOME_DIR/state/backup/crontab"
+      printf '%s\n' "$current" > "$HOME_DIR/state/backup/crontab/crontab-$(date +%Y%m%d-%H%M%S)-before-restore.txt"
+      if "$CRONTAB" -n "$good" >/dev/null 2>&1 && "$CRONTAB" "$good"; then
+        summary+=("crontab から jstock-go のブロックが消えていた（daytrade の行 $have 本 / 控え $want 本）ので、控えから戻しました")
+        log "[restore] crontab を控えから戻した（$have → $want 本）"
+      else
+        summary+=("crontab から jstock-go のブロックが消えていましたが、控えから戻せませんでした")
+        failed=1
+      fi
     fi
   else
     log "crontab は正常（daytrade の行 ${have:-0} 本 / 控え ${want:-0} 本）"
@@ -60,21 +72,35 @@ if [ "$((10#$hour))" -lt 9 ]; then
     summary+=("寄る前の点検で問題: $codes")
 
     if [[ ",$codes," == *,config,* ]]; then
-      log "実行ファイルを作り直す（deploy/build.sh）"
-      if "$HOME_DIR/deploy/build.sh" >> "$GUARD_LOG" 2>&1; then
-        summary+=("実行ファイルを作り直しました")
-      else
-        summary+=("実行ファイルの作り直しに失敗しました")
-      fi
-      out=$(run_preflight); rc=$?
-      if [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -q 'problems:.*config\|strict mode\|unknown field'; then
-        log "作り直してもまだ設定を読めない → 1 世代前へ戻す"
-        if "$HOME_DIR/deploy/rollback-bin.sh" >> "$GUARD_LOG" 2>&1; then
-          summary+=("1 世代前の実行ファイルへ戻しました")
+      # 作り直すのは、作業ツリーが**コミット済みの main** のときだけ。未コミット・別ブランチのコードから
+      # 作った実行ファイルで 8:59:45 の open を動かさない（誤発注の入口になる）。そうでなければ
+      # 作り直さず、1 世代前へ戻す側に進む
+      dirty=$(git -C "$HOME_DIR" status --porcelain --untracked-files=no 2>/dev/null | wc -l)
+      branch=$(git -C "$HOME_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+      if [ "$dirty" -eq 0 ] && [ "$branch" = "main" ]; then
+        log "実行ファイルを作り直す（deploy/build.sh）"
+        if "$HOME_DIR/deploy/build.sh" >> "$GUARD_LOG" 2>&1; then
+          summary+=("実行ファイルを作り直しました")
         else
-          summary+=("1 世代前へ戻せませんでした")
+          summary+=("実行ファイルの作り直しに失敗しました")
         fi
         out=$(run_preflight); rc=$?
+      else
+        summary+=("作業ツリーが未コミットか main でない（変更 ${dirty} 件 / ブランチ $branch）ため、自動では作り直しません")
+        log "[warn] 作業ツリーが main でクリーンでないので build.sh を走らせない"
+      fi
+      # まだ動かない: 起動しない（コードが出ない）か、設定を読めない → 1 世代前へ戻す
+      if [ "$rc" -ne 0 ]; then
+        after=$(printf '%s\n' "$out" | sed -n 's/^preflight-problems: //p' | tail -1)
+        if [ -z "$after" ] || [[ ",$after," == *,config,* ]]; then
+          log "まだ動かない → 1 世代前へ戻す"
+          if "$HOME_DIR/deploy/rollback-bin.sh" >> "$GUARD_LOG" 2>&1; then
+            summary+=("1 世代前の実行ファイルへ戻しました")
+          else
+            summary+=("1 世代前へ戻せませんでした")
+          fi
+          out=$(run_preflight); rc=$?
+        fi
       fi
     fi
     if [ "$rc" -ne 0 ] && [[ ",$(printf '%s\n' "$out" | sed -n 's/^preflight-problems: //p' | tail -1)," == *,plan,* ]]; then
