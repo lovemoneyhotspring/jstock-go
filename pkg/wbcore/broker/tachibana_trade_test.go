@@ -285,9 +285,24 @@ func TestOrderPayloadOpeningCondition(t *testing.T) {
 		}
 	}
 
+	// 引けは「成行（sOrderPrice = 0）× 執行条件 引け（sCondition = 4）」。保険の手仕舞いが使う
+	closing, err := base.WithCondition(domain.ConditionClosing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err = b.orderPayload(closing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{"sCondition": "4", "sOrderPrice": "0"} {
+		if params[key] != want {
+			t.Errorf("引け: %s = %v, want %v", key, params[key], want)
+		}
+	}
+
 	// 未知の執行条件は「指定なし」に落とさずエラー（落とすとザラ場の成行として通ってしまう）
 	bad := base
-	bad.Condition = domain.OrderCondition("CLOSING")
+	bad.Condition = domain.OrderCondition("UNKNOWN")
 	if _, err := b.orderPayload(bad); err == nil {
 		t.Error("未知の執行条件が通りました")
 	}

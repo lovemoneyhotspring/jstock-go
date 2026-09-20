@@ -38,7 +38,7 @@ func newPreflightCmd() *cobra.Command {
 			if skipHolidayFor(day, "preflight", false) {
 				return nil
 			}
-			problems := preflightProblems(day.Format(DateLayout), func() error {
+			problems, codes := preflightProblems(day.Format(DateLayout), func() error {
 				_, err := loadConfig()
 				return err
 			}, func() error {
@@ -69,9 +69,14 @@ func newPreflightCmd() *cobra.Command {
 			}
 			body := strings.Join(problems, "\n")
 			fmt.Printf("%s 寄る前の点検: %d 件の問題\n%s\n", day.Format(DateLayout), len(problems), body)
+			// 自動復旧（deploy/guard-preopen.sh）が読む 1 行。コードは config / plan / ledger / disk
+			fmt.Printf("preflight-problems: %s\n", strings.Join(codes, ","))
 			logError("daytrade.preflight", "寄る前の点検で問題", map[string]any{"day": day.Format(DateLayout), "problems": problems})
 			digest.Anomaly("daytrade.preflight", fmt.Sprintf("寄る前の点検で %d 件の問題", len(problems)))
-			alert(fmt.Sprintf("デイトレ: 寄る前の点検で %d 件の問題（8:59:45 の open までに直す）", len(problems)), body)
+			// 自動復旧の側が結果をまとめて通知するときは、ここでは送らない（PREFLIGHT_NO_ALERT=1）
+			if os.Getenv("PREFLIGHT_NO_ALERT") != "1" {
+				alert(fmt.Sprintf("デイトレ: 寄る前の点検で %d 件の問題（8:59:45 の open までに直す）", len(problems)), body)
+			}
 			return fmt.Errorf("寄る前の点検で %d 件の問題", len(problems))
 		},
 	}
@@ -81,22 +86,25 @@ func newPreflightCmd() *cobra.Command {
 
 // preflightProblems は点検を順に回し、問題を人向けの行にして返す。1 つ落ちても残りは続ける
 // （設定が読めなくても plan・ディスクは別に確かめられる）。
-func preflightProblems(day string, config, plan, ledger, disk func() error) []string {
-	var problems []string
+//
+// codes は問題の種類（config / plan / ledger / disk）。自動復旧が直し方を選ぶのに使う。
+func preflightProblems(day string, config, plan, ledger, disk func() error) (problems, codes []string) {
 	for _, check := range []struct {
+		code string
 		name string
 		run  func() error
 	}{
-		{"設定を読めません（項目を足したなら deploy/build.sh）", config},
-		{day + " の plan", plan},
-		{"台帳を開けません", ledger},
-		{"ディスク", disk},
+		{"config", "設定を読めません（項目を足したなら deploy/build.sh）", config},
+		{"plan", day + " の plan", plan},
+		{"ledger", "台帳を開けません", ledger},
+		{"disk", "ディスク", disk},
 	} {
 		if err := check.run(); err != nil {
 			problems = append(problems, fmt.Sprintf("- %s: %v", check.name, err))
+			codes = append(codes, check.code)
 		}
 	}
-	return problems
+	return problems, codes
 }
 
 // checkFreeSpace は dir のあるファイルシステムの空きが need バイト以上あるか。

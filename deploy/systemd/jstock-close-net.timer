@@ -1,0 +1,12 @@
+[Unit]
+Description=jstock-go: 引けの手仕舞いの安全網（平日 15:22・15:26 JST）
+
+[Timer]
+# cron の close は 15:20・15:24・15:28。その 2 分後に「済んでいるか」を見る
+OnCalendar=Mon..Fri 15:22:00 Asia/Tokyo
+OnCalendar=Mon..Fri 15:26:00 Asia/Tokyo
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

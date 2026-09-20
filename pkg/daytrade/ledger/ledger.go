@@ -69,7 +69,8 @@ type Order struct {
 	Reason    string
 	// Trade は現物 / 信用新規 / 信用返済。古い台帳（列が無い）は現物。
 	Trade domain.TradeType
-	// Condition は執行条件。空 = ザラ場の成行、OPENING = 寄成（寄る前に出した）。
+	// Condition は執行条件。空 = ザラ場の成行、OPENING = 寄成（寄る前に出した）、
+	// CLOSING = 引け（保険の手仕舞い。IsProtective——手仕舞いの判定がこの列で分かれる）。
 	// 滑り（RefPrice と AvgFillPrice の差）を寄成とザラ場の成行で分けて見るために残す。
 	Condition domain.OrderCondition
 	// Verify は発注経路の実機検証（docs/BROKER_VERIFY.md）で出した注文か。
@@ -113,6 +114,11 @@ func (o Order) IsEntry() bool {
 		return o.Side == domain.SideBuy
 	}
 }
+
+// IsProtective は**保険の手仕舞い**（執行条件「引け」の返済・売り。daytrade protect）か。
+// ブローカーに置いておく安全網で、ふだんの手仕舞いは 15:20 の成行（close が取り消して出し直す）。
+// 生きている間は「手仕舞い済み」と数えない（数えると 15:20 の成行が出ず、毎日引け値で手仕舞う）。
+func (o Order) IsProtective() bool { return o.IsExit() && o.Condition == domain.ConditionClosing }
 
 // IsExit は手仕舞う側の注文か。
 func (o Order) IsExit() bool { return !o.IsEntry() }

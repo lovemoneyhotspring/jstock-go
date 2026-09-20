@@ -1,0 +1,13 @@
+[Unit]
+Description=jstock-go: crontab の復元と寄る前の自動復旧（平日 8:42・15:12 JST）
+
+[Timer]
+# 8:42 は 8:40 の cron の点検（preflight）の直後。8:59:45 の open まで 17 分ある
+OnCalendar=Mon..Fri 08:42:00 Asia/Tokyo
+# 15:12 は 15:20 の cron の close の前に crontab を確かめる
+OnCalendar=Mon..Fri 15:12:00 Asia/Tokyo
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

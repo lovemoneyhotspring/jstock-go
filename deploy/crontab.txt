@@ -272,6 +272,13 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 16,26,36,46,56 9 * * 1-5     cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
 6,16,26,36,46,56 10-14 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
 6,16 15 * * 1-5              cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
+# 保険の手仕舞い（daytrade protect）: 建てた玉に執行条件「引け」の返済・売りをブローカーへ置く。
+# execution.protect_exit = false の間は何もしない（設定で入り切り）。9:20 は 9:13 の最後の open の後、
+# 10:20・13:20・15:10 は取消・拒否・約定の増えた分の置き直し（何度回しても重ならない）。15:20 の close が
+# 取り消して成行を出す。cron・マシン・ネットが止まっても、引けで手仕舞われる安全網
+20 9,10,13 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-protect.log $WBJP_BIN/daytrade protect --config-dir config/daytrade_margin --live --yes
+# 15:10 は最後の置き直し（guard_window は 15:19 まで。15:20 の close の前に、午後に増えた約定にも保険を置く）
+10 15 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-protect.log $WBJP_BIN/daytrade protect --config-dir config/daytrade_margin --live --yes
 # 15:20・15:24・15:28: 当日建てた分を返済（1 回目で済めば以降は何もしない）
 20,24,28 15 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-close.log $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin --live --yes
 # --- dry-run の close / verify（2026-09-11〜）。--live が無いので**注文は出ない**。

@@ -75,11 +75,16 @@ const (
 	// ConditionOpening は寄付。その銘柄の**始値を決める板寄せ**に参加する。9:00 に寄らず
 	// 特別気配で切り上がる銘柄は、寄った時刻（9:07 など）の始値で約定する。
 	ConditionOpening OrderCondition = "OPENING"
+	// ConditionClosing は引け。大引けの板寄せ（クロージング・オークション）に参加する。
+	// 建てた玉の**保険の手仕舞い**（daytrade protect）だけが使う——注文はブローカーに残るので、
+	// このマシンが止まっても引けで手仕舞われる。引け値は 15:20 の成行より両脚とも不利（2026-09
+	// の分足検証）なので、ふだんの手仕舞いには使わない（close が取り消して 15:20 の成行を出す）。
+	ConditionClosing OrderCondition = "CLOSING"
 )
 
 // IsKnown は発注に使える執行条件か。
 func (c OrderCondition) IsKnown() bool {
-	return c == ConditionNone || c == ConditionOpening
+	return c == ConditionNone || c == ConditionOpening || c == ConditionClosing
 }
 
 // TradeType は現物・信用の取引区分。

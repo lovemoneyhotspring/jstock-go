@@ -88,7 +88,8 @@ func GuardPending(env Env, marks map[string]string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	exits, err := placedExits(env)
+	// 保険の引け注文は「済み」と数えない（返済は別に出す）ので、約定した売建は返済待ちとして残る
+	exits, err := placedExits(env, false)
 	if err != nil {
 		return nil, err
 	}
@@ -122,15 +123,31 @@ func cancelOpen(env Env, b broker.Broker, o ledger.Order, current *domain.Order,
 	if brokerID == nil {
 		brokerID = o.BrokerOrderID
 	}
+	cancelErr := sendCancel(env, b, o, brokerID, code)
+	current = pollOrder(env, b, o, current, brokerID, wait, true)
+	// 取消が受け付けられたか、結末が取消のときだけ「取り消した」と言う（取消がエラーで
+	// 実は全部約定していたなら、通知は返済だけにする）
+	return current, cancelErr == nil || current.Status == domain.OrderStatusCancelled
+}
+
+// sendCancel は取消を 1 回送る。エラーでも照会し直して結末で決める（取消の間に全部約定した・
+// すでに取消中など）ので、警告して返すだけ。
+func sendCancel(env Env, b broker.Broker, o ledger.Order, brokerID *string, code string) error {
 	cancelErr := b.Cancel(o.ClientOrderID, brokerID)
 	if cancelErr != nil {
-		// 取消の間に全部約定した・すでに取消中など。照会し直して結末で決める
 		env.Report.Warn(code, "取消がエラー。照会し直して決める", map[string]any{
 			"day": env.dayText(), "symbol": o.Symbol, "client_order_id": o.ClientOrderID, "error": cancelErr.Error(),
 		})
 	}
+	return cancelErr
+}
+
+// pollOrder は current が終わるまで、最大 guardPolls 回照会し直す。waitFirst が偽なら 1 回目は
+// 待たずに見る（取消を全部送ってから確かめるとき、2 本目以降はもう待たなくてよい）。
+func pollOrder(env Env, b broker.Broker, o ledger.Order, current *domain.Order, brokerID *string,
+	wait time.Duration, waitFirst bool) *domain.Order {
 	for i := 0; i < guardPolls && !current.Status.IsTerminal(); i++ {
-		if !env.boundedWait(wait) && env.expired() {
+		if (i > 0 || waitFirst) && !env.boundedWait(wait) && env.expired() {
 			break
 		}
 		next, err := b.GetOrder(o.ClientOrderID, brokerID)
@@ -141,9 +158,7 @@ func cancelOpen(env Env, b broker.Broker, o ledger.Order, current *domain.Order,
 			current = next
 		}
 	}
-	// 取消が受け付けられたか、結末が取消のときだけ「取り消した」と言う（取消がエラーで
-	// 実は全部約定していたなら、通知は返済だけにする）
-	return current, cancelErr == nil || current.Status == domain.OrderStatusCancelled
+	return current
 }
 
 func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAction {
@@ -189,7 +204,23 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 		return act
 	}
 
-	exits, err := placedExits(env)
+	// この銘柄の保険の引け注文が生きていれば先に取り消す（返済できる建玉を押さえていて、
+	// 通っても二重に返済する）。取り消せたと確かめられなければ返済を出さず、次の回で照会し直す
+	var heldErr error
+	if b != nil {
+		held, err := ReleaseProtection(env, b, map[string]bool{o.Symbol: true})
+		if err != nil {
+			act.Err = err
+			return act
+		}
+		if reason, ok := held[o.Symbol+"|"+o.Leg()]; ok {
+			// 取り消せなかった保険は生きたまま数え、覆われていない株数だけ返済する（RefreshEntries と
+			// 同じ方針）。エラーは残して次の回で保険を照会し直す
+			heldErr = fmt.Errorf("保険の引け注文を取り消せません（%s）。その株数は引けで返済されます。次の回で照会し直します", reason)
+		}
+	}
+	// 取り消せた保険は終わった注文で、取り消せなかった保険は生きたまま数える
+	exits, err := placedExits(env, true)
 	if err != nil {
 		act.Err = err
 		return act
@@ -197,6 +228,7 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 	remaining := remainingToExit(exits, o, filled)
 	if remaining.LessThanOrEqual(decimal.Zero) {
 		act.Result = fmt.Sprintf("約定 %s 株の返済は発注済み", filled)
+		act.Err = heldErr
 		return act
 	}
 	if b == nil {
@@ -217,5 +249,6 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 		prefix = "残りを取消し、"
 	}
 	act.Result = fmt.Sprintf("%s約定 %s 株を返済買い（%s）", prefix, remaining, outcome)
+	act.Err = heldErr
 	return act
 }

@@ -319,3 +319,15 @@ func TestInWindow(t *testing.T) {
 		t.Error("読めない時間帯を「中」とした")
 	}
 }
+
+// 保険の手仕舞い（引け）は実機で未検証なので、既定は無効。設定ファイルは読める（有効にするのは検証の後）。
+func TestProtectExitIsOffByDefault(t *testing.T) {
+	if Default().Execution.ProtectExit {
+		t.Error("execution.protect_exit の既定が有効（実機で検証するまで無効にしておく）")
+	}
+	for _, dir := range []string{"../../../config/daytrade", "../../../config/daytrade_margin"} {
+		if _, err := Load(dir); err != nil {
+			t.Fatalf("%s: %v", dir, err)
+		}
+	}
+}

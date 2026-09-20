@@ -43,6 +43,7 @@ const (
 	// 銘柄・市場によっては寄付を受け付けない（エラー「商品市場別設定.執行条件寄付不可」）。
 	conditionNone    = "0"
 	conditionOpening = "2"
+	conditionClosing = "4"
 )
 
 // ShortSaleMarketUnits は成行で出せる信用新規売りの上限**単元数**。
@@ -204,6 +205,8 @@ func conditionCodeOf(c domain.OrderCondition) (string, error) {
 		return conditionNone, nil
 	case domain.ConditionOpening:
 		return conditionOpening, nil
+	case domain.ConditionClosing:
+		return conditionClosing, nil
 	}
 	return "", fmt.Errorf("立花証券に送れない執行条件です: %s", c)
 }

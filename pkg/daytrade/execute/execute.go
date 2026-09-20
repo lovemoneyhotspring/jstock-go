@@ -801,6 +801,8 @@ type ExitTarget struct {
 	// なり「発注済み（冪等）」として送られず、黙って持ち越す。0 のときは種に入れない（従来と同じ ID）。
 	// 同じ状態での再実行は同じ値になるので冪等は保たれる。
 	AlreadyExited decimal.Decimal
+	// Protective は保険の手仕舞い（執行条件「引け」）。client_order_id の種を分け、条件を付ける。
+	Protective bool
 }
 
 // LiveEntries は今日の建玉のうち dry-run でないもの。dryRun は除いた数。
@@ -828,7 +830,12 @@ func LiveEntries(env Env) (entries []ledger.Order, dryRun int, err error) {
 //
 // 状態（ある／なし）でなく株数で持つのは、手仕舞いを出した後に建て注文の約定が増えた
 // （取消を確かめられないまま残りが約定した）ときに、増えた分を次の回が拾えるようにするため。
-func placedExits(env Env) (map[string]decimal.Decimal, error) {
+//
+// withProtection が偽なら、**生きている保険の手仕舞い**（引け。IsProtective）は数えない。
+// ふだんの手仕舞い（close・guard）は保険の注文と別に 15:20 の成行を出すので、保険を「済み」と
+// 数えると出さずに終わる。数えるのは保険を置く側（ProtectEntries）だけ。終わった保険
+// （引けで約定した・一部約定して取り消された）は約定した株数だけ数える。
+func placedExits(env Env, withProtection bool) (map[string]decimal.Decimal, error) {
 	all, err := env.Ledger.ExitsOn(env.Day)
 	if err != nil {
 		return nil, err
@@ -836,6 +843,9 @@ func placedExits(env Env) (map[string]decimal.Decimal, error) {
 	exits := map[string]decimal.Decimal{}
 	for _, o := range all {
 		if o.IsDryRun() || o.IsDead() {
+			continue
+		}
+		if !withProtection && o.IsProtective() && o.IsOpen() {
 			continue
 		}
 		key := o.Symbol + "|" + o.Leg()
@@ -864,16 +874,37 @@ func remainingToExit(exits map[string]decimal.Decimal, order ledger.Order, fille
 // 0 は「手仕舞う数量なし」として扱われるので、建玉があっても売らずに
 // 終わり、そのまま持ち越しになる。確かめられなかった銘柄は unconfirmed に積む。
 //
+// 生きている保険の手仕舞い（引け）は先に取り消す（ReleaseProtection）。取り消せなかった銘柄は
+// unconfirmed に積み（close が通知して異常終了する。安全網の cron が引けの前にもう一度回す）、
+// 保険が覆っている株数を除いた残りだけを成行で手仕舞う。
+//
 // まだ板に残っている建て注文（寄らないままの寄成・一部約定の残り）は**取り消してから**
 // 数量を確定する。引けの回しか呼ばないので、ここより後に建つ理由は無い。
 //
 // b が nil（dry-run）なら送信済み・送信中を全約定とみなして対象を示す。
 func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets []ExitTarget, unconfirmed []string, err error) {
-	exits, err := placedExits(env)
+	// 保険の手仕舞い（引け）が板に生きていれば、先に取り消す。生きたままだと返済できる建玉が
+	// その注文に押さえられていて 15:20 の成行が通らず、通ったとしても保険と二重に手仕舞う。
+	// 取り消せたと確かめられない銘柄は保険に任せる（引け値で手仕舞われる。二重に出さない）
+	held, err := ReleaseProtection(env, b, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	// 取り消せた保険は終わった注文（取消済み）なので数えない。取り消せなかった保険は生きたままなので、
+	// その株数は手仕舞い済みと数える——残りの株数（取消済みの保険が覆っていた分・保険を置いた後に増えた
+	// 約定）だけを成行で手仕舞う。返済できる建玉は生きている保険に押さえられているので、その分は
+	// 出しても通らない（二重にならない）
+	exits, err := placedExits(env, true)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, order := range entries {
+		// 保険を取り消せなかった銘柄でも、建て注文の取消と約定の確認は従来どおり行う（飛ばすと、
+		// 板に残った建て注文が引けで約定して、保険も成行も掛からない建玉になる）
+		if reason, ok := held[order.Symbol+"|"+order.Leg()]; ok {
+			unconfirmed = append(unconfirmed,
+				fmt.Sprintf("%s（保険の引け注文を取り消せず、その株数は引け値の手仕舞いに任せます: %s）", order.Symbol, reason))
+		}
 		// FILLED なのに約定数量が入っていない台帳行は注文数量とみなす（settledQuantity。0 と読むと
 		// 全部約定した建玉を「約定なし」として手仕舞わず、台帳外の掃除にも掛からず黙って持ち越す）
 		filled := settledQuantity(order)
@@ -963,7 +994,11 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 		}
 		remaining := remainingToExit(exits, order, filled)
 		if remaining.LessThanOrEqual(decimal.Zero) {
-			env.printf("  %s: 手仕舞い発注済み（冪等）\n", order.Symbol)
+			if _, ok := held[order.Symbol+"|"+order.Leg()]; ok {
+				env.printf("  %s: 保険の引け注文を取り消せず、その株数は引け値で手仕舞われる（成行は出していない）\n", order.Symbol)
+			} else {
+				env.printf("  %s: 手仕舞い発注済み（冪等）\n", order.Symbol)
+			}
 			continue
 		}
 		if !remaining.Equal(filled) {
@@ -1059,6 +1094,10 @@ func ExitRequestAs(target ExitTarget, day time.Time, cfg config.Config, attempt 
 	if target.Unrecorded {
 		kind = "daytrade-sweep"
 	}
+	condition := domain.ConditionNone
+	if target.Protective {
+		kind, condition = "daytrade-protect", domain.ConditionClosing
+	}
 	seed := fmt.Sprintf("%s|%s|%d", kind, day.Format(cli.DateLayout), attempt)
 	if target.AlreadyExited.IsPositive() {
 		seed += "|+" + target.AlreadyExited.String()
@@ -1072,7 +1111,8 @@ func ExitRequestAs(target ExitTarget, day time.Time, cfg config.Config, attempt 
 		TaxType:       cfg.Execution.TaxAccountType,
 		Reason: fmt.Sprintf("%s %s %s（%s）",
 			cfg.StrategyName(), day.Format(cli.DateLayout), phrase, action),
-		Trade: exitTrade,
+		Trade:     exitTrade,
+		Condition: condition,
 	}, action
 }
 
