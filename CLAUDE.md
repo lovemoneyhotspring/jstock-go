@@ -30,6 +30,11 @@ push していない記録は PC 側の Obsidian から見えず、存在しな�
 
 2026-09-07 より前の検証は `docs/research/` にあった。git の履歴に残っている。
 
+**検証のスクリプトは `test/` に置いて commit する。`/tmp` に書かない。**
+`/tmp` は消える。2026-09-20 に候補表の再現（`/tmp/dt_rebuild.py`）や walk-forward が丸ごと消えていて、
+ノートの手順どおりに再現できなかった。ノートの「手順」に書くコマンドは `test/*.py` を指すこと。
+中間出力は `test/out/`（git の管理外）。候補表は `test/dt_candidates.py`、walk-forward の土台は `test/dt_wf_target.py`。
+
 # 文脈を膨らませない
 
 読んだものは会話が続く限り毎ターン送り直される。利用上限を早く使い切る主因はこれ。
