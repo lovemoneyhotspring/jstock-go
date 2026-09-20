@@ -1,6 +1,7 @@
 package execute
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 
@@ -183,6 +184,65 @@ func TestRefreshEntriesReleasesProtectionAndExitsAtMarket(t *testing.T) {
 	targets, _, err = RefreshEntries(env, pb, entries)
 	if err != nil || len(targets) != 0 || len(pb.cancelled) != 1 {
 		t.Errorf("2 回目: targets=%+v cancelled=%d err=%v, want 何もしない", targets, len(pb.cancelled), err)
+	}
+}
+
+// 一部約定した保険が、照会で約定 0 の取消済みに見えても書き戻さない（返済済みの株数まで成行で送り直さない）。
+// 生きている扱いのまま unconfirmed に積んで人に知らせる。
+func TestRefreshEntriesKeepsProtectionWhenFillShrinks(t *testing.T) {
+	env, _ := newEnv(t)
+	id := recordLongToday(t, env, "7203", 400)
+	pb := newProtectBroker(id, 400, 400)
+	if _, err := ProtectEntries(env, pb); err != nil || len(pb.placed) != 1 {
+		t.Fatalf("保険: placed=%d err=%v", len(pb.placed), err)
+	}
+	protectID := pb.placed[0].ClientOrderID
+	p := decimal.NewFromInt(761)
+	if err := env.Ledger.UpdateStatus(protectID, domain.OrderStatusPartiallyFilled, decimal.NewFromInt(100), &p, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, _, _ := LiveEntries(env)
+	targets, unconfirmed, err := RefreshEntries(env, pb, entries)
+	if err != nil || len(targets) != 0 || len(unconfirmed) != 1 {
+		t.Fatalf("targets=%+v unconfirmed=%v err=%v, want 成行なし・知らせる 1 件", targets, unconfirmed, err)
+	}
+	exits, _ := env.Ledger.ExitsOn(env.Day)
+	if len(exits) != 1 || exits[0].Status != string(domain.OrderStatusPartiallyFilled) ||
+		!exits[0].FilledQuantity.Equal(decimal.NewFromInt(100)) {
+		t.Errorf("台帳の保険 = %+v, want 一部約定 100 株のまま", exits)
+	}
+}
+
+// 取消は通ったのに台帳に書けなかった保険を「発注済み」と数えない。取り消せた株数の成行を出す。
+func TestRefreshEntriesExitsWhenReleaseCannotBeWritten(t *testing.T) {
+	env, rep := newEnv(t)
+	id := recordLongToday(t, env, "7203", 400)
+	pb := newProtectBroker(id, 400, 400)
+	if _, err := ProtectEntries(env, pb); err != nil || len(pb.placed) != 1 {
+		t.Fatalf("保険: placed=%d err=%v", len(pb.placed), err)
+	}
+	// 取消済みへの書き換えだけを失敗させる
+	db, err := sql.Open("sqlite", env.Ledger.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TRIGGER block_cancel BEFORE UPDATE ON orders WHEN NEW.status = 'CANCELLED'
+		BEGIN SELECT RAISE(ABORT, 'test: 書けない'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, _, _ := LiveEntries(env)
+	targets, _, err := RefreshEntries(env, pb, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(400)) {
+		t.Fatalf("targets = %+v, want 成行 400 株（保険は取り消してある）", targets)
+	}
+	if len(rep.errors) == 0 || !strings.HasPrefix(rep.errors[0], "daytrade.ledger: ") {
+		t.Errorf("errors = %v, want 台帳に書けなかったことの報告", rep.errors)
 	}
 }
 
