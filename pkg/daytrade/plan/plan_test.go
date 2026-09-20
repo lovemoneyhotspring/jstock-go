@@ -1,6 +1,7 @@
 package plan_test
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -54,6 +55,10 @@ func TestBuildSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	if _, _, err := plan.Save(built, dir); err != nil {
 		t.Fatal(err)
+	}
+	// parquet も meta も一時ファイル → rename で書く。書き終えたら一時ファイルは残らない
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(leftovers) != 0 {
+		t.Errorf("一時ファイルが残っている: %v", leftovers)
 	}
 	loaded, ok, err := plan.Load(dir, day)
 	if err != nil || !ok {

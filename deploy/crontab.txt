@@ -99,7 +99,11 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 
 # --- 銘柄選定（デイトレ）----------------------------------------------------------
 # 前夜 20:30: 翌営業日の母集団を state/daytrade/plan-<日付>.parquet に保存（ロング＋ショート）
-30 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade.lock $WBJP_BIN/daytrade plan --config-dir config/daytrade_margin >> state/logs/daytrade-plan.log    2>&1
+# ロックは with-lock.sh で 30 秒待ち、取れずに見送った回・打ち切った回は Discord に知らせる（flock -n は無言で消える）
+30 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 WITH_LOCK_TIMEOUT=300 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-plan.log $WBJP_BIN/daytrade plan --config-dir config/daytrade_margin
+# 朝 6:40 の保険: 前夜の plan を読めない（無い・壊れている）ときだけ作り直して知らせる。在れば何もしない。
+# 無いまま 8:59:45 を迎えると、その日の open は全部の回が落ちる
+40 6 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 WITH_LOCK_TIMEOUT=300 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-plan.log $WBJP_BIN/daytrade plan --if-missing --config-dir config/daytrade_margin
 # 17:05・17:20・20:20（日足の取り込み後）: 朝の候補（選んだ銘柄も次点も）に当日の日足を当てて結果を履歴に残す。
 # 9:00 の順位表が無い日は plan × 始値で順位を作り直して評価する。妥当性の確認は `daytrade review`
 # 日足は普段 16:43 の jquants sync で入る。17:05 は 17:35 の日次レポートに間に合わせるため、17:20 は
