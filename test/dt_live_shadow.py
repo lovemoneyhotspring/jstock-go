@@ -6,13 +6,16 @@
 「その朝の気配で lgbm / gap_vol / 素の gap ならどれを建てたか」を作り直し、当日の日足で採点する。
 模擬ではなく**本番が実際に見た気配**での比較なので、誤差のモデルが要らない。
 
-  test/.venv/bin/python test/dt_live_shadow.py [--since 2026-09-24] [--model config/daytrade/models/lgbm_rank.txt]
+  test/.venv/bin/python test/dt_live_shadow.py [--since 2026-09-24] [--model config/daytrade/models/lgbm_rank.txt] [--limit 0.005]
 
 - 使う回: その日の最初の回（寄る前の 8:59:45 の回があればそれ）。出力の round に時刻（JST）を出す
 - 候補: plan の eligible、気配が usable、見えるギャップ [-1, 0)、ストップ安でない
 - 建て方・コストは test/dt_wf_target.py と同じ（上位 3・業種 1 銘柄・逆ボラ配分・流動性別コスト）。始値で建てて引けで手仕舞う
 - 見送りの日（米国小幅高・12 月など）も並べ直して採点する（traded = False）。「休んだ日に建てていたら」が分かる
 - 特徴量の作り方は test/dt_lgbm_train.py（Go の rerank と照合済み）をそのまま使う
+- gap_vol_limit: gap_vol と同じ選定を寄指（指値 = 前日終値 × (1 − --limit)）で出したら。始値が指値より下の銘柄だけ約定、
+  約定しない枠は現金（vault 20-research/2026-09-jp-daytrade-limit-on-open.md の結論 8。発注はしない影の記録）。
+  呼値への切り下げは入れていない（指値は実際にはわずかに低くなる）。同値は約定しないと置く
 出力: test/out/dt_live_shadow.parquet（日 × 並べ方）、標準出力に日ごとの表と累計
 """
 
@@ -64,6 +67,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", default="2026-09-24", help="寄成の本番は 2026-09-24 から。それより前は 9:00 過ぎの回の気配")
     ap.add_argument("--model", default="config/daytrade/models/lgbm_rank.txt")
+    ap.add_argument("--limit", type=float, default=0.005, help="gap_vol_limit の指値（前日終値からの下げ幅）")
     a = ap.parse_args()
 
     df = duckdb.sql(SQL, params=[a.since, a.since]).df()
@@ -93,7 +97,13 @@ def main():
         d = p.groupby("d").agg(round=("run_at", "first"), picks=("code", lambda x: " ".join(x)), ret_bp=("ret", lambda x: x.sum() * 1e4),
                                seen_gap=("gap", "mean"), true_gap=("gap_true", "mean"),
                                n_true_pos=("gap_true", lambda x: int((x >= 0).sum()))).reset_index()
-        rows.append(d.assign(ranker=ranker))
+        rows.append(d.assign(ranker=ranker, n_fill=p.groupby("d").size().values))
+        if ranker == "gap_vol":
+            f = p.assign(filled=p["gap_true"] < -a.limit)
+            f["ret"] = f["ret"].where(f["filled"], 0.0)
+            rows.append(d.drop(columns="ret_bp").merge(
+                f.groupby("d").agg(ret_bp=("ret", lambda x: x.sum() * 1e4), n_fill=("filled", "sum")).reset_index(), on="d")
+                .assign(ranker="gap_vol_limit"))
     r = pd.concat(rows, ignore_index=True).merge(traded, on="d", how="left")
     r["traded"] = r["traded"].fillna(False).astype(bool)
     r["round"] = pd.to_datetime(r["round"], utc=True).dt.tz_convert("Asia/Tokyo").dt.strftime("%H:%M:%S")
@@ -109,7 +119,9 @@ def main():
         line = "、".join(f"{k} {w[k].mean():+.1f}" for k in w.columns)
         diff = w["lgbm"] - w["gap_vol"]
         t = diff.mean() / (diff.std(ddof=1) / np.sqrt(len(diff))) if len(diff) > 2 and diff.std(ddof=1) > 0 else float("nan")
-        print(f"{label}（{len(w)} 日）: {line}、lgbm − gap_vol {diff.mean():+.1f}（t {t:.2f}）、"
+        lim = w["gap_vol_limit"] - w["gap_vol"]
+        print(f"{label}（{len(w)} 日）: {line}、lgbm − gap_vol {diff.mean():+.1f}（t {t:.2f}）、寄指 − 寄成（gap_vol）{lim.mean():+.1f}、"
+              f"寄指の約定 {q.loc[q['ranker'] == 'gap_vol_limit', 'n_fill'].sum()}/{q.loc[q['ranker'] == 'gap_vol', 'n_fill'].sum()} 本、"
               f"選定が実際は正のギャップだった割合 " + "、".join(f"{k} {v * 100:.0f}%" for k, v in (q.groupby("ranker")["n_true_pos"].sum() / (3 * q.groupby("ranker").size())).items()))
 
 
