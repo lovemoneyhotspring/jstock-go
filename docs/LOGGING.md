@@ -179,7 +179,7 @@ jq -c 'select(.verify)' state/digest/prod-2026-09-06.jsonl
 | `daytrade.pending_resolved` | 送信結果不明（`PENDING`）の注文を当日の注文一覧（銘柄・売買・区分・数量・時刻）で判定した。`outcome` = `attributed`（届いていた→注文番号と状態を帰属）/ `not_sent`（届いていない→`UNSENT`。同じ実行の中で種を変えて 1 度送り直す）/ `too_recent` | `day`, `client_order_id`, `symbol`, `side`, `quantity`, `outcome`, `reason`, `broker_order_id`, `status`, `filled` |
 | `daytrade.pending_ambiguous` | 同じ銘柄・売買で数量か区分の違う未帰属の注文があり、自動で決められない（通知も送る）。`PENDING` のまま残り、その銘柄はその日は触らない。ダイジェストの `pending_ambiguous` に件数。AI はこの行だけで修復できる（`docs/FEEDBACK.md`「自己修復の手順」） | 同上＋ `placed_at`, `candidates[]`（`broker_order_id`, `quantity`, `trade`, `status`, `filled`, `created_at`）, `fix`（実行する `pending resolve` の雛形） |
 | `daytrade.pending_unresolved` | 当日の注文一覧を照会できず判定を持ち越した。open は発注しない（次の cron で再判定）。close は当日の手仕舞いを続ける（判定できなかった建玉は `daytrade.unconfirmed` に出る） | `error` |
-| `daytrade.exit_refresh` | close の 2 回目以降（15:24・15:28）が、前の回に受理された手仕舞いを照会できなかった。発注済みとして数えたまま（重ねて出さない）。残っていれば 15:40 の verify が持ち越しとして知らせる | `symbol`, `client_order_id`, `error` |
+| `daytrade.exit_refresh` | close の 2 回目以降（15:24・15:28）が、前の回に受理された手仕舞いを照会できなかった、または照会の約定数量が台帳より少なかった（書き戻さない）。発注済みとして数えたまま（重ねて出さない）。残っていれば 15:40 の verify が持ち越しとして知らせる | `symbol`, `client_order_id`, `error` |
 | `daytrade.skip` | 何もしなかった | `reason`（`disabled` / `holiday` / `no_calendar` / `window` / `regime` / `already` / `no_quotes` / `no_picks` / `no_capital` / `no_buys` / `nothing_to_sell`）と付随項目 |
 | `daytrade.calendar`（warn） | 取引カレンダーが空（取り込みが無い・壊れた）。発注する回（`--live`）は休場か分からないので見送る（`daytrade.skip` の `no_calendar`）。発注しない回は平日で代用して続ける | `phase`, `day`, `live` |
 | `daytrade.signal`（warn） | 打ち切り（SIGTERM。`deploy/with-lock.sh` の時間切れ）を受け、実行品質（滑り）の記録を書き出して終了した | `signal` |

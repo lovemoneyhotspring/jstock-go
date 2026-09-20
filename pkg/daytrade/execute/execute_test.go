@@ -1065,3 +1065,26 @@ func TestRefreshEntriesDoesNotDoubleLiveOrUnknownExit(t *testing.T) {
 		})
 	}
 }
+
+// 一部約定して終わった返済が、聞き直しで約定 0 の終了状態に見えても、台帳の約定分を消さない。
+// 消すと死んだ注文と数えられ、返済済みの株数まで送り直す（反対建玉）。
+func TestRefreshEntriesKeepsExitFillWhenLookupShrinks(t *testing.T) {
+	env, rep := newEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	_, exitID := exitRerun(t, env, b)
+	if err := env.Ledger.UpdateStatus(exitID, domain.OrderStatusPartiallyFilled, decimal.NewFromInt(60), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	b.getOrder = func(id string) (*domain.Order, error) {
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusExpired,
+			Quantity: decimal.NewFromInt(100)}, nil
+	}
+	entries, _, _ := LiveEntries(env)
+	targets, _, err := RefreshEntries(env, b, entries)
+	if err != nil || len(targets) != 0 || !rep.warned("daytrade.exit_refresh") {
+		t.Fatalf("targets=%+v err=%v, want 対象なしと警告", targets, err)
+	}
+	if o, _, _ := env.Ledger.Get(exitID); !o.FilledQuantity.Equal(decimal.NewFromInt(60)) {
+		t.Errorf("台帳の約定数量 = %s, want 60 のまま", o.FilledQuantity)
+	}
+}

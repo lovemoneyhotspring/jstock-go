@@ -864,33 +864,44 @@ func placedExits(env Env, withProtection bool) (map[string]decimal.Decimal, erro
 // （ID の種は DeadCount と AlreadyExited で変わる）。まだ板に生きていれば数えたまま（二重に出さない）。
 // 照会できなかった注文も数えたままにする——生きているかもしれない返済にもう 1 本重ねない。
 //
+// 照会の約定数量が台帳より**減って**いたら書き戻さない。建て注文は数量が減っても「売らない」側に
+// 倒れるが、手仕舞いは逆で、一部約定して終わった返済が約定 0 に見えると死んだ注文（IsDead）になり、
+// 返済済みの株数まで送り直す（反対建玉）。
+//
 // 保険（引け）は ReleaseProtection が、送信結果不明（PENDING）は ResolvePending が見るので除く。
-func refreshOpenExits(env Env, b broker.Broker) {
+func refreshOpenExits(env Env, b broker.Broker) error {
 	if b == nil {
-		return
+		return nil
 	}
 	all, err := env.Ledger.ExitsOn(env.Day)
 	if err != nil {
-		env.Report.Warn("daytrade.exit_refresh", "今日の手仕舞いを台帳から読めず、聞き直しを省略",
-			map[string]any{"day": env.dayText(), "error": err.Error()})
-		return
+		return err
 	}
 	for _, o := range all {
 		if !o.IsOpen() || o.IsProtective() || o.Status == string(domain.OrderStatusPending) {
 			continue
 		}
-		fill := queryFill(env, b, o, "手仕舞い注文の約定状況")
-		if fill.Unconfirmed {
-			reason := "応答に該当の注文がありません"
-			if fill.Err != nil {
-				reason = fill.Err.Error()
-			}
-			env.Report.Warn("daytrade.exit_refresh", "手仕舞い注文を照会できません（発注済みとして数えたまま）", map[string]any{
+		current, qerr := b.GetOrder(o.ClientOrderID, o.BrokerOrderID)
+		reason := ""
+		switch {
+		case current == nil && qerr != nil:
+			reason = qerr.Error()
+		case current == nil:
+			reason = "応答に該当の注文がありません"
+		case current.FilledQuantity.LessThan(o.FilledQuantity):
+			reason = fmt.Sprintf("照会の約定数量 %s が台帳の %s より少ない（%s）",
+				current.FilledQuantity, o.FilledQuantity, current.Status)
+		}
+		if reason != "" {
+			env.Report.Warn("daytrade.exit_refresh", "手仕舞い注文を確かめられません（発注済みとして数えたまま）", map[string]any{
 				"day": env.dayText(), "symbol": o.Symbol,
 				"client_order_id": o.ClientOrderID, "error": reason,
 			})
+			continue
 		}
+		recordFill(env, o, current, current.FilledQuantity, current.AvgFillPrice, "手仕舞い注文の約定状況")
 	}
+	return nil
 }
 
 // remainingToExit は建玉の約定数量 filled のうち、まだ手仕舞っていない株数。
@@ -928,7 +939,9 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 	// 前の回（15:20）に受理された手仕舞いが、その後ブローカー側で終わっていないか聞き直す。
 	// 聞かないと台帳は送信済みのままで、受理の後に拒否・失効した返済を「発注済み（冪等）」と数え、
 	// 15:24・15:28 の回が送り直さずに持ち越す（気づくのは 15:40 の verify）
-	refreshOpenExits(env, b)
+	if err := refreshOpenExits(env, b); err != nil {
+		return nil, nil, err
+	}
 	// 取り消せた保険は終わった注文（取消済み）なので数えない。取り消せなかった保険は生きたままなので、
 	// その株数は手仕舞い済みと数える——残りの株数（取消済みの保険が覆っていた分・保険を置いた後に増えた
 	// 約定）だけを成行で手仕舞う。返済できる建玉は生きている保険に押さえられているので、その分は
