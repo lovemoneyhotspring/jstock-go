@@ -7,7 +7,7 @@
 # 場中に落ちれば建玉を持ち越す。外のサービスに定時の ping を打ち、**来なかったら向こうが知らせる**。
 #
 # 送り先は .env の HEALTHCHECK_URL_<KEY>（例: HEALTHCHECK_URL_MORNING=https://hc-ping.com/<uuid>）。
-# **未設定なら何もしない**（exit 0）。終了コードを渡すと、0 以外のとき URL の末尾に /<終了コード> を
+# **未設定なら ping は打たない**（exit 0。下の印だけ残す）。終了コードを渡すと、0 以外のとき URL の末尾に /<終了コード> を
 # 付ける（healthchecks.io は失敗として記録する）。休場日も打つ——監視側の予定は「平日の毎日」でよい。
 #
 # ping が失敗しても cron の行の結果は変えない（常に exit 0）。
@@ -26,6 +26,11 @@ case "$key" in
 esac
 
 home=${WBJP_HOME:-$(cd "$(dirname "$0")/.." && pwd)}
+# 届いた印を手元にも残す（日付 時刻 終了コード）。deploy/mackerel-alive.sh がこれを読んで Mackerel へ
+# 状態を投稿する。URL が未設定でも残す
+mkdir -p "$home/state/ping" 2>/dev/null \
+  && echo "$(date '+%Y-%m-%d %H:%M:%S') $rc" > "$home/state/ping/$key.tmp" \
+  && mv -f "$home/state/ping/$key.tmp" "$home/state/ping/$key"
 url=$(eval "printf '%s' \"\${HEALTHCHECK_URL_$key:-}\"")
 if [ -z "$url" ] && [ -f "$home/.env" ]; then
   # .env を丸ごと source しない（cron の行の環境を変えない）。該当の 1 行だけ読む
