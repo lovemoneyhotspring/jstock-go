@@ -1,9 +1,11 @@
 package backtest
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/shopspring/decimal"
@@ -50,6 +52,32 @@ func TestSourceFilesListsEveryParquet(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("sourceFiles[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// panelSources の入力（文字列の欄）が 1 つでも鍵から漏れると、その入力だけ更新された日に
+// 古いキャッシュを読む。欄を足して sourceFiles に足し忘れたらここで落ちる。
+func TestSourceFilesCoversEveryInput(t *testing.T) {
+	var src panelSources
+	v := reflect.ValueOf(&src).Elem()
+	var want []string
+	for i := 0; i < v.NumField(); i++ {
+		if v.Field(i).Kind() != reflect.String {
+			continue
+		}
+		path := "/a/" + v.Type().Field(i).Name + ".parquet"
+		reflect.NewAt(v.Field(i).Type(), unsafe.Pointer(v.Field(i).UnsafeAddr())).Elem().
+			SetString("read_parquet(['" + path + "'], union_by_name=true)")
+		want = append(want, path)
+	}
+	got := map[string]bool{}
+	for _, p := range sourceFiles(src) {
+		got[p] = true
+	}
+	for _, p := range want {
+		if !got[p] {
+			t.Errorf("sourceFiles に %s が無い（キャッシュの鍵から漏れている）", p)
 		}
 	}
 }

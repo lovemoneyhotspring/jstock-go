@@ -89,9 +89,13 @@ func panelCacheKey(arch *archive.Archive, cfg config.Config, end time.Time) (str
 }
 
 // sourceFiles は read_parquet([...]) の中のパスを取り出して並べる。
+//
+// パネルが読む入力は**全部**ここに並べる。漏れた入力は更新されても鍵が変わらず、
+// 古いキャッシュを黙って読み続ける（空売り残高 ssr が 2026-09-20 まで漏れていた）。
+// panelSources に入力を足したら TestSourceFilesCoversEveryInput が落ちて知らせる。
 func sourceFiles(src panelSources) []string {
 	var out []string
-	for _, expr := range []string{src.bars, src.master, src.fins, src.sched, src.alert} {
+	for _, expr := range []string{src.bars, src.master, src.fins, src.sched, src.alert, src.ssr} {
 		if expr == "" {
 			continue
 		}
