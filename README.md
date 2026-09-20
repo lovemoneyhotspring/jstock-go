@@ -506,7 +506,7 @@ cmd/discord-post                                  日次レポートの配達係
 go test ./...              # ネットワークを使うものは既定でスキップ
 go test ./... -short       # 時間のかかる検証を飛ばす
 go vet ./...
-make ci                    # build + vet + staticcheck + test（GitHub Actions と同じ手順）
+make ci                    # コンパイルの確認 + vet + staticcheck + test（GitHub Actions と同じ手順。bin/ は作らない）
 gofmt -l .                 # 整形されていないファイルを列挙
 ```
 

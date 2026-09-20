@@ -154,11 +154,17 @@ func scaleBudget(capital decimal.Decimal, n int) decimal.Decimal {
 }
 
 // scaleCap は 1 銘柄の上限を同率で縮める。0 は「上限なし」なので触らない。
+// 縮めた結果が 1 円未満に丸まっても 0 にはしない——0 は「上限なし」の意味なので、
+// 縮めるほど栓が緩む向きになってしまう。1 円で止めて栓を締めたままにする。
 func scaleCap(cap, ratio decimal.Decimal) decimal.Decimal {
 	if cap.IsZero() {
 		return cap
 	}
-	return cap.Mul(ratio).Floor()
+	scaled := cap.Mul(ratio).Floor()
+	if scaled.LessThanOrEqual(decimal.Zero) {
+		return decimal.NewFromInt(1)
+	}
+	return scaled
 }
 
 // Describe は適用の結果を 1 行で。
