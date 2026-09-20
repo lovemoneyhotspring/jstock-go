@@ -144,9 +144,22 @@ func TestMarketPricesKeepsPartialRows(t *testing.T) {
 	if len(failed) != 1 || failed[0].Index != 2 || failed[0].Batches != 2 || len(failed[0].Symbols) != 10 {
 		t.Fatalf("2 本目の失敗が報告されるはず: %+v", failed)
 	}
-	if n := countBatches(fake.priceBatches, second); n != 4 {
-		t.Errorf("2 周 × (失敗 + 送り直し) = 4 回のはず: %d", n)
+	// 1 周目はずらして送る経路で、その場の送り直しはしない（2 周目の直列に任せる）
+	if n := countBatches(fake.priceBatches, second); n != 3 {
+		t.Errorf("1 周目 1 回 + 2 周目 (失敗 + 送り直し) = 3 回のはず: %d", n)
 	}
+
+	// TACHIBANA_PRICE_STAGGER_MS=0 なら従来の直列——1 周目も postTo がその場で送り直す
+	t.Setenv("TACHIBANA_PRICE_STAGGER_MS", "0")
+	fake.priceFail = map[string]int{second: 4}
+	fake.priceBatches = nil
+	if _, failed := b.MarketPricesRawPartial(symbols, ""); len(failed) != 1 {
+		t.Fatalf("直列でも 2 本目の失敗が報告されるはず: %+v", failed)
+	}
+	if n := countBatches(fake.priceBatches, second); n != 4 {
+		t.Errorf("直列は 2 周 × (失敗 + 送り直し) = 4 回のはず: %d", n)
+	}
+	t.Setenv("TACHIBANA_PRICE_STAGGER_MS", "")
 
 	fake.priceFail = map[string]int{second: 4}
 	if _, err := b.MarketPricesRaw(symbols, ""); err == nil {
@@ -176,5 +189,58 @@ func TestMarketPricesStopsAtDeadline(t *testing.T) {
 	}
 	if len(fake.clmIDs) != sent {
 		t.Error("締め切り後に時価問合が送られた")
+	}
+}
+
+// ずらして送っても、届く順に p_no が増えている（実機は増えていないと p_errno=6 で弾く）。
+func TestMarketPricesPipelinedKeepsPNoOrder(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, pub := writeTestKey(t, dir)
+	fake := newFakeTachibana(t, pub)
+	fake.enforcePNo = true
+	b := newSessionTestBroker(t, fake, keyPath, dir)
+	symbols := make([]string, 0, 600)
+	for i := 0; i < 600; i++ {
+		symbols = append(symbols, fmt.Sprintf("%04d", 1000+i))
+	}
+
+	rows, at, failed := b.MarketPricesRawPartialAt(symbols, "")
+	if len(failed) != 0 || len(rows) != 600 || len(at) != 600 {
+		t.Fatalf("5 バッチとも取れるはず: rows %d, at %d, failed %+v", len(rows), len(at), failed)
+	}
+	if len(fake.priceBatches) != 5 {
+		t.Errorf("取り直しなしの 5 回のはず: %v", fake.priceBatches)
+	}
+	for i := 1; i < len(fake.pNos); i++ {
+		if fake.pNos[i] <= fake.pNos[i-1] {
+			t.Errorf("p_no が届いた順に増えていない: %v", fake.pNos)
+		}
+	}
+	// 後続の電文（発注・照会）の番号は、ずらして送ったぶんより大きい
+	if _, err := b.postRequest(clmOrderList, map[string]any{}); err != nil {
+		t.Fatalf("時価問合のあとの照会が弾かれた: %v", err)
+	}
+}
+
+// 到着が入れ替わって p_errno=6 で弾かれたバッチは、2 周目の直列で取り直す。セッションは捨てない。
+func TestMarketPricesPipelinedRetriesPNoOrder(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, pub := writeTestKey(t, dir)
+	fake := newFakeTachibana(t, pub)
+	fake.enforcePNo = true
+	b := newSessionTestBroker(t, fake, keyPath, dir)
+	symbols := priceTestSymbols()
+	second := symbols[120]
+	fake.priceRejectPNo = map[string]int{second: 1}
+
+	rows, err := b.MarketPricesRaw(symbols, "")
+	if err != nil || len(rows) != 130 {
+		t.Fatalf("弾かれた 2 本目も取り直して 130 行のはず: rows %d, err %v", len(rows), err)
+	}
+	if n := countBatches(fake.priceBatches, second); n != 2 {
+		t.Errorf("2 本目は 1 周目（弾かれる）+ 2 周目の 2 回のはず: %d", n)
+	}
+	if fake.logins != 1 {
+		t.Errorf("p_errno=6 でセッションを捨ててログインし直している: logins %d", fake.logins)
 	}
 }
