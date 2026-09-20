@@ -10,9 +10,10 @@
 #     open / guard / close / verify は WITH_LOCK_NOTIFY=1——打ち切りと見送りを Discord にも知らせる
 #   - --live が無い行は判断と記録だけで注文を出さない（dry-run）
 #   - 実行の要約は state/digest/<env>-<日付>.jsonl に 1 行ずつ溜まる（docs/FEEDBACK.md）
-#   - 外の死活監視: 9:22 の朝の点検と 15:40 の verify の後に deploy/ping.sh が ping を打つ（.env の
-#     HEALTHCHECK_URL_MORNING / HEALTHCHECK_URL_VERIFY。未設定なら何もしない）。マシン・ネット・cron が
-#     止まると通知も全部止まるので、「来なかったら知らせる」のは外のサービスにしかできない
+#   - 外の死活監視は Mackerel: 9:22 の朝の点検と 15:40 の verify の後に deploy/ping.sh が実行の印
+#     （state/ping/<KEY>）を残し、deploy/mackerel-alive.sh が 5 分おきに状態をサービスメトリックへ投稿する。
+#     マシン・ネット・cron が止まると通知も全部止まるので、「来なかったら知らせる」のは外のサービスにしか
+#     できない（cron 停止は途切れ監視、マシン停止は mackerel-agent の connectivity。docs/DEPLOY.md）
 #
 # 有効化の段階:
 #   1. 2026-09-11〜: データ・候補に加えて、**板の記録（snap）と dry-run の open** を回す。
@@ -288,6 +289,8 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 15:40: 返済が全部約定したかを照会し、持ち越しを通知
 40 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-verify.log $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin; deploy/ping.sh VERIFY $? >> state/logs/ping.log 2>&1
 #40 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-verify-dryrun.log $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin
+# 外の死活監視（Mackerel）。土日も回す——cron が止まったことは途切れ監視でしか分からない
+*/5 * * * *           cd $WBJP_HOME && deploy/mackerel-alive.sh >> state/logs/mackerel-alive.log 2>&1
 # スイング売買（日足・大引け後 1 回で足りるが、固定間隔でも無害）
 #*/20 * * * *        cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  $WBJP_BIN/wbjp  run --config-dir config --live --yes >> state/logs/wbjp-run.log  2>&1
 # 積立（発注時間帯 14:00〜15:00 の外では自動でスキップ）

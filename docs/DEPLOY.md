@@ -270,11 +270,17 @@ Discord（`WBJP_ALERT_CHANNEL_ID` / レポートの送り先）にも短く流�
 - **MAILTO。** ログへリダイレクトしていても、Go が起動する前の失敗（`cd` の失敗、`state/logs` が
   無い、`bin/` が無い）は cron がメールで送るしかない。このマシンには MTA（`sendmail`）が無いので、
   宛先を入れる前に `msmtp-mta` などを入れること。crontab の `# MAILTO=` は宛先が決まるまでコメントのまま。
-- **外の死活監視（`deploy/ping.sh`）。** 通知はどれもこのマシンから Discord へ出るので、マシン停止・ネット断・
-  cron 停止では何も鳴らない。9:22 の朝の点検と 15:40 の verify の後に、外のサービス（healthchecks.io 型）へ
-  ping を打つ。**来なかったら向こうが知らせる**。`.env` に `HEALTHCHECK_URL_MORNING` / `HEALTHCHECK_URL_VERIFY`
-  を入れる（未設定なら何もしない）。監視側の予定は「平日 9:22 / 15:40、猶予 10 分」。休場日も打つ。
-  終了コードが 0 以外のときは URL の末尾に `/<終了コード>` を付ける（healthchecks.io は失敗として記録する）。
+- **外の死活監視（Mackerel）。** 通知はどれもこのマシンから Discord へ出るので、マシン停止・ネット断・
+  cron 停止では何も鳴らない。**来なかったら向こうが知らせる**役は Mackerel に寄せる（組織 `pimopimo`、サービス `jstock`）。
+  - マシン停止・ネット断 … mackerel-agent の connectivity 監視（もとから動いている）。
+  - cron 停止 … `deploy/mackerel-alive.sh` が 5 分おきに `alive.cron` = 1 を投稿する。20 分途切れたら警報。
+  - 点検の失敗・未実行 … 9:22 の朝の点検と 15:40 の verify の後に `deploy/ping.sh <KEY> <終了コード>` が
+    `state/ping/<KEY>` に印（日付 時刻 終了コード）を残す。`mackerel-alive.sh` がそれを読んで
+    `alive.morning` / `alive.verify` を投稿する。0 = 正常、1 = 終了コードが 0 以外、
+    2 = 平日の期限（9:40 / 16:00）を過ぎても今日の印が無い。0 を超えたら警報。休場日も印は残る。
+  - API キーは `.env` の `MACKEREL_APIKEY`、無ければ `/etc/mackerel-agent/mackerel-agent.conf` から読む。
+    監視ルールは Mackerel 側にある（名前が `jstock:` で始まる 3 本）。通知先は Mackerel の通知チャンネル。
+  - `ping.sh` は `.env` に `HEALTHCHECK_URL_<KEY>` があれば healthchecks.io 型の URL へも打つ（未設定なら打たない）。
 - **打ち切り・見送りの通知（`WITH_LOCK_NOTIFY=1`）。** `with-lock.sh` の `[timeout]`・`[lock_busy]` はログに
   書くだけだと誰も読まない（朝の点検は open と snap だけ）。open / guard / close / verify / plan の行は
   `WITH_LOCK_NOTIFY=1` を立て、`bin/discord-post` で知らせる。snap のように打ち切り・見送りが設計のうちの行には立てない。
