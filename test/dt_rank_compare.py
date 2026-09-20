@@ -27,6 +27,7 @@ US = "test/out/mb_panel.parquet"
 LAST_DAY = "2026-09-15"  # 米国の値（mb_panel）がある最後の日
 SEEN_FROM = pd.Timestamp("2024-09-02")  # ここから先は事前登録の前に一度見ている
 SLOT, ERR_SINCE = "0859", "2026-09-11"
+OUT = "test/out/dt_rank_compare_daily.parquet"
 
 
 def fit(tr):
@@ -85,8 +86,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=20)
     ap.add_argument("--side-seeds", type=int, default=10, help="x0.8 と block のシード数（判定の x1.0 は --seeds）")
+    ap.add_argument("--report-only", action="store_true", help="保存済みの日次の結果から集計だけやり直す")
     a = ap.parse_args()
 
+    if a.report_only:
+        r = pd.read_parquet(OUT)
+        report(r, pd.DatetimeIndex(sorted(r.loc[r["form"] == "upper", "d"].unique())))
+        return
     err = duckdb.sql(ERR_SQL, params=[SLOT, ERR_SINCE, ERR_SINCE]).df()
     err["band"] = np.digitize(err["g"], BANDS[1:-1], right=True)
     df = pd.read_parquet(CAND)
@@ -114,12 +120,15 @@ def main():
             res.append(simulate(te, models, fold_of, e, form, s))
             print(f"{form} seed {s}", flush=True)
     r = pd.concat(res, ignore_index=True)
-    r.to_parquet("test/out/dt_rank_compare_daily.parquet", index=False)
+    r.to_parquet(OUT, index=False)
+    report(r, pd.DatetimeIndex(sorted(te["d"].unique())))
+
+
+def report(r, all_days):
 
     us = pd.read_parquet(US)[["date", "spx_ret1", "vix"]].rename(columns={"date": "d"})
     us["us_low"] = (us["spx_ret1"] >= 0) & (us["spx_ret1"] < 0.01) & (us["vix"].isna() | (us["vix"] <= 24))
-    all_days = pd.DatetimeIndex(sorted(te["d"].unique()))
-    us_low = us.set_index("d")["us_low"].reindex(all_days).fillna(False).values
+    us_low = us.set_index("d")["us_low"].reindex(all_days).fillna(False).astype(bool).values
 
     def series(form, ranker, seed=None):
         q = r[(r["form"] == form) & (r["ranker"] == ranker)]
