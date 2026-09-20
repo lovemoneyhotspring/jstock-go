@@ -24,6 +24,7 @@ from dt_wf_target import EMBARGO, FOLD_STARTS
 
 EDGES = [np.inf, 0.0, -0.005, -0.01, -0.015, -0.02, -0.03, -0.04, -0.05]  # 指値の格子（ギャップ）。inf は指値なし = 寄成
 OUT = "test/out/dt_limit_breakeven_picks.parquet"
+HYBRID_LIMIT = -0.005  # 折衷の探索で寄指の側に置く指値（探索で一番良かった固定の指値）
 
 
 def label(c):
@@ -51,9 +52,10 @@ def report(picks):
     unseen = all_days < SEEN_FROM
     print(f"\n{all_days[0]:%Y-%m-%d}〜{all_days[-1]:%Y-%m-%d}、{len(all_days)} 日（12 月を除く）、うち休む {sum(d in rest for d in all_days)} 日、流動性別コスト")
 
-    def series(q, limit_of_day=None, fixed=None):
+    def series(q, limit_of_day=None, fixed=None, market_below=-np.inf):
+        """market_below: 見えるギャップがこれより深い銘柄は寄成（必ず約定）、残りは寄指。"""
         lim = fixed if fixed is not None else q["d"].map(limit_of_day)
-        r = (q["w"] * q["net"] * (q["gap_true"] < lim)).groupby(q["d"]).sum()
+        r = (q["w"] * q["net"] * ((q["gap_true"] < lim) | (q["gap"] < market_below))).groupby(q["d"]).sum()
         return r.reindex(all_days).fillna(0.0)
 
     for form in ("block", "block_x0.8"):
@@ -89,6 +91,18 @@ def report(picks):
             print(f"| {name} | {stats(x)[0]:+.2f} | {stats(x)[2]:.2f} | {stats(x)[3]:.1f}% | {d.mean() * 1e4:+.2f} | {tstat(d):.2f} |"
                   f" {d[unseen].mean() * 1e4:+.2f} / {d[~unseen].mean() * 1e4:+.2f} | {pos}/{len(seeds)} | {fill.mean() * 100:.0f}% |"
                   f" {pe.loc[fill, 'net'].mean() * 1e4:+.1f} / {pe.loc[~fill, 'net'].mean() * 1e4:+.1f} |")
+
+        # 探索（事前登録なし、2026-09-21 追記）: 見えるギャップが深い銘柄は寄成、浅い銘柄だけ寄指（指値 −0.5%）
+        print(f"\n折衷（探索）: 見えるギャップが s より深ければ寄成、浅ければ寄指（指値 {label(HYBRID_LIMIT)}）。差は「全部を寄指」との比較")
+        print("| s | bp/日 | B との差（t） | 全部を寄指との差（t） | 寄成に回る割合 | うち指値より浅く寄った行 / その始値→引け（bp） |")
+        print("|---|---|---|---|---|---|")
+        allq = mean_of(fixed=HYBRID_LIMIT)
+        for sg in (-0.01, -0.02, -0.03, -0.05):
+            x = mean_of(fixed=HYBRID_LIMIT, market_below=sg)
+            deep = pe[pe["gap"] < sg]
+            miss = deep[deep["gap_true"] >= HYBRID_LIMIT]
+            print(f"| {label(sg)} | {stats(x)[0]:+.2f} | {(x - b).mean() * 1e4:+.2f}（{tstat(x - b):.2f}） | {(x - allq).mean() * 1e4:+.2f}（{tstat(x - allq):.2f}） |"
+                  f" {len(deep) / len(pe) * 100:.0f}% | {len(miss) / len(deep) * 100:.1f}% / {miss['net'].mean() * 1e4:+.1f} |")
 
 
 def main():
