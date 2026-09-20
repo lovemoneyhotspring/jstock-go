@@ -1077,6 +1077,8 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 					Reason: fillReason,
 				})
 				recordFill(env, order, current, filled, fillPrice, "買い注文の約定状況")
+				// 台帳には応答のまま書き、手仕舞いの数量だけ読み替える（FILLED で約定数量 0 → 注文数量）
+				filled = settledFill(current, order.Quantity)
 			} else {
 				// 台帳に約定が残っている（前の回で一部約定を記録した）。その値で手仕舞う。ただし
 				// 台帳では未確定のままなので、**残りが板に生きているかもしれない**——照会できないと
@@ -1153,7 +1155,7 @@ type fillResult struct {
 // 全部を聞くと 1 実行で百を超える電文になる（立花は 1 件 1 電文）。未確定のものだけ照会し、
 // 結果を台帳に残す。未確定なのに照会できなければ Unconfirmed——数量を推測しない。
 func queryFill(env Env, b broker.Broker, order ledger.Order, msg string) fillResult {
-	result := fillResult{Filled: order.FilledQuantity, Price: order.AvgFillPrice}
+	result := fillResult{Filled: settledQuantity(order), Price: order.AvgFillPrice}
 	if !order.IsOpen() {
 		return result
 	}
@@ -1165,6 +1167,8 @@ func queryFill(env Env, b broker.Broker, order ledger.Order, msg string) fillRes
 	result.Filled, result.Price = current.FilledQuantity, current.AvgFillPrice
 	result.Open = current.Status.IsOpen()
 	recordFill(env, order, current, result.Filled, result.Price, msg)
+	// 台帳には応答のまま書き、返す数量だけ読み替える（FILLED で約定数量 0 → 注文数量）
+	result.Filled = settledFill(current, order.Quantity)
 	return result
 }
 

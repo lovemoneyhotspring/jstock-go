@@ -114,6 +114,16 @@ func settledQuantity(o ledger.Order) decimal.Decimal {
 	return o.FilledQuantity
 }
 
+// settledFill は settledQuantity と同じ規則を、ブローカーの照会結果に当てる。FILLED なのに約定数量が
+// 入っていない応答を 0 と読むと、その回の close は「約定なし」と飛ばし、保険も置かない（台帳に書いた
+// 次の回は settledQuantity で拾えるが、その回までは手仕舞いが 1 本も無い）。
+func settledFill(current *domain.Order, quantity decimal.Decimal) decimal.Decimal {
+	if current.Status == domain.OrderStatusFilled && !current.FilledQuantity.IsPositive() {
+		return quantity
+	}
+	return current.FilledQuantity
+}
+
 // cancelOpen は板に残っている注文 o（current は直前の照会の結果で、まだ終わっていない）を取り消し、
 // 終わるまで wait おきに guardPolls 回まで照会し直す。最後に見た状態と「取り消したと言えるか」を返す。
 // 返った状態がまだ終わっていなければ、取消の完了を確かめられなかった（呼ぶ側が決める）。
