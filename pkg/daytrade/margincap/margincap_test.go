@@ -224,6 +224,39 @@ func TestApplyScalesMaxOrderButLeavesUnlimited(t *testing.T) {
 	}
 }
 
+// 縮めた結果が 1 円未満に丸まっても 0（上限なし）に化けない。縮めるほど栓は締まる。
+func TestScaleCapNeverTurnsIntoUnlimited(t *testing.T) {
+	cases := []struct {
+		name       string
+		cap, ratio string
+		want       string
+	}{
+		{"ふつうの縮小", "2500000", "0.6", "1500000"},
+		{"端数は切り捨て", "1000001", "0.5", "500000"},
+		{"ちょうど 1 円", "2500000", "0.0000004", "1"},
+		{"1 円未満に丸まる", "2500000", "0.0000003", "1"},
+		{"比が 0", "2500000", "0", "1"},
+		{"もともと上限なし", "0", "0.0000003", "0"},
+	}
+	for _, c := range cases {
+		got := scaleCap(dec(c.cap), dec(c.ratio))
+		if !got.Equal(dec(c.want)) {
+			t.Errorf("%s: scaleCap(%s, %s) = %s, want %s", c.name, c.cap, c.ratio, got, c.want)
+		}
+	}
+}
+
+// Apply を通しても同じ。保証金がほぼ無い日に max_order が 0 に落ちてはいけない。
+func TestApplyKeepsMaxOrderCapWhenMarginIsTiny(t *testing.T) {
+	got, _ := Apply(prodLike(), Snapshot{SinyouSinkidate: dec("1")})
+	if !got.Capital.MaxOrder.IsPositive() {
+		t.Errorf("ロングの max_order が上限なし（0）に化けた: %s", got.Capital.MaxOrder)
+	}
+	if !got.Margin.MaxOrder.IsPositive() {
+		t.Errorf("ショートの max_order が上限なし（0）に化けた: %s", got.Margin.MaxOrder)
+	}
+}
+
 // 様子見モード（max_capital = 0）には触らない。
 func TestApplyLeavesWatchOnlyConfigAlone(t *testing.T) {
 	cfg := prodLike()
