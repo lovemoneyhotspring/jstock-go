@@ -9,6 +9,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
+	"github.com/shopspring/decimal"
 )
 
 // 保険の手仕舞い（daytrade protect）。
@@ -74,10 +75,7 @@ func ProtectEntries(env Env, b broker.Broker) ([]ProtectAction, error) {
 			env.printf("  %s: 約定を確かめられません。保険は次の回で\n", order.Symbol)
 			continue
 		}
-		filled := fill.Filled
-		if !order.IsOpen() {
-			filled = settledQuantity(order)
-		}
+		filled := fill.Filled // FILLED で約定数量 0 の読み替えは queryFill が済ませている
 		if !filled.IsPositive() {
 			continue
 		}
@@ -117,13 +115,21 @@ func ProtectEntries(env Env, b broker.Broker) ([]ProtectAction, error) {
 // 取り消せずに約定していた（引けの前に約定してしまった）保険は「手仕舞い済み」として台帳に残し、警告する。
 // 通知は呼び出し側が出す（close は unconfirmed、guard は GuardAction.Err）。
 func ReleaseProtection(env Env, b broker.Broker, symbols map[string]bool) (held map[string]string, err error) {
-	held = map[string]string{}
+	held, _, err = releaseProtection(env, b, symbols)
+	return held, err
+}
+
+// releaseProtection は ReleaseProtection の本体。unwritten（"銘柄|脚" → 株数）は、取消で終わったと
+// 確かめたのに台帳に書けなかった保険の、約定しなかった株数。台帳ではまだ生きた保険として数えられる
+// （placedExits）ので、close はこの株数を引いて成行を出す。
+func releaseProtection(env Env, b broker.Broker, symbols map[string]bool) (held map[string]string, unwritten map[string]decimal.Decimal, err error) {
+	held, unwritten = map[string]string{}, map[string]decimal.Decimal{}
 	if b == nil {
-		return held, nil
+		return held, unwritten, nil
 	}
 	all, err := env.Ledger.ExitsOn(env.Day)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	type pending struct {
 		order    ledger.Order
@@ -168,7 +174,18 @@ func ReleaseProtection(env Env, b broker.Broker, symbols map[string]bool) (held 
 		o := p.order
 		key := o.Symbol + "|" + o.Leg()
 		current := pollOrder(env, b, o, p.current, p.brokerID, min(env.RetryWait, closeCancelWait), i == 0)
-		recordFill(env, o, current, current.FilledQuantity, current.AvgFillPrice, "保険の引け注文の取消")
+		if current.FilledQuantity.LessThan(o.FilledQuantity) {
+			// 約定数量が台帳より減って見える。書き戻すと、一部約定した保険が約定 0 の死んだ注文になり、
+			// 返済済みの株数まで成行で送り直す（refreshOpenExits と同じ理由）。生きている扱いのまま人に知らせる
+			held[key] = fmt.Sprintf("取消の結末を判定できません（照会の約定数量 %s が台帳の %s より少ない・%s）。"+
+				"保険が板に無ければ引けでも手仕舞われず建玉が残るので、口座を確認してください",
+				current.FilledQuantity, o.FilledQuantity, current.Status)
+			continue
+		}
+		written := recordFill(env, o, current, current.FilledQuantity, current.AvgFillPrice, "保険の引け注文の取消")
+		if !written && current.Status.IsTerminal() && current.Status != domain.OrderStatusFilled {
+			unwritten[key] = unwritten[key].Add(decimal.Max(o.Quantity.Sub(current.FilledQuantity), decimal.Zero))
+		}
 		switch {
 		case !current.Status.IsTerminal():
 			held[key] = fmt.Sprintf("取消の完了を確かめられません（%s）", current.Status)
@@ -199,5 +216,5 @@ func ReleaseProtection(env Env, b broker.Broker, symbols map[string]bool) (held 
 		env.Report.Warn("daytrade.protect_held", "保険の引け注文を取り消せず、その株数は引け値の手仕舞いに任せる",
 			map[string]any{"day": env.dayText(), "held": lines})
 	}
-	return held, nil
+	return held, unwritten, nil
 }

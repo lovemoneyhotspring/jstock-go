@@ -456,3 +456,33 @@ func TestRefreshEntriesFilledWithoutQuantity(t *testing.T) {
 		t.Errorf("targets=%+v err=%v, want 400 株", targets, err)
 	}
 }
+
+// 引け: 照会の応答が FILLED・約定数量 0 のときも注文数量で手仕舞う（台帳の行と同じ規則）。
+// 0 と読むと、この回は「約定なし」と黙って飛ばし、保険も置かれていない。
+func TestRefreshEntriesBrokerFilledWithoutQuantity(t *testing.T) {
+	env, _ := newEnv(t)
+	recordLongToday(t, env, "7203", 400)
+	filledZero := &stubBroker{getOrder: func(id string) (*domain.Order, error) {
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled, Quantity: decimal.NewFromInt(400)}, nil
+	}}
+	entries, _, _ := LiveEntries(env)
+	targets, unconfirmed, err := RefreshEntries(env, filledZero, entries)
+	if err != nil || len(unconfirmed) != 0 || len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(400)) {
+		t.Errorf("targets=%+v unconfirmed=%v err=%v, want 400 株", targets, unconfirmed, err)
+	}
+}
+
+// 保険: 照会の応答が FILLED・約定数量 0 でも、注文数量ぶんの引けの返済を置く。
+func TestProtectEntriesBrokerFilledWithoutQuantity(t *testing.T) {
+	env, _ := newEnv(t)
+	recordLongToday(t, env, "7203", 400)
+	filledZero := &stubBroker{balance: richBalance(), getOrder: func(id string) (*domain.Order, error) {
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled, Quantity: decimal.NewFromInt(400)}, nil
+	}}
+	if _, err := ProtectEntries(env, filledZero); err != nil {
+		t.Fatal(err)
+	}
+	if len(filledZero.placed) != 1 || !filledZero.placed[0].Quantity.Equal(decimal.NewFromInt(400)) {
+		t.Errorf("placed=%+v, want 引けの返済 400 株", filledZero.placed)
+	}
+}

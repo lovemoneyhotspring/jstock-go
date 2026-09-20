@@ -114,6 +114,16 @@ func settledQuantity(o ledger.Order) decimal.Decimal {
 	return o.FilledQuantity
 }
 
+// settledFill は settledQuantity と同じ規則を、ブローカーの照会結果に当てる。FILLED なのに約定数量が
+// 入っていない応答を 0 と読むと、その回の close は「約定なし」と飛ばし、保険も置かない（台帳に書いた
+// 次の回は settledQuantity で拾えるが、その回までは手仕舞いが 1 本も無い）。
+func settledFill(current *domain.Order, quantity decimal.Decimal) decimal.Decimal {
+	if current.Status == domain.OrderStatusFilled && !current.FilledQuantity.IsPositive() {
+		return quantity
+	}
+	return current.FilledQuantity
+}
+
 // cancelOpen は板に残っている注文 o（current は直前の照会の結果で、まだ終わっていない）を取り消し、
 // 終わるまで wait おきに guardPolls 回まで照会し直す。最後に見た状態と「取り消したと言えるか」を返す。
 // 返った状態がまだ終わっていなければ、取消の完了を確かめられなかった（呼ぶ側が決める）。
@@ -207,12 +217,14 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 	// この銘柄の保険の引け注文が生きていれば先に取り消す（返済できる建玉を押さえていて、
 	// 通っても二重に返済する）。取り消せたと確かめられなければ返済を出さず、次の回で照会し直す
 	var heldErr error
+	var unwritten map[string]decimal.Decimal
 	if b != nil {
-		held, err := ReleaseProtection(env, b, map[string]bool{o.Symbol: true})
+		held, cancelled, err := releaseProtection(env, b, map[string]bool{o.Symbol: true})
 		if err != nil {
 			act.Err = err
 			return act
 		}
+		unwritten = cancelled
 		if reason, ok := held[o.Symbol+"|"+o.Leg()]; ok {
 			// 取り消せなかった保険は生きたまま数え、覆われていない株数だけ返済する（RefreshEntries と
 			// 同じ方針）。エラーは残して次の回で保険を照会し直す
@@ -224,6 +236,10 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 	if err != nil {
 		act.Err = err
 		return act
+	}
+	// 取消は通ったのに台帳に書けなかった保険は、台帳では生きたまま数えられている。引いてから決める（RefreshEntries と同じ）
+	for key, quantity := range unwritten {
+		exits[key] = decimal.Max(exits[key].Sub(quantity), decimal.Zero)
 	}
 	remaining := remainingToExit(exits, o, filled)
 	if remaining.LessThanOrEqual(decimal.Zero) {

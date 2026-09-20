@@ -985,7 +985,7 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 	// 保険の手仕舞い（引け）が板に生きていれば、先に取り消す。生きたままだと返済できる建玉が
 	// その注文に押さえられていて 15:20 の成行が通らず、通ったとしても保険と二重に手仕舞う。
 	// 取り消せたと確かめられない銘柄は保険に任せる（引け値で手仕舞われる。二重に出さない）
-	held, err := ReleaseProtection(env, b, nil)
+	held, unwritten, err := releaseProtection(env, b, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1002,6 +1002,12 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 	exits, err := placedExits(env, true)
 	if err != nil {
 		return nil, nil, err
+	}
+	// 取消は通ったのに台帳に書けなかった保険は、台帳では生きたまま（＝手仕舞い済み）に数えられている。
+	// そのままだと成行を出さず「発注済み（冪等）」で黙って終わり、保険も成行も無い建玉が残る。
+	// 取り消せた株数を引いて成行を出す（台帳は次の回が照会し直して書く。書けないことは recordFill が知らせている）
+	for key, quantity := range unwritten {
+		exits[key] = decimal.Max(exits[key].Sub(quantity), decimal.Zero)
 	}
 	for _, order := range entries {
 		// 保険を取り消せなかった銘柄でも、建て注文の取消と約定の確認は従来どおり行う（飛ばすと、
@@ -1060,7 +1066,8 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 				}
 			}
 			if current != nil {
-				filled, fillPrice = current.FilledQuantity, current.AvgFillPrice
+				// FILLED で約定数量 0 の応答は注文数量と読む（settledFill）。台帳にだけは応答のまま書く
+				filled, fillPrice = settledFill(current, order.Quantity), current.AvgFillPrice
 				fillReason := execution.ReasonExpired
 				if filled.GreaterThan(decimal.Zero) {
 					fillReason = execution.ReasonFilled
@@ -1076,7 +1083,7 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 					FillQuantity: filled, FillPrice: decimalOrNil(fillPrice),
 					Reason: fillReason,
 				})
-				recordFill(env, order, current, filled, fillPrice, "買い注文の約定状況")
+				recordFill(env, order, current, current.FilledQuantity, fillPrice, "買い注文の約定状況")
 			} else {
 				// 台帳に約定が残っている（前の回で一部約定を記録した）。その値で手仕舞う。ただし
 				// 台帳では未確定のままなので、**残りが板に生きているかもしれない**——照会できないと
@@ -1118,8 +1125,10 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 
 // recordFill は照会の結果を台帳とログに残す。台帳に書けなくても手仕舞いは続ける
 // （数量はもう手元にある）が、黙らない。
-func recordFill(env Env, order ledger.Order, current *domain.Order, filled decimal.Decimal, fillPrice *decimal.Decimal, msg string) {
+func recordFill(env Env, order ledger.Order, current *domain.Order, filled decimal.Decimal, fillPrice *decimal.Decimal, msg string) (written bool) {
+	written = true
 	if err := env.Ledger.UpdateStatus(order.ClientOrderID, current.Status, filled, fillPrice, current.BrokerOrderID); err != nil {
+		written = false
 		env.Report.Error("daytrade.ledger", "約定状況を台帳に書けません", map[string]any{
 			"day": env.dayText(), "symbol": order.Symbol,
 			"client_order_id": order.ClientOrderID, "error": err.Error(),
@@ -1132,6 +1141,7 @@ func recordFill(env Env, order ledger.Order, current *domain.Order, filled decim
 		"before":          order.Status, "after": string(current.Status),
 		"quantity": order.Quantity.String(), "filled": filled.String(),
 	})
+	return written
 }
 
 // fillResult は 1 注文の約定状況（queryFill の結果）。
@@ -1153,7 +1163,7 @@ type fillResult struct {
 // 全部を聞くと 1 実行で百を超える電文になる（立花は 1 件 1 電文）。未確定のものだけ照会し、
 // 結果を台帳に残す。未確定なのに照会できなければ Unconfirmed——数量を推測しない。
 func queryFill(env Env, b broker.Broker, order ledger.Order, msg string) fillResult {
-	result := fillResult{Filled: order.FilledQuantity, Price: order.AvgFillPrice}
+	result := fillResult{Filled: settledQuantity(order), Price: order.AvgFillPrice}
 	if !order.IsOpen() {
 		return result
 	}
@@ -1165,6 +1175,8 @@ func queryFill(env Env, b broker.Broker, order ledger.Order, msg string) fillRes
 	result.Filled, result.Price = current.FilledQuantity, current.AvgFillPrice
 	result.Open = current.Status.IsOpen()
 	recordFill(env, order, current, result.Filled, result.Price, msg)
+	// 台帳には応答のまま書き、返す数量だけ読み替える（FILLED で約定数量 0 → 注文数量）
+	result.Filled = settledFill(current, order.Quantity)
 	return result
 }
 

@@ -189,6 +189,31 @@ func TestArgumentErrorOnNewOrderIsNotSentAndKeepsSession(t *testing.T) {
 	}
 }
 
+// 6（p_no の逆転）: 発注では「送っていない」と断定しない（届いていたら次の回の送り直しが二重発注になる）。
+// 結果不明として返し、次の回が注文一覧で判定する。送り直さず、セッションも捨てない。
+func TestPNoOrderErrorOnNewOrderStaysUnconfirmed(t *testing.T) {
+	b, fake := newFixtureBroker(t)
+	if _, err := b.postRequest(clmBalanceSummary, nil); err != nil {
+		t.Fatal(err)
+	}
+	fake.failNext, fake.failErrno = 1, pErrnoPNoOrder
+	_, err := b.Place(cashOrderRequest("c1"))
+	var notSent *ErrNotSent
+	if err == nil || errors.As(err, &notSent) {
+		t.Fatalf("p_no の逆転を「送っていない」と断定している: %v", err)
+	}
+	var platform *ErrPlatform
+	if !errors.As(err, &platform) || platform.Errno != pErrnoPNoOrder {
+		t.Errorf("ErrPlatform(6) でない: %v", err)
+	}
+	if fake.countCLM(clmNewOrder) != 1 {
+		t.Errorf("発注が送り直されている: %v", fake.clmIDs)
+	}
+	if _, ok := readSessionFile(b.sessionFilePath()); !ok {
+		t.Error("p_no の逆転でセッションを捨てている")
+	}
+}
+
 // -62（時間外）: 送り直さず、セッションも捨てない。
 func TestOutsideHoursKeepsSessionAndDoesNotResend(t *testing.T) {
 	b, fake := newFixtureBroker(t)

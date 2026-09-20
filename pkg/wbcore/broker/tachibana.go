@@ -407,8 +407,8 @@ func (e *ErrSession) Error() string {
 		e.CLMID, e.Errno, strings.TrimSpace(e.Text))
 }
 
-// ErrPlatform は基盤が電文を弾いた応答（p_errno = -1 引数エラー / -62 時間外）。
-// セッションは生きているので捨てていない。送り直しもしない。
+// ErrPlatform は基盤が電文を弾いた応答（p_errno = -1 引数エラー / -62 時間外 / 6 p_no の逆転）。
+// セッションは生きているので捨てていない。ここでは送り直しもしない。
 type ErrPlatform struct {
 	CLMID string
 	Errno string
@@ -421,6 +421,12 @@ func (e *ErrPlatform) Error() string {
 
 // NotAccepted は基盤が受け付ける前に弾いた（引数エラー）か。発注ならこの電文は
 // 注文系に届いていないので「送っていない」として扱える。
+//
+// **6（p_no の逆転）は入れない。** 発注は往復のあいだ flock を握るので、後から採番した電文が先に届く
+// ことがなく、原理的に 6 を受けない（受けるのは採番してロックを放す時価問合のバッチ）。それでも発注が
+// 6 を受けたなら前提が崩れている＝状態不明で、「送っていない」と断定して UNSENT にすると、届いていた
+// 場合に次の回が別の ID で送り直して二重発注になる。結果不明（PENDING）のままなら次の回が注文一覧で
+// 判定する（損は遅れだけ）。6 が受付の前か後かは実機で測っていない（時価問合は副作用が無く測れない）。
 func (e *ErrPlatform) NotAccepted() bool { return e.Errno == pErrnoArgument }
 
 func (t *TachibanaBroker) sessionFilePath() string {
@@ -715,7 +721,8 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 		case "", "0":
 			return res, nil
 		case pErrnoArgument, pErrnoOutsideHours, pErrnoPNoOrder:
-			// 基盤が弾いた。セッションは生きているので捨てない。送り直しても同じ結果
+			// 基盤が弾いた。セッションは生きているので捨てない。-1 と -62 は送り直しても同じ結果。
+			// 6 は新しい p_no なら通るが、ここでは送り直さない（発注は結果不明として次の回が一覧で判定する。NotAccepted）
 			// （6 = p_no の逆転はここでは起きないはず——往復のあいだ flock を握るので、後から採番した電文が
 			// 先に届くことがない。弾かれるのは、採番してロックを放す marketPricePipelined 側のバッチ。
 			// それでも来たら失効ではないので、再ログインの嵐にしない）
