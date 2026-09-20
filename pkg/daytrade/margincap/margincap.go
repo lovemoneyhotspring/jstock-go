@@ -5,7 +5,9 @@
 // （代用有価証券の ETF は日本株と一緒に下がるので、下げた日に建玉も縮めると
 // 底で縮小して戻りを取り逃す。研究ノート 2026-09-daytrade-collateral-etf）。
 //
-// 前夜に plan が焼き、朝の open が読む（data/daytrade/margin.json）。取れなければ設定の値で建てる
+// 朝 8:53 の `daytrade warm-margin` が焼き、9:01 の open が読む（data/daytrade/margin.json）。
+// 前夜には焼かない——受入保証金は夜間更新で確定するので、前夜の値は代用有価証券の評価替えを
+// 取りこぼす（IsFresh が当日取得ぶんだけを通す）。取れなければ設定の値で建てる
 // ——保証金が読めないことを理由に売買を止めない。usmarket（VIX）と同じ約束。
 package margincap
 
@@ -29,7 +31,7 @@ const dateLayout = "2006-01-02"
 // （9 年の複利試算で 1.3 → 1.94 億、2.0 → 1.43 億、3.0 → 9,891 万）。
 var SafetyFactor = decimal.RequireFromString("1.3")
 
-// Snapshot は前夜に焼いた保証金の状態（キャッシュのファイル形式）。
+// Snapshot は朝の warm-margin が焼いた保証金の状態（キャッシュのファイル形式）。
 type Snapshot struct {
 	// Day は判定日（この保証金で建てる営業日）。
 	Day string `json:"day"`

@@ -186,7 +186,7 @@ func printPlan(p dtplan.Plan, cfg dtconfig.Config) {
 
 // refreshIV は前夜の plan に IV が無ければ取り直す。
 //
-// オプションの足は 27:00 頃の更新なので、20:30 の plan には前日の IV がまだ無い。
+// オプションの足は夜遅く（翌 0 時ごろ）に乗るので、20:30 の plan には前日の IV がまだ無い。
 // 朝の sync で入っていればここで拾う。それでも無ければゲートは効かせず取引する
 // （低 IV の日は期待値がほぼ 0 で、負ではない）。
 func refreshIV(cfg dtconfig.Config, p dtplan.Plan) dtplan.Plan {
