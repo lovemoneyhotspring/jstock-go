@@ -273,6 +273,13 @@ func recordLongToday(t *testing.T, env Env, symbol string, qty int64) string {
 	return req.ClientOrderID
 }
 
+// filledExit は台帳の手仕舞い注文が注文数量どおり全部約定した、という照会の応答。
+func filledExit(env Env, id string, price *decimal.Decimal) *domain.Order {
+	o, _, _ := env.Ledger.Get(id)
+	return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled,
+		Quantity: o.Quantity, FilledQuantity: o.Quantity, AvgFillPrice: price}
+}
+
 // 引け: 寄らないまま板に残っている買いは取り消す。約定が無ければ手仕舞いは出さない。
 func TestRefreshEntriesCancelsUnfilledEntry(t *testing.T) {
 	env, _ := newEnv(t)
@@ -335,10 +342,14 @@ func TestRefreshEntriesDoesNotCancelFilledEntry(t *testing.T) {
 // 次の回で約定が増えていたら、増えた分だけを足して手仕舞う。
 func TestRefreshEntriesCancelUnconfirmedExitsKnownFillThenGrowth(t *testing.T) {
 	env, rep := newEnv(t)
-	recordLongToday(t, env, "7203", 400)
+	entryID := recordLongToday(t, env, "7203", 400)
 	status, filled := domain.OrderStatusPartiallyFilled, int64(100)
 	b := &stubBroker{balance: richBalance(), getOrder: func(id string) (*domain.Order, error) {
 		p := decimal.NewFromInt(761)
+		if id != entryID {
+			// 前の回の手仕舞い（次の回が聞き直す）は全部約定している
+			return filledExit(env, id, &p), nil
+		}
 		return &domain.Order{ClientOrderID: id, Status: status, Quantity: decimal.NewFromInt(400),
 			FilledQuantity: decimal.NewFromInt(filled), AvgFillPrice: &p}, nil
 	}}
@@ -368,10 +379,14 @@ func TestRefreshEntriesCancelUnconfirmedExitsKnownFillThenGrowth(t *testing.T) {
 // client_order_id になって「発注済み（冪等）」で飛ばされてはいけない（黙って持ち越す）。
 func TestRefreshEntriesGrowthOfSameQuantityIsNotSwallowedAsIdempotent(t *testing.T) {
 	env, _ := newEnv(t)
-	recordLongToday(t, env, "7203", 400)
+	entryID := recordLongToday(t, env, "7203", 400)
 	status, filled := domain.OrderStatusPartiallyFilled, int64(200)
 	b := &stubBroker{balance: richBalance(), getOrder: func(id string) (*domain.Order, error) {
 		p := decimal.NewFromInt(761)
+		if id != entryID {
+			// 前の回の手仕舞い（次の回が聞き直す）は全部約定している
+			return filledExit(env, id, &p), nil
+		}
 		return &domain.Order{ClientOrderID: id, Status: status, Quantity: decimal.NewFromInt(400),
 			FilledQuantity: decimal.NewFromInt(filled), AvgFillPrice: &p}, nil
 	}}

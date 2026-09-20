@@ -990,3 +990,78 @@ func TestRefreshEntriesDoesNotQueryFinalizedOrders(t *testing.T) {
 		t.Errorf("約定済みの 7203 だけを台帳の値で手仕舞うはず: %+v", targets)
 	}
 }
+
+// exitRerun は「15:20 に手仕舞いが受理された」ところまで進め、その返済注文の ID を返す。
+// 2 回目（15:24）の照会の応答は呼び出し側が b.getOrder で決める。
+func exitRerun(t *testing.T, env Env, b *stubBroker) (entryID, exitID string) {
+	t.Helper()
+	entryID = recordLongToday(t, env, "7203", 100)
+	price := decimal.NewFromInt(761)
+	b.getOrder = func(id string) (*domain.Order, error) {
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled,
+			Quantity: decimal.NewFromInt(100), FilledQuantity: decimal.NewFromInt(100), AvgFillPrice: &price}, nil
+	}
+	entries, _, _ := LiveEntries(env)
+	targets, _, err := RefreshEntries(env, b, entries)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("1 回目: targets=%+v err=%v", targets, err)
+	}
+	if failures := PlaceExits(env, b, targets); len(failures) != 0 {
+		t.Fatalf("1 回目の手仕舞い: %v", failures)
+	}
+	return entryID, b.placed[len(b.placed)-1].ClientOrderID
+}
+
+// 15:20 に受理された返済が、その後ブローカー側で拒否・失効していたら、次の回（15:24）が送り直すこと。
+// 台帳の送信済みを信じて「発注済み（冪等）」と数えると、返済が無いまま持ち越す。
+func TestRefreshEntriesResendsExitThatDiedAfterAcceptance(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	_, exitID := exitRerun(t, env, b)
+	sent := len(b.placed)
+
+	b.getOrder = func(id string) (*domain.Order, error) {
+		if id != exitID {
+			t.Errorf("確定済みの建て注文を聞き直した: %s", id)
+		}
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusRejected,
+			Quantity: decimal.NewFromInt(100)}, nil
+	}
+	entries, _, _ := LiveEntries(env)
+	targets, unconfirmed, err := RefreshEntries(env, b, entries)
+	if err != nil || len(unconfirmed) != 0 || len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("2 回目: targets=%+v unconfirmed=%v err=%v, want 100 株を送り直す", targets, unconfirmed, err)
+	}
+	if o, _, _ := env.Ledger.Get(exitID); o.Status != string(domain.OrderStatusRejected) {
+		t.Errorf("1 回目の返済の台帳 = %s, want REJECTED", o.Status)
+	}
+	if failures := PlaceExits(env, b, targets); len(failures) != 0 {
+		t.Fatalf("2 回目の手仕舞い: %v", failures)
+	}
+	if len(b.placed) != sent+1 || b.placed[len(b.placed)-1].ClientOrderID == exitID {
+		t.Errorf("送り直していない（または同じ ID）: placed=%d → %d", sent, len(b.placed))
+	}
+}
+
+// 返済がまだ板に生きている・照会できないときは、もう 1 本重ねない（二重の返済にしない）。
+func TestRefreshEntriesDoesNotDoubleLiveOrUnknownExit(t *testing.T) {
+	for name, reply := range map[string]func(id string) (*domain.Order, error){
+		"板に生きている": func(id string) (*domain.Order, error) {
+			return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusSubmitted,
+				Quantity: decimal.NewFromInt(100)}, nil
+		},
+		"照会できない": func(string) (*domain.Order, error) { return nil, errors.New("timeout") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, _ := newEnv(t)
+			b := &stubBroker{balance: richBalance()}
+			exitRerun(t, env, b)
+			b.getOrder = reply
+			entries, _, _ := LiveEntries(env)
+			targets, _, err := RefreshEntries(env, b, entries)
+			if err != nil || len(targets) != 0 {
+				t.Fatalf("targets=%+v err=%v, want 対象なし", targets, err)
+			}
+		})
+	}
+}
