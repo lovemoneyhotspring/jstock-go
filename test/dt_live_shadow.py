@@ -35,7 +35,10 @@ OUT = "test/out/dt_live_shadow.parquet"
 SQL = f"""
 WITH q0 AS (
   SELECT *, min(recorded_at) OVER (PARTITION BY day, run_id) run_at
-  FROM read_parquet('{HIST}/quotes/*.parquet', union_by_name=true) WHERE CAST(day AS DATE) >= CAST(? AS DATE)),
+  FROM read_parquet('{HIST}/quotes/*.parquet', union_by_name=true) WHERE CAST(day AS DATE) >= CAST(? AS DATE)
+    -- 夜中の試し実行（古い気配）を当日の回に数えない。2026-09-11 は 0:14 の回が最初に来ていた
+    AND CAST(timezone('Asia/Tokyo', recorded_at) AS DATE) = CAST(day AS DATE)
+    AND hour(timezone('Asia/Tokyo', recorded_at)) >= 8),
 q AS (SELECT * FROM q0 QUALIFY run_at = min(run_at) OVER (PARTITION BY day)),
 p AS (
   SELECT * FROM read_parquet('{HIST}/plan/*.parquet', union_by_name=true)
