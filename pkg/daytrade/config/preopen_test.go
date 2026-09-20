@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
+	"github.com/shopspring/decimal"
 )
 
 // 寄る前に出すのは preopen_legs に挙げた脚だけ。9:00 以降の回は寄成にしない。
@@ -76,5 +77,30 @@ func TestPreopenDeadlineIsTheAuction(t *testing.T) {
 	none.PreopenLegs = PreopenLegsNone
 	if got := none.RunDeadline("entry", now, true, jst); got.Equal(want) {
 		t.Error("preopen_legs = none で板寄せの締め切りが付いた")
+	}
+}
+
+// preopen_limit_pct（寄指）は 0〜5% で、ロングを寄る前に出す設定のときだけ通す。
+func TestValidatePreopenLimitPct(t *testing.T) {
+	c := Default()
+	c.Execution.EntryWindow = []string{"08:59", "09:15"}
+	c.Execution.PreopenLegs = PreopenLegsLong
+	c.Execution.PreopenLimitPct = decimal.RequireFromString("0.5")
+	if err := c.Validate(); err != nil {
+		t.Fatalf("long × 0.5%% で弾かれた: %v", err)
+	}
+	if !c.Execution.PreopenLimitFor(domain.SideBuy) || c.Execution.PreopenLimitFor(domain.SideSell) {
+		t.Error("寄指はロングだけ")
+	}
+	for _, bad := range []string{"-0.1", "5.1"} {
+		c.Execution.PreopenLimitPct = decimal.RequireFromString(bad)
+		if err := c.Validate(); err == nil {
+			t.Errorf("preopen_limit_pct = %s を通した", bad)
+		}
+	}
+	c.Execution.PreopenLimitPct = decimal.RequireFromString("0.5")
+	c.Execution.PreopenLegs = PreopenLegsShort
+	if err := c.Validate(); err == nil {
+		t.Error("ロングを寄る前に出さない設定で preopen_limit_pct を通した")
 	}
 }

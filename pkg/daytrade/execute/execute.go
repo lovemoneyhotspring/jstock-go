@@ -22,6 +22,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/execution"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/reconcile"
 	"github.com/shopspring/decimal"
 )
@@ -131,7 +132,10 @@ func PlacedToday(env Env) (Placed, error) {
 	}
 	placed := Placed{Symbols: map[string]domain.Side{}}
 	for _, o := range entries {
-		if o.IsDryRun() || o.IsDead() {
+		// 失効した寄付条件の注文（指値に届かなかった寄指）は**使った枠**に数える。埋め直すと、
+		// 「浅く寄ったから買わなかった銘柄」の枠を、寄った後の成行（滑りつき）で別の銘柄に使ってしまう。
+		// 拒否・未送信・取消は従来どおり埋め直す（寄成・寄指の電文が通らなければ今までの形に戻る）
+		if o.IsDryRun() || (o.IsDead() && !o.IsLapsedOpening()) {
 			continue
 		}
 		amount := decimal.Zero
@@ -184,11 +188,35 @@ func (e *ErrUnrecordedPositions) Error() string {
 		"口座を確かめてから実行してください", strings.Join(e.Positions, "、"), e.LedgerPath)
 }
 
+// UnfilledOpening は約定しないまま終わった寄付条件の建て注文の銘柄（指値に届かなかった寄指、
+// 1 日寄らなかった寄成）。close が建て注文の状態を確定した後に呼ぶ。拒否・未送信は入れない
+// （それは送信の失敗で、open が知らせている）。
+func UnfilledOpening(env Env) ([]string, error) {
+	entries, err := env.Ledger.EntriesOn(env.Day)
+	if err != nil {
+		return nil, err
+	}
+	var symbols []string
+	for _, o := range entries {
+		if o.IsDryRun() || !o.IsDead() || o.Condition != domain.ConditionOpening {
+			continue
+		}
+		if o.Status == string(domain.OrderStatusExpired) || o.Status == string(domain.OrderStatusCancelled) {
+			symbols = append(symbols, o.Symbol)
+		}
+	}
+	return symbols, nil
+}
+
 // EntryRequest は建てる注文。ロング（BUY）は現物か信用買い、ショート（SELL）は信用新規売り。
 //
 // preopen が真（寄る前の回）で、その脚が execution.preopen_legs に挙がっていれば**寄成**
 // にする。寄成はその銘柄の始値を決める板寄せに参加するので、寄った後の値を追わずに始値で建つ。
 // 9:00 以降の回は preopen が偽で、従来どおりザラ場の成行。
+//
+// execution.preopen_limit_pct が正なら、ロングの寄成を**寄指**（指値 × 寄付）にする。始値が指値より
+// 下のときだけ始値で約定するので、「深く見えたのに浅く寄った銘柄」を買わずに済む。指値を作れない
+// （前日終値が無い・呼値に丸められない）ときは寄成のまま出す——今の本番の動きに戻るだけ。
 func EntryRequest(pick selection.Pick, day time.Time, cfg config.Config, attempt int, preopen bool) domain.OrderRequest {
 	// 前回が拒否されていたら種を変える（同じ ID はブローカーが弾く）。attempt 0 は従来と同じ ID
 	seed := "daytrade|" + day.Format(cli.DateLayout)
@@ -202,22 +230,47 @@ func EntryRequest(pick selection.Pick, day time.Time, cfg config.Config, attempt
 	}
 	gap, _ := pick.Gap.Float64()
 	condition := domain.ConditionNone
+	orderType := domain.OrderTypeMarket
+	var limit *decimal.Decimal
 	if preopen && cfg.Execution.PreopenFor(pick.Side) {
 		condition = domain.ConditionOpening
-		action += "（寄成）"
+		if price, ok := OpeningLimitPrice(pick, cfg); ok {
+			orderType, limit = domain.OrderTypeLimit, &price
+			action += fmt.Sprintf("（寄指 %s）", price.String())
+		} else {
+			action += "（寄成）"
+		}
 	}
 	return domain.OrderRequest{
 		ClientOrderID: domain.MakeClientOrderID(seed, pick.Symbol, pick.Side, pick.Quantity),
 		Symbol:        pick.Symbol,
 		Side:          pick.Side,
-		OrderType:     domain.OrderTypeMarket,
+		OrderType:     orderType,
 		Quantity:      pick.Quantity,
+		LimitPrice:    limit,
 		TaxType:       cfg.Execution.TaxAccountType,
 		Reason: fmt.Sprintf("%s %s gap %s #%d %s",
 			cfg.StrategyName(), day.Format(cli.DateLayout), cli.Pct(gap), pick.Rank, action),
 		Trade:     trade,
 		Condition: condition,
 	}
+}
+
+// OpeningLimitPrice は寄指の指値: 前日終値 × (1 − preopen_limit_pct/100) を呼値に切り下げた値。
+// 寄指にしない設定・脚、または指値を作れないときは ok = false（呼ぶ側は寄成のまま出す）。
+//
+// 呼値は TOPIX500 でない刻み（粗いほう）で切り下げる。粗い刻みの値は細かい刻みでも有効な値段で、
+// 買いの指値が数円低くなるだけ（daytrade は TOPIX500 の一覧を持っていない）。
+func OpeningLimitPrice(pick selection.Pick, cfg config.Config) (decimal.Decimal, bool) {
+	if !cfg.Execution.PreopenLimitFor(pick.Side) || !pick.PrevClose.IsPositive() {
+		return decimal.Zero, false
+	}
+	raw := pick.PrevClose.Mul(decimal.NewFromInt(100).Sub(cfg.Execution.PreopenLimitPct)).Div(decimal.NewFromInt(100))
+	price, err := marketrules.SnapToTick(raw, pick.Side, false, marketrules.RoundingConservative)
+	if err != nil || !price.IsPositive() {
+		return decimal.Zero, false
+	}
+	return price, true
 }
 
 // EntryTrade はその脚を建てるときの売買区分。

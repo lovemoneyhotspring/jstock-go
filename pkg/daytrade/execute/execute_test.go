@@ -1088,3 +1088,77 @@ func TestRefreshEntriesKeepsExitFillWhenLookupShrinks(t *testing.T) {
 		t.Errorf("台帳の約定数量 = %s, want 60 のまま", o.FilledQuantity)
 	}
 }
+
+// preopen_limit_pct が正なら、寄る前の回のロングは寄指（指値 × 寄付）になる。指値は
+// 前日終値 × (1 − x%) を呼値に切り下げた値。ショート・寄った後の回・前日終値なしは従来のまま。
+func TestEntryRequestOpeningLimit(t *testing.T) {
+	cfg := config.Default()
+	cfg.Margin.Enabled = true
+	cfg.Execution.EntryWindow = []string{"08:59", "09:15"}
+	cfg.Execution.PreopenLegs = config.PreopenLegsBoth
+	cfg.Execution.PreopenLimitPct = decimal.RequireFromString("0.5")
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	long := EntryRequest(pick("7203", domain.SideBuy), day, cfg, 0, true)
+	// 1030 × 0.995 = 1024.85 → 1 円刻みで切り下げ
+	if long.OrderType != domain.OrderTypeLimit || long.LimitPrice == nil || !long.LimitPrice.Equal(decimal.NewFromInt(1024)) {
+		t.Fatalf("寄指の種別・指値 = %s / %v, want LIMIT / 1024", long.OrderType, long.LimitPrice)
+	}
+	if long.Condition != domain.ConditionOpening || !strings.Contains(long.Reason, "寄指 1024") {
+		t.Errorf("執行条件 = %q、理由 = %q", long.Condition, long.Reason)
+	}
+
+	short := EntryRequest(pick("9984", domain.SideSell), day, cfg, 0, true)
+	if short.OrderType != domain.OrderTypeMarket || short.LimitPrice != nil || short.Condition != domain.ConditionOpening {
+		t.Errorf("ショートは寄成のまま: %s / %v / %q", short.OrderType, short.LimitPrice, short.Condition)
+	}
+	later := EntryRequest(pick("7203", domain.SideBuy), day, cfg, 0, false)
+	if later.OrderType != domain.OrderTypeMarket || later.LimitPrice != nil || later.Condition != domain.ConditionNone {
+		t.Errorf("寄った後の回はザラ場の成行のまま: %s / %v / %q", later.OrderType, later.LimitPrice, later.Condition)
+	}
+	noPrev := pick("7203", domain.SideBuy)
+	noPrev.PrevClose = decimal.Zero
+	fallback := EntryRequest(noPrev, day, cfg, 0, true)
+	if fallback.OrderType != domain.OrderTypeMarket || fallback.LimitPrice != nil || fallback.Condition != domain.ConditionOpening {
+		t.Errorf("前日終値が無ければ寄成で出す: %s / %v / %q", fallback.OrderType, fallback.LimitPrice, fallback.Condition)
+	}
+}
+
+// 指値に届かず失効した寄指は使った枠に数える（後の回が成行で埋め直さない）。拒否は従来どおり埋め直す。
+func TestPlacedTodayCountsLapsedOpeningAsUsed(t *testing.T) {
+	env, _ := newEnv(t)
+	env.Cfg.Margin.Enabled = true
+	env.Cfg.Execution.EntryWindow = []string{"08:59", "09:15"}
+	env.Cfg.Execution.PreopenLegs = config.PreopenLegsLong
+	env.Cfg.Execution.PreopenLimitPct = decimal.RequireFromString("0.5")
+	env.Preopen = true
+	b := &stubBroker{balance: richBalance()}
+	if _, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)}); err != nil || len(failures) != 0 {
+		t.Fatalf("failures=%v err=%v", failures, err)
+	}
+	if b.placed[0].OrderType != domain.OrderTypeLimit || b.placed[0].Condition != domain.ConditionOpening {
+		t.Fatalf("送った注文 = %s / %q, want LIMIT / OPENING", b.placed[0].OrderType, b.placed[0].Condition)
+	}
+	if err := env.Ledger.UpdateStatus(b.placed[0].ClientOrderID, domain.OrderStatusExpired, decimal.Zero, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	placed, err := PlacedToday(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if placed.Long != 1 || placed.Symbols["7203"] != domain.SideBuy {
+		t.Errorf("失効した寄指が枠に数えられていない: long=%d symbols=%v", placed.Long, placed.Symbols)
+	}
+	if unfilled, err := UnfilledOpening(env); err != nil || len(unfilled) != 1 || unfilled[0] != "7203" {
+		t.Errorf("UnfilledOpening = %v, %v", unfilled, err)
+	}
+
+	if err := env.Ledger.UpdateStatus(b.placed[0].ClientOrderID, domain.OrderStatusRejected, decimal.Zero, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if placed, _ = PlacedToday(env); placed.Long != 0 {
+		t.Errorf("拒否された寄指は埋め直す: long=%d", placed.Long)
+	}
+}

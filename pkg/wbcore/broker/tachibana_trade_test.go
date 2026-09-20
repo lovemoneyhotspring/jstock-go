@@ -285,6 +285,20 @@ func TestOrderPayloadOpeningCondition(t *testing.T) {
 		}
 	}
 
+	// 寄指は「指値（sOrderPrice = 指値）× 執行条件 寄付（sCondition = 2）」。値段と執行条件は別の項目
+	limitPrice := dec("1024")
+	limit := opening
+	limit.OrderType, limit.LimitPrice = domain.OrderTypeLimit, &limitPrice
+	params, err = b.orderPayload(limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{"sCondition": "2", "sOrderPrice": "1024"} {
+		if params[key] != want {
+			t.Errorf("寄指: %s = %v, want %v", key, params[key], want)
+		}
+	}
+
 	// 引けは「成行（sOrderPrice = 0）× 執行条件 引け（sCondition = 4）」。保険の手仕舞いが使う
 	closing, err := base.WithCondition(domain.ConditionClosing)
 	if err != nil {

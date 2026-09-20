@@ -103,6 +103,14 @@ func (o Order) IsDead() bool {
 	return dead
 }
 
+// IsLapsedOpening は寄付条件の注文が**約定せずに失効した**か（指値に届かなかった寄指）。
+//
+// 拒否（REJECTED）とは別物——電文は通り、板寄せにも参加したうえで「始値が指値より上だった」という
+// 正常な結果。open はこの枠を埋め直さず、close は失敗でなく記録として知らせる。
+func (o Order) IsLapsedOpening() bool {
+	return o.IsDead() && o.Condition == domain.ConditionOpening && o.Status == string(domain.OrderStatusExpired)
+}
+
 // IsEntry は建てる側の注文か（現物の買い、信用の新規建て）。手仕舞う側なら偽。
 func (o Order) IsEntry() bool {
 	switch o.Trade {

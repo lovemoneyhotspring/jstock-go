@@ -130,6 +130,12 @@ func printPreopenNote(cfg dtconfig.Config) {
 		"寄付のスプレッド %s bp を払っていません\n", cfg.Execution.PreopenLegs, cfg.Execution.SpreadBPOpen.String())
 	fmt.Println("      8:59 台の気配と始値の誤差も入っていないので上限側の数字です。" +
 		`preopen_legs = "none" の結果（結果.csv の過去の行）とは物差しが違います`)
+	if cfg.Execution.PreopenLimitPct.IsPositive() {
+		// backtest の約定は「必ず始値で建つ」。寄指の「始値が指値より上なら約定しない」は入っていない
+		fmt.Printf("注意: execution.preopen_limit_pct = %s（寄指）は backtest に入っていません。"+
+			"選んだ銘柄は全部が始値で建つ想定のままです（寄指の模擬は test/dt_limit_breakeven.py）\n",
+			cfg.Execution.PreopenLimitPct.String())
+	}
 }
 
 func printBacktest(cfg dtconfig.Config, result *dtbacktest.Result, start, end time.Time, showTrades bool) {
