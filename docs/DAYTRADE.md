@@ -11,6 +11,12 @@
 **ギャップ（寄付 ÷ 前日終値 − 1）が負の銘柄を並べた上位 N 銘柄**を成行で買い、15:20 以降の成行売りで
 手仕舞う（15:25 以降ならクロージング・オークションで引け値）。持ち越さない。
 
+**2026-09-20 から並べ方は gap_vol（ギャップ ÷ 20 日ボラの小さい順）で、米国小幅高の日は両脚とも休む**
+（`signal.rank_by = "gap_vol"`、`regime.us_skip_legs = "all"`。この 2 つは組で変える）。寄る前の気配（8:59:45）で
+並べる形では、気配の誤差で LightGBM の優位が消えるため（vault `20-research/2026-09-jp-daytrade-rankby-preopen-fair`）。
+LightGBM の予測値は順位表に残らなくなるが、気配（`quotes`）と母集団（`plan`）の履歴から `test/dt_live_shadow.py` で並べ直せる。
+以下は LightGBM で並べていた期間（2026-09-18〜19 の設定）の説明で、`rank_by = "lgbm"` に戻せばそのまま当てはまる。
+
 並べ方は 2026-09-18 から **LightGBM の予測値の高い順**（`signal.rank_by = "lgbm"`、`pkg/daytrade/rerank`）。
 それまでは gap_vol（ギャップ ÷ 20 日ボラの小さい順）。候補・帯・N の取り方・業種の上限・配分は変わらず、
 並べる順番だけが変わる。gap_vol の順位と「gap_vol なら選んだ銘柄」は順位表の履歴に毎日残す（下記「履歴」）。
@@ -356,7 +362,7 @@ open の要約は `short_paused = true` で `short_n` / `short_multiplier` は�
 | | `drift_days` / `drift_gate` / `drift_gap_override` | 市場の日中ドリフトのゲート（下記）。既定は無効 |
 | | `equity_curve_days` / `equity_curve_scale` | 戦略自身の直近 N 日の実現損益が 0 以下なら資金を `scale` 倍に縮める（既定 20 日・0.5）。scale 0 で休む |
 | | `us_skip_low` / `us_skip_high` / `us_vix_override` | 前夜の S&P500 が帯の中（既定 0〜+1%）で VIX ≤ 24 なら休む。`us_skip_high` 無しで無効 |
-| | `us_skip_legs` | 米国のゲートで休む脚。`all`（既定、両脚）/ `short`（ショートだけ休み、ロングは取引する）。本番は `short` |
+| | `us_skip_legs` | 米国のゲートで休む脚。`all`（既定、両脚）/ `short`（ショートだけ休み、ロングは取引する）。本番は 2026-09-20 から `all`（`rank_by = "gap_vol"` と組。`lgbm` に戻すなら `short`） |
 | | `shock_market_gap` / `shock_us_ret` | ショック日の条件: 9:00 の市場ギャップ／前夜の S&P500 がこれ以下（設定は −2% / −2%）。無ければ見ない |
 | | `shock_long_scale` / `shock_short_scale` | ショック日にロング／ショートの資金へ掛ける倍率（土台は 1 / 1 = 記録のみ、`config/daytrade_margin` は 1.5 / 0） |
 | `[execution]` | `quote_source` / `quote_file` | 気配の取得元 |
