@@ -120,7 +120,8 @@ func runOpen(opts openOptions) error {
 	if watchOnly {
 		fmt.Println("資金 0（max_capital = 0）: スクリーニングと候補の表示だけ行い、買いません")
 	}
-	if skipHolidayFor(day, "open", opts.live) {
+	cal, holiday := holidayCalendar(day, "open", opts.live)
+	if holiday || skipHalfDay(cal, cfg, day, "open") {
 		return nil
 	}
 	if opts.live && !opts.ignoreWindow && !cfg.Execution.InWindow("entry", now, jst) {

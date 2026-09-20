@@ -55,6 +55,7 @@ func newPlanCmd() *cobra.Command {
 				return crash("候補の作成", "daytrade.crash", err)
 			}
 			printPlan(p, cfg)
+			alertHalfDay(calendar.FromArchive(openArchive()), cfg, day)
 			warmUsmarket(cfg, day)
 			// 保証金は朝 8:53 の `daytrade warm-margin` で取る。前夜の値では代用有価証券の
 			// 評価替え（前営業日終値 × 掛目、夜間更新で確定）を取りこぼす

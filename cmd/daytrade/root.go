@@ -125,6 +125,13 @@ func skipHoliday(day time.Time, phase string) bool { return skipHolidayFor(day, 
 // （live）では見送る——祝日を営業日と読んで成行を出すと、翌営業日の寄りで約定しうる。
 // 代用のままにすると、年 16 日ある祝日に黙って注文を出す側に倒れる。
 func skipHolidayFor(day time.Time, phase string, live bool) bool {
+	_, skip := holidayCalendar(day, phase, live)
+	return skip
+}
+
+// holidayCalendar は skipHolidayFor の本体。読んだカレンダーも返す
+// （open が同じカレンダーで半日立会も見る。寄付の前に同じファイルを 2 度読まない）。
+func holidayCalendar(day time.Time, phase string, live bool) (*calendar.Calendar, bool) {
 	cal := calendar.FromArchive(openArchive())
 	if cal.Empty() {
 		logWarn("daytrade.calendar", "取引カレンダーが空（平日で代用）",
@@ -135,16 +142,47 @@ func skipHolidayFor(day time.Time, phase string, live bool) bool {
 			logError("daytrade.skip", "カレンダーが無いため見送り",
 				map[string]any{"reason": "no_calendar", "phase": phase, "day": day.Format(DateLayout)})
 			digest.Skipped("no_calendar")
-			return true
+			return cal, true
 		}
 	}
 	if cal.IsTradingDay(day) {
-		return false
+		return cal, false
 	}
 	fmt.Printf("%s は休場日。何もしません\n", day.Format(DateLayout))
 	logInfo("daytrade.skip", "休場日", map[string]any{"reason": "holiday", "phase": phase, "day": day.Format(DateLayout)})
 	digest.Skipped("holiday")
+	return cal, true
+}
+
+// skipHalfDay は半日立会（HolDiv = 2）の日なら真（建てない）。建てる経路（open）用。
+//
+// 手仕舞い（close）は execution.exit_window（15:20〜）を待つ。前場で引ける日に建てると、
+// close が動く頃には市場が閉じていて、当日の建玉が丸ごと持ち越しになる。時間帯を日ごとに
+// 動かすのは発注経路への影響が大きいので、その日は建てないだけにする（今の東証に半日立会は
+// 無く、来るとしても年に 1〜2 日）。手仕舞う側（close・guard・protect）は止めない
+// ——前日から持ち越した建玉があれば、いつもどおり返そうとする。
+//
+// 通知はここでは出さない（open は朝に 7 回走る）。前夜の plan が 1 回だけ知らせる。
+func skipHalfDay(cal *calendar.Calendar, cfg dtconfig.Config, day time.Time, phase string) bool {
+	if !cal.IsHalfDay(day) {
+		return false
+	}
+	fmt.Printf("%s は半日立会。手仕舞い（%s）の前に引けるので建てません\n", day.Format(DateLayout), describeWindow(cfg, "exit"))
+	logWarn("daytrade.skip", "半日立会のため見送り",
+		map[string]any{"reason": "half_day", "phase": phase, "day": day.Format(DateLayout)})
+	digest.Skipped("half_day")
 	return true
+}
+
+// alertHalfDay は判定日が半日立会なら、前夜のうちに 1 回だけ知らせる（plan 用）。
+func alertHalfDay(cal *calendar.Calendar, cfg dtconfig.Config, day time.Time) {
+	if !cal.IsHalfDay(day) {
+		return
+	}
+	fmt.Printf("%s は半日立会。open は建てません\n", day.Format(DateLayout))
+	logWarn("daytrade.half_day", "判定日は半日立会（open は建てない）", map[string]any{"day": day.Format(DateLayout)})
+	alert("デイトレ: "+day.Format(DateLayout)+" は半日立会のため建てません",
+		"手仕舞い（"+describeWindow(cfg, "exit")+"）の前に引けるので、open は見送ります。持ち越しの建玉がある場合は手で返済してください")
 }
 
 // connectBroker は設定のブローカーに繋ぐ（部品は wbcore/cli）。

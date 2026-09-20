@@ -180,7 +180,8 @@ jq -c 'select(.verify)' state/digest/prod-2026-09-06.jsonl
 | `daytrade.pending_ambiguous` | 同じ銘柄・売買で数量か区分の違う未帰属の注文があり、自動で決められない（通知も送る）。`PENDING` のまま残り、その銘柄はその日は触らない。ダイジェストの `pending_ambiguous` に件数。AI はこの行だけで修復できる（`docs/FEEDBACK.md`「自己修復の手順」） | 同上＋ `placed_at`, `candidates[]`（`broker_order_id`, `quantity`, `trade`, `status`, `filled`, `created_at`）, `fix`（実行する `pending resolve` の雛形） |
 | `daytrade.pending_unresolved` | 当日の注文一覧を照会できず判定を持ち越した。open は発注しない（次の cron で再判定）。close は当日の手仕舞いを続ける（判定できなかった建玉は `daytrade.unconfirmed` に出る） | `error` |
 | `daytrade.exit_refresh` | close の 2 回目以降（15:24・15:28）が、前の回に受理された手仕舞いを照会できなかった、または照会の約定数量が台帳より少なかった（書き戻さない）。発注済みとして数えたまま（重ねて出さない）。残っていれば 15:40 の verify が持ち越しとして知らせる | `symbol`, `client_order_id`, `error` |
-| `daytrade.skip` | 何もしなかった | `reason`（`disabled` / `holiday` / `no_calendar` / `window` / `regime` / `already` / `no_quotes` / `no_picks` / `no_capital` / `no_buys` / `nothing_to_sell`）と付随項目 |
+| `daytrade.skip` | 何もしなかった | `reason`（`disabled` / `holiday` / `half_day` / `no_calendar` / `window` / `regime` / `already` / `no_quotes` / `no_picks` / `no_capital` / `no_buys` / `nothing_to_sell`）と付随項目 |
+| `daytrade.half_day`（warn） | 判定日が半日立会（カレンダーの `HolDiv = 2`）。手仕舞い（`exit_window`、15:20〜）の前に引けるので `open` は建てない（`daytrade.skip` の `half_day`、warn）。前夜の `plan` がこのコードと運用通知を 1 回出す。手仕舞う側（`close`・`guard`・`protect`）は止めない。今の東証に半日立会は無い | `day` |
 | `daytrade.calendar`（warn） | 取引カレンダーが空（取り込みが無い・壊れた）。発注する回（`--live`）は休場か分からないので見送る（`daytrade.skip` の `no_calendar`）。発注しない回は平日で代用して続ける | `phase`, `day`, `live` |
 | `daytrade.signal`（warn） | 打ち切り（SIGTERM。`deploy/with-lock.sh` の時間切れ）を受け、実行品質（滑り）の記録を書き出して終了した | `signal` |
 | `daytrade.pnl_incomplete` | 資産曲線の評価で、売りの約定単価が確定していない日を除いた | `days` |
