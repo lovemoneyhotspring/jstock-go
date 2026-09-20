@@ -12,15 +12,18 @@ func TestPreflightProblemsRunsEveryCheck(t *testing.T) {
 	ok := func() error { ran++; return nil }
 	bad := func() error { ran++; return errors.New("unknown field \"x\"") }
 
-	problems := preflightProblems("2026-09-24", bad, ok, bad, ok)
+	problems, codes := preflightProblems("2026-09-24", bad, ok, bad, ok)
 	if ran != 4 {
 		t.Errorf("回った点検 = %d, want 4（途中で止めない）", ran)
 	}
 	if len(problems) != 2 || !strings.Contains(problems[0], "deploy/build.sh") || !strings.Contains(problems[1], "台帳") {
 		t.Errorf("problems = %v", problems)
 	}
-	if got := preflightProblems("2026-09-24", ok, ok, ok, ok); len(got) != 0 {
-		t.Errorf("問題なしなのに %v", got)
+	if strings.Join(codes, ",") != "config,ledger" {
+		t.Errorf("codes = %v, want config,ledger", codes)
+	}
+	if got, gotCodes := preflightProblems("2026-09-24", ok, ok, ok, ok); len(got) != 0 || len(gotCodes) != 0 {
+		t.Errorf("問題なしなのに %v %v", got, gotCodes)
 	}
 }
 

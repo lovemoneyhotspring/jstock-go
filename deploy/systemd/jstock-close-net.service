@@ -1,0 +1,13 @@
+[Unit]
+Description=jstock-go: cron の close が走っていなければ代わりに手仕舞う（安全網）
+# cron とは別系統。マシンが生きていれば、cron・crontab が壊れていても引けの手仕舞いに間に合う
+
+[Service]
+Type=oneshot
+WorkingDirectory=@HOME_DIR@
+Environment=WBJP_HOME=@HOME_DIR@
+Environment=WBJP_ENV=prod
+Environment=PATH=@PATH@
+ExecStart=@HOME_DIR@/deploy/close-net.sh
+# with-lock.sh の打ち切り（170 秒）より少し長く
+TimeoutStartSec=240

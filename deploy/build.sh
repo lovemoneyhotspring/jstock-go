@@ -26,6 +26,12 @@ for cmd in "${cmds[@]}"; do
   echo "building $cmd..."
   go build -trimpath -o "$BIN_DIR/.$cmd.new" "./cmd/$cmd"
 done
+# 差し替える前に、いまの実行ファイルを 1 世代だけ $BIN_DIR/.prev に残す（ハードリンクなので容量は増えない）。
+# 新しい実行ファイルが動かないとき deploy/rollback-bin.sh が戻す
+mkdir -p "$BIN_DIR/.prev"
+for cmd in "${cmds[@]}"; do
+  [ -f "$BIN_DIR/$cmd" ] && ln -f "$BIN_DIR/$cmd" "$BIN_DIR/.prev/$cmd"
+done
 for cmd in "${cmds[@]}"; do
   mv -f "$BIN_DIR/.$cmd.new" "$BIN_DIR/$cmd"
 done

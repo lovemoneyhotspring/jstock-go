@@ -1,0 +1,13 @@
+[Unit]
+Description=jstock-go: crontab の復元と寄る前の自動復旧
+# cron とは別系統。crontab が消えていれば控えから戻し、8 時台なら寄る前の点検が落ちたときに直す
+
+[Service]
+Type=oneshot
+WorkingDirectory=@HOME_DIR@
+Environment=WBJP_HOME=@HOME_DIR@
+Environment=WBJP_ENV=prod
+Environment=PATH=@PATH@
+ExecStart=@HOME_DIR@/deploy/guard-preopen.sh
+# 作り直し（deploy/build.sh）に 1〜2 分かかりうる
+TimeoutStartSec=600
