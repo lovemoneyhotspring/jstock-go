@@ -189,6 +189,29 @@ func TestArgumentErrorOnNewOrderIsNotSentAndKeepsSession(t *testing.T) {
 	}
 }
 
+// 6（p_no の逆転）: p_no の検査は受付より前。発注は「送っていない」。セッションは捨てない。
+func TestPNoOrderErrorOnNewOrderIsNotSentAndKeepsSession(t *testing.T) {
+	b, fake := newFixtureBroker(t)
+	if _, err := b.postRequest(clmBalanceSummary, nil); err != nil {
+		t.Fatal(err)
+	}
+	fake.failNext, fake.failErrno = 1, pErrnoPNoOrder
+	_, err := b.Place(cashOrderRequest("c1"))
+	var notSent *ErrNotSent
+	if !errors.As(err, &notSent) {
+		t.Fatalf("p_no の逆転が ErrNotSent でない: %v", err)
+	}
+	if fake.countCLM(clmNewOrder) != 1 {
+		t.Errorf("発注が送り直されている: %v", fake.clmIDs)
+	}
+	if _, ok := readSessionFile(b.sessionFilePath()); !ok {
+		t.Error("p_no の逆転でセッションを捨てている")
+	}
+	if fake.logins != 1 {
+		t.Errorf("logins=%d（再ログインは不要）", fake.logins)
+	}
+}
+
 // -62（時間外）: 送り直さず、セッションも捨てない。
 func TestOutsideHoursKeepsSessionAndDoesNotResend(t *testing.T) {
 	b, fake := newFixtureBroker(t)
