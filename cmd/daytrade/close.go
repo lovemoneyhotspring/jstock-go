@@ -14,7 +14,6 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/execution"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 )
@@ -80,11 +79,13 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 	}
 	led.Verify = brokerVerify
 	defer led.Close()
-	defer func() {
-		if err := execution.Flush(historyStore(), day); err != nil {
-			logWarn("daytrade.execution", "実行品質の記録に失敗", map[string]any{"error": err.Error()})
-		}
-	}()
+	defer flushExecution(day)
+	// with-lock.sh の打ち切り（SIGTERM）でも記録・保留した通知・ダイジェストを残す
+	defer flushOnSignal(day)()
+	// 運用通知は注文を出し切ってから送る（同期の HTTP を発注の前に挟まない。run.DeferAlerts）
+	if live {
+		run.DeferAlerts()
+	}
 
 	env := execute.Env{
 		Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout,
@@ -156,6 +157,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 	}
 
 	failures := execute.PlaceExits(env, b, targets)
+	run.FlushAlerts()
 	if len(failures) > 0 {
 		// 売れ残りは持ち越しになる。人が手で売る必要があるので必ず知らせる
 		alert(fmt.Sprintf("デイトレ: %d 件の手仕舞いが通らず（持ち越しの恐れ）", len(failures)),

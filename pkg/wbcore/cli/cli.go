@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
@@ -40,6 +41,11 @@ type Run struct {
 	Alerter func(title, body string, logger *logging.Logger) bool
 	// Verify は実機検証の実行か（--broker-verify）。SetVerify で立てる。
 	Verify bool
+
+	// 保留中の運用通知（DeferAlerts）。打ち切りのシグナルを受ける goroutine からも書き出すので鍵を掛ける。
+	alertMu     sync.Mutex
+	deferAlerts bool
+	queued      [][2]string // 題・本文
 }
 
 // SetVerify はこの実行を実機検証として印を付ける（docs/BROKER_VERIFY.md）。
@@ -93,6 +99,9 @@ func (r *Run) Finish(err error) {
 	if ferr := digest.Flush(); ferr != nil {
 		fmt.Fprintf(os.Stderr, "[warn] ダイジェストを書けません: %v\n", ferr)
 	}
+	// 保留したままの通知を落とさない（途中のエラーで FlushAlerts まで届かなかった回）。
+	// ダイジェストの後——打ち切りの後始末では SIGKILL まで時間が無く、通知は遅いことがある
+	r.FlushAlerts()
 	if r.Logger != nil {
 		_ = r.Logger.Close()
 	}
@@ -118,10 +127,53 @@ func (r *Run) Error(code, msg string, extra ...map[string]any) {
 
 // Alert は運用通知。送り先が未設定か届かなかったときは警告ログに残す
 // （通知は「落ちた」ことを人に届ける最後の経路なので、届かなかった事実を黙らせない）。
+//
+// DeferAlerts の後は貯めるだけで、送るのは FlushAlerts。
 func (r *Run) Alert(title, body string) {
 	if r == nil {
 		return
 	}
+	r.alertMu.Lock()
+	if r.deferAlerts {
+		r.queued = append(r.queued, [2]string{title, body})
+		r.alertMu.Unlock()
+		// 送るのが後になっても、起きた時刻はログに残す
+		r.Info("cli.alert_deferred", "運用通知を保留（発注の後に送る）", map[string]any{"title": title})
+		return
+	}
+	r.alertMu.Unlock()
+	r.sendAlert(title, body)
+}
+
+// DeferAlerts は以降の Alert を貯め、FlushAlerts（か Finish）でまとめて送る。
+//
+// 通知は同期の HTTP（1 通 15 秒 × 3 回まで）で、発注の前に挟まると Discord が遅い日に注文が
+// その分だけ遅れる——15:28 の回の返済なら 15:30 を越える。発注の経路は先に注文を出し切り、
+// 通知は後ろへ回す。
+func (r *Run) DeferAlerts() {
+	if r == nil {
+		return
+	}
+	r.alertMu.Lock()
+	r.deferAlerts = true
+	r.alertMu.Unlock()
+}
+
+// FlushAlerts は保留した通知を順に送り、以降の Alert を即時に戻す。何度呼んでもよい。
+func (r *Run) FlushAlerts() {
+	if r == nil {
+		return
+	}
+	r.alertMu.Lock()
+	queued := r.queued
+	r.queued, r.deferAlerts = nil, false
+	r.alertMu.Unlock()
+	for _, a := range queued {
+		r.sendAlert(a[0], a[1])
+	}
+}
+
+func (r *Run) sendAlert(title, body string) {
 	alerter := r.Alerter
 	if alerter == nil {
 		alerter = notify.Alert

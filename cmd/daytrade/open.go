@@ -97,6 +97,11 @@ func runOpen(opts openOptions) error {
 	// 保証金で建玉の上限を安全側へ寄せる（下げ方向のみ）。前夜に plan が焼いたキャッシュを
 	// 読むだけなので、ここでブローカーには繋がない。取れない朝は設定の値のまま建てる。
 	// **watchOnly の判定より前**でなければ、下げた結果が今日の判断に効かない
+	// 運用通知は同期の HTTP。発注の前に挟むと Discord が遅い日に注文が遅れるので、
+	// 注文を出し切ってから送る（途中で抜けた回は run.Finish が送る）
+	if opts.live {
+		run.DeferAlerts()
+	}
 	cfg = applyMarginCap(cfg, day)
 	watchOnly := cfg.Capital.Positions() == 0
 	// 締め切り: 時間帯の終わり（live のとき）と開始 + max_run_seconds の早い方。
@@ -601,6 +606,7 @@ func runOpen(opts openOptions) error {
 			"age_ms": age.Milliseconds(), "reused": env.RefPrices != nil, "picks": len(picks)})
 	}
 	orders, failures, err := execute.PlacePicks(env, b, picks)
+	run.FlushAlerts()
 	if err != nil {
 		return err
 	}
@@ -724,9 +730,11 @@ func flushExecution(day time.Time) {
 	}
 }
 
-// flushOnSignal は打ち切り（SIGTERM / Ctrl-C）を受けたら実行品質の記録を書き出して終える。
-// 返り値を defer で呼んで後始末する。売買そのものは止めない——記録は付帯物で、
-// 送信済みの注文は台帳の PENDING から次の回が判定する。
+// flushOnSignal は打ち切り（SIGTERM / Ctrl-C）を受けたら、貯めた実行品質の記録・保留した通知・
+// ダイジェストを書き出して終える。with-lock.sh の打ち切りでは defer が走らないので、何もしないと
+// 固まった回の記録が丸ごと消える。返り値を defer で呼んで後始末する。売買そのものは止めない
+// ——記録は付帯物で、送信済みの注文は台帳の PENDING から次の回が判定する。
+// 人への通知は with-lock.sh の側（WITH_LOCK_NOTIFY）。SIGKILL まで 10 秒しか無い。
 func flushOnSignal(day time.Time) (stop func()) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGTERM, os.Interrupt)
@@ -734,9 +742,10 @@ func flushOnSignal(day time.Time) (stop func()) {
 	go func() {
 		select {
 		case sig := <-ch:
-			logWarn("daytrade.signal", "打ち切りを受けたので実行品質の記録を書き出して終了",
+			logWarn("daytrade.signal", "打ち切りを受けたので記録を書き出して終了",
 				map[string]any{"signal": sig.String()})
 			flushExecution(day)
+			run.Finish(fmt.Errorf("打ち切り（%s）", sig))
 			os.Exit(143)
 		case <-done:
 		}

@@ -7,6 +7,7 @@
 #   - 開始の分は互いにずらす（J-Quants のレート制限と、同じファイルへの同時書き込みを避ける）
 #   - flock -n で同じジョブの重なりを防ぐ。発注経路（daytrade snap / open / close / verify）は
 #     deploy/with-lock.sh 経由——ロックを取れずに見送った回もログに残す
+#     open / guard / close / verify は WITH_LOCK_NOTIFY=1——打ち切りと見送りを Discord にも知らせる
 #   - --live が無い行は判断と記録だけで注文を出さない（dry-run）
 #   - 実行の要約は state/digest/<env>-<日付>.jsonl に 1 行ずつ溜まる（docs/FEEDBACK.md）
 #
@@ -242,9 +243,9 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 既に寄った銘柄に約定しないため。実測 4〜9 秒で終わるので 15 秒あれば足りる。
 # 送れなかった分は下の 9:00:03 からの回が「残りの枚数」を従来のザラ場の成行で埋める。
 # 8:59 の snap は 8:59:35（slot 085935）へ前倒しし、この回にロックを明け渡している
-59 8 * * 1-5          cd $WBJP_HOME && sleep 45 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 5 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
-0,1,3,6,9,13 9 * * 1-5 cd $WBJP_HOME && sleep 3 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
-0 9 * * 1-5           cd $WBJP_HOME && sleep 25 && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
+59 8 * * 1-5          cd $WBJP_HOME && sleep 45 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 5 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
+0,1,3,6,9,13 9 * * 1-5 cd $WBJP_HOME && sleep 3 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
+0 9 * * 1-5           cd $WBJP_HOME && sleep 25 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
 # --- dry-run の open（2026-09-11〜）。--live / --yes が無いので**注文は出ない**。
 # 実際の気配で銘柄選定・株数・鮮度判定まで通し、判断の記録（ranking / open_run）を残す。
 # 信用取引口座が未開設なので発注はそもそもできない。口座が開いて実機検証が済んだら
@@ -254,17 +255,17 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 9:16〜15:16 の 10 分おき（news sync の 2 分後）: 材料（TOB など）の出た今日の売建を処置する。
 # 未約定なら取消、一部約定なら残りを取消して約定分を返済買い、全部約定なら返済買い。
 # 今日の売建が無い日は台帳を見るだけで終わる（ブローカーに接続しない）。窓は guard_window（〜15:19）
-16,26,36,46,56 9 * * 1-5     cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
-6,16,26,36,46,56 10-14 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
-6,16 15 * * 1-5              cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
+16,26,36,46,56 9 * * 1-5     cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
+6,16,26,36,46,56 10-14 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
+6,16 15 * * 1-5              cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-guard.log $WBJP_BIN/daytrade guard  --config-dir config/daytrade_margin --live --yes
 # 15:20・15:24・15:28: 当日建てた分を返済（1 回目で済めば以降は何もしない）
-20,24,28 15 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-close.log $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin --live --yes
+20,24,28 15 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-close.log $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin --live --yes
 # --- dry-run の close / verify（2026-09-11〜）。--live が無いので**注文は出ない**。
 # 引け後の経路（手仕舞いの判断・注文照会）を本番の時間帯で動かして、実機でしか
 # 出ないエラーを拾う。建玉が無い日は「売る対象なし」で正常終了する
 #20,24,28 15 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-close-dryrun.log $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin
 # 15:40: 返済が全部約定したかを照会し、持ち越しを通知
-40 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-verify.log $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin
+40 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-verify.log $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin
 #40 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-verify-dryrun.log $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin
 # スイング売買（日足・大引け後 1 回で足りるが、固定間隔でも無害）
 #*/20 * * * *        cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  $WBJP_BIN/wbjp  run --config-dir config --live --yes >> state/logs/wbjp-run.log  2>&1

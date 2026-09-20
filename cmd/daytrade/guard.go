@@ -12,7 +12,6 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/execution"
 	"github.com/spf13/cobra"
 )
 
@@ -75,11 +74,13 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 		return err
 	}
 	defer led.Close()
-	defer func() {
-		if err := execution.Flush(historyStore(), day); err != nil {
-			logWarn("daytrade.execution", "実行品質の記録に失敗", map[string]any{"error": err.Error()})
-		}
-	}()
+	defer flushExecution(day)
+	// with-lock.sh の打ち切り（SIGTERM）でも記録・保留した通知・ダイジェストを残す
+	defer flushOnSignal(day)()
+	// 運用通知は注文を出し切ってから送る（同期の HTTP を発注の前に挟まない。run.DeferAlerts）
+	if live {
+		run.DeferAlerts()
+	}
 	env := execute.Env{
 		Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout,
 		RetryWait: execute.DefaultRetryWait, Deadline: deadline,
@@ -175,6 +176,7 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 	}
 
 	actions, err := execute.GuardCorpEvents(env, b, marks)
+	run.FlushAlerts()
 	if err != nil {
 		return err
 	}

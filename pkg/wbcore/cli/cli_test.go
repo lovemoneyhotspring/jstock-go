@@ -299,3 +299,36 @@ func TestGuardedRecoversPanicAndAlerts(t *testing.T) {
 		t.Errorf("panicked=%v err=%v, want 元のエラー", panicked, err)
 	}
 }
+
+// DeferAlerts の後の通知は貯めるだけ。FlushAlerts で順に送り、以降は即時に戻る。
+// 途中で抜けた回は Finish が送る（落とさない）。
+func TestDeferAlertsQueuesUntilFlush(t *testing.T) {
+	defer digest.Reset()
+	defer logging.ResetRunContext()
+	s := &settings.AppSettings{Env: settings.EnvUAT, StateDir: t.TempDir(), LogDir: t.TempDir()}
+	run := StartRun("daytrade", s, "close")
+	var sent []string
+	run.Alerter = func(title, _ string, _ *logging.Logger) bool {
+		sent = append(sent, title)
+		return true
+	}
+
+	run.DeferAlerts()
+	run.Alert("一", "")
+	run.Alert("二", "")
+	if len(sent) != 0 {
+		t.Fatalf("保留中に送っている: %v", sent)
+	}
+	run.FlushAlerts()
+	run.Alert("三", "")
+	if strings.Join(sent, ",") != "一,二,三" {
+		t.Fatalf("sent = %v, want 一,二,三（順に・以降は即時）", sent)
+	}
+
+	run.DeferAlerts()
+	run.Alert("四", "")
+	run.Finish(nil)
+	if strings.Join(sent, ",") != "一,二,三,四" {
+		t.Errorf("sent = %v, want Finish が保留分を送る", sent)
+	}
+}
