@@ -984,7 +984,7 @@ func (t *TachibanaBroker) orderPayload(req domain.OrderRequest) (map[string]any,
 		"sIssueCode":                req.Symbol,
 		"sSizyouC":                  marketCodeTSE,
 		"sBaibaiKubun":              sideKubun,
-		"sCondition":                condition, // 0 指定なし / 2 寄付
+		"sCondition":                condition, // 0 指定なし / 2 寄付 / 4 引け
 		"sOrderPrice":               price,
 		"sOrderSuryou":              req.Quantity.String(),
 		"sGenkinShinyouKubun":       tradeKubun,

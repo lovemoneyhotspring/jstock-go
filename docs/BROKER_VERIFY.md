@@ -268,6 +268,7 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 | `CLMOrderListDetail`（前営業日の注文） | 持ち越しの判定（`execute.CarriedPositions`） | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
 | `CLMKabuNewOrder` の `sCondition = 2`（寄成） | 寄る前の発注（`execution.preopen_legs`。既定 `none` なので本番では出ていない） | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
 | 板寄せに**間に合わなかった**寄成（9:00:00 以降に届いた `sCondition = 2`）の行き先 | 寄成の締め切りは 9:00:00 ちょうど（`RunDeadline`）。気配の 1 本が遅れると 8:59:59 台に出る。拒否されるのか、後場寄り（12:30）の板寄せに回るのかを確かめる——後場寄りに回るなら検証していない時刻の建玉になるので、送信の締め切りを 8:59:57 へ詰める。close は板に残った建て注文を取り消す（`RefreshEntries`）ので持ち越しにはならない | [pkg/daytrade/config/config.go](../pkg/daytrade/config/config.go) `RunDeadline` |
+| `CLMKabuNewOrder` の `sCondition = 4`（引け）× 信用返済 | **保険の手仕舞い**（`execution.protect_exit`。既定 `false`）。手順は下の「引けの保険注文」 | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
 | `daytrade` の台帳を通した信用の 1 周 | `open` → `close` → `verify` | [pkg/daytrade/execute](../pkg/daytrade/execute) |
 
 信用建玉（行あり）・信用新規／返済の発注・信用返済の逆指値は 2026-09-14 に本番口座で確認済み（上の節）。
@@ -278,6 +279,39 @@ Go への移植時に項目名を取り違えていた（`aCLMKabuZan` / `sGenki
 
 項目名と区分コードの出所は、**削除済みの Python 実装**（`git show ac1eb7a:src/wbcore/broker/tachibana.py`）。
 Go への初回移植で推定に頼って多数取り違えたため、そこから写し直してある。
+
+## 引けの保険注文（`execution.protect_exit`）を実機で確かめる
+
+**何のためか。** 建てた玉に、執行条件「引け」（`sCondition = 4`）の返済・売りをブローカーへ先に置く
+（`daytrade protect`、9:20・10:20・13:20）。注文は立花に残るので、cron・マシン・ネットが止まっても
+引けで手仕舞われる。人が気づいて端末を打つ前提にしない安全網。ふだんの手仕舞いは 15:20 の成行のまま
+（引け値は 15:20 より両脚とも不利。分足の検証で合算 +525 万 → +470 万）で、close が保険を取り消してから
+成行を出す。**実機で確かめていないこと（すべて `false` の間は何も起きない）:**
+
+1. 信用返済（`sTatebiType = 1`・建玉個別指定）に `sCondition = 4` が通るか。拒否なら `protect` が通知を 1 通出し、
+   その日はもう置かない。売買は止まらない（close は従来どおり 15:20 に手仕舞う）
+2. 保険が**場中に約定してしまわないか**（引けの条件を成行と読み違える）。9:20 に置いた直後に約定したら、
+   その日の持ち時間が変わる（利益の源泉は寄り後〜15:20）。台帳・立花の約定一覧で確かめる
+3. 保険の取消が通り、返済できる建玉（`sTategyokuSuryou` の返済可能株数）が**元に戻る**か。
+   戻らないと 15:20 の成行が「返済できる建玉が 0 株」で拒否され、保険に任せる形になる（引け値で手仕舞い。
+   通知は出る）。取消の直後に建玉一覧を見て、返済可能株数が戻っているか確かめる
+4. 引けで約定した保険が、台帳（`queryFill`）と翌朝の持ち越し判定（`CarriedPositions`）で「手仕舞い済み」に
+   なるか
+
+**確かめ方（1 単元・1 日）。**
+
+```bash
+# 1. 有効にする（config/daytrade/daytrade.toml の protect_exit = true）→ deploy/build.sh
+# 2. 9:20 の cron の後（または手で）:
+WBJP_ENV=prod ./bin/daytrade protect --config-dir config/daytrade_margin --live --yes
+./bin/daytrade status --config-dir config/daytrade_margin   # 建玉と手仕舞いの注文
+# 3. 立花の注文一覧で 引け・返済の注文が「受付済み」で残っていること（約定していないこと）
+# 4. 15:20 の close の後: 保険が「取消済み」、成行の返済が約定していること
+# 5. 15:40 の verify が持ち越しなしで終わること
+```
+
+有効にした最初の日に `daytrade.protect`（発注）・`daytrade.protect_cancel`・`daytrade.protect_held`
+（取消を確かめられず保険に任せた）のログと通知が出る。出なければ何も起きていない。
 
 ## 設計: 分からないときは必ず止まる
 

@@ -88,7 +88,8 @@ func GuardPending(env Env, marks map[string]string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	exits, err := placedExits(env)
+	// 保険の引け注文は「済み」と数えない（返済は別に出す）ので、約定した売建は返済待ちとして残る
+	exits, err := placedExits(env, false)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +190,20 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 		return act
 	}
 
-	exits, err := placedExits(env)
+	// この銘柄の保険の引け注文が生きていれば先に取り消す（返済できる建玉を押さえていて、
+	// 通っても二重に返済する）。取り消せたと確かめられなければ返済を出さず、次の回で照会し直す
+	if b != nil {
+		held, err := ReleaseProtection(env, b, map[string]bool{o.Symbol: true})
+		if err != nil {
+			act.Err = err
+			return act
+		}
+		if reason, ok := held[o.Symbol+"|"+o.Leg()]; ok {
+			act.Err = fmt.Errorf("保険の引け注文を取り消せません（%s）。次の回で照会し直します", reason)
+			return act
+		}
+	}
+	exits, err := placedExits(env, false)
 	if err != nil {
 		act.Err = err
 		return act

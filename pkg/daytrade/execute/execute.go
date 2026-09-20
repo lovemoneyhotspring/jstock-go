@@ -801,6 +801,8 @@ type ExitTarget struct {
 	// なり「発注済み（冪等）」として送られず、黙って持ち越す。0 のときは種に入れない（従来と同じ ID）。
 	// 同じ状態での再実行は同じ値になるので冪等は保たれる。
 	AlreadyExited decimal.Decimal
+	// Protective は保険の手仕舞い（執行条件「引け」）。client_order_id の種を分け、条件を付ける。
+	Protective bool
 }
 
 // LiveEntries は今日の建玉のうち dry-run でないもの。dryRun は除いた数。
@@ -828,7 +830,12 @@ func LiveEntries(env Env) (entries []ledger.Order, dryRun int, err error) {
 //
 // 状態（ある／なし）でなく株数で持つのは、手仕舞いを出した後に建て注文の約定が増えた
 // （取消を確かめられないまま残りが約定した）ときに、増えた分を次の回が拾えるようにするため。
-func placedExits(env Env) (map[string]decimal.Decimal, error) {
+//
+// withProtection が偽なら、**生きている保険の手仕舞い**（引け。IsProtective）は数えない。
+// ふだんの手仕舞い（close・guard）は保険の注文と別に 15:20 の成行を出すので、保険を「済み」と
+// 数えると出さずに終わる。数えるのは保険を置く側（ProtectEntries）だけ。終わった保険
+// （引けで約定した・一部約定して取り消された）は約定した株数だけ数える。
+func placedExits(env Env, withProtection bool) (map[string]decimal.Decimal, error) {
 	all, err := env.Ledger.ExitsOn(env.Day)
 	if err != nil {
 		return nil, err
@@ -836,6 +843,9 @@ func placedExits(env Env) (map[string]decimal.Decimal, error) {
 	exits := map[string]decimal.Decimal{}
 	for _, o := range all {
 		if o.IsDryRun() || o.IsDead() {
+			continue
+		}
+		if !withProtection && o.IsProtective() && o.IsOpen() {
 			continue
 		}
 		key := o.Symbol + "|" + o.Leg()
@@ -869,11 +879,22 @@ func remainingToExit(exits map[string]decimal.Decimal, order ledger.Order, fille
 //
 // b が nil（dry-run）なら送信済み・送信中を全約定とみなして対象を示す。
 func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets []ExitTarget, unconfirmed []string, err error) {
-	exits, err := placedExits(env)
+	// 保険の手仕舞い（引け）が板に生きていれば、先に取り消す。生きたままだと返済できる建玉が
+	// その注文に押さえられていて 15:20 の成行が通らず、通ったとしても保険と二重に手仕舞う。
+	// 取り消せたと確かめられない銘柄は保険に任せる（引け値で手仕舞われる。二重に出さない）
+	held, err := ReleaseProtection(env, b, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	exits, err := placedExits(env, false)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, order := range entries {
+		if reason, ok := held[order.Symbol+"|"+order.Leg()]; ok {
+			env.printf("  %s: 保険の引け注文を取り消せません（%s）。引けの手仕舞いに任せます\n", order.Symbol, reason)
+			continue
+		}
 		// FILLED なのに約定数量が入っていない台帳行は注文数量とみなす（settledQuantity。0 と読むと
 		// 全部約定した建玉を「約定なし」として手仕舞わず、台帳外の掃除にも掛からず黙って持ち越す）
 		filled := settledQuantity(order)
@@ -1059,6 +1080,10 @@ func ExitRequestAs(target ExitTarget, day time.Time, cfg config.Config, attempt 
 	if target.Unrecorded {
 		kind = "daytrade-sweep"
 	}
+	condition := domain.ConditionNone
+	if target.Protective {
+		kind, condition = "daytrade-protect", domain.ConditionClosing
+	}
 	seed := fmt.Sprintf("%s|%s|%d", kind, day.Format(cli.DateLayout), attempt)
 	if target.AlreadyExited.IsPositive() {
 		seed += "|+" + target.AlreadyExited.String()
@@ -1072,7 +1097,8 @@ func ExitRequestAs(target ExitTarget, day time.Time, cfg config.Config, attempt 
 		TaxType:       cfg.Execution.TaxAccountType,
 		Reason: fmt.Sprintf("%s %s %s（%s）",
 			cfg.StrategyName(), day.Format(cli.DateLayout), phrase, action),
-		Trade: exitTrade,
+		Trade:     exitTrade,
+		Condition: condition,
 	}, action
 }
 

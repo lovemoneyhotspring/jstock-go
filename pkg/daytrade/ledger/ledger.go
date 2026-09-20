@@ -114,6 +114,11 @@ func (o Order) IsEntry() bool {
 	}
 }
 
+// IsProtective は**保険の手仕舞い**（執行条件「引け」の返済・売り。daytrade protect）か。
+// ブローカーに置いておく安全網で、ふだんの手仕舞いは 15:20 の成行（close が取り消して出し直す）。
+// 生きている間は「手仕舞い済み」と数えない（数えると 15:20 の成行が出ず、毎日引け値で手仕舞う）。
+func (o Order) IsProtective() bool { return o.IsExit() && o.Condition == domain.ConditionClosing }
+
 // IsExit は手仕舞う側の注文か。
 func (o Order) IsExit() bool { return !o.IsEntry() }
 

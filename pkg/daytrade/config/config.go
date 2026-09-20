@@ -349,6 +349,12 @@ type Execution struct {
 	// 9:00 以降の回は脚によらず従来の成行（もう板寄せは終わっているか、未寄付なら
 	// 成行でも板寄せに入る）。研究ノート vault 2026-09-jp-daytrade-preopen-order。
 	PreopenLegs string `toml:"preopen_legs"`
+	// ProtectExit は建てた玉に**保険の手仕舞い**（執行条件「引け」の返済・売り）をブローカーへ
+	// 先に置くか（daytrade protect）。注文はブローカーに残るので、cron・マシン・ネットが止まっても
+	// 引けで手仕舞われる。15:20 の close は保険の注文を取り消してから成行で手仕舞う（引け値は
+	// 15:20 の成行より不利なので、保険はふだん使わない）。既定は false（実機で未検証。
+	// docs/BROKER_VERIFY.md「引けの保険注文」）。
+	ProtectExit bool `toml:"protect_exit"`
 	// ExitWindow は手仕舞いの成行売りを出してよい時間帯（JST）。15:25 以降の注文は
 	// クロージング・オークションに回り引け値で約定する。
 	ExitWindow []string `toml:"exit_window"`
