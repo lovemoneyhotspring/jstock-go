@@ -31,7 +31,7 @@ WITH b AS (
   SELECT CAST(day AS DATE) d, slot, symbol, TRY_CAST(pPRP AS DOUBLE) pc,
          TRY_CAST(pQAP AS DOUBLE) ask, TRY_CAST(pQBP AS DOUBLE) bid
   FROM read_parquet('{BOOK}', union_by_name=true)
-  WHERE slot IN {SLOTS} AND CAST(day AS DATE) >= CAST(? AS DATE)),
+  WHERE slot IN ({', '.join('?' * len(SLOTS))}) AND CAST(day AS DATE) >= CAST(? AS DATE)),
 v AS (
   SELECT d, slot, symbol, pc,
          CASE WHEN ask > 0 AND bid > 0 THEN (ask + bid) / 2 WHEN ask > 0 THEN ask WHEN bid > 0 THEN bid END vis
@@ -57,7 +57,7 @@ def main():
     ap.add_argument("--since", default="2026-09-11")
     ap.add_argument("--daily", action="store_true", help="日ごとの行も出す")
     a = ap.parse_args()
-    df = duckdb.sql(SQL, params=[a.since, a.since]).df()
+    df = duckdb.sql(SQL, params=[*SLOTS, a.since, a.since]).df()
     if df.empty:
         print("板の記録と日足が揃った日がありません")
         return

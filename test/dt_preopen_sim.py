@@ -64,8 +64,6 @@ def error_pools(slot, since):
     pools = [err.loc[err["band"] == b, "e"].values for b in range(len(BANDS) - 1)]
     print(f"誤差の実測: slot {slot}、{err['d'].nunique()} 日、帯ごとの行数 {[len(p) for p in pools]}、"
           f"絶対誤差の中央値 {[round(float(np.median(np.abs(p))), 2) if len(p) else None for p in pools]}")
-    if min(len(p) for p in pools) == 0:
-        raise SystemExit("誤差の実測が 1 行も無い帯があります（記録の日数が足りない）")
     return pools
 
 
@@ -128,6 +126,9 @@ def main():
     model = train(df)
     te = df[(df["d"] >= TEST_START) & (df["d"].dt.month != 12)].copy()
     band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
+    # 候補に出てくる帯だけ見る（候補表を +3% で切っていれば最上位の帯は引かない）
+    if empty := [int(b) for b in np.unique(band) if len(pools[b]) == 0]:
+        raise SystemExit(f"誤差の実測が 1 行も無い帯があります: {empty}（記録の日数が足りない）")
 
     picks = []
     exact = seen(te, np.zeros(len(te)))
@@ -142,7 +143,7 @@ def main():
         for ranker in ("lgbm", "gap_vol"):
             picks.append(run(model, g, "preopen", ranker, s, False))
             if a.limit_on_open:
-                picks.append(run(model, g, "limit", ranker, s, True).assign(variant=f"limit/{ranker}"))
+                picks.append(run(model, g, "limit", ranker, s, True))
     p = pd.concat(picks, ignore_index=True)
     p["ret"] = np.where(p["filled"], p["w"] * (p["y_raw"] - liq_cost_bp(p["turnover_med"].values) / 1e4), 0.0)
     tag = os.path.splitext(os.path.basename(a.cand))[0].replace("dt_candidates", "").strip("_") or "narrow"

@@ -24,7 +24,7 @@ FOLD_STARTS = [f"{y}-09-17" for y in range(2019, 2026)]
 LAST_DAY = "2026-09-16"
 EMBARGO = 5
 N = 3
-BUDGET = 1_666_666
+BUDGET = 1_666_666  # 本番（config/daytrade_margin）のロングの 1 注文: max_capital 500 万 ÷ N 3
 LABEL_MAX = 20
 
 
@@ -67,7 +67,7 @@ def pick(day):
     """予測の高い順に N 本。1 単元が予算を超える銘柄は飛ばし、業種は 1 銘柄まで（業種が空なら数えない）。"""
     out, seen = [], set()
     for r in day.itertuples():
-        if r.o * 100 > BUDGET:
+        if r.price * 100 > BUDGET:  # price は選ぶ時点で見える値段（walk-forward では始値、気配の模擬では気配）
             continue
         if r.sector and r.sector in seen:
             continue
