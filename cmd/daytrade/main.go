@@ -46,12 +46,17 @@ func main() {
 	rootCmd.AddCommand(newSnapCmd())
 	rootCmd.AddCommand(newWarmMarginCmd())
 	rootCmd.AddCommand(newWarmUsCmd())
+	rootCmd.AddCommand(newPreflightCmd())
 	rootCmd.AddCommand(newBacktestCmd())
 	rootCmd.AddCommand(cli.NewPendingCmd("daytrade", appSettings.DaytradeDBPath))
 
 	// os.Exit は defer を飛ばすので、ダイジェストはここで必ず書き出す
-	err := rootCmd.Execute()
+	// panic も記録・通知してから終わる（cli.Guarded）
+	panicked, err := cli.Guarded("daytrade", &run, rootCmd.Execute)
 	run.Finish(err)
+	if panicked {
+		os.Exit(cli.ExitPanic)
+	}
 	if err != nil {
 		os.Exit(1)
 	}

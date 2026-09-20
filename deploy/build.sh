@@ -15,9 +15,19 @@ cd "$HOME_DIR"
 mkdir -p "$BIN_DIR"
 
 # -trimpath: 実行ファイルに開発機の絶対パスを埋めない
-for cmd in wbjp accum daytrade jquants discord-post rate news; do
+#
+# bin/ へ直接ビルドしない。cron は場中 10 分ごと（9:00 台は数十秒ごと）に bin/ を叩くので、
+# 書きかけの実行ファイルを掴むか、実行中のファイルを上書きできずに失敗する。同じディレクトリの
+# 別名に作り、**全部できてから** mv で差し替える（同じファイルシステムの rename は一瞬で、
+# 途中で 1 本でもビルドに失敗したら古い一式のまま残る）。
+cmds=(wbjp accum daytrade jquants discord-post rate news)
+trap 'for cmd in "${cmds[@]}"; do rm -f "$BIN_DIR/.$cmd.new"; done' EXIT
+for cmd in "${cmds[@]}"; do
   echo "building $cmd..."
-  go build -trimpath -o "$BIN_DIR/$cmd" "./cmd/$cmd"
+  go build -trimpath -o "$BIN_DIR/.$cmd.new" "./cmd/$cmd"
+done
+for cmd in "${cmds[@]}"; do
+  mv -f "$BIN_DIR/.$cmd.new" "$BIN_DIR/$cmd"
 done
 
 echo

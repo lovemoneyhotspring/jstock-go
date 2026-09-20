@@ -267,6 +267,7 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 |---|---|---|
 | `CLMOrderListDetail`（前営業日の注文） | 持ち越しの判定（`execute.CarriedPositions`） | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
 | `CLMKabuNewOrder` の `sCondition = 2`（寄成） | 寄る前の発注（`execution.preopen_legs`。既定 `none` なので本番では出ていない） | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
+| 板寄せに**間に合わなかった**寄成（9:00:00 以降に届いた `sCondition = 2`）の行き先 | 寄成の締め切りは 9:00:00 ちょうど（`RunDeadline`）。気配の 1 本が遅れると 8:59:59 台に出る。拒否されるのか、後場寄り（12:30）の板寄せに回るのかを確かめる——後場寄りに回るなら検証していない時刻の建玉になるので、送信の締め切りを 8:59:57 へ詰める。close は板に残った建て注文を取り消す（`RefreshEntries`）ので持ち越しにはならない | [pkg/daytrade/config/config.go](../pkg/daytrade/config/config.go) `RunDeadline` |
 | `daytrade` の台帳を通した信用の 1 周 | `open` → `close` → `verify` | [pkg/daytrade/execute](../pkg/daytrade/execute) |
 
 信用建玉（行あり）・信用新規／返済の発注・信用返済の逆指値は 2026-09-14 に本番口座で確認済み（上の節）。

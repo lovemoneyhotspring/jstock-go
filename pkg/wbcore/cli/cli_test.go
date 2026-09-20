@@ -266,3 +266,67 @@ func TestAddCommasKeepsFraction(t *testing.T) {
 		}
 	}
 }
+
+// panic は記録・通知してからエラーに直す（何もしないと stderr に出るだけで誰も気づかない）。
+func TestGuardedRecoversPanicAndAlerts(t *testing.T) {
+	defer digest.Reset()
+	defer logging.ResetRunContext()
+	s := &settings.AppSettings{Env: settings.EnvUAT, StateDir: t.TempDir(), LogDir: t.TempDir()}
+	var run *Run
+	var got string
+	panicked, err := Guarded("daytrade", &run, func() error {
+		// PersistentPreRun の体: 実行の途中で run が起きる
+		run = StartRun("daytrade", s, "close")
+		run.Alerter = func(title, body string, _ *logging.Logger) bool {
+			got = title + "|" + body
+			return true
+		}
+		panic("ぬるぽ")
+	})
+	if !panicked || err == nil || !strings.Contains(err.Error(), "panic:") {
+		t.Fatalf("panicked=%v err=%v, want panic をエラーに直す", panicked, err)
+	}
+	if !strings.HasPrefix(got, "daytrade close: panic で異常終了|panic:") {
+		t.Errorf("通知の内容: %q", got)
+	}
+	run.Finish(err)
+
+	// ふつうの失敗・成功はそのまま通す
+	boom := errors.New("boom")
+	if panicked, err := Guarded("daytrade", &run, func() error { return boom }); panicked || err != boom {
+		t.Errorf("panicked=%v err=%v, want 元のエラー", panicked, err)
+	}
+}
+
+// DeferAlerts の後の通知は貯めるだけ。FlushAlerts で順に送り、以降は即時に戻る。
+// 途中で抜けた回は Finish が送る（落とさない）。
+func TestDeferAlertsQueuesUntilFlush(t *testing.T) {
+	defer digest.Reset()
+	defer logging.ResetRunContext()
+	s := &settings.AppSettings{Env: settings.EnvUAT, StateDir: t.TempDir(), LogDir: t.TempDir()}
+	run := StartRun("daytrade", s, "close")
+	var sent []string
+	run.Alerter = func(title, _ string, _ *logging.Logger) bool {
+		sent = append(sent, title)
+		return true
+	}
+
+	run.DeferAlerts()
+	run.Alert("一", "")
+	run.Alert("二", "")
+	if len(sent) != 0 {
+		t.Fatalf("保留中に送っている: %v", sent)
+	}
+	run.FlushAlerts()
+	run.Alert("三", "")
+	if strings.Join(sent, ",") != "一,二,三" {
+		t.Fatalf("sent = %v, want 一,二,三（順に・以降は即時）", sent)
+	}
+
+	run.DeferAlerts()
+	run.Alert("四", "")
+	run.Finish(nil)
+	if strings.Join(sent, ",") != "一,二,三,四" {
+		t.Errorf("sent = %v, want Finish が保留分を送る", sent)
+	}
+}

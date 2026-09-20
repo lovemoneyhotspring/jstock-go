@@ -387,7 +387,12 @@ func TestProbeStateDirResolvesToRepoRoot(t *testing.T) {
 	}
 	abs := t.TempDir()
 	if probeStateDir(t, abs) != abs {
-		t.Error("絶対パスを変えている")
+		t.Error("在る絶対パスを変えている")
+	}
+	// 設定は相対パスを作業ディレクトリ（パッケージの下）から絶対化して渡してくる。無ければ root へ
+	cwd, _ := os.Getwd()
+	if missing := probeStateDir(t, filepath.Join(cwd, "無い-state")); strings.Contains(missing, filepath.Join("pkg", "wbcore", "broker")) {
+		t.Errorf("無い絶対パスをパッケージの下のまま返している: %s", missing)
 	}
 }
 

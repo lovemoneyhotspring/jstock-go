@@ -327,6 +327,15 @@ func NewTachibanaBroker(env settings.Environment, creds *credentials.TachibanaCr
 		baseURL = BaseURLProd
 	}
 
+	// 本番のセッションは state の下の日付別ファイルで全プロセスが共有する。state が無い場所から
+	// 動かすと新しいセッションファイルで新規ログインし、動いている本番のセッションを切る。
+	// 黙って作らず止める（初回の構築では人が作る）
+	if env.IsProduction() {
+		if info, err := os.Stat(stateDir); err != nil || !info.IsDir() {
+			return nil, fmt.Errorf("本番の state ディレクトリがありません（%s）。作業ディレクトリか WBJP_STATE_DIR を確認してください", stateDir)
+		}
+	}
+
 	keyBytes, err := os.ReadFile(creds.PrivateKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("秘密鍵ファイルの読込に失敗しました (%s): %w", creds.PrivateKeyFile, err)

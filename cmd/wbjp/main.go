@@ -40,8 +40,12 @@ func main() {
 	rootCmd.AddCommand(cli.NewPendingCmd("wbjp", appSettings.DBPath))
 
 	// os.Exit は defer を飛ばすので、ダイジェストはここで必ず書き出す
-	err := rootCmd.Execute()
+	// panic も記録・通知してから終わる（cli.Guarded）
+	panicked, err := cli.Guarded("wbjp", &run, rootCmd.Execute)
 	run.Finish(err)
+	if panicked {
+		os.Exit(cli.ExitPanic)
+	}
 	if err != nil {
 		os.Exit(1)
 	}

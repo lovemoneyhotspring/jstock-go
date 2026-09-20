@@ -17,6 +17,7 @@ import (
 
 func newPlanCmd() *cobra.Command {
 	var dateFlag string
+	var ifMissing bool
 	cmd := &cobra.Command{
 		Use:   "plan",
 		Short: "翌営業日の母集団を作る（前夜に cron で回す）。9:00 の open はこれを読む",
@@ -35,6 +36,19 @@ func newPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if ifMissing {
+				// 朝の保険の回。前夜の plan が読めるなら何もしない。読めない（無い・壊れている）ときだけ作る
+				if _, ok, err := dtplan.Load(appSettings.DaytradeDir(), day); ok && err == nil {
+					fmt.Printf("%s の plan は既にあります。何もしません\n", day.Format(DateLayout))
+					logInfo("daytrade.skip", "plan は既にある", map[string]any{"reason": "plan_exists", "day": day.Format(DateLayout)})
+					digest.Skipped("plan_exists")
+					return nil
+				} else if err != nil {
+					logWarn("daytrade.plan", "前夜の plan を読めないので作り直す", map[string]any{"day": day.Format(DateLayout), "error": err.Error()})
+				}
+				alert("デイトレ: 前夜の plan が無いので朝に作ります", day.Format(DateLayout)+" の plan を読めませんでした。前夜 20:30 の回（state/logs/daytrade-plan.log）を確認してください")
+				digest.Anomaly("daytrade.plan_missing", day.Format(DateLayout)+" の plan が朝の時点で無い")
+			}
 			logConfig(cfg, "plan", map[string]any{"day": day.Format(DateLayout)})
 			p, err := buildPlan(cfg, day)
 			if err != nil {
@@ -48,6 +62,7 @@ func newPlanCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dateFlag, "date", "", "判定日（YYYY-MM-DD、既定は今日／次の営業日）")
+	cmd.Flags().BoolVar(&ifMissing, "if-missing", false, "その日の plan を読めるなら何もしない（朝の保険の回）")
 	return cmd
 }
 

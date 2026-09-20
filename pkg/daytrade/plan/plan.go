@@ -244,7 +244,14 @@ func Save(p Plan, directory string) (parquetPath, metaPath string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	if err := os.WriteFile(metaPath, raw, 0o644); err != nil {
+	// meta も一時ファイルに書いて rename。Load は meta があれば plan があるとみなすので、
+	// **meta を最後に**置く。直接書いて途中で落ちると壊れた meta が残り、「無い」ではなくエラーに
+	// なって翌朝の回が全部落ちる
+	metaTmp := metaPath + ".tmp"
+	if err := os.WriteFile(metaTmp, raw, 0o644); err != nil {
+		return "", "", err
+	}
+	if err := os.Rename(metaTmp, metaPath); err != nil {
 		return "", "", err
 	}
 	return parquetPath, metaPath, nil
