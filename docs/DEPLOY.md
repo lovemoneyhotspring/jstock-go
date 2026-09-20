@@ -379,7 +379,7 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
 ```bash
 cd /home/abobo/jstock-go
 flock /tmp/accum-run.lock git pull --ff-only   # 走行中の accum run と重ならないようにロックを取る
-make ci                                        # 任意: build + vet + staticcheck + test（push 時の CI と同じ）
+make ci                                        # 任意: コンパイルの確認 + vet + staticcheck + test（push 時の CI と同じ。bin/ は作らない）
 flock /tmp/accum-run.lock deploy/build.sh      # 実行ファイルを作り直す（走行中と重ならないように）
 ```
 
