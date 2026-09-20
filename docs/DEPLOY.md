@@ -257,6 +257,14 @@ Discord（`WBJP_ALERT_CHANNEL_ID` / レポートの送り先）にも短く流�
 - **MAILTO。** ログへリダイレクトしていても、Go が起動する前の失敗（`cd` の失敗、`state/logs` が
   無い、`bin/` が無い）は cron がメールで送るしかない。このマシンには MTA（`sendmail`）が無いので、
   宛先を入れる前に `msmtp-mta` などを入れること。crontab の `# MAILTO=` は宛先が決まるまでコメントのまま。
+- **外の死活監視（`deploy/ping.sh`）。** 通知はどれもこのマシンから Discord へ出るので、マシン停止・ネット断・
+  cron 停止では何も鳴らない。9:22 の朝の点検と 15:40 の verify の後に、外のサービス（healthchecks.io 型）へ
+  ping を打つ。**来なかったら向こうが知らせる**。`.env` に `HEALTHCHECK_URL_MORNING` / `HEALTHCHECK_URL_VERIFY`
+  を入れる（未設定なら何もしない）。監視側の予定は「平日 9:22 / 15:40、猶予 10 分」。休場日も打つ。
+  終了コードが 0 以外のときは URL の末尾に `/<終了コード>` を付ける（healthchecks.io は失敗として記録する）。
+- **打ち切り・見送りの通知（`WITH_LOCK_NOTIFY=1`）。** `with-lock.sh` の `[timeout]`・`[lock_busy]` はログに
+  書くだけだと誰も読まない（朝の点検は open と snap だけ）。open / guard / close / verify / plan の行は
+  `WITH_LOCK_NOTIFY=1` を立て、`bin/discord-post` で知らせる。snap のように打ち切り・見送りが設計のうちの行には立てない。
 - **WBJP_ENV（口座）。** Go の既定は `uat`、以前の `report.sh` / `night-repair.sh` / `morning-check.sh`
   の既定は `prod` で食い違っていた。既定で補うと、どちらに揃えても「黙って別の口座の
   ダイジェストを読む（あるいは 1 件も無くて何もしない）」が起きるので、**3 本とも未設定なら
@@ -370,7 +378,10 @@ flock /tmp/accum-run.lock deploy/build.sh      # 実行ファイルを作り直�
   ——`plan` `snap` `open` `close` `guard` `verify` が**全部**、設定を読む段階で止まる。
   2026-09-19 に `preopen_legs` / `extra_symbols` を足して `crontab` は入れたのに `build.sh` を
   忘れ、次の営業日（9/24）の朝が丸ごと止まる状態で数時間置いた。**確かめ方**:
-  `./bin/daytrade status --config-dir config/daytrade_margin` が設定のエラーを出さないこと
+  `./bin/daytrade preflight --config-dir config/daytrade_margin` が「問題なし」を出すこと
+  （設定・今日の plan・台帳・ディスクを読むだけ。cron でも 8:40 に回り、問題があれば通知する）
+- `build.sh` は `bin/` へ直接ビルドしない。別名に作って**全部できてから** `mv` で差し替えるので、
+  場中に回しても cron が書きかけの実行ファイルを掴まない（途中で失敗したら古い一式のまま）
 - `data/`（台帳 DB・足・ログ）は git 管理外なので pull で消えない
 - `config/` は git 管理下。サーバー側で `accum.toml` を直接編集すると pull が衝突する。
   設定変更は **ローカルで commit → push → サーバーで pull** の一方向に揃える

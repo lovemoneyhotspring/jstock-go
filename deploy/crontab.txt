@@ -10,6 +10,9 @@
 #     open / guard / close / verify は WITH_LOCK_NOTIFY=1——打ち切りと見送りを Discord にも知らせる
 #   - --live が無い行は判断と記録だけで注文を出さない（dry-run）
 #   - 実行の要約は state/digest/<env>-<日付>.jsonl に 1 行ずつ溜まる（docs/FEEDBACK.md）
+#   - 外の死活監視: 9:22 の朝の点検と 15:40 の verify の後に deploy/ping.sh が ping を打つ（.env の
+#     HEALTHCHECK_URL_MORNING / HEALTHCHECK_URL_VERIFY。未設定なら何もしない）。マシン・ネット・cron が
+#     止まると通知も全部止まるので、「来なかったら知らせる」のは外のサービスにしかできない
 #
 # 有効化の段階:
 #   1. 2026-09-11〜: データ・候補に加えて、**板の記録（snap）と dry-run の open** を回す。
@@ -195,7 +198,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 板は遡れないので、欠けたその日のうちに気づくためのもの。判断も修正もしない。
 # night-repair（6:00）はダイジェストの異常を見るが、こちらは「回るはずの回数が回ったか」を見る
 # ——成功したまま回数が足りない（cron が動かない・ロックで見送り）を拾えるのはこちら
-22 9 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod $WBJP_HOME/deploy/morning-check.sh >> state/logs/morning-check.log 2>&1
+22 9 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod $WBJP_HOME/deploy/morning-check.sh >> state/logs/morning-check.log 2>&1; deploy/ping.sh MORNING $? >> state/logs/ping.log 2>&1
 
 # --- 判断の妥当性（改善ループ。docs/FEEDBACK.md）---------------------------------
 # スイング: スクリーニングの結果に 20 営業日後の終値を当てる。採用・次点・圏外を比べる
@@ -276,7 +279,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 出ないエラーを拾う。建玉が無い日は「売る対象なし」で正常終了する
 #20,24,28 15 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-close-dryrun.log $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin
 # 15:40: 返済が全部約定したかを照会し、持ち越しを通知
-40 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-verify.log $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin
+40 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-verify.log $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin; deploy/ping.sh VERIFY $? >> state/logs/ping.log 2>&1
 #40 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-verify-dryrun.log $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin
 # スイング売買（日足・大引け後 1 回で足りるが、固定間隔でも無害）
 #*/20 * * * *        cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  $WBJP_BIN/wbjp  run --config-dir config --live --yes >> state/logs/wbjp-run.log  2>&1
