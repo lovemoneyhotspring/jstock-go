@@ -92,7 +92,7 @@ TACHIBANA_UAT_ORDER_PASSWORD=...
 ## 3. `.env` の置き場所
 
 - **既定**: リポジトリ直下（カレントディレクトリ基準）= `/home/abobo/jstock-go/.env`。`chmod 600` 必須（緩いと起動時に警告）
-- **絶対パスで指定したい場合**: 環境変数 `WBJP_ENV_FILE=/etc/wbjp/wbjp.env` を渡せば、cronの`cd`忘れがあってもそこを読む
+- **絶対パスで指定したい場合**: 環境変数 `WBJP_ENV_FILE=/etc/wbjp/wbjp.env` を渡せば、cronの`cd`忘れがあってもそこを読む。**相対パスの設定（`WBJP_STATE_DIR=state` など）は読み込んだ `.env` のある場所から解く**（作業ディレクトリからではない）ので、`.env` をリポジトリの外に置くなら `WBJP_STATE_DIR` / `WBJP_DATA_DIR` / `WBJP_CONFIG_DIR` は絶対パスで書く。本番のブローカーは state ディレクトリが無い場所からは作れない（別のセッションで新規ログインして本番のセッションを切らないため）
 - 中身は秘密でない項目（`WBJP_ENV=prod` 等）のみ。APIキー自体は上記手順3のsystemd `EnvironmentFile=` 経由が推奨（ローカル開発ならキーチェーン。README「APIキーの置き場所」）
 
 ## 4. 定期実行（cron）— 20分おき固定、時刻計算はしない

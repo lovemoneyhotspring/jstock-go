@@ -179,8 +179,8 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 20,50 8 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_TIMEOUT=120 deploy/with-lock.sh /tmp/daytrade-warm-us.lock 0 state/logs/daytrade-warm-us.log $WBJP_BIN/daytrade warm-us --config-dir config/daytrade_margin
 # 8:40: 寄る前の事前点検（daytrade preflight）。この bin が設定を読めるか・今日の plan・台帳・ディスクを
 # **読むだけ**で確かめ、問題があれば Discord に知らせる。ブローカーには繋がないのでロックは取らない。
-# bin そのものが動かない（無い・壊れた）ときは、後ろの discord-post が知らせる
-40 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod $WBJP_BIN/daytrade preflight --config-dir config/daytrade_margin >> state/logs/daytrade-preflight.log 2>&1 || { [ $? -ge 2 ] && echo "bin/daytrade preflight が動きません（state/logs/daytrade-preflight.log）。deploy/build.sh を確認" | WBJP_ENV=prod $WBJP_BIN/discord-post --title "デイトレ: 寄る前の点検を実行できません"; }
+# bin そのものが動かない（無い・実行できない = 終了コード 126 以上）ときは、後ろの discord-post が知らせる
+40 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod $WBJP_BIN/daytrade preflight --config-dir config/daytrade_margin >> state/logs/daytrade-preflight.log 2>&1 || { [ $? -ge 126 ] && echo "bin/daytrade preflight が動きません（state/logs/daytrade-preflight.log）。deploy/build.sh を確認" | WBJP_ENV=prod $WBJP_BIN/discord-post --title "デイトレ: 寄る前の点検を実行できません"; }
 # 8:53: 委託保証金を照会して data/daytrade/margin.json に焼く。9:00:03 からの open はこのファイルを
 # 読んで建玉の上限を**下げ方向のみ**上書きする——寄付の判断にブローカーの遅さを持ち込まないため、
 # open 自身は保証金を取りに行かない。
@@ -192,8 +192,8 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 取れなかった朝は open が設定の値で建てる（売買は止まらない）
 53 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-margin.log $WBJP_BIN/daytrade warm-margin --config-dir config/daytrade_margin
 # 8:56 の保険: 8:53 に取れなかった朝（margin.json が今日の日付でない）だけもう一度。取れていれば何もしない。
-# ロック待ち 5 秒・45 秒で打ち切る——遅くとも 8:56:50 に手放し、8:57 の snap（wait 0）を塞がない。cron では % を \% と書く
-56 8 * * 1-5          cd $WBJP_HOME && [ "$(date -r data/daytrade/margin.json +\%F 2>/dev/null)" != "$(date +\%F)" ] && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=45 deploy/with-lock.sh /tmp/daytrade.lock 5 state/logs/daytrade-margin.log $WBJP_BIN/daytrade warm-margin --config-dir config/daytrade_margin
+# ロック待ち 5 秒・35 秒で打ち切る——TERM は遅くとも 8:56:40、KILL（+10 秒）でも 8:56:50 に手放し、8:57 の snap（wait 0）を塞がない。cron では % を \% と書く
+56 8 * * 1-5          cd $WBJP_HOME && [ "$(date -r data/daytrade/margin.json +\%F 2>/dev/null)" != "$(date +\%F)" ] && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=35 deploy/with-lock.sh /tmp/daytrade.lock 5 state/logs/daytrade-margin.log $WBJP_BIN/daytrade warm-margin --config-dir config/daytrade_margin
 # 9:22: その朝の記録が回ったかを点検して Discord に 1 通投げる（deploy/morning-check.sh）。
 # 板は遡れないので、欠けたその日のうちに気づくためのもの。判断も修正もしない。
 # night-repair（6:00）はダイジェストの異常を見るが、こちらは「回るはずの回数が回ったか」を見る

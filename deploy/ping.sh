@@ -20,6 +20,11 @@ if [ -z "$key" ]; then
   exit 64
 fi
 
+# 鍵は変数名と sed のパターンに入る。英大文字・数字・_ だけを通す
+case "$key" in
+  *[!A-Z0-9_]*) echo "ping.sh: KEY は英大文字・数字・_ だけ: $key" >&2; exit 64 ;;
+esac
+
 home=${WBJP_HOME:-$(cd "$(dirname "$0")/.." && pwd)}
 url=$(eval "printf '%s' \"\${HEALTHCHECK_URL_$key:-}\"")
 if [ -z "$url" ] && [ -f "$home/.env" ]; then

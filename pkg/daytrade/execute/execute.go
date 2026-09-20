@@ -795,6 +795,12 @@ type ExitTarget struct {
 	// client_order_id の種を分けるために持つ——台帳の建玉の手仕舞いと同じ銘柄・
 	// 同じ株数になると ID が衝突し、片方が「発注済み（冪等）」として送られない。
 	Unrecorded bool
+	// AlreadyExited は同じ銘柄・脚で、今日の手仕舞いが既に引き受けている株数。client_order_id の
+	// 種に混ぜる——手仕舞いを出した後に建て注文の約定が増え、**同じ株数**をもう一度手仕舞うとき
+	// （200 株を手仕舞い → 取消の前にさらに 200 株約定）、種が同じだと 2 回目が 1 回目と同じ ID に
+	// なり「発注済み（冪等）」として送られず、黙って持ち越す。0 のときは種に入れない（従来と同じ ID）。
+	// 同じ状態での再実行は同じ値になるので冪等は保たれる。
+	AlreadyExited decimal.Decimal
 }
 
 // LiveEntries は今日の建玉のうち dry-run でないもの。dryRun は除いた数。
@@ -844,6 +850,10 @@ func placedExits(env Env) (map[string]decimal.Decimal, error) {
 
 // remainingToExit は建玉の約定数量 filled のうち、まだ手仕舞っていない株数。
 // 手仕舞いが引き受けている株数を差し引く。
+//
+// exits は銘柄・脚の合計なので、同じ銘柄・脚に約定した建て注文が 2 件あると 2 件目が足りなく
+// 数えられる（手仕舞い漏れの側）。同じ銘柄は 1 日 1 回しか建てない（PlacedToday の Symbols）ので、
+// 重なるのは約定 0 で死んだ送り直しだけ——その前提に乗っている。
 func remainingToExit(exits map[string]decimal.Decimal, order ledger.Order, filled decimal.Decimal) decimal.Decimal {
 	return decimal.Max(filled.Sub(exits[order.Symbol+"|"+order.Leg()]), decimal.Zero)
 }
@@ -864,7 +874,9 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 		return nil, nil, err
 	}
 	for _, order := range entries {
-		filled := order.FilledQuantity
+		// FILLED なのに約定数量が入っていない台帳行は注文数量とみなす（settledQuantity。0 と読むと
+		// 全部約定した建玉を「約定なし」として手仕舞わず、台帳外の掃除にも掛からず黙って持ち越す）
+		filled := settledQuantity(order)
 		fillPrice := order.AvgFillPrice
 		// 台帳で確定済み（約定・拒否・未送信・失効）の注文はブローカーに聞かず台帳の値を使う
 		// （queryFill と同じ）。もう変わらないうえ、未送信・拒否は注文番号が無く、聞くと
@@ -930,7 +942,12 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 				})
 				recordFill(env, order, current, filled, fillPrice, "買い注文の約定状況")
 			} else {
-				// 台帳に約定が残っている（照会は空でも過去に確定済み）。その値で手仕舞う
+				// 台帳に約定が残っている（前の回で一部約定を記録した）。その値で手仕舞う。ただし
+				// 台帳では未確定のままなので、**残りが板に生きているかもしれない**——照会できないと
+				// 取消も送れない。黙って正常終了せず、人に知らせる（次の回も照会し直す）
+				unconfirmed = append(unconfirmed,
+					fmt.Sprintf("%s（照会できず、残りが板にあるか分かりません: %s / 約定 %s / %s 株）",
+						order.Symbol, order.Status, filled, order.Quantity))
 				env.Report.Warn("daytrade.fill", "買い注文を照会できず台帳の確定値で続行", map[string]any{
 					"day": env.dayText(), "symbol": order.Symbol,
 					"client_order_id": order.ClientOrderID, "filled": filled.String(),
@@ -953,7 +970,8 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 			env.printf("  %s: 手仕舞いのうち %s 株は約定して終わっている。残り %s 株を手仕舞う\n",
 				order.Symbol, filled.Sub(remaining), remaining)
 		}
-		targets = append(targets, ExitTarget{Entry: order, Quantity: remaining, FillPrice: fillPrice})
+		targets = append(targets, ExitTarget{Entry: order, Quantity: remaining, FillPrice: fillPrice,
+			AlreadyExited: exits[order.Symbol+"|"+order.Leg()]})
 	}
 	return targets, unconfirmed, nil
 }
@@ -1042,6 +1060,9 @@ func ExitRequestAs(target ExitTarget, day time.Time, cfg config.Config, attempt 
 		kind = "daytrade-sweep"
 	}
 	seed := fmt.Sprintf("%s|%s|%d", kind, day.Format(cli.DateLayout), attempt)
+	if target.AlreadyExited.IsPositive() {
+		seed += "|+" + target.AlreadyExited.String()
+	}
 	return domain.OrderRequest{
 		ClientOrderID: domain.MakeClientOrderID(seed, entry.Symbol, exitSide, quantity),
 		Symbol:        entry.Symbol,

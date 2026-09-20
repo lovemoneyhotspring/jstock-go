@@ -22,7 +22,8 @@ import (
 //   - 約定があれば、その株数を成行で返済買い（一部約定・全部約定とも）。種は引けの手仕舞いと同じ
 //     （PlaceExitAs）なので、close が同じ株数を数えれば冪等で重ならない
 
-// guardPolls は取消を送った後に「終わったか」を照会し直す回数（間隔は Env.RetryWait）。
+// guardPolls は取消を送った後に「終わったか」を照会し直す回数。間隔は cancelOpen の引数
+// （guard は Env.RetryWait、引けの close は closeCancelWait まで）。
 const guardPolls = 5
 
 // GuardAction は材料の出た売建 1 件への処置。
@@ -202,7 +203,8 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 		act.Result = fmt.Sprintf("dry-run: 約定 %s 株のうち %s 株を返済買い", filled, remaining)
 		return act
 	}
-	outcome, err := PlaceExitAs(env, b, ExitTarget{Entry: o, Quantity: remaining, FillPrice: price}, "材料（TOB など）で返済")
+	outcome, err := PlaceExitAs(env, b, ExitTarget{Entry: o, Quantity: remaining, FillPrice: price,
+		AlreadyExited: exits[o.Symbol+"|"+o.Leg()]}, "材料（TOB など）で返済")
 	if err != nil {
 		act.Err = fmt.Errorf("約定 %s 株の返済を送れません: %w", remaining, err)
 		return act

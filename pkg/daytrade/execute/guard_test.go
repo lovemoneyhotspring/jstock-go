@@ -363,3 +363,81 @@ func TestRefreshEntriesCancelUnconfirmedExitsKnownFillThenGrowth(t *testing.T) {
 		t.Errorf("2 回目: targets=%+v unconfirmed=%v err=%v, want 残り 200 株", targets, unconfirmed, err)
 	}
 }
+
+// 引け: 手仕舞いを出した後に**同じ株数**だけ約定が増えたとき、2 回目の手仕舞いが 1 回目と同じ
+// client_order_id になって「発注済み（冪等）」で飛ばされてはいけない（黙って持ち越す）。
+func TestRefreshEntriesGrowthOfSameQuantityIsNotSwallowedAsIdempotent(t *testing.T) {
+	env, _ := newEnv(t)
+	recordLongToday(t, env, "7203", 400)
+	status, filled := domain.OrderStatusPartiallyFilled, int64(200)
+	b := &stubBroker{balance: richBalance(), getOrder: func(id string) (*domain.Order, error) {
+		p := decimal.NewFromInt(761)
+		return &domain.Order{ClientOrderID: id, Status: status, Quantity: decimal.NewFromInt(400),
+			FilledQuantity: decimal.NewFromInt(filled), AvgFillPrice: &p}, nil
+	}}
+
+	entries, _, _ := LiveEntries(env)
+	targets, _, err := RefreshEntries(env, b, entries)
+	if err != nil || len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(200)) {
+		t.Fatalf("1 回目: targets=%+v err=%v, want 200 株", targets, err)
+	}
+	if failures := PlaceExits(env, b, targets); len(failures) != 0 || len(b.placed) != 1 {
+		t.Fatalf("1 回目: failures=%v placed=%d", failures, len(b.placed))
+	}
+
+	// 取消が通る前に残りの 200 株も約定していた
+	status, filled = domain.OrderStatusCancelled, 400
+	entries, _, _ = LiveEntries(env)
+	targets, _, err = RefreshEntries(env, b, entries)
+	if err != nil || len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(200)) {
+		t.Fatalf("2 回目: targets=%+v err=%v, want 増えた 200 株", targets, err)
+	}
+	if failures := PlaceExits(env, b, targets); len(failures) != 0 {
+		t.Fatal(failures)
+	}
+	if len(b.placed) != 2 || b.placed[0].ClientOrderID == b.placed[1].ClientOrderID {
+		t.Fatalf("placed = %+v, want 別の ID で 2 件（同じ ID だと 2 回目が送られない）", b.placed)
+	}
+
+	// 同じ状態での再実行は重ねない（冪等）
+	entries, _, _ = LiveEntries(env)
+	targets, _, _ = RefreshEntries(env, b, entries)
+	if len(targets) != 0 {
+		t.Errorf("3 回目: targets=%+v, want 手仕舞いなし", targets)
+	}
+}
+
+// 引け: 台帳に一部約定が残っている未確定の建て注文を照会できないとき、約定分は手仕舞うが、
+// 残りが板に生きているかもしれないので黙って正常終了しない。
+func TestRefreshEntriesUnqueryablePartialIsReported(t *testing.T) {
+	env, _ := newEnv(t)
+	id := recordLongToday(t, env, "7203", 400)
+	p := decimal.NewFromInt(761)
+	if err := env.Ledger.UpdateStatus(id, domain.OrderStatusPartiallyFilled, decimal.NewFromInt(100), &p, nil); err != nil {
+		t.Fatal(err)
+	}
+	b := &stubBroker{} // 照会は空
+
+	entries, _, _ := LiveEntries(env)
+	targets, unconfirmed, err := RefreshEntries(env, b, entries)
+	if err != nil || len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("targets=%+v err=%v, want 台帳の約定 100 株", targets, err)
+	}
+	if len(unconfirmed) != 1 || len(b.cancelled) != 0 {
+		t.Errorf("unconfirmed=%v cancelled=%v, want 知らせる 1 件・取消は送らない", unconfirmed, b.cancelled)
+	}
+}
+
+// 引け: FILLED なのに約定数量が入っていない台帳行は注文数量で手仕舞う（0 と読んで持ち越さない）。
+func TestRefreshEntriesFilledWithoutQuantity(t *testing.T) {
+	env, _ := newEnv(t)
+	id := recordLongToday(t, env, "7203", 400)
+	if err := env.Ledger.UpdateStatus(id, domain.OrderStatusFilled, decimal.Zero, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, _ := LiveEntries(env)
+	targets, _, err := RefreshEntries(env, &stubBroker{}, entries)
+	if err != nil || len(targets) != 1 || !targets[0].Quantity.Equal(decimal.NewFromInt(400)) {
+		t.Errorf("targets=%+v err=%v, want 400 株", targets, err)
+	}
+}
