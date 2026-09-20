@@ -12,6 +12,7 @@
 """
 
 import glob
+import os
 import sys
 
 import numpy as np
@@ -44,7 +45,8 @@ def cap_tercile(g):
 
 
 def main():
-    panel = sys.argv[1] if len(sys.argv) > 1 else sorted(glob.glob("data/jquants/_panel_cache/panel-*.parquet"))[-1]
+    # キャッシュの名前は鍵のハッシュなので、名前順ではなく更新時刻の新しいものを使う
+    panel = sys.argv[1] if len(sys.argv) > 1 else max(glob.glob("data/jquants/_panel_cache/panel-*.parquet"), key=os.path.getmtime)
     out = sys.argv[2] if len(sys.argv) > 2 else OUT
     df = pd.read_parquet(panel)
     df["d"] = pd.to_datetime(df["d"])
