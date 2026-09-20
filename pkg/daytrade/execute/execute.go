@@ -994,7 +994,11 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 		}
 		remaining := remainingToExit(exits, order, filled)
 		if remaining.LessThanOrEqual(decimal.Zero) {
-			env.printf("  %s: 手仕舞い発注済み（冪等）\n", order.Symbol)
+			if _, ok := held[order.Symbol+"|"+order.Leg()]; ok {
+				env.printf("  %s: 保険の引け注文を取り消せず、その株数は引け値で手仕舞われる（成行は出していない）\n", order.Symbol)
+			} else {
+				env.printf("  %s: 手仕舞い発注済み（冪等）\n", order.Symbol)
+			}
 			continue
 		}
 		if !remaining.Equal(filled) {

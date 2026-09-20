@@ -125,6 +125,8 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 	if len(entries) == 0 {
 		fmt.Printf("今日の建玉が台帳にありません（dry-run %d 件）。何もしません\n", dryRun)
 		logInfo("daytrade.skip", "売る対象なし", map[string]any{"reason": "no_buys", "dry_run": dryRun})
+		// live を残す（安全網 deploy/close-net.sh は live=true の成功だけを「済み」と数える）
+		digest.Note(map[string]any{"phase": "close", "live": allowed, "sells": 0})
 		if allowed {
 			warnUnrecordedPositions(cfg, day, held, carried)
 		}
@@ -150,6 +152,7 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 				len(unconfirmed))
 		}
 		logInfo("daytrade.skip", "売る対象なし", map[string]any{"reason": "nothing_to_sell"})
+		digest.Note(map[string]any{"phase": "close", "live": allowed, "sells": 0})
 		return nil
 	}
 	if err := confirmLive(allowed, yes); err != nil {

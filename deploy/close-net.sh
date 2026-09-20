@@ -50,6 +50,6 @@ if [ "$rc" -eq 0 ]; then
     log "close は何もせず終わった（休場日・時間帯の外など）"
   fi
 else
-  notify "デイトレ: 安全網の close が失敗しました（rc=$rc）" "cron の close が走っていないうえ、安全網の close も失敗しました。建玉が残っている恐れがあります（$day）。state/logs/daytrade-close.log を確認してください。ブローカーに保険の引け注文があれば引けで手仕舞われます"
+  notify "デイトレ: 安全網の close が正常に終わりませんでした（rc=$rc）" "cron の close の成功記録が無く、安全網の close も正常に終わりませんでした（$day）。手仕舞えていない建玉が残っている恐れがあります。ブローカーに保険の引け注文があれば引けで手仕舞われます（取消を確かめられない保険がある日はこの通知になります）。state/logs/daytrade-close.log を確認してください"
 fi
 exit "$rc"

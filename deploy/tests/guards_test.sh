@@ -72,7 +72,7 @@ new_home 2
 printf '#!/bin/sh\nexit 3\n' > "$H/bin/daytrade"; chmod +x "$H/bin/daytrade"
 bash "$H/deploy/close-net.sh"; rc=$?
 check "close が失敗したら rc を返す" '[ "$rc" = 3 ]'
-check "失敗を通知する" 'grep -q "安全網の close が失敗" "$H/posted"'
+check "失敗を通知する" 'grep -q "安全網の close も正常に終わりませんでした" "$H/posted"'
 # 4. 休場日など（close は 0 で終わるが ok の記録を残さない）→ 通知しない
 new_home 3
 printf '#!/bin/sh\nexit 0\n' > "$H/bin/daytrade"; chmod +x "$H/bin/daytrade"
@@ -81,7 +81,7 @@ check "何もせず終わった日は通知しない" '[ ! -f "$H/posted" ]'
 # 4b. cron の close が実行中（ロックを取れない）→ 失敗と誤報せず何もしない
 new_home 13
 printf '#!/bin/sh\necho ran >> "$(dirname "$0")/../daytrade.calls"\n' > "$H/bin/daytrade"; chmod +x "$H/bin/daytrade"
-( flock "$H/lock" sleep 4 ) &
+( flock "$H/lock" sleep 8 ) &
 sleep 0.5
 CLOSE_NET_LOCK="$H/lock" CLOSE_NET_LOCK_WAIT=0 bash "$H/deploy/close-net.sh"; rc=$?
 wait
@@ -169,10 +169,19 @@ check "9 時以降は点検を飛ばす" '[ ! -f "$H/calls" ]'
 new_home 14
 printf '#!/bin/sh\necho "strict mode: fields missing"\necho "preflight-problems: config"\nexit 1\n' > "$H/bin/daytrade"; chmod +x "$H/bin/daytrade"
 stub_common '' 'printf "#!/bin/sh\\necho ok\\n" > "$(dirname "$0")/../bin/daytrade"'
+echo 'package x' > "$H/a.go"
 git_home
-echo dirty >> "$H/tracked.txt"
+echo '// dirty' >> "$H/a.go"
 bash "$H/deploy/guard-preopen.sh"; rc=$?
-check "未コミットなら build.sh を走らせず、戻す" '[ ! -f "$H/build.calls" ] && [ -f "$H/rb.calls" ] && grep -q "自動では作り直しません" "$H/posted" && [ "$rc" = 0 ]'
+check "未コミットなら build.sh も rollback も走らせない（設定が新しいとき、戻すと悪化する）" '[ ! -f "$H/build.calls" ] && [ ! -f "$H/rb.calls" ] && grep -q "自動では何もしません" "$H/posted" && [ "$rc" = 1 ]'
+# 12b. 追跡されていない新規 .go ファイルも「汚れ」として数える（git に無いコードから作らない）。戻しもしない
+new_home 18
+printf '#!/bin/sh\necho "strict mode: fields missing"\necho "preflight-problems: config"\nexit 1\n' > "$H/bin/daytrade"; chmod +x "$H/bin/daytrade"
+stub_common '' ''
+git_home
+echo 'package x' > "$H/new.go"
+bash "$H/deploy/guard-preopen.sh"; rc=$?
+check "未追跡の .go があれば作り直しも戻しもしない" '[ ! -f "$H/build.calls" ] && [ ! -f "$H/rb.calls" ] && [ "$rc" = 1 ]'
 # 13. 作り直しても実行ファイルが起動しない（コードが出ない）→ 戻す
 new_home 15
 printf '#!/bin/sh\nexit 127\n' > "$H/bin/daytrade"; chmod +x "$H/bin/daytrade"

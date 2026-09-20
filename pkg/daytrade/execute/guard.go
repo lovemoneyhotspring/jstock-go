@@ -206,6 +206,7 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 
 	// この銘柄の保険の引け注文が生きていれば先に取り消す（返済できる建玉を押さえていて、
 	// 通っても二重に返済する）。取り消せたと確かめられなければ返済を出さず、次の回で照会し直す
+	var heldErr error
 	if b != nil {
 		held, err := ReleaseProtection(env, b, map[string]bool{o.Symbol: true})
 		if err != nil {
@@ -213,11 +214,13 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 			return act
 		}
 		if reason, ok := held[o.Symbol+"|"+o.Leg()]; ok {
-			act.Err = fmt.Errorf("保険の引け注文を取り消せません（%s）。次の回で照会し直します", reason)
-			return act
+			// 取り消せなかった保険は生きたまま数え、覆われていない株数だけ返済する（RefreshEntries と
+			// 同じ方針）。エラーは残して次の回で保険を照会し直す
+			heldErr = fmt.Errorf("保険の引け注文を取り消せません（%s）。その株数は引けで返済されます。次の回で照会し直します", reason)
 		}
 	}
-	exits, err := placedExits(env, false)
+	// 取り消せた保険は終わった注文で、取り消せなかった保険は生きたまま数える
+	exits, err := placedExits(env, true)
 	if err != nil {
 		act.Err = err
 		return act
@@ -225,6 +228,7 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 	remaining := remainingToExit(exits, o, filled)
 	if remaining.LessThanOrEqual(decimal.Zero) {
 		act.Result = fmt.Sprintf("約定 %s 株の返済は発注済み", filled)
+		act.Err = heldErr
 		return act
 	}
 	if b == nil {
@@ -245,5 +249,6 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 		prefix = "残りを取消し、"
 	}
 	act.Result = fmt.Sprintf("%s約定 %s 株を返済買い（%s）", prefix, remaining, outcome)
+	act.Err = heldErr
 	return act
 }

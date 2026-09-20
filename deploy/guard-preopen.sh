@@ -75,7 +75,9 @@ if [ "$((10#$hour))" -lt 9 ]; then
       # 作り直すのは、作業ツリーが**コミット済みの main** のときだけ。未コミット・別ブランチのコードから
       # 作った実行ファイルで 8:59:45 の open を動かさない（誤発注の入口になる）。そうでなければ
       # 作り直さず、1 世代前へ戻す側に進む
-      dirty=$(git -C "$HOME_DIR" status --porcelain --untracked-files=no 2>/dev/null | wc -l)
+      # 対象はビルドに効くもの（.go・go.mod・go.sum・設定）。追跡されていない新規ファイルも数える
+      # （go build は未追跡の .go も取り込むので、git に無いコードから作ってしまう）
+      dirty=$(git -C "$HOME_DIR" status --porcelain -- '*.go' go.mod go.sum config 2>/dev/null | wc -l)
       branch=$(git -C "$HOME_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
       if [ "$dirty" -eq 0 ] && [ "$branch" = "main" ]; then
         log "実行ファイルを作り直す（deploy/build.sh）"
@@ -86,11 +88,14 @@ if [ "$((10#$hour))" -lt 9 ]; then
         fi
         out=$(run_preflight); rc=$?
       else
-        summary+=("作業ツリーが未コミットか main でない（変更 ${dirty} 件 / ブランチ $branch）ため、自動では作り直しません")
-        log "[warn] 作業ツリーが main でクリーンでないので build.sh を走らせない"
+        # 作り直しも戻しもしない。設定が新しいとき、古い実行ファイルへ戻すと悪化する
+        # （古い実行ファイルは新しい項目をもっと読めない）。人が deploy/build.sh を実行するまで待つ
+        summary+=("作業ツリーが未コミットか main でない（変更 ${dirty} 件 / ブランチ $branch）ため、自動では何もしません。コミットして deploy/build.sh を実行してください")
+        log "[warn] 作業ツリーが main でクリーンでないので build.sh も rollback も走らせない"
+        skip_repair=1
       fi
       # まだ動かない: 起動しない（コードが出ない）か、設定を読めない → 1 世代前へ戻す
-      if [ "$rc" -ne 0 ]; then
+      if [ "$rc" -ne 0 ] && [ "${skip_repair:-0}" -eq 0 ]; then
         after=$(printf '%s\n' "$out" | sed -n 's/^preflight-problems: //p' | tail -1)
         if [ -z "$after" ] || [[ ",$after," == *,config,* ]]; then
           log "まだ動かない → 1 世代前へ戻す"
