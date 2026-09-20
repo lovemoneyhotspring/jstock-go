@@ -281,9 +281,7 @@ func TestGuardedRecoversPanicAndAlerts(t *testing.T) {
 			got = title + "|" + body
 			return true
 		}
-		var m map[string]int
-		m["x"] = 1
-		return nil
+		panic("ぬるぽ")
 	})
 	if !panicked || err == nil || !strings.Contains(err.Error(), "panic:") {
 		t.Fatalf("panicked=%v err=%v, want panic をエラーに直す", panicked, err)
