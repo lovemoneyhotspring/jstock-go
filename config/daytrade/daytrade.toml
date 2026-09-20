@@ -86,8 +86,21 @@ skip_opened = false
 # 今の実測（8:59:00 の気配の誤差込み）は lgbm +9.02 対 gap_vol +9.18 とほぼ同値で、差は
 # 8:59 の気配の誤差が lgbm の優位（+5 bp）をちょうど食い潰した形。**8:59:45 の誤差は
 # 8:59:00 より小さいはずで、それを測るのがこれから**（vault 2026-09-jp-daytrade-preopen-order）。
-rank_by = "lgbm"
-# rank_by が lgbm なので日による切り替えは要らない（空 = rank_by と同じ）。
+#
+# **2026-09-20 に gap_vol へ戻した（us_skip_legs = "all" と組）。** 上の「ほぼ同値」は候補を
+# 「実際の始値のギャップが負」の銘柄に限った模擬で、楽観的だった。本番は気配しか見えないので、
+# 実際は小幅高で寄るのに 8:59 の気配では負に見える銘柄が候補に入る。それを入れて事前登録のうえ
+# 7 年（2019-09〜2026-09）を測ると、常時 lgbm −2.23 bp/日 に対し「gap_vol・米国小幅高は休む」+2.93
+# （差 +5.16、t 3.54、20/20 シード、まだ見ていなかった期間でも +4.32、誤差 0.8 倍でも +3.88）。
+# 常時 gap_vol（+1.85、t 1.58）と併用（+1.31）は基準に届かない。lgbm は浅いギャップを多く選ぶので
+# 選定の 31% が「実際は小幅高で寄った銘柄」になる（gap_vol 21%）。
+# **誤差が無ければ lgbm が上（+32.60 対 +25.07）。** 8:59:45 の気配の誤差が小さいと分かれば戻す:
+#   test/.venv/bin/python test/dt_preopen_rank.py          # 毎日の誤差と順位の再現度
+#   test/.venv/bin/python test/dt_live_shadow.py           # 本番の記録から lgbm / gap_vol を並べ直して比べる
+#   test/.venv/bin/python test/dt_rank_compare.py          # 20 営業日溜まったら実測の誤差で測り直す
+# vault 20-research/2026-09-jp-daytrade-rankby-preopen-fair。
+rank_by = "gap_vol"
+# 日による切り替えはしない（空 = rank_by と同じ）。平常日 gap_vol・小幅高だけ lgbm の形は上の検証で −0.92 bp/日。
 rank_by_us_low = ""
 # lgbm のモデル（このファイルからの相対パス）。
 model = "models/lgbm_rank.txt"
@@ -130,7 +143,9 @@ us_vix_override = 24
 # rank_by を gap_vol に戻すときは "all" に戻す（gap_vol のこの日は +3.88 bp・t 0.59）。
 # LightGBM で並べられない日（plan が古い・モデルが読めない・並べ替えに失敗）は open が自動で
 # gap_vol と "all" に切り替える（ログ daytrade.rerank）
-us_skip_legs = "short"
+# 2026-09-20 から "all"（rank_by = gap_vol と組）。寄る前の気配の誤差の下では、この日はどの並べ方でも
+# −9〜−11 bp/日（7 年・540 日）。見送りの日も気配・板・順位表は記録に残る（skipped の印付き）。
+us_skip_legs = "all"
 # 前夜の米国市場（us_skip_high / shock_us_ret の材料）がまだ取れていない回は 9:12 まで判定せずに待つ。
 # open の cron は 9:00:03・9:00:25・9:01:03 と 9:03〜9:13 の 3 分おきなので、9:13 の回は取れた値で判定する（取れなければ異常に載せる）。
 # FRED だけだった頃は火〜金の 9:01〜9:10 が前々夜の値で判定していた（前夜の値が出るのは 9:10 JST ごろ）

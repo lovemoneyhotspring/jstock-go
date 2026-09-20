@@ -39,9 +39,12 @@ func TestLoadRealConfigs(t *testing.T) {
 		if cfg.Regime.UsSkipHigh == nil {
 			t.Errorf("%s: us_skip_high が読めていない", dir)
 		}
-		// 米国小幅高の日は LightGBM のロングだけ取引し、ショートは休む
-		if cfg.Regime.UsSkipLegs != UsSkipLegsShort {
-			t.Errorf("%s: us_skip_legs = %q, want %q", dir, cfg.Regime.UsSkipLegs, UsSkipLegsShort)
+		// 2026-09-20 から gap_vol で並べ、米国小幅高の日は両脚とも休む（この 2 つは組で変える）
+		if cfg.Signal.RankBy != RankByGapVol {
+			t.Errorf("%s: rank_by = %q, want %q", dir, cfg.Signal.RankBy, RankByGapVol)
+		}
+		if cfg.Regime.UsSkipLegs != UsSkipLegsAll {
+			t.Errorf("%s: us_skip_legs = %q, want %q", dir, cfg.Regime.UsSkipLegs, UsSkipLegsAll)
 		}
 	}
 	margin, err := Load("../../../config/daytrade_margin")
