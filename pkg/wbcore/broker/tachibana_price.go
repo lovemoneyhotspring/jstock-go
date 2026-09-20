@@ -9,6 +9,8 @@ package broker
 import (
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,14 +75,36 @@ func MarginalFlatRateCommission(dayTotalBefore, amount decimal.Decimal) decimal.
 	return FlatRateCommission(dayTotalBefore.Add(amount)).Sub(FlatRateCommission(dayTotalBefore))
 }
 
-// priceLimiter は時価問合の送信上限（4 回 / 秒）。
+// priceLimiter は時価問合の送信上限（8 回 / 秒。2026-09-21 に 4 から上げた——8 本を 0.35 秒で
+// 送る形を 12 回続けても弾かれなかった。TestPriceParallelProbe）。
 //
 // 母集団が数千銘柄あると 1 回の open で 120 銘柄ずつ数十リクエストを連射することになり、
 // 上限に当たって寄付の判断が止まる。上限はブローカー側の口（sUrlPrice）ごとなので、
 // プロセスに 1 つ持てば足りる。
 var priceLimiter = sync.OnceValue(func() *RateLimiter {
-	return NewRateLimiter(Limit{Calls: 4, PerSeconds: 1.0})
+	return NewRateLimiter(Limit{Calls: 8, PerSeconds: 1.0})
 })
+
+// marketPriceStagger は時価問合のバッチを、応答を待たずに番号順にずらして送るときの間隔。
+//
+// 立花は**届いた順に** p_no が増えていることを検査する。8 本を同時に送ると、先に着いた 1 本だけが通り、
+// 残りは p_errno=6「p_no <= 前要求.p_no」で弾かれる（2026-09-21 の実機。TestPriceParallelProbe）。
+// 番号順に間隔を空けて送れば通る——960 銘柄 × 8 本が、間隔 50 / 30 / 20 / 10 ms のどれでも 12 回とも
+// 8/8、0.35〜0.58 秒（直列は本番の実測で 1.48 秒）。測ったのは連休の深夜で、9:00 は回線が混むので
+// 通った下限（10 ms）でなく 50 ms を採る。弾かれたバッチは 2 周目が直列で取り直す。
+//
+// TACHIBANA_PRICE_STAGGER_MS で上書きできる。0 なら従来の直列（bin を作り直さずに cron の 1 行で戻せる）。
+func marketPriceStagger() (stagger time.Duration, invalid string) {
+	if raw := strings.TrimSpace(os.Getenv("TACHIBANA_PRICE_STAGGER_MS")); raw != "" {
+		ms, err := strconv.Atoi(raw)
+		if err != nil || ms < 0 || ms > 1000 {
+			// 直列に戻したつもりの書き間違い（=O、=0ms）を黙って既定にしない。呼び出し側が警告を出す
+			return 50 * time.Millisecond, raw
+		}
+		return time.Duration(ms) * time.Millisecond, ""
+	}
+	return 50 * time.Millisecond, ""
+}
 
 // requestLimiter は発注・照会の口（sUrlRequest）のうち**照会**の送信上限（2 回 / 秒）。
 //
@@ -252,6 +276,34 @@ func (t *TachibanaBroker) MarketPricesRawPartialAt(symbols []string, columns str
 			})
 		}
 		var failed []PriceBatchFailure
+		stagger, invalid := marketPriceStagger()
+		if pass == 1 && invalid != "" {
+			t.logWarn("broker.price_stagger_invalid", "TACHIBANA_PRICE_STAGGER_MS を読めないので既定の間隔で送る（直列に戻すなら 0）", map[string]any{
+				"value": invalid, "stagger_ms": stagger.Milliseconds(),
+			})
+		}
+		if pass == 1 && stagger > 0 && len(pending) > 1 {
+			// 1 周目は応答を待たずにずらして送る。取り直し（2 周目）は下の直列——弾かれた理由が
+			// 順番なら直列で確実に通り、失効なら postTo がログインし直す
+			for _, r := range t.marketPricePipelined(pending, columns, stagger, started) {
+				if r.err != nil {
+					r.batch.Err = r.err
+					failed = append(failed, r.batch)
+					continue
+				}
+				found = append(found, r.rows...)
+				for range r.rows {
+					received = append(received, r.at)
+				}
+			}
+			// どの形で送ったかを毎回残す（戻したつもりで戻っていない、を朝のログで見分ける）
+			t.logInfo("broker.price_pipelined", "時価問合をずらして送った", map[string]any{
+				"stagger_ms": stagger.Milliseconds(), "batches": batches, "failed": len(failed),
+				"elapsed_ms": time.Since(started).Milliseconds(),
+			})
+			pending = failed
+			continue
+		}
 		for _, b := range pending {
 			rows, err := t.marketPriceBatch(b.Symbols, columns)
 			if err != nil {
@@ -277,6 +329,118 @@ func (t *TachibanaBroker) MarketPricesRawPartialAt(symbols []string, columns str
 		pending = failed
 	}
 	return found, received, pending
+}
+
+// pipelinedBatch は marketPricePipelined の 1 バッチぶんの結果。
+type pipelinedBatch struct {
+	batch PriceBatchFailure
+	rows  []map[string]any
+	at    time.Time
+	err   error
+}
+
+// marketPricePipelined はバッチを番号順に stagger ずつずらして送り、応答はまとめて待つ（marketPriceStagger）。
+//
+// 採番は postTo と同じく flock の中で「読む → 進める → 書く」。**送信を始めてから stagger のあいだロックを
+// 握ったままにする**——放すと、並走する別プロセス（snap / wbjp）が大きい番号を先に届かせて、こちらの
+// 送りかけが弾かれる。応答の p_errno が 0 でなければそのバッチは失敗として返す（呼び出し側が直列で取り直す）。
+// 失効（6・-1・-62 以外）ならセッションを捨てる——取り直しの postTo がログインし直す。
+func (t *TachibanaBroker) marketPricePipelined(pending []PriceBatchFailure, columns string, stagger time.Duration, started time.Time) []pipelinedBatch {
+	out := make([]pipelinedBatch, len(pending))
+	var wg sync.WaitGroup
+	for i, b := range pending {
+		out[i].batch = b
+		fail := func(err error) {
+			out[i].err = fmt.Errorf("開始から %dms: %w", time.Since(started).Milliseconds(), err)
+		}
+		if t.expired() {
+			fail(&ErrDeadline{CLMID: clmMarketPrice, Deadline: t.deadline})
+			continue
+		}
+		if _, err := priceLimiter().Acquire(); err != nil {
+			fail(fmt.Errorf("時価問合の送信待ちに失敗しました: %w", err))
+			continue
+		}
+		err := func() error {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			path := t.sessionFilePath()
+			unlock, err := lockSession(path)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			if err := t.ensureSessionLocked(path); err != nil {
+				return err
+			}
+			pNo := t.session.PNo
+			t.session.PNo++
+			if err := writeSessionFile(path, t.session); err != nil {
+				return fmt.Errorf("セッションを保存できません: %w", err)
+			}
+			endpoint, timeout := t.endpointOf(interfacePrice)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// この goroutine の panic は cli.Guarded の網に掛からず、通知もなくプロセスが落ちる。
+				// バッチの失敗に落とす——気配が揃わないので発注に進まず、通常のエラーとして通知される
+				defer func() {
+					if p := recover(); p != nil {
+						fail(fmt.Errorf("時価問合のバッチで panic: %v", p))
+					}
+				}()
+				res, err := t.sendTo(endpoint, timeout, interfacePrice, pNo, clmMarketPrice, map[string]any{
+					"sTargetIssueCode": strings.Join(b.Symbols, ","),
+					"sTargetColumn":    columns,
+				})
+				out[i].at = clock.NowUTC()
+				if err != nil {
+					fail(err)
+					return
+				}
+				if errno := strings.TrimSpace(text(res["p_errno"])); errno != "" && errno != "0" {
+					fail(&ErrPlatform{CLMID: clmMarketPrice, Errno: errno, Text: text(res["p_err"])})
+					return
+				}
+				if err := checkResultOptional(res, clmMarketPrice); err != nil {
+					fail(err)
+					return
+				}
+				rows, err := rowsOf(res, marketPriceKey, clmMarketPrice)
+				if err != nil {
+					fail(err)
+					return
+				}
+				out[i].rows = rows
+			}()
+			time.Sleep(stagger)
+			return nil
+		}()
+		if err != nil {
+			fail(err)
+		}
+	}
+	wg.Wait()
+
+	// 失効らしい応答があればセッションを捨てる（postTo の「それ以外」と同じ扱い）
+	for _, r := range out {
+		var platform *ErrPlatform
+		if errors.As(r.err, &platform) {
+			switch platform.Errno {
+			case pErrnoPNoOrder, pErrnoArgument, pErrnoOutsideHours:
+			default:
+				t.mu.Lock()
+				path := t.sessionFilePath()
+				if unlock, err := lockSession(path); err == nil {
+					t.invalidateSessionLocked(path)
+					unlock()
+				}
+				t.mu.Unlock()
+				return out
+			}
+		}
+	}
+	return out
 }
 
 func indexOfBatch(batches []PriceBatchFailure, index int) int {

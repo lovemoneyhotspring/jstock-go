@@ -350,7 +350,7 @@ func NewTachibanaBroker(env settings.Environment, creds *credentials.TachibanaCr
 		env:        env,
 		creds:      creds,
 		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{Timeout: 30 * time.Second, Transport: pooledTransport()},
 		stateDir:   stateDir,
 		privKey:    privKey,
 	}, nil
@@ -390,6 +390,9 @@ const (
 	pErrnoSessionLost  = "2"   // セッション切断・失効
 	pErrnoArgument     = "-1"  // 引数エラー（基盤が受け付ける前に弾いた）
 	pErrnoOutsideHours = "-62" // 時間外
+	// p_no が前の電文以下（「引数（p_no:[3] <= 前要求.p_no:[10]）エラー」）。届いた順で検査される。
+	// セッションは生きている——直後の大きい番号は通る（2026-09-21 の実機。TestPriceParallelProbe）
+	pErrnoPNoOrder = "6"
 )
 
 // ErrSession は p_errno が失効（またはそれと区別できない値）だった応答。セッションは捨ててある。
@@ -711,8 +714,11 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 		switch errno {
 		case "", "0":
 			return res, nil
-		case pErrnoArgument, pErrnoOutsideHours:
+		case pErrnoArgument, pErrnoOutsideHours, pErrnoPNoOrder:
 			// 基盤が弾いた。セッションは生きているので捨てない。送り直しても同じ結果
+			// （6 = p_no の逆転はここでは起きないはず——往復のあいだ flock を握るので、後から採番した電文が
+			// 先に届くことがない。弾かれるのは、採番してロックを放す marketPricePipelined 側のバッチ。
+			// それでも来たら失効ではないので、再ログインの嵐にしない）
 			return nil, &ErrPlatform{CLMID: clmID, Errno: errno, Text: text(res["p_err"])}
 		}
 		// 2（失効）と、それと区別できない値
@@ -730,6 +736,36 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 
 // send は 1 電文を Shift_JIS で送り、応答を UTF-8 の map にする。
 func (t *TachibanaBroker) send(iface string, pNo int, clmID string, params map[string]any) (map[string]any, error) {
+	endpoint, timeout := t.endpointOf(iface)
+	return t.sendTo(endpoint, timeout, iface, pNo, clmID, params)
+}
+
+// pooledTransport は同じホストへの待機接続を多めに残す。既定（1 ホスト 2 本）だと、時価問合を
+// ずらして 8 本送るたびに 6 本ぶんつなぎ直し、その所要のばらつきが p_no の到着順を入れ替える。
+func pooledTransport() http.RoundTripper {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultTransport
+	}
+	tr := base.Clone()
+	tr.MaxIdleConns, tr.MaxIdleConnsPerHost = 64, 32
+	return tr
+}
+
+// endpointOf は口の仮想URL と待つ上限。セッションを読むので、採番のロックの中で呼ぶ。
+func (t *TachibanaBroker) endpointOf(iface string) (string, time.Duration) {
+	switch iface {
+	case interfacePrice:
+		return t.session.URLPrice, priceTimeout
+	case interfaceMaster:
+		return t.session.URLMaster, requestTimeout
+	}
+	return t.session.URLRequest, requestTimeout
+}
+
+// sendTo は宛先を受け取って 1 電文送る。セッションに触らないので、時価問合をずらして
+// 並行に送る経路（marketPricePipelined）から、採番のロックの外で呼べる。
+func (t *TachibanaBroker) sendTo(endpoint string, timeout time.Duration, iface string, pNo int, clmID string, params map[string]any) (map[string]any, error) {
 	payload := map[string]any{
 		// 文字列で送る（login と同じ。数値だと基盤エラーになる）
 		"p_no":      strconv.Itoa(pNo),
@@ -748,16 +784,6 @@ func (t *TachibanaBroker) send(iface string, pNo int, clmID string, params map[s
 	sjisBytes, err := io.ReadAll(transform.NewReader(bytes.NewReader(bodyBytes), japanese.ShiftJIS.NewEncoder()))
 	if err != nil {
 		return nil, fmt.Errorf("立花証券API 電文を Shift_JIS にできません: %w", err)
-	}
-
-	endpoint := t.session.URLRequest
-	timeout := requestTimeout
-	switch iface {
-	case interfacePrice:
-		endpoint = t.session.URLPrice
-		timeout = priceTimeout
-	case interfaceMaster:
-		endpoint = t.session.URLMaster
 	}
 
 	// 1 電文 1 行の記録。何を送ったか（電文の種類・銘柄）と、どれだけ待って何が返ったか

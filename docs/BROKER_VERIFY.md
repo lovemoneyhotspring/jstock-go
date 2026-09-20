@@ -497,3 +497,28 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 
 停止は `config/<戦略名>/settings.toml`（`daytrade.toml`）の `kill_switch = true`。
 cron を消さなくても次のサイクルから発注しなくなる。
+
+## 時価問合を並列に送れるか（2026-09-21、確認済み）
+
+`CLMMfdsGetMarketPrice` は 1 リクエスト 120 銘柄までで、914 銘柄 = 8 本を直列に送ると 1.1〜1.5 秒かかる。
+縮めるために実機で確かめた（注文は出さない。`pkg/wbcore/broker/tachibana_price_parallel_probe_test.go`）。
+
+| 確かめたこと | 結果 |
+|---|---|
+| 8 本を同時に送る | **通らない**。先に着いた 1 本だけ通り、残り 7 本は `p_errno=6`「引数（p_no:[3] <= 前要求.p_no:[10]）エラー」。立花は**届いた順に** p_no が増えていることを検査する |
+| `p_errno=6` のあとのセッション | **生きている**。直後の大きい番号は通る（失効として捨てる必要はない） |
+| 応答を待たずに、番号順に間隔を空けて送る | **通る**。960 銘柄 × 8 本が、間隔 50 / 30 / 20 / 10 ms のどれでも 12 回とも 8/8、合計 0.35〜0.58 秒 |
+| 送信の上限 | 8 本を 0.35 秒で送る形を 0.3 秒おきに 12 回続けても弾かれない。`priceLimiter` を 4 → 8 回/秒に上げた |
+| 実装した経路（`MarketPricesRawPartialAt`） | 914 銘柄で直列 1.14〜1.16 秒 → **0.51〜0.60 秒**、失敗バッチ 0。1 回の中の応答時刻の幅は 0.97 秒 → 0.33〜0.41 秒 |
+
+```bash
+WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env TACHIBANA_PROD_PRIVATE_KEY_FILE=$PWD/e_api_private_key.der \
+  TACHIBANA_PRICE_PARALLEL_PROBE=1 TACHIBANA_PROBE_STAGGER_MS=50,30,20,10 TACHIBANA_PROBE_SYMBOLS=<銘柄,...> \
+  go test ./pkg/wbcore/broker -run TestPriceParallelProbe -v -count=1
+```
+
+プローブは実験のあいだ（10 秒以上）本番のセッションのロックを握り続ける。**場の時間外・cron の発注系と重ならない時刻に走らせる。**
+
+**残り**: 測ったのは連休の深夜。9:00 台の混んだ回線で到着が入れ替わる頻度は未確認——構造化ログの `broker.price_retry`
+（弾かれたバッチを直列で取り直した）が朝に出るかを見る。送った形と間隔は毎回 `broker.price_pipelined`（`stagger_ms`・`failed`・`elapsed_ms`）に残る。頻発するなら cron の行に `TACHIBANA_PRICE_STAGGER_MS=100`、
+直列に戻すなら `=0`（bin の作り直しは不要）。
