@@ -3,7 +3,7 @@
 根拠・事前登録: vault 20-research/2026-09-jp-daytrade-rankby-preopen-fair.md
 
   test/.venv/bin/python test/dt_candidates.py --max-gap 0.03 --out test/out/dt_candidates_wide.parquet
-  test/.venv/bin/python test/dt_rank_compare.py [--seeds 20] [--side-seeds 10]
+  test/.venv/bin/python test/dt_rank_compare.py [--seeds 20] [--side-seeds 10] [--slot 0859] [--err-since 2026-09-11]
 
 誤差の入れ方・候補の作り直しは test/dt_preopen_sim.py と同じ。違いは
   - 学習が walk-forward（1 年ずつ 7 本。dt_preopen_sim は 2024-09 で 1 分割）
@@ -86,6 +86,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=20)
     ap.add_argument("--side-seeds", type=int, default=10, help="x0.8 と block のシード数（判定の x1.0 は --seeds）")
+    ap.add_argument("--slot", default=SLOT, help="誤差を測る板の時刻。8:59:45 の記録が 20 営業日溜まったら 085945")
+    ap.add_argument("--err-since", default=ERR_SINCE)
     ap.add_argument("--report-only", action="store_true", help="保存済みの日次の結果から集計だけやり直す")
     a = ap.parse_args()
 
@@ -93,7 +95,8 @@ def main():
         r = pd.read_parquet(OUT)
         report(r, pd.DatetimeIndex(sorted(r.loc[r["form"] == "upper", "d"].unique())))
         return
-    err = duckdb.sql(ERR_SQL, params=[SLOT, ERR_SINCE, ERR_SINCE]).df()
+    err = duckdb.sql(ERR_SQL, params=[a.slot, a.err_since, a.err_since]).df()
+    print(f"誤差の実測: slot {a.slot}、{err['d'].nunique()} 日、{len(err):,} 行", flush=True)
     err["band"] = np.digitize(err["g"], BANDS[1:-1], right=True)
     df = pd.read_parquet(CAND)
     df = df[df["d"] <= LAST_DAY].copy()
