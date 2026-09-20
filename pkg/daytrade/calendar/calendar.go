@@ -11,7 +11,7 @@ import (
 )
 
 // TradingDivisions は営業日とみなす HolDiv の値。
-var TradingDivisions = map[string]bool{"1": true, "2": true}
+var TradingDivisions = map[string]bool{"1": true, HalfDayDivision: true}
 
 // HalfDayDivision は半日立会（前場だけ）の HolDiv。営業日には数えるが、デイトレは建てない
 // ——手仕舞いの時間帯（execution.exit_window、15:20〜）は後場の引けが前提で、前場で引ける日に
@@ -27,6 +27,7 @@ type Calendar struct {
 }
 
 // New は日付の並びからカレンダーを作る（重複と順序は内部で整える）。
+// 半日立会の印は持たない（IsHalfDay は常に偽）。印が要る経路は FromArchive を使うこと。
 func New(days []time.Time) *Calendar {
 	set := make(map[string]bool, len(days))
 	uniq := make([]time.Time, 0, len(days))

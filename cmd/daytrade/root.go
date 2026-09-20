@@ -1,7 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
@@ -162,7 +166,8 @@ func holidayCalendar(day time.Time, phase string, live bool) (*calendar.Calendar
 // 無く、来るとしても年に 1〜2 日）。手仕舞う側（close・guard・protect）は止めない
 // ——前日から持ち越した建玉があれば、いつもどおり返そうとする。
 //
-// 通知はここでは出さない（open は朝に 7 回走る）。前夜の plan が 1 回だけ知らせる。
+// 通知は朝に 1 回だけ出す（open は朝に何度も走る）。前夜の plan も知らせるが、plan が落ちた夜や
+// --if-missing で早く返った朝はそれが出ないので、黙って「何もしない朝」にしないよう朝側でも担保する。
 func skipHalfDay(cal *calendar.Calendar, cfg dtconfig.Config, day time.Time, phase string) bool {
 	if !cal.IsHalfDay(day) {
 		return false
@@ -171,6 +176,31 @@ func skipHalfDay(cal *calendar.Calendar, cfg dtconfig.Config, day time.Time, pha
 	logWarn("daytrade.skip", "半日立会のため見送り",
 		map[string]any{"reason": "half_day", "phase": phase, "day": day.Format(DateLayout)})
 	digest.Skipped("half_day")
+	if firstOfDay(halfDayMarkerDir(), "half_day", day) {
+		alertHalfDayBody(cfg, day)
+	}
+	return true
+}
+
+// halfDayMarkerDir は「その朝もう知らせたか」の印を置く場所。設定が読めていなければ空（印も通知も無し）。
+func halfDayMarkerDir() string {
+	if appSettings == nil || appSettings.StateDir == "" {
+		return ""
+	}
+	return appSettings.DaytradeDir()
+}
+
+// firstOfDay は、その日その名前で呼ばれたのが初めてなら真を返す（印のファイルを排他で作る）。
+// 印を作れない（権限・ディスク）ときは真——知らせる側に倒す。dir が空なら偽。
+func firstOfDay(dir, name string, day time.Time) bool {
+	if dir == "" {
+		return false
+	}
+	f, err := os.OpenFile(filepath.Join(dir, name+"-"+day.Format(DateLayout)+".alerted"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return !errors.Is(err, fs.ErrExist)
+	}
+	_ = f.Close()
 	return true
 }
 
@@ -181,6 +211,10 @@ func alertHalfDay(cal *calendar.Calendar, cfg dtconfig.Config, day time.Time) {
 	}
 	fmt.Printf("%s は半日立会。open は建てません\n", day.Format(DateLayout))
 	logWarn("daytrade.half_day", "判定日は半日立会（open は建てない）", map[string]any{"day": day.Format(DateLayout)})
+	alertHalfDayBody(cfg, day)
+}
+
+func alertHalfDayBody(cfg dtconfig.Config, day time.Time) {
 	alert("デイトレ: "+day.Format(DateLayout)+" は半日立会のため建てません",
 		"手仕舞い（"+describeWindow(cfg, "exit")+"）の前に引けるので、open は見送ります。持ち越しの建玉がある場合は手で返済してください")
 }
