@@ -146,6 +146,14 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 		digest.Anomaly("daytrade.unconfirmed_entries",
 			fmt.Sprintf("%d 件の買い注文を照会できませんでした", len(unconfirmed)))
 	}
+	// 約定しなかった寄付条件の注文（指値に届かなかった寄指）は失敗ではない。枠が空いた日として残す
+	if unfilled, err := execute.UnfilledOpening(env); err != nil {
+		logWarn("daytrade.opening_unfilled", "約定しなかった寄付条件の注文を数えられません", map[string]any{"error": err.Error()})
+	} else if len(unfilled) > 0 {
+		logInfo("daytrade.opening_unfilled", "寄付条件の建て注文が約定せずに終わった（寄指の指値に届かず、または寄らず）",
+			map[string]any{"count": len(unfilled), "symbols": strings.Join(unfilled, " ")})
+		digest.Note(map[string]any{"opening_unfilled": len(unfilled)})
+	}
 	if len(targets) == 0 {
 		if len(unconfirmed) > 0 {
 			return fmt.Errorf("%d 件の買い注文を照会できず、手仕舞いを判断できません（口座を確認してください）",

@@ -268,6 +268,7 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 | `CLMOrderListDetail`（前営業日の注文） | 持ち越しの判定（`execute.CarriedPositions`） | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
 | `CLMKabuNewOrder` の `sCondition = 2`（寄成） | 寄る前の発注（`execution.preopen_legs`。既定 `none` なので本番では出ていない） | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
 | 板寄せに**間に合わなかった**寄成（9:00:00 以降に届いた `sCondition = 2`）の行き先 | 寄成の締め切りは 9:00:00 ちょうど（`RunDeadline`）。気配の 1 本が遅れると 8:59:59 台に出る。拒否されるのか、後場寄り（12:30）の板寄せに回るのかを確かめる——後場寄りに回るなら検証していない時刻の建玉になるので、送信の締め切りを 8:59:57 へ詰める。close は板に残った建て注文を取り消す（`RefreshEntries`）ので持ち越しにはならない | [pkg/daytrade/config/config.go](../pkg/daytrade/config/config.go) `RunDeadline` |
+| `CLMKabuNewOrder` の **指値 × `sCondition = 2`（寄指）** | 寄る前のロングを寄指にする（`execution.preopen_limit_pct`。既定 0 なので本番では出ていない）。手順は下の「寄指のプローブ」 | [pkg/daytrade/execute/execute.go](../pkg/daytrade/execute/execute.go) `OpeningLimitPrice` / `EntryRequest` |
 | `CLMKabuNewOrder` の `sCondition = 4`（引け）× 信用返済 | **保険の手仕舞い**（`execution.protect_exit`。**2026-09-20 から有効**・本番で検証中）。手順は下の「引けの保険注文」 | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
 | `daytrade` の台帳を通した信用の 1 周 | `open` → `close` → `verify` | [pkg/daytrade/execute](../pkg/daytrade/execute) |
 
@@ -313,6 +314,40 @@ WBJP_ENV=prod ./bin/daytrade protect --config-dir config/daytrade_margin --live 
 
 有効にした最初の日に `daytrade.protect`（発注）・`daytrade.protect_cancel`・`daytrade.protect_held`
 （取消を確かめられず保険に任せた）のログと通知が出る。出なければ何も起きていない。
+
+## 寄指のプローブ（`execution.preopen_limit_pct`）を実機で確かめる
+
+**何のためか。** 寄る前の回のロングを、寄成でなく寄指（指値 = 前日終値 × (1 − x%)、執行条件「寄付」）で出す。
+始値が指値より下のときだけ**始値で**約定するので、「8:59 台の気配では深く見えたのに浅く寄った銘柄」を買わずに済む
+（[DAYTRADE.md](DAYTRADE.md) の「寄指にする」、vault `20-research/2026-09-jp-daytrade-limit-on-open.md`）。
+**先に 9/24 以降の寄成（成行 × `sCondition = 2`）が通っているのを確かめてから**にする。実機で確かめていないこと:
+
+1. **電文が通るか。** `sOrderPrice = 指値` × `sCondition = 2` × 信用新規買い。拒否なら台帳に REJECTED が残り、
+   9:00:03 からの回が従来のザラ場成行で埋める（寄成が拒否されたときと同じ戻り方。通知も出る）
+2. **約定値が指値でなく始値か。** 台帳の約定単価 × 日足の始値（`evaluate` の `ref_price` 列）。指値で約定していたら
+   寄付条件が効いていない
+3. **指値に届かなかった注文がいつ・どの状態で終わるか。** 板寄せの直後に失効（`sOrderStatusCode = 12` → `EXPIRED`）か、
+   板に残って後場の寄付にも参加するか、大引けまで残るか。残るなら 15:20 の `close` が取り消す（`RefreshEntries`）が、
+   **後場寄り（12:30）で約定しうる**なら持ち時間が変わるので、9:20 の `protect` の後に手で取り消す運用か、
+   取消を `protect` に足すかを決める
+4. **余力がいつ戻るか。** 失効・取消の後に信用新規建余力が戻ること（その日はもう建てないので実害は無いが、翌朝に残らないこと）
+5. 始値 = 指値ちょうどのときの約定（板寄せでは保証されない。頻度は 1〜2%。模擬は「約定しない」と置いた）
+
+**確かめ方（1 日）。**
+
+```bash
+# 1. bin を作り直す（preopen_limit_pct を知らない古い bin は strict mode で全コマンドが止まる）
+deploy/build.sh && WBJP_ENV=prod ./bin/daytrade preflight --config-dir config/daytrade_margin
+# 2. config/daytrade/daytrade.toml の preopen_limit_pct = 0.5 のコメントを外す（戻すならコメントに戻すだけ）
+# 3. 翌営業日の 8:59:50 の回の後:
+./bin/daytrade status --config-dir config/daytrade_margin      # 理由の欄に「（寄指 1234）」、condition = OPENING
+# 4. 9:05 ごろ、立花の注文一覧で: 約定した注文の単価 = 始値、届かなかった注文の状態（失効 / 受付済みのまま）
+# 5. 15:20 の close の後: ログに daytrade.opening_unfilled（届かなかった件数と銘柄）、15:40 の verify が持ち越しなし
+# 6. その日の影の記録と突き合わせる（どの銘柄が約定するはずだったか）
+test/.venv/bin/python test/dt_live_shadow.py --since <その日>
+```
+
+結果はこの節に追記し、3 の答えで運用（後場寄りの前に取り消すか）を決める。
 
 ## 設計: 分からないときは必ず止まる
 

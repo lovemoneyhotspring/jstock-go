@@ -349,6 +349,15 @@ type Execution struct {
 	// 9:00 以降の回は脚によらず従来の成行（もう板寄せは終わっているか、未寄付なら
 	// 成行でも板寄せに入る）。研究ノート vault 2026-09-jp-daytrade-preopen-order。
 	PreopenLegs string `toml:"preopen_legs"`
+	// PreopenLimitPct は寄る前の回の**ロングを寄指（寄付条件つきの指値）にする**ときの指値の位置（%）。
+	// 指値 = 前日終値 × (1 − PreopenLimitPct/100) を呼値に切り下げた値。0（既定）なら寄成のまま。
+	//
+	// 寄指は寄成と同じ板寄せに参加し、**始値が指値より下のときだけ始値で約定する**（指値では約定しない）。
+	// 狙いは「深く見えたのに浅く寄った銘柄」を買わないこと——−0.5% より浅く寄った銘柄は 7 年とも
+	// 1 本 −8〜−15 bp で、予想どおり深く寄る銘柄は指値が浅いので必ず約定する。約定しなかった枠は
+	// 埋め直さない（PlacedToday は板に残った注文も失効した寄指も使った枠に数える）。
+	// ショートには効かない（測っていない）。研究ノート vault 2026-09-jp-daytrade-limit-on-open。
+	PreopenLimitPct decimal.Decimal `toml:"preopen_limit_pct"`
 	// ProtectExit は建てた玉に**保険の手仕舞い**（執行条件「引け」の返済・売り）をブローカーへ
 	// 先に置くか（daytrade protect）。注文はブローカーに残るので、cron・マシン・ネットが止まっても
 	// 引けで手仕舞われる。15:20 の close は保険の注文を取り消してから成行で手仕舞う（引け値は
@@ -400,6 +409,14 @@ func (e Execution) PreopenFor(side domain.Side) bool {
 		return side == domain.SideSell
 	}
 	return false
+}
+
+// MaxPreopenLimitPct は preopen_limit_pct の上限（%）。検証したのは 0〜5% で、深くするほど枠が現金で残る。
+const MaxPreopenLimitPct = 5
+
+// PreopenLimitFor はその脚の寄る前の注文を寄指にする設定か（ロングだけ）。
+func (e Execution) PreopenLimitFor(side domain.Side) bool {
+	return side == domain.SideBuy && e.PreopenFor(side) && e.PreopenLimitPct.IsPositive()
 }
 
 // PreopenEnabled はどちらかの脚を寄る前に出す設定か。
@@ -855,6 +872,13 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("execution.preopen_legs は %q / %q / %q / %q",
 			PreopenLegsNone, PreopenLegsLong, PreopenLegsShort, PreopenLegsBoth)
+	}
+	if c.Execution.PreopenLimitPct.IsNegative() || c.Execution.PreopenLimitPct.GreaterThan(decimal.NewFromInt(MaxPreopenLimitPct)) {
+		return fmt.Errorf("execution.preopen_limit_pct は 0〜%d（%%。0 は寄成のまま）", MaxPreopenLimitPct)
+	}
+	// 寄指はロングの寄る前の注文にしか付かない。脚が合っていないと黙って寄成・成行のままになる
+	if c.Execution.PreopenLimitPct.IsPositive() && !c.Execution.PreopenFor(domain.SideBuy) {
+		return fmt.Errorf("execution.preopen_limit_pct > 0 なら preopen_legs に long を含める（今は %q）", c.Execution.PreopenLegs)
 	}
 	// 窓が 9:00 開始のままだと寄る前の回がそもそも走らず、寄成が一度も出ない。
 	// 黙って従来の動きに戻るより、設定の食い違いとして止める
