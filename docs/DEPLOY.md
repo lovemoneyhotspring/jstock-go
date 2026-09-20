@@ -138,7 +138,7 @@ deploy/install-crontab.sh             # バックアップを取り、構文を�
 | cron が止まった・crontab が消えた・cron の行が壊れた | `jstock-close-net`（平日 15:22・15:26）が、当日の close の成功記録（ダイジェスト）が無ければ代わりに `close` を走らせる |
 | crontab から jstock-go のブロックが消えた（上書き・空） | `jstock-guard`（平日 8:42・15:12）が `state/crontab.good` から戻す |
 | 寄る前の点検が落ちた（設定を読めない・plan が無い） | `jstock-guard`（8:42）が直す: 設定は `deploy/build.sh` で作り直し（作業ツリーが**コミット済みの main** のときだけ）→ まだ動かなければ `deploy/rollback-bin.sh` で 1 世代前へ。plan は `daytrade plan --if-missing`。台帳・ディスクは通知のみ |
-| **マシン停止・ネット断** | ローカルの仕組みでは救えない。**ブローカーに置いた保険の引け注文**（`execution.protect_exit`。`daytrade protect`）が引けで手仕舞う。実機で未検証のため既定は無効（`docs/BROKER_VERIFY.md`「引けの保険注文」） |
+| **マシン停止・ネット断** | ローカルの仕組みでは救えない。**ブローカーに置いた保険の引け注文**（`execution.protect_exit`。`daytrade protect`）が引けで手仕舞う。2026-09-20 から有効（実機で未検証のまま本番で検証中。`docs/BROKER_VERIFY.md`「引けの保険注文」）。戻すなら `protect_exit = false` |
 
 ```bash
 deploy/install-systemd.sh           # 入れて有効にする（sudo 不要。linger が有効なこと）

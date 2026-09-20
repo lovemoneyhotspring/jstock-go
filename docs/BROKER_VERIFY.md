@@ -268,7 +268,7 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 | `CLMOrderListDetail`（前営業日の注文） | 持ち越しの判定（`execute.CarriedPositions`） | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
 | `CLMKabuNewOrder` の `sCondition = 2`（寄成） | 寄る前の発注（`execution.preopen_legs`。既定 `none` なので本番では出ていない） | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
 | 板寄せに**間に合わなかった**寄成（9:00:00 以降に届いた `sCondition = 2`）の行き先 | 寄成の締め切りは 9:00:00 ちょうど（`RunDeadline`）。気配の 1 本が遅れると 8:59:59 台に出る。拒否されるのか、後場寄り（12:30）の板寄せに回るのかを確かめる——後場寄りに回るなら検証していない時刻の建玉になるので、送信の締め切りを 8:59:57 へ詰める。close は板に残った建て注文を取り消す（`RefreshEntries`）ので持ち越しにはならない | [pkg/daytrade/config/config.go](../pkg/daytrade/config/config.go) `RunDeadline` |
-| `CLMKabuNewOrder` の `sCondition = 4`（引け）× 信用返済 | **保険の手仕舞い**（`execution.protect_exit`。既定 `false`）。手順は下の「引けの保険注文」 | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
+| `CLMKabuNewOrder` の `sCondition = 4`（引け）× 信用返済 | **保険の手仕舞い**（`execution.protect_exit`。**2026-09-20 から有効**・本番で検証中）。手順は下の「引けの保険注文」 | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
 | `daytrade` の台帳を通した信用の 1 周 | `open` → `close` → `verify` | [pkg/daytrade/execute](../pkg/daytrade/execute) |
 
 信用建玉（行あり）・信用新規／返済の発注・信用返済の逆指値は 2026-09-14 に本番口座で確認済み（上の節）。
@@ -286,7 +286,7 @@ Go への初回移植で推定に頼って多数取り違えたため、そこ�
 （`daytrade protect`、9:20・10:20・13:20）。注文は立花に残るので、cron・マシン・ネットが止まっても
 引けで手仕舞われる。人が気づいて端末を打つ前提にしない安全網。ふだんの手仕舞いは 15:20 の成行のまま
 （引け値は 15:20 より両脚とも不利。分足の検証で合算 +525 万 → +470 万）で、close が保険を取り消してから
-成行を出す。**実機で確かめていないこと（すべて `false` の間は何も起きない）:**
+成行を出す。**2026-09-20 に有効にした（ユーザ判断。検証しながら本番で回す。最初の営業日は 9/24）。実機で確かめていないこと:**
 
 1. 信用返済（`sTatebiType = 1`・建玉個別指定）に `sCondition = 4` が通るか。拒否なら `protect` が通知を 1 通出し、
    その日はもう置かない。売買は止まらない（close は従来どおり 15:20 に手仕舞う）
@@ -301,7 +301,8 @@ Go への初回移植で推定に頼って多数取り違えたため、そこ�
 **確かめ方（1 単元・1 日）。**
 
 ```bash
-# 1. 有効にする（config/daytrade/daytrade.toml の protect_exit = true）→ deploy/build.sh
+# 1. 有効（config/daytrade/daytrade.toml の protect_exit = true。cron が読む設定なので build は要らない）
+#    戻すなら false にするだけ
 # 2. 9:20 の cron の後（または手で）:
 WBJP_ENV=prod ./bin/daytrade protect --config-dir config/daytrade_margin --live --yes
 ./bin/daytrade status --config-dir config/daytrade_margin   # 建玉と手仕舞いの注文
