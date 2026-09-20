@@ -75,10 +75,7 @@ func ProtectEntries(env Env, b broker.Broker) ([]ProtectAction, error) {
 			env.printf("  %s: 約定を確かめられません。保険は次の回で\n", order.Symbol)
 			continue
 		}
-		filled := fill.Filled
-		if !order.IsOpen() {
-			filled = settledQuantity(order)
-		}
+		filled := fill.Filled // FILLED で約定数量 0 の読み替えは queryFill が済ませている
 		if !filled.IsPositive() {
 			continue
 		}
@@ -180,7 +177,8 @@ func releaseProtection(env Env, b broker.Broker, symbols map[string]bool) (held 
 		if current.FilledQuantity.LessThan(o.FilledQuantity) {
 			// 約定数量が台帳より減って見える。書き戻すと、一部約定した保険が約定 0 の死んだ注文になり、
 			// 返済済みの株数まで成行で送り直す（refreshOpenExits と同じ理由）。生きている扱いのまま人に知らせる
-			held[key] = fmt.Sprintf("照会の約定数量 %s が台帳の %s より少ない（%s）",
+			held[key] = fmt.Sprintf("取消の結末を判定できません（照会の約定数量 %s が台帳の %s より少ない・%s）。"+
+				"保険が板に無ければ引けでも手仕舞われず建玉が残るので、口座を確認してください",
 				current.FilledQuantity, o.FilledQuantity, current.Status)
 			continue
 		}

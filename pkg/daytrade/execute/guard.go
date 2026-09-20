@@ -217,12 +217,14 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 	// この銘柄の保険の引け注文が生きていれば先に取り消す（返済できる建玉を押さえていて、
 	// 通っても二重に返済する）。取り消せたと確かめられなければ返済を出さず、次の回で照会し直す
 	var heldErr error
+	var unwritten map[string]decimal.Decimal
 	if b != nil {
-		held, err := ReleaseProtection(env, b, map[string]bool{o.Symbol: true})
+		held, cancelled, err := releaseProtection(env, b, map[string]bool{o.Symbol: true})
 		if err != nil {
 			act.Err = err
 			return act
 		}
+		unwritten = cancelled
 		if reason, ok := held[o.Symbol+"|"+o.Leg()]; ok {
 			// 取り消せなかった保険は生きたまま数え、覆われていない株数だけ返済する（RefreshEntries と
 			// 同じ方針）。エラーは残して次の回で保険を照会し直す
@@ -234,6 +236,10 @@ func guardOne(env Env, b broker.Broker, o ledger.Order, act GuardAction) GuardAc
 	if err != nil {
 		act.Err = err
 		return act
+	}
+	// 取消は通ったのに台帳に書けなかった保険は、台帳では生きたまま数えられている。引いてから決める（RefreshEntries と同じ）
+	for key, quantity := range unwritten {
+		exits[key] = decimal.Max(exits[key].Sub(quantity), decimal.Zero)
 	}
 	remaining := remainingToExit(exits, o, filled)
 	if remaining.LessThanOrEqual(decimal.Zero) {

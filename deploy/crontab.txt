@@ -270,6 +270,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # （同じロック。snap が先に取ると open が待たされて板寄せに間に合わない）。戻すなら 08:59:45.0
 # WITH_LOCK_TIMEOUT=15: 固まったら 9:00:05〜10 に手放す（既定の 170 秒だと 9:02:40 まで握り、9:00:01.2・9:00:25・
 # 9:01:03 の回が lock_busy で全部消えて建つのが 9:03 になる）。締め切りは 9:00:00 なので、切られて困る仕事は残っていない
+# **DT_PREOPEN_AT + WITH_LOCK_TIMEOUT は 09:00:05 以上に保つ**（08:59:45.0 に戻すなら 20）。9:00:00 ちょうどに切ると最後の寄成の送信中に当たる
 59 8 * * 1-5          cd $WBJP_HOME && deploy/wait-until.sh $DT_PREOPEN_AT && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 WITH_LOCK_TIMEOUT=15 deploy/with-lock.sh /tmp/daytrade.lock 5 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
 # 9:00 の回だけは DT_OPEN_AT ちょうどに始める（2026-09-20、それまでは sleep 3 で実際は 9:00:04 台）。
 # 8:59 の行から起こして deploy/wait-until.sh で待つので、cron の起動の揺れ（+1〜2 秒）が乗らない。

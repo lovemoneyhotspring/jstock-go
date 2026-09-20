@@ -1066,7 +1066,8 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 				}
 			}
 			if current != nil {
-				filled, fillPrice = current.FilledQuantity, current.AvgFillPrice
+				// FILLED で約定数量 0 の応答は注文数量と読む（settledFill）。台帳にだけは応答のまま書く
+				filled, fillPrice = settledFill(current, order.Quantity), current.AvgFillPrice
 				fillReason := execution.ReasonExpired
 				if filled.GreaterThan(decimal.Zero) {
 					fillReason = execution.ReasonFilled
@@ -1082,9 +1083,7 @@ func RefreshEntries(env Env, b broker.Broker, entries []ledger.Order) (targets [
 					FillQuantity: filled, FillPrice: decimalOrNil(fillPrice),
 					Reason: fillReason,
 				})
-				recordFill(env, order, current, filled, fillPrice, "買い注文の約定状況")
-				// 台帳には応答のまま書き、手仕舞いの数量だけ読み替える（FILLED で約定数量 0 → 注文数量）
-				filled = settledFill(current, order.Quantity)
+				recordFill(env, order, current, current.FilledQuantity, fillPrice, "買い注文の約定状況")
 			} else {
 				// 台帳に約定が残っている（前の回で一部約定を記録した）。その値で手仕舞う。ただし
 				// 台帳では未確定のままなので、**残りが板に生きているかもしれない**——照会できないと
