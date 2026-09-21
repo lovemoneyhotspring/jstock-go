@@ -86,6 +86,16 @@ func runVerify(date string, brokerVerify bool) error {
 	result := execute.Verify(env, b, entries, exits)
 	carried, unconfirmed := result.Carried, result.Unconfirmed
 
+	// 返済が建玉を超えた脚は、持ち越しの有無とは別に必ず知らせる（ここでは終わらず、下の判定も続ける）。
+	// 翌朝の open の台帳外の建玉の検出（8:59）まで誰にも見えない
+	if len(result.Overclosed) > 0 {
+		logError("daytrade.overclosed", "手仕舞いの約定が建玉を超えた",
+			map[string]any{"day": day.Format(DateLayout), "positions": result.Overclosed})
+		digest.Anomaly("daytrade.overclosed", fmt.Sprintf("%d 銘柄で手仕舞いの約定が建玉を超えた", len(result.Overclosed)))
+		alert("デイトレ: 手仕舞いの約定が建玉を超えています（反対の建玉・別口の現物の売りの恐れ）。口座を確認してください",
+			strings.Join(result.Overclosed, "\n"))
+	}
+
 	if len(carried) > 0 {
 		logError("daytrade.carry", "持ち越し",
 			map[string]any{"day": day.Format(DateLayout), "positions": carried})
@@ -110,8 +120,13 @@ func runVerify(date string, brokerVerify bool) error {
 		return fmt.Errorf("%d 件の注文を照会できませんでした", len(unconfirmed))
 	}
 
-	fmt.Println("手仕舞いを確認しました（持ち越しなし）")
+	if len(result.Overclosed) > 0 {
+		// 持ち越しは無いが「確認しました」とは言わない（上で知らせた超過が残っている）
+		fmt.Println("持ち越しはありませんが、手仕舞いの約定が建玉を超えています（上の表示）")
+	} else {
+		fmt.Println("手仕舞いを確認しました（持ち越しなし）")
+	}
 	logInfo("daytrade.run", "手仕舞いを確認",
-		map[string]any{"phase": "verify", "live": true, "carried": 0})
+		map[string]any{"phase": "verify", "live": true, "carried": 0, "overclosed": len(result.Overclosed)})
 	return nil
 }

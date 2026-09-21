@@ -57,7 +57,9 @@ notify() {
 
 limit=${WITH_LOCK_TIMEOUT:-170}
 if [ "$limit" -gt 0 ] && command -v timeout >/dev/null 2>&1; then
-  set -- timeout -k 10 "$limit" "$@"
+  # TERM で終わらない（D 状態など）ときの KILL までの猶予。ロックが空くのは最悪 limit + これ。
+  # 次の回までの間が詰まっている行（8:59 台の snap）は crontab 側で WITH_LOCK_KILL_AFTER を短くする
+  set -- timeout -k "${WITH_LOCK_KILL_AFTER:-10}" "$limit" "$@"
 else
   limit=0
 fi

@@ -82,6 +82,18 @@ func (e Env) expired() bool {
 	return !e.Deadline.IsZero() && !clock.NowUTC().Before(e.Deadline)
 }
 
+// EntrySendMargin は建て注文を送り始めてよい、締め切りまでの最短の残り時間。これを切ったら送らない。
+// 電文は締め切りで切られる（broker.SetDeadline）ので、直前に送り始めた注文は結果が分からないまま
+// PENDING になり、次の回の一覧照会まで建ったかどうかが確定しない（二重発注にはならないが、寄る前の回なら
+// 9:00:25 まで枠が塞がる）。発注 1 往復は 0.2〜0.3 秒なので 1 秒。手仕舞い・保険・取消には掛けない——
+// あちらは送れないと持ち越しになるので、締め切りの直前でも送る。
+const EntrySendMargin = time.Second
+
+// entryClosing は建て注文を送り始めるには締め切りが近すぎるか（過ぎている場合も真）。
+func (e Env) entryClosing() bool {
+	return !e.Deadline.IsZero() && e.Deadline.Sub(clock.NowUTC()) < EntrySendMargin
+}
+
 // deadlineText は人向けの締め切り（JST）。
 func (e Env) deadlineText() string {
 	return clock.ToZone(e.Deadline, clock.Tokyo).Format("15:04:05")
@@ -683,6 +695,16 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 			skipRow(pick, request, execution.ReasonIdempotent, "")
 			continue
 		}
+		if env.Preopen && !env.Cfg.Execution.PreopenFor(pick.Side) {
+			// 寄る前の回が出すのは execution.preopen_legs に挙げた脚だけ。挙げていない脚を条件なしの成行で
+			// 8:59:5x に送ると、板寄せに入って実質その脚の寄成になる（測っていない形）。失敗には数えない——
+			// 9:00 以降の回が従来どおりザラ場の成行で建てる
+			outcome := "寄る前の回はこの脚を出さない（execution.preopen_legs）"
+			env.printf("  %s: %sは%s\n", pick.Symbol, label, outcome)
+			// 締め切り（window_closed）と混ぜない——あちらは「遅れ」の分布を見る材料
+			skipRow(pick, request, execution.ReasonNotEligible, outcome)
+			continue
+		}
 		outcome := ""
 		if b == nil {
 			if err := env.Ledger.Record(request, env.Day, ledger.DryRunStatus, &pick.Price, nil); err != nil {
@@ -691,10 +713,11 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 			skipRow(pick, request, execution.ReasonDryRun, "")
 			outcome = "dry-run"
 			orders++
-		} else if env.expired() {
-			// 締め切りを過ぎた。ここから先の注文は送らない——時間帯の外に成行を出さないため。
+		} else if env.entryClosing() {
+			// 締め切りを過ぎた・残りが EntrySendMargin を切った。ここから先の注文は送らない——時間帯の外に
+			// 成行を出さない・締め切りに切られて結果の分からない電文を作らないため。
 			// 送れなかった分は次の cron が「残りの枚数」として建て直す
-			outcome = fmt.Sprintf("見送り 締め切り（%s）を過ぎた", env.deadlineText())
+			outcome = fmt.Sprintf("見送り 締め切り（%s）まで %s を切った", env.deadlineText(), EntrySendMargin)
 			failures = append(failures, fmt.Sprintf("%s %s: %s", pick.Symbol, label, outcome))
 			env.printf("  %s: %s\n", pick.Symbol, outcome)
 			skipRow(pick, request, execution.ReasonWindowClosed, outcome)
@@ -954,7 +977,16 @@ func refreshOpenExits(env Env, b broker.Broker) error {
 			})
 			continue
 		}
-		recordFill(env, o, current, current.FilledQuantity, current.AvgFillPrice, "手仕舞い注文の約定状況")
+		written := recordFill(env, o, current, current.FilledQuantity, current.AvgFillPrice, "手仕舞い注文の約定状況")
+		if !written && current.Status.IsTerminal() && current.Status != domain.OrderStatusFilled {
+			// 終わった（拒否・失効・取消）手仕舞いを台帳に書けなかった。台帳では生きた注文のままなので、この回は
+			// 「発注済み」と数えて送り直さない。保険（releaseProtection の unwritten）のように引いて送り直す手は
+			// 使えない——書けていない注文は DeadCount に入らず、送り直しが元の注文と同じ client_order_id になる。
+			// 次の回（15:24・15:28）が書き込みからやり直すが、黙って持ち越さないよう人には知らせる
+			env.Report.Alert("デイトレ: 終わった手仕舞い注文を台帳に書けません（この回は送り直せない・持ち越しの恐れ）",
+				fmt.Sprintf("%s %s（%s / 約定 %s 株）。次の close の回が書き込みからやり直します。15:30 を過ぎても残るなら口座を確認してください",
+					o.Symbol, o.ClientOrderID, current.Status, current.FilledQuantity))
+		}
 	}
 	return nil
 }
@@ -1316,6 +1348,9 @@ func PlaceExits(env Env, b broker.Broker, targets []ExitTarget) (failures []stri
 type VerifyResult struct {
 	// Carried は手仕舞えていない建玉（持ち越し）。
 	Carried []string
+	// Overclosed は手仕舞いの約定が建玉の約定を超えた脚（保険の引け注文と 15:20 の成行が両方約定した、など）。
+	// 超えた分は反対の建玉か、別のアプリ（積立）の現物の売りになっている。持ち越しとは別に知らせる。
+	Overclosed []string
 	// Unconfirmed は照会できなかった注文。空でなければ「持ち越しなし」とは言えない。
 	Unconfirmed []string
 }
@@ -1403,6 +1438,15 @@ func Verify(env Env, b broker.Broker, entries, exits []ledger.Order) VerifyResul
 			result.Carried = append(result.Carried, fmt.Sprintf("%s %s %s 株", symbol, what, cli.Yen(remaining)))
 			flagged[symbol] = struct{}{}
 			env.printf("  %s: %s %s 株が手仕舞えていません（持ち越し）\n", symbol, what, cli.Yen(remaining))
+		case remaining.IsNegative():
+			// 「手仕舞い済み」に落とさない。超えた分は口座に反対の玉として残っているかもしれず、
+			// 下の建玉との突合は「建てた向き」しか見ないので見つけられない（2026-09-21 のレビュー #10）
+			over := remaining.Neg()
+			result.Overclosed = append(result.Overclosed, fmt.Sprintf("%s %s %s 株に対して手仕舞いの約定が %s 株（%s 株の超過）",
+				symbol, what, cli.Yen(opened[key]), cli.Yen(closed[key]), cli.Yen(over)))
+			flagged[symbol] = struct{}{}
+			env.printf("  %s: %s %s 株に対して手仕舞いが %s 株約定しています（%s 株の超過）\n",
+				symbol, what, cli.Yen(opened[key]), cli.Yen(closed[key]), cli.Yen(over))
 		case opened[key].GreaterThan(decimal.Zero):
 			env.printf("  %s: %s %s 株 手仕舞い済み\n", symbol, what, cli.Yen(opened[key]))
 		}

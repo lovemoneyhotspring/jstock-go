@@ -174,6 +174,7 @@ jq -c 'select(.verify)' state/digest/prod-2026-09-06.jsonl
 | `daytrade.order` | 注文にした結果（1 件ごと。買いも売りも） | `day`, `symbol`, `side`, `client_order_id`, `quantity`, `price`, `amount`, `live`, `outcome`（`発注` / `dry-run` / `見送り 余力不足 …` / `見送り 締め切り …` / `見送り 余力を照会できない …` / `失敗 …`） |
 | `daytrade.balance_failed` | 余力を照会できず、その銘柄だけ見送った（実行は止めない。次の銘柄へ進む） | `symbol`, `trade`, `error` |
 | `daytrade.carry` | verify が売れ残り（持ち越し）を見つけた（通知も送る） | `day`, `positions`（銘柄と株数） |
+| `daytrade.overclosed`（error） | verify が、手仕舞いの約定が建玉の約定を超えた脚を見つけた（保険の引け注文と 15:20 の成行が両方約定した、など。通知も送る）。超えた分は反対の建玉か、別口（積立）の現物の売りになっている。持ち越しの判定とは別に出す | `day`, `positions`（銘柄・建玉と手仕舞いの株数・超過） |
 | `daytrade.fill` | close / verify が注文をブローカーに照会した | `symbol`, `client_order_id`, `broker_order_id`, `before` / `after`（状態）, `quantity`, `filled`, `avg_fill_price`。照会できなければ warning で `after` が null |
 | `daytrade.reconcile` | close / verify が台帳と食い違う建玉をブローカーに見つけた（通知も送る）／建玉を照会できなかった | `held`, `symbol` / `error` |
 | `daytrade.pending_resolved` | 送信結果不明（`PENDING`）の注文を当日の注文一覧（銘柄・売買・区分・数量・時刻）で判定した。`outcome` = `attributed`（届いていた→注文番号と状態を帰属）/ `not_sent`（届いていない→`UNSENT`。同じ実行の中で種を変えて 1 度送り直す）/ `too_recent` | `day`, `client_order_id`, `symbol`, `side`, `quantity`, `outcome`, `reason`, `broker_order_id`, `status`, `filled` |
