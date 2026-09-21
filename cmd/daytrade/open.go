@@ -356,7 +356,7 @@ func runOpen(opts openOptions) error {
 	verdict = usLowPreopenOnly(cfg, verdict, env.Preopen)
 	summary["rank_by"] = cfg.Signal.RankBy
 	summary["us_low"] = verdict.UsLow
-	summary["preopen_limit_pct"] = cfg.Execution.PreopenLimitPct.String()
+	summary["preopen_limit_pct"] = cfg.Execution.PreopenLimitPct
 	summary["trade"] = verdict.Trade
 	summary["reasons"] = strings.Join(verdict.Reasons, "、")
 	summary["scale"] = verdict.Scale

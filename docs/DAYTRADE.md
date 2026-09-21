@@ -11,9 +11,11 @@
 **ギャップ（寄付 ÷ 前日終値 − 1）が負の銘柄を並べた上位 N 銘柄**を成行で買い、15:20 以降の成行売りで
 手仕舞う（15:25 以降ならクロージング・オークションで引け値）。持ち越さない。
 
-**2026-09-20 から並べ方は gap_vol（ギャップ ÷ 20 日ボラの小さい順）で、米国小幅高の日は両脚とも休む**
-（`signal.rank_by = "gap_vol"`、`regime.us_skip_legs = "all"`。この 2 つは組で変える）。寄る前の気配（8:59:45）で
+**2026-09-20 から平常日の並べ方は gap_vol（ギャップ ÷ 20 日ボラの小さい順）**（`signal.rank_by = "gap_vol"`）。寄る前の気配（8:59:50）で
 並べる形では、気配の誤差で LightGBM の優位が消えるため（vault `20-research/2026-09-jp-daytrade-rankby-preopen-fair`）。
+**米国小幅高の日は、2026-09-21 から「LightGBM で並べ、前日終値 −1.5% の寄指を寄る前の回に出すだけ」**（ショートと 9:00 以降の回は休み。
+`signal.rank_by_us_low = "lgbm"`・`regime.us_skip_legs = "short"`・`execution.preopen_limit_pct_us_low = 1.5` の 3 つが組。
+下の「米国小幅高の日だけ寄指で出す」）。9/20 の 1 日だけは両脚とも休む設定（`us_skip_legs = "all"`）で、**戻すときもこの 1 行を `"all"` にする**。
 LightGBM の予測値は順位表に残らなくなるが、気配（`quotes`）と母集団（`plan`）の履歴から `test/dt_live_shadow.py` で並べ直せる。
 以下は LightGBM で並べていた期間（2026-09-18〜19 の設定）の説明で、`rank_by = "lgbm"` に戻せばそのまま当てはまる。
 
@@ -36,8 +38,8 @@ N は資金から決める: `N = round(max_capital ÷ order_budget)`（200 万�
 | 8:40 | `daytrade preflight` | 寄る前の事前点検。この bin が設定を読めるか・今日の plan・台帳・ディスクを**読むだけ**で確かめ、問題があれば通知する（ブローカーには繋がない） | 設定 + plan + 台帳 |
 | 7:30・8:20・8:50 | `daytrade warm-us` | 前夜の米国市場（S&P500・VIX）を `data/daytrade/us.json` に焼く。`open` は読むだけになり、寄付の判断の途中で外（Cboe → Yahoo → FRED）へ取りに行かない。前夜の行が VIX つきで入っていれば何もしない（冪等）。3 回とも取れなかった朝は `open` が取りに行く——寄る前の回は 1 リクエスト 3 秒・合計 5 秒まで、9:00:03 からの回は 1 リクエスト 8 秒。20:30 の `plan` も温めるが、その時刻には当夜の米国市場が開いていないので朝の判定に要る行は入らない | Cboe / Yahoo / FRED |
 | 8:53（取れなかった朝だけ 8:56 にもう一度） | `daytrade warm-margin` | 委託保証金を照会して `data/daytrade/margin.json` に焼く。9:01 の `open` が読んで建玉の上限を下げ方向のみ上書きする。**前夜でなく朝に取る**（代用有価証券の評価替えが夜間更新で確定するため） | ブローカー |
-| 8:59:45 | `daytrade open --live --yes` | **寄る前の回。** 候補の気配を取って並べ、ロングを**寄成**で出す（`execution.preopen_legs = "long"`）。締め切りは 9:00:00（板寄せ） | plan + 気配 |
-| 09:00〜09:15 | `daytrade open --live --yes` | 8:59:45 で建たなかった残りの枚数を、従来どおりザラ場の成行で買う。台帳に記録 | plan + 気配（`execution.quote_source`） |
+| 8:59:50 | `daytrade open --live --yes` | **寄る前の回**（開始は crontab の `DT_PREOPEN_AT`、いま 08:59:50.0）。候補の気配を取って並べ、ロングを**寄成**で出す（`execution.preopen_legs = "long"`。米国小幅高の日は LightGBM で並べた**寄指**）。締め切りは 9:00:00（板寄せ） | plan + 気配 |
+| 09:00〜09:15 | `daytrade open --live --yes` | 寄る前の回で建たなかった残りの枚数を、従来どおりザラ場の成行で買う（米国小幅高の日は埋めない——`regime` で見送り）。台帳に記録 | plan + 気配（`execution.quote_source`） |
 | 06:20 / 8:52 / 9:14〜15:14（10 分おき）/ 20:20 | `news sync`（別コマンド。`docs/NEWS.md`） | ニュース電文（TDnet 適時開示を含む）を記録簿に取り込む。plan / open / guard が TOB などの材料の判定に読む。8:52 は前日ぶんも取り直す | 立花のニュース電文 |
 | 9:16〜15:16（10 分おき） | `daytrade guard --live --yes` | 直前の `news sync` の記録簿で、TOB など材料の出た今日の売建を処置（未約定→取消、一部約定→残りを取消して約定分を返済買い、全部約定→返済買い）。売建が無い日は接続しない | 台帳 + ニュースの記録簿 + ブローカー |
 | 9:20・10:20・13:20 | `daytrade protect --live --yes` | **保険の手仕舞い。** 建てた玉のうち約定したぶんに、執行条件「引け」の返済・売りをブローカーへ先に置く（`execution.protect_exit`。**2026-09-20 から有効**——実機で未検証のまま本番で検証している。何度回しても重ならない）。注文は立花に残るので、cron・マシン・ネットが止まっても引けで手仕舞われる。引け値は 15:20 の成行より不利なので、ふだんは使わず close が取り消す | 台帳 + ブローカー |
@@ -393,7 +395,7 @@ open の要約は `short_paused = true` で `short_n` / `short_multiplier` は�
 | | `skip_limit_down` | 気配がストップ安の銘柄は買わない（既定 true） |
 | | `skip_opened` | 9:01 に**既に寄っている**銘柄を候補から外す（ロング・ショート両方。既定 false。下記） |
 | | `rank_by` | ロングの並べ方（**平常日**。米国小幅高の日は `rank_by_us_low`）。`gap`（既定。ギャップの小さい順）／`gap_vol`（ギャップ ÷ 20 日ボラの小さい順）／`lgbm`（LightGBM の予測値の高い順。**本番は `lgbm`**——2026-09-19 に寄る前の発注と組で常時 lgbm へ戻した。下記「寄る前に出す」）。`lgbm` の特徴量は gap・gap_vol の鍵と順位・20 日ボラ・騰落率（1/4/19 本）・20 日レンジ内の位置・前日の日中・売買代金・時価総額・株価・空売り残高（公表済みで 120 日以内）・益回り・候補数で、その日の候補の中の百分位に直してから渡す。**LightGBM で並べられない日（特徴量の無い古い plan・モデルが読めない・当日の気配で試しに並べて失敗）は gap_vol で並べて取引し、`us_skip_legs` を `all` に戻す**（米国小幅高の日は両脚とも休む。gap_vol のこの日は稼げないため。ログ `daytrade.rerank`、異常にも載る）。判定は寄付の危険信号より先に行う。根拠は vault の 2026-09-jp-daytrade-ml-open-quote（差 +8.58 bp/日・t 1.96。事前登録の基準 t ≥ 2.0 には届かず、境目のまま採用） |
-| | `rank_by_us_low` | **前夜の米国市場が小幅高だった日だけ**使う並べ方（空なら `rank_by` と同じ）。**本番は空**——`rank_by` を `lgbm` に戻した 2026-09-19 から日による切り替えは要らない。以下は `rank_by = "gap_vol"` だった頃の根拠。学習期間の外・スプレッド込みの 2 年で、小幅高だけ lgbm 717 万円 / Sharpe 2.76、常時 lgbm 522 万 / 2.32、gap_vol で小幅高は休む 601 万 / 2.63、常時 gap_vol で小幅高も取引 435 万 / 1.60。**gap_vol は小幅高の日に負け、LightGBM はその日に稼ぐ。平常日は逆**という交互作用に沿った形。判定は危険信号と同じ `regime.IsUsLow`（`us_skip_low` 〜 `us_skip_high`、VIX の例外つき）で、`us_skip_legs = "short"` と組で使う（小幅高の日もロングは建てる）。モデルが読めない日は `rank_by` ごと gap_vol に落ち、`us_skip_legs` も `all` に戻る。**同じ 2 年で見つけた組み合わせなので、日次の差の検定はまだしていない** |
+| | `rank_by_us_low` | **前夜の米国市場が小幅高だった日だけ**使う並べ方（空なら `rank_by` と同じ）。**本番は 2026-09-21 から `"lgbm"`**（`execution.preopen_limit_pct_us_low = 1.5`・`us_skip_legs = "short"` と組で、この日のロングは寄指だけ。寄成・成行で出す形は寄る前の気配の誤差の下で −0.92 bp/日 なので、寄指なしでは使わない）。以下は寄った後の気配で並べていた頃（〜2026-09-18）の根拠。学習期間の外・スプレッド込みの 2 年で、小幅高だけ lgbm 717 万円 / Sharpe 2.76、常時 lgbm 522 万 / 2.32、gap_vol で小幅高は休む 601 万 / 2.63、常時 gap_vol で小幅高も取引 435 万 / 1.60。**gap_vol は小幅高の日に負け、LightGBM はその日に稼ぐ。平常日は逆**という交互作用に沿った形。判定は危険信号と同じ `regime.IsUsLow`（`us_skip_low` 〜 `us_skip_high`、VIX の例外つき）で、`us_skip_legs = "short"` と組で使う（小幅高の日もロングは建てる）。モデルが読めない日は `rank_by` ごと gap_vol に落ち、`us_skip_legs` も `all` に戻る。**同じ 2 年で見つけた組み合わせなので、日次の差の検定はまだしていない** |
 | | `model` | `rank_by = "lgbm"` のモデル（LightGBM のテキスト形式）。相対パスは**この項目を書いた設定ファイルのディレクトリから**（設定は `models/lgbm_rank.txt`）。設定を読んだ時点では読み込まない（壊れたモデルで close・verify・guard を止めないため）。open が読んで、読めなければ gap_vol に戻す。backtest は並べる時点で止まる。学習し直すのは `test/dt_si_pit.py` → `test/dt_lgbm_train.py`（モデルと Go の照合用データ `pkg/daytrade/rerank/testdata/parity.json` を同時に書く。`go test ./pkg/daytrade/rerank/` が Python の予測との一致を確かめる） |
 | | `max_per_sector` | 同じ日に同じ 33 業種（master の S33）から建ててよい銘柄数の上限。**既定 0 = 無制限**。1 にすると 10 年で損益 +5.3%・Sharpe 2.90→3.12・MaxDD −21%（IS/OOS とも損益・Sharpe が改善、ただし効果の大半は IS 由来）。上限 2 では効かない。上限を超えた銘柄は落ちて次点が繰り上がる。ロング側だけ（研究ノート 2026-09-jp-sector-crowding）。業種は `plan` の `sector` 列から読む——この列が無いと判定は黙って素通りする（2026-09-12 まで本番だけ無制限だった）。業種の取れない候補があると `open` が警告を出す |
 | | `value_pool` | 益回りの 2 段階選定（ギャップ順の上位 N × この倍率から益回り上位 N）。**既定 0 = 無効**。検証では損益 −3.8%（×2）と引き換えに MaxDD −23%。DD を減らす道具としてだけ有効 |
@@ -402,7 +404,7 @@ open の要約は `short_paused = true` で `short_n` / `short_multiplier` は�
 | | `drift_days` / `drift_gate` / `drift_gap_override` | 市場の日中ドリフトのゲート（下記）。既定は無効 |
 | | `equity_curve_days` / `equity_curve_scale` | 戦略自身の直近 N 日の実現損益が 0 以下なら資金を `scale` 倍に縮める（既定 20 日・0.5）。scale 0 で休む |
 | | `us_skip_low` / `us_skip_high` / `us_vix_override` | 前夜の S&P500 が帯の中（既定 0〜+1%）で VIX ≤ 24 なら休む。`us_skip_high` 無しで無効 |
-| | `us_skip_legs` | 米国のゲートで休む脚。`all`（既定、両脚）/ `short`（ショートだけ休み、ロングは取引する）。本番は 2026-09-20 から `all`（`rank_by = "gap_vol"` と組。`lgbm` に戻すなら `short`） |
+| | `us_skip_legs` | 米国のゲートで休む脚。`all`（既定、両脚）/ `short`（ショートだけ休み、ロングは取引する）。本番は 2026-09-21 から `short`（`rank_by_us_low = "lgbm"`・`preopen_limit_pct_us_low = 1.5` と組。この日のロングは寄る前の回の寄指だけで、9:00 以降の回は両脚とも休む）。**小幅高の日の寄指を止めるときはこの 1 行を `all` に**（9/20 の形。bin の作り直しは不要） |
 | | `shock_market_gap` / `shock_us_ret` | ショック日の条件: 9:00 の市場ギャップ／前夜の S&P500 がこれ以下（設定は −2% / −2%）。無ければ見ない |
 | | `shock_long_scale` / `shock_short_scale` | ショック日にロング／ショートの資金へ掛ける倍率（土台は 1 / 1 = 記録のみ、`config/daytrade_margin` は 1.5 / 0） |
 | `[execution]` | `quote_source` / `quote_file` | 気配の取得元 |
@@ -566,7 +568,7 @@ toml でよい。
 | `plan_meta` | `plan` 1 回の要約（件数・IV・ドリフト。`rerank_features` は特徴量を書いた版で、0 なら `lgbm` で並べられない） | `plan` のたび |
 | `quotes` | 9:00 に受け取った気配 1 銘柄。`usable`（鮮度の検査を通った）・`opened`（もう寄っていた）・`gap` 付き | `open` が気配を取ったとき |
 | `ranking` | 順位表の 1 行。`side`（BUY=ロング / SELL=ショート）、`picked`、`quantity`、`amount`。`over_budget` は 1 単元が 1 注文の予算を超えて飛ばされた銘柄（順位が上でも picked にならない）。`skipped` は危険信号で見送った日の順位表で、picked は「建てていたら」（N と予算は通常日の値）。`reason` は選ばれた／外れた理由（`picked` / `over_budget` / `sector_cap` 業種の上限 / `value_pool` 益回りで N に入らず / `too_small` 按分が 1 単元未満 / `beyond_n` N の外。2026-09-15 から）。`rule_rank` は gap_vol での順位、`rule_picked` は gap_vol の順位なら選んでいたか、`score` は LightGBM の予測値（`rank` はこの高い順。`rank_by = "lgbm"` の日だけ。2026-09-18 から）。`rule_off` は既存規則なら建てない日（米国小幅高）で、`rule_picked` が 0 件なのは候補なしではない | `open` が順位を付けたとき（見送りの日も） |
-| `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数、`rank_by`（ロングを実際に並べた規則） | `open` が判断まで進んだとき |
+| `open_run` | `open` 1 回の要約。`mode`（live / dry_run / watch）、`outcome`（picked / regime / no_quotes / no_picks / no_capital）、危険信号の値、件数、`rank_by`（ロングを実際に並べた規則）、`us_low`（米国小幅高の日）、`preopen_limit_pct`（その回の寄指の位置。0 = 寄成）、`opening_limit_dropped`（指値を作れず外した数）。後ろの 3 つは 2026-09-21 から（古いファイルには無いので `union_by_name = true`） | `open` が判断まで進んだとき |
 | `open_run` の `broker_verify` | 実機検証の実行（`--broker-verify`）だったか | `open` のたび |
 | `book` | 板・気配 1 銘柄 × 1 観測時刻（`slot` = JST の HHMM）。時価問合の応答をそのまま（値は文字列） | `snap` のたび（1 日 10 回。[OPENING_DATA.md](OPENING_DATA.md)） |
 

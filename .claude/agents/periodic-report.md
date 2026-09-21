@@ -198,8 +198,16 @@ bin/jquants query "SELECT sum(CASE WHEN picked THEN even_pnl ELSE 0 END) AS lgbm
 列は 2026-09-18 の改修から（それ以前のファイルには `even_pnl` / `later_run` / `rule_off` が無いので
 `union_by_name` で読む）。円で比べるのは `even_pnl`（1 注文 = 予算の等金額に揃えた想定損益）。`hypo_pnl` は LightGBM 側だけ
 按分の株数なので引き算しない。`rule_off = true` の日は既存規則なら建てない日（米国小幅高）で、
-gap_vol 側は 0 円が正しい。20〜40 営業日たって LightGBM が負けていれば、`rank_by` を gap_vol に戻す
-（`us_skip_legs` も "all" に戻す）ことを改善案に書く。
+gap_vol 側は 0 円が正しい。**2026-09-20 から平常日は gap_vol で並べているので、この比べの行が付くのは
+米国小幅高の日だけ**（`rank_by_us_low = "lgbm"`）。
+
+**米国小幅高の日（open_run の `us_low = true`）は 2026-09-21 から「LightGBM × 前日終値 −1.5% の寄指を寄る前の回に
+出すだけ」**（`execution.preopen_limit_pct_us_low = 1.5`。ショートと 9:00 以降の回は休み）。約定が 0〜1 件・
+`opening_unfilled` が 8 割超・後の回の `regime` の見送りは正しい姿。期間の集計ではこの日を平常日と分け、
+**寄指を出した本数・約定した本数（約定率。模擬は 15%）・約定した分の net bp（模擬は約 +20 bp）**を 1 行で書く。
+小幅高の日が 20 日ほど溜まって、約定した分の平均が 0 を下回る・約定率が模擬から大きく外れるなら、
+`regime.us_skip_legs = "all"` の 1 行で休む形に戻すことを改善案に書く（`preopen_limit_pct_us_low` だけを
+コメントにする案は書かない——LightGBM の寄成・成行で建つ −11.6 bp/日 の形になる）。
 
 **ショートは 2026-09-18 から一時停止中**（`margin.paused`）。期間の集計にはそれ以前の売建が混ざるので、
 ショートの成績は「停止前まで」と断って書く。停止後の SELL 0 件は異常ではない。

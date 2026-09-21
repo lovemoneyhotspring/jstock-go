@@ -183,6 +183,7 @@ jq -c 'select(.verify)' state/digest/prod-2026-09-06.jsonl
 | `daytrade.skip` | 何もしなかった | `reason`（`disabled` / `holiday` / `half_day` / `no_calendar` / `window` / `regime` / `already` / `no_quotes` / `no_picks` / `no_capital` / `no_buys` / `nothing_to_sell`）と付随項目 |
 | `daytrade.half_day`（warn） | 判定日が半日立会（カレンダーの `HolDiv = 2`）。手仕舞い（`exit_window`、15:20〜）の前に引けるので `open` は建てない（`daytrade.skip` の `half_day`、warn）。前夜の `plan` がこのコードと運用通知を 1 回出す。手仕舞う側（`close`・`guard`・`protect`）は止めない。今の東証に半日立会は無い | `day` |
 | `daytrade.opening_unfilled` | 寄付条件の建て注文が約定せずに終わった（寄指の指値に届かなかった、または 1 日寄らなかった）。`close` が建て注文を確定した後に出す。**失敗ではない**——枠が現金で残った日の記録 | `count`, `symbols` |
+| `daytrade.opening_limit`（warn） | 米国小幅高の日を寄指だけで取引する設定（`execution.preopen_limit_pct_us_low`）で、寄指の指値を作れない銘柄（前日終値が無い・呼値に丸められない）を発注から外した。平常日は寄成に戻すが、この日の寄成は損の側なので出さない。外した件数は `open_run` の `opening_limit_dropped` | `symbol` / `side` / `prev_close` |
 | `daytrade.calendar`（warn） | 取引カレンダーが空（取り込みが無い・壊れた）。発注する回（`--live`）は休場か分からないので見送る（`daytrade.skip` の `no_calendar`）。発注しない回は平日で代用して続ける | `phase`, `day`, `live` |
 | `daytrade.signal`（warn） | 打ち切り（SIGTERM。`deploy/with-lock.sh` の時間切れ）を受け、実行品質（滑り）の記録を書き出して終了した | `signal` |
 | `daytrade.pnl_incomplete` | 資産曲線の評価で、売りの約定単価が確定していない日を除いた | `days` |
