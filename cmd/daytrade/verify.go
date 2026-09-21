@@ -86,6 +86,16 @@ func runVerify(date string, brokerVerify bool) error {
 	result := execute.Verify(env, b, entries, exits)
 	carried, unconfirmed := result.Carried, result.Unconfirmed
 
+	// 返済が建玉を超えた脚は、持ち越しの有無とは別に必ず知らせる（ここでは終わらず、下の判定も続ける）。
+	// 翌朝の open の台帳外の建玉の検出（8:59）まで誰にも見えない
+	if len(result.Overclosed) > 0 {
+		logError("daytrade.overclosed", "手仕舞いの約定が建玉を超えた",
+			map[string]any{"day": day.Format(DateLayout), "positions": result.Overclosed})
+		digest.Anomaly("daytrade.overclosed", fmt.Sprintf("%d 銘柄で手仕舞いの約定が建玉を超えた", len(result.Overclosed)))
+		alert("デイトレ: 手仕舞いの約定が建玉を超えています（反対の建玉・別口の現物の売りの恐れ）。口座を確認してください",
+			strings.Join(result.Overclosed, "\n"))
+	}
+
 	if len(carried) > 0 {
 		logError("daytrade.carry", "持ち越し",
 			map[string]any{"day": day.Format(DateLayout), "positions": carried})

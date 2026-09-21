@@ -108,6 +108,13 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 			logError("daytrade.pending_unresolved", "送信結果不明の注文を判定できず当日の手仕舞いを続ける",
 				map[string]any{"error": err.Error()})
 		}
+		// 確認は**ブローカーの状態を変える前に**取る。この先の SettleCarried は持ち越しの返済を送り、
+		// RefreshEntries は板に残った建て注文と保険の手仕舞いを取り消す——後ろで N と答えると、保険は外れ・
+		// 成行は出ていない状態で終わっていた（2026-09-21 のレビュー #6。cron は --yes なので手で叩いたときだけ）。
+		// 売る対象が無い日にも聞くことになるが、端末で叩く人には害がない
+		if err := confirmLive(allowed, yes); err != nil {
+			return err
+		}
 		// 朝の返済が寄らずに失効した持ち越しがあれば、引けでもう一度。判定できなくても
 		// **当日の手仕舞いは止めない**——ここで止めると今日の建玉が丸ごと持ち越しになる
 		// （open は逆で、判定できなければ新規に建てない。方針は execute.SettleAtClose）
@@ -163,10 +170,6 @@ func runClose(live, yes, ignoreWindow bool, date string, brokerVerify bool) erro
 		digest.Note(map[string]any{"phase": "close", "live": allowed, "sells": 0})
 		return nil
 	}
-	if err := confirmLive(allowed, yes); err != nil {
-		return err
-	}
-
 	failures := execute.PlaceExits(env, b, targets)
 	run.FlushAlerts()
 	if len(failures) > 0 {

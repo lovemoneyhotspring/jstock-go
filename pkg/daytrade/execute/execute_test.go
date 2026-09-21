@@ -1,6 +1,7 @@
 package execute
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -795,6 +796,43 @@ func TestVerifyDetectsCarriedAndMismatch(t *testing.T) {
 	}
 }
 
+// TestVerifyReportsOverclosed は、手仕舞いの約定が建玉の約定を超えたら「手仕舞い済み」に落とさず知らせること
+// （保険の引け注文と成行が両方約定した、など。2026-09-21 のレビュー #10）。
+func TestVerifyReportsOverclosed(t *testing.T) {
+	env, _ := newEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	if _, _, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)}); err != nil {
+		t.Fatal(err)
+	}
+	b.getOrder = func(id string) (*domain.Order, error) {
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled,
+			Quantity: decimal.NewFromInt(100), FilledQuantity: decimal.NewFromInt(100)}, nil
+	}
+	entries, _, _ := LiveOrders(env)
+	targets, _, _ := RefreshEntries(env, b, entries)
+	PlaceExits(env, b, targets)
+	entries, exits, _ := LiveOrders(env)
+	if len(exits) != 1 {
+		t.Fatalf("手仕舞いが 1 本のはず: %+v", exits)
+	}
+	// 手仕舞いの照会だけ 200 株約定と返す（建玉は 100 株）
+	exitID := exits[0].ClientOrderID
+	b.getOrder = func(id string) (*domain.Order, error) {
+		qty := decimal.NewFromInt(100)
+		if id == exitID {
+			qty = decimal.NewFromInt(200)
+		}
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled, Quantity: qty, FilledQuantity: qty}, nil
+	}
+	result := Verify(env, b, entries, exits)
+	if len(result.Overclosed) != 1 || !strings.Contains(result.Overclosed[0], "7203") || !strings.Contains(result.Overclosed[0], "100 株の超過") {
+		t.Errorf("返済の超過を検出できない: %+v", result)
+	}
+	if len(result.Carried) != 0 {
+		t.Errorf("超過は持ち越しではない: %+v", result.Carried)
+	}
+}
+
 // --- 送信結果不明（PENDING）の自動判定 ---
 
 func brokerOrderOf(id, symbol string, side domain.Side, qty int64, trade domain.TradeType, status domain.OrderStatus) domain.Order {
@@ -912,7 +950,8 @@ func TestResolvePendingAmbiguousAlertsAndKeepsPending(t *testing.T) {
 func TestUnconfirmedDefersWhenDeadlineShortensWait(t *testing.T) {
 	env, _ := todayEnv(t)
 	env.RetryWait = time.Hour
-	env.Deadline = time.Now().Add(100 * time.Millisecond)
+	// 送り始められるだけの余裕（EntrySendMargin）は残し、待ち（RetryWait）には足りない締め切り
+	env.Deadline = time.Now().Add(EntrySendMargin + 100*time.Millisecond)
 	b := &stubBroker{balance: richBalance()} // 一覧は空（まだ載っていない）
 	b.place = func(domain.OrderRequest) (*domain.OrderAck, error) { return nil, errors.New("timeout") }
 	_, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
@@ -1160,5 +1199,96 @@ func TestPlacedTodayCountsLapsedOpeningAsUsed(t *testing.T) {
 	}
 	if placed, _ = PlacedToday(env); placed.Long != 0 {
 		t.Errorf("拒否された寄指は埋め直す: long=%d", placed.Long)
+	}
+}
+
+// TestPlacePicksStopsJustBeforeDeadline は、締め切りまで EntrySendMargin を切ったら新しい建て注文を
+// 送り始めないこと。直前に送り始めた電文は締め切りで切られて PENDING になり、次の回の一覧照会まで
+// 建ったかどうかが確定しない（2026-09-21 のレビュー #9）。余裕があれば従来どおり送る。
+func TestPlacePicksStopsJustBeforeDeadline(t *testing.T) {
+	env, _ := newEnv(t)
+	env.Deadline = time.Now().Add(EntrySendMargin / 2)
+	b := &stubBroker{balance: richBalance()}
+	orders, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if err != nil || orders != 0 || len(b.placed) != 0 {
+		t.Fatalf("締め切りの直前に送り始めた: orders=%d placed=%d err=%v", orders, len(b.placed), err)
+	}
+	if len(failures) != 1 || !strings.Contains(failures[0], "締め切り") {
+		t.Errorf("見送りの理由が締め切りになっていない: %v", failures)
+	}
+	env.Deadline = time.Now().Add(time.Minute)
+	if orders, _, err = PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)}); err != nil || orders != 1 {
+		t.Errorf("余裕があるのに送らなかった: orders=%d err=%v", orders, err)
+	}
+}
+
+// TestPlacePicksPreopenSkipsLegsNotListed は、寄る前の回が execution.preopen_legs に無い脚を送らないこと。
+// 条件なしの成行を 8:59:5x に送ると板寄せに入り、実質その脚の寄成になる（2026-09-21 のレビュー #7。
+// ショート再開の日に効く）。失敗には数えず台帳にも残さない——9:00 以降の回が従来どおり建てる。
+func TestPlacePicksPreopenSkipsLegsNotListed(t *testing.T) {
+	env, _ := newEnv(t)
+	env.Preopen = true
+	env.Cfg.Execution.PreopenLegs = "long"
+	b := &stubBroker{balance: richBalance()}
+	orders, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy), pick("9984", domain.SideSell)})
+	if err != nil || len(failures) != 0 {
+		t.Fatalf("err=%v failures=%v", err, failures)
+	}
+	if orders != 1 || len(b.placed) != 1 || b.placed[0].Symbol != "7203" {
+		t.Fatalf("寄る前の回に出すのはロングだけ: orders=%d placed=%+v", orders, b.placed)
+	}
+	if b.placed[0].Condition != domain.ConditionOpening {
+		t.Errorf("ロングが寄成になっていない: %q", b.placed[0].Condition)
+	}
+	// 9:00 以降の回は両脚とも従来どおり
+	env.Preopen = false
+	if orders, _, err = PlacePicks(env, b, []selection.Pick{pick("9984", domain.SideSell)}); err != nil || orders != 1 {
+		t.Errorf("寄った後の回でショートが出ない: orders=%d err=%v", orders, err)
+	}
+}
+
+// 終わった（拒否）手仕舞いを台帳に書けなかったら、黙って「発注済み」のまま終わらず人に知らせること。
+// 送り直しはしない——書けていない注文は DeadCount に入らず、元の注文と同じ client_order_id になる。
+func TestRefreshOpenExitsAlertsWhenDeadExitCannotBeWritten(t *testing.T) {
+	env, rep := newEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	if _, _, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)}); err != nil {
+		t.Fatal(err)
+	}
+	b.getOrder = func(id string) (*domain.Order, error) {
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled,
+			Quantity: decimal.NewFromInt(100), FilledQuantity: decimal.NewFromInt(100)}, nil
+	}
+	entries, _, _ := LiveOrders(env)
+	targets, _, _ := RefreshEntries(env, b, entries)
+	PlaceExits(env, b, targets)
+	_, exits, _ := LiveOrders(env)
+	if len(exits) != 1 {
+		t.Fatalf("手仕舞いが 1 本のはず: %+v", exits)
+	}
+	exitID := exits[0].ClientOrderID
+	// 手仕舞いは後から拒否された。その書き換えだけを失敗させる
+	b.getOrder = func(id string) (*domain.Order, error) {
+		if id == exitID {
+			return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusRejected, Quantity: decimal.NewFromInt(100)}, nil
+		}
+		return &domain.Order{ClientOrderID: id, Status: domain.OrderStatusFilled,
+			Quantity: decimal.NewFromInt(100), FilledQuantity: decimal.NewFromInt(100)}, nil
+	}
+	db, err := sql.Open("sqlite", env.Ledger.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TRIGGER block_rejected BEFORE UPDATE ON orders WHEN NEW.status = 'REJECTED'
+		BEGIN SELECT RAISE(ABORT, 'test: 書けない'); END`); err != nil {
+		t.Fatal(err)
+	}
+	before := len(rep.alerts)
+	if err := refreshOpenExits(env, b); err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.alerts) != before+1 || !strings.Contains(rep.alerts[before], "台帳に書けません") || !strings.Contains(rep.alerts[before], "7203") {
+		t.Errorf("alerts = %v, want 書けなかった手仕舞いの通知 1 件", rep.alerts[before:])
 	}
 }
