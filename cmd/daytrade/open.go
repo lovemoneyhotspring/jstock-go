@@ -944,9 +944,10 @@ const (
 	usFetchBudgetPreopen  = 5 * time.Second
 )
 
-// usFetchReservePreopen は寄る前の回が、米国市場の取得の後に残しておく時間（並べる 0.3 秒 + 注文 4 本の
-// 往復 1.2 秒 + execute.EntrySendMargin の 1 秒）。取得がここへ食い込むと、取れても寄成が板寄せに間に合わない。
-const usFetchReservePreopen = 3 * time.Second
+// usFetchReservePreopen は寄る前の回が、米国市場の取得の後に残しておく時間（並べる 0.3 秒 + 順位表の書き出しと
+// 台帳外の建玉の検査で 0.5〜1 秒 + 注文 4 本の往復 1.2 秒 + execute.EntrySendMargin の 1 秒）。取得がここへ食い込むと、
+// 取れても寄成が板寄せに間に合わない。米国小幅高の日は送れなかった分を後の回が埋めないので、詰めすぎない。
+const usFetchReservePreopen = 4 * time.Second
 
 // usFetchLimits は米国市場の取得の上限（1 リクエストの timeout と、次の取得元へ繋ぎ始めてよい budget）。
 // 最悪の所要は budget + timeout。寄る前の回は、それが「締め切り − usFetchReservePreopen」を超えないように詰める

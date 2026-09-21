@@ -121,6 +121,22 @@ out=$(mc)
 check "昨日までの見送りは数えない" 'grep -q "時刻待ちの見送り 0 件" <<<"$out"'
 check "NO_POST=1 では Discord に投げない" '[ ! -e "$H/posted" ]'
 
+# --- crontab.txt の行の形（スクリプトが正しくても、行が古いままだと効かない）---
+C="$REPO/deploy/crontab.txt"
+check "wait-until.sh を呼ぶ行は全部 WAIT_UNTIL_LOG を前置している" \
+  '[ "$(grep -v "^#" "$C" | grep -c "deploy/wait-until.sh")" -ge 2 ] && ! grep -v "^#" "$C" | grep "deploy/wait-until.sh" | grep -qv "WAIT_UNTIL_LOG=state/logs/daytrade-open.log deploy/wait-until.sh"'
+snap_ok=1; snap_n=0
+while IFS= read -r line; do
+  snap_n=$((snap_n + 1))
+  t=$(sed -n 's/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p' <<<"$line")
+  m=$(sed -n 's/.*--max-run \([0-9]*\).*/\1/p' <<<"$line")
+  { [ -n "$t" ] && [ -n "$m" ] && [ "$m" -lt "$t" ]; } || snap_ok=0
+done < <(grep -v "^#" "$C" | grep "daytrade snap" | grep -- "--max-run")
+check "snap の --max-run は必ず WITH_LOCK_TIMEOUT より手前（同じか逆だと TERM が先に当たり何も記録しない）" \
+  '[ "$snap_n" -ge 2 ] && [ "$snap_ok" = 1 ]'
+check "8:59 台の snap は KILL の猶予を詰めている（既定の 10 秒だと寄る前の open のロック待ちを越える）" \
+  '! grep -v "^#" "$C" | grep -E -- "--slot 0859(35|55)" | grep -qv "WITH_LOCK_KILL_AFTER="'
+
 echo
 [ "$fail" = 0 ] && echo "全部通った" || echo "失敗あり"
 exit "$fail"

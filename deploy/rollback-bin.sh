@@ -51,11 +51,16 @@ for cmd in "${cmds[@]}"; do
 done
 
 # --- 入れ替え: rename だけ ---------------------------------------------------------------
+# bin/ を全コマンド先に戻してから .prev/ を入れ替える。.prev/<cmd> を先に上書きすると、その直後に落ちたとき
+# 古い版は .rb にしか無く、trap がそれを消して**戻す先が失われる**。この順なら、途中で落ちても bin/ は全部が
+# 実行できる版で、.prev/<cmd> は古い版のまま（失うのは新しい版の控えだけ。deploy/build.sh で作り直せる）
+for cmd in "${cmds[@]}"; do
+  mv -f "$BIN_DIR/.$cmd.rb" "$BIN_DIR/$cmd"
+done
 for cmd in "${cmds[@]}"; do
   if [ -f "$BIN_DIR/.prev/.$cmd.keep" ]; then
     mv -f "$BIN_DIR/.prev/.$cmd.keep" "$BIN_DIR/.prev/$cmd"
   fi
-  mv -f "$BIN_DIR/.$cmd.rb" "$BIN_DIR/$cmd"
 done
 echo "rollback-bin: 1 世代前の実行ファイルに戻しました（$BIN_DIR）"
 if [ "${#restore_only[@]}" -gt 0 ]; then

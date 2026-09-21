@@ -701,7 +701,8 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 			// 9:00 以降の回が従来どおりザラ場の成行で建てる
 			outcome := "寄る前の回はこの脚を出さない（execution.preopen_legs）"
 			env.printf("  %s: %sは%s\n", pick.Symbol, label, outcome)
-			skipRow(pick, request, execution.ReasonWindowClosed, outcome)
+			// 締め切り（window_closed）と混ぜない——あちらは「遅れ」の分布を見る材料
+			skipRow(pick, request, execution.ReasonNotEligible, outcome)
 			continue
 		}
 		outcome := ""

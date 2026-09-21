@@ -120,8 +120,13 @@ func runVerify(date string, brokerVerify bool) error {
 		return fmt.Errorf("%d 件の注文を照会できませんでした", len(unconfirmed))
 	}
 
-	fmt.Println("手仕舞いを確認しました（持ち越しなし）")
+	if len(result.Overclosed) > 0 {
+		// 持ち越しは無いが「確認しました」とは言わない（上で知らせた超過が残っている）
+		fmt.Println("持ち越しはありませんが、手仕舞いの約定が建玉を超えています（上の表示）")
+	} else {
+		fmt.Println("手仕舞いを確認しました（持ち越しなし）")
+	}
 	logInfo("daytrade.run", "手仕舞いを確認",
-		map[string]any{"phase": "verify", "live": true, "carried": 0})
+		map[string]any{"phase": "verify", "live": true, "carried": 0, "overclosed": len(result.Overclosed)})
 	return nil
 }

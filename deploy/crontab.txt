@@ -161,10 +161,13 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 何もせず終わる**（発注が優先）。必ず回る保証が無いので morning-check の必須スロットには
 # 入れない（deploy/morning-check.sh の EXPECTED_SLOTS）。
 #   085935: open の前に滑り込む回。--max-run 8 と WITH_LOCK_TIMEOUT=10 で、固まっても
-#           8:59:45〜47 までに手放して 8:59:50 の open（DT_PREOPEN_AT。ロック待ち 5 秒）を塞がない
+#           8:59:46〜47 に TERM、死ななくても WITH_LOCK_KILL_AFTER=2 で 8:59:49 までに手放し、8:59:50 の open
+#           （DT_PREOPEN_AT。ロック待ち 5 秒）を塞がない。KILL の猶予が既定の 10 秒のままだと 8:59:57 まで握りうる
 #   085955: 板寄せの 5 秒前。open（実測 4〜9 秒）の後の回で、取れた日の板は始値にいちばん近い。
-#           --max-run 2 と WITH_LOCK_TIMEOUT=3（起動の揺れ +1〜2 秒を足しても 9:00:00 ごろには手放す。9:00:01.2 の open の前）
-# **--max-run は必ず WITH_LOCK_TIMEOUT より手前に置く**（2026-09-21 のレビュー。それまでは 8 / 8 と 4 / 3。いまは 8 / 10 と 2 / 3）。
+#           --max-run 2 と WITH_LOCK_TIMEOUT=4。--max-run は起動とログインの前から測るので問合せに使えるのは 1 秒前後、
+#           その後の parquet の書き出しに 2 秒残す（3 だと書き出しが TERM に当たり、取れた分まで捨てる）。ふだんは 8:59:59 ごろに終わる。
+#           固まった回は 9:00:00〜01 に TERM——9:00:01.2 の open（ロック待ち 30 秒）が最悪 1〜2 秒待つ
+# **--max-run は必ず WITH_LOCK_TIMEOUT より手前に置く**（2026-09-21 のレビュー。それまでは 8 / 8 と 4 / 3。いまは 8 / 10 と 2 / 4）。
 # --max-run は snap が自分で切り上げる締め切りで、過ぎたら送信中の電文を切って**取れたバッチだけ記録して
 # 正常に終わる**。WITH_LOCK_TIMEOUT は外からの TERM で、当たると**何も記録せず** [timeout] が残る。
 # 同じか逆だと、全銘柄（実測 7.3 秒）を取り切れない回は必ず TERM が先に当たり——085955 は毎回——
@@ -172,13 +175,13 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # なので差は 1〜2 秒で足りる。085935 は --max-run 8 を残して打ち切りの側を 10 に延ばした——全銘柄は実測 7.3 秒で、
 # --max-run を 6 に詰めると候補の外の銘柄が毎日 2 割ほど記録から落ちる。固まった回がロックを手放すのは 8:59:45〜47 で、
 # 寄る前の open（DT_PREOPEN_AT = 08:59:50.0、ロック待ち 5 秒）には掛からない。**DT_PREOPEN_AT を 08:59:45.0 に戻すなら 8 / 6 に詰める**。
-# 085955 は打ち切りを動かせない（9:00:01.2 の open の前に手放す）ので --max-run の側を詰めた。対象の銘柄が先に並ぶので、落ちるのは候補の外の銘柄。
+# 085955 は打ち切りをほとんど動かせない（9:00:01.2 の open の前に手放す）ので --max-run の側を詰めた。対象の銘柄が先に並ぶので、落ちるのは候補の外の銘柄。
 # これで [timeout] が出たら本当に固まった回。秒数を触るときは 2 つを組で直す
 # 8:57 は 8:55 と 8:59 の間を埋める（気配の動く速さを特徴量にするため。2026-09-19 追加）
 30,45,55,57 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 59 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=25 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 20
-59 8 * * 1-5          cd $WBJP_HOME && sleep 35 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=10 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085935 --max-run 8
-59 8 * * 1-5          cd $WBJP_HOME && sleep 55 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=3 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085955 --max-run 2
+59 8 * * 1-5          cd $WBJP_HOME && sleep 35 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=10 WITH_LOCK_KILL_AFTER=2 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085935 --max-run 8
+59 8 * * 1-5          cd $WBJP_HOME && sleep 55 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=4 WITH_LOCK_KILL_AFTER=2 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085955 --max-run 2
 0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=18 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 15
 2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
