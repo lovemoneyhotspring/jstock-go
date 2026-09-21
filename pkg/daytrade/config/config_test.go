@@ -39,12 +39,19 @@ func TestLoadRealConfigs(t *testing.T) {
 		if cfg.Regime.UsSkipHigh == nil {
 			t.Errorf("%s: us_skip_high が読めていない", dir)
 		}
-		// 2026-09-20 から gap_vol で並べ、米国小幅高の日は両脚とも休む（この 2 つは組で変える）
+		// 2026-09-20 から平常日は gap_vol で並べる
 		if cfg.Signal.RankBy != RankByGapVol {
 			t.Errorf("%s: rank_by = %q, want %q", dir, cfg.Signal.RankBy, RankByGapVol)
 		}
-		if cfg.Regime.UsSkipLegs != UsSkipLegsAll {
-			t.Errorf("%s: us_skip_legs = %q, want %q", dir, cfg.Regime.UsSkipLegs, UsSkipLegsAll)
+		// 2026-09-21 から米国小幅高の日は「LightGBM・前日終値 −1.5% の寄指・寄る前の回だけ」（この 3 つは組で変える）
+		if cfg.Signal.RankByUsLow != RankByLGBM || cfg.Regime.UsSkipLegs != UsSkipLegsShort ||
+			!cfg.Execution.PreopenLimitPctUsLow.Equal(decimal.RequireFromString("1.5")) {
+			t.Errorf("%s: rank_by_us_low = %q / us_skip_legs = %q / preopen_limit_pct_us_low = %s, want lgbm / short / 1.5",
+				dir, cfg.Signal.RankByUsLow, cfg.Regime.UsSkipLegs, cfg.Execution.PreopenLimitPctUsLow)
+		}
+		// 平常日は寄成のまま（寄指のプローブ待ち）
+		if !cfg.Execution.ForDay(false).PreopenLimitPct.IsZero() {
+			t.Errorf("%s: 平常日の preopen_limit_pct = %s, want 0", dir, cfg.Execution.PreopenLimitPct)
 		}
 	}
 	margin, err := Load("../../../config/daytrade_margin")

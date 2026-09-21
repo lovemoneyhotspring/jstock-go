@@ -216,7 +216,9 @@ func UnfilledOpening(env Env) ([]string, error) {
 //
 // execution.preopen_limit_pct が正なら、ロングの寄成を**寄指**（指値 × 寄付）にする。始値が指値より
 // 下のときだけ始値で約定するので、「深く見えたのに浅く寄った銘柄」を買わずに済む。指値を作れない
-// （前日終値が無い・呼値に丸められない）ときは寄成のまま出す——今の本番の動きに戻るだけ。
+// （前日終値が無い・呼値に丸められない）ときは寄成のまま出す——平常日は今の本番の動きに戻るだけ。
+// **米国小幅高の日（preopen_limit_pct_us_low）の寄成は損の側**なので、その日は open がここへ渡す前に
+// 指値を作れない銘柄を落としている（cmd/daytrade/open.go の dropWithoutOpeningLimit）。
 func EntryRequest(pick selection.Pick, day time.Time, cfg config.Config, attempt int, preopen bool) domain.OrderRequest {
 	// 前回が拒否されていたら種を変える（同じ ID はブローカーが弾く）。attempt 0 は従来と同じ ID
 	seed := "daytrade|" + day.Format(cli.DateLayout)
