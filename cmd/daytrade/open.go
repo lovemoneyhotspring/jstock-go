@@ -350,11 +350,9 @@ func runOpen(opts openOptions) error {
 	}
 	// 並べ方は米国小幅高の日だけ替わる（signal.rank_by_us_low）。危険信号の判定より後でしか
 	// 決まらないので、summary への記録もここまで待つ
-	cfg.Signal = cfg.Signal.ForDay(verdict.UsLow)
 	// 寄指の位置も米国小幅高の日だけ替わる（execution.preopen_limit_pct_us_low）。この設定の日のロングは
 	// 寄る前の回の寄指でしか建てない——9:00 以降の回は見送りにする
-	cfg.Execution = cfg.Execution.ForDay(verdict.UsLow)
-	env.Cfg.Execution = cfg.Execution // 発注（execute.EntryRequest）が読むのは env の側
+	cfg = applyDayConfig(cfg, &env, verdict.UsLow)
 	verdict = usLowPreopenOnly(cfg, verdict, env.Preopen)
 	summary["rank_by"] = cfg.Signal.RankBy
 	summary["us_low"] = verdict.UsLow
@@ -607,7 +605,9 @@ func runOpen(opts openOptions) error {
 	// 米国小幅高の日を寄指だけで取引する設定では、指値を作れない銘柄（前日終値が無い・呼値に丸められない）を
 	// 寄成で出さない。平常日は寄成に戻るだけでよいが、この日の寄成は損の側（−9〜−12 bp/日）
 	if verdict.UsLow && cfg.Execution.UsLowPreopenOnly() {
+		before := len(picks)
 		picks = dropWithoutOpeningLimit(picks, cfg)
+		summary["opening_limit_dropped"] = before - len(picks)
 	}
 
 	// 台帳に残す「送る直前の時価」は、取ったばかりの気配があればそれを使う（取り直すと順位表と
@@ -723,9 +723,21 @@ func evaluateRegime(cfg dtconfig.Config, p dtplan.Plan, day time.Time, marketGap
 	return verdict, usStale, nil
 }
 
+// applyDayConfig はその日（米国小幅高かどうか）の並べ方と寄指の位置を設定に入れる。
+// **発注（execute.EntryRequest）が読むのは env.Cfg の側**なので、そちらにも入れる——抜けると
+// 小幅高の日のロングが黙って寄成で出る。
+func applyDayConfig(cfg dtconfig.Config, env *execute.Env, usLow bool) dtconfig.Config {
+	cfg.Signal = cfg.Signal.ForDay(usLow)
+	cfg.Execution = cfg.Execution.ForDay(usLow)
+	env.Cfg.Execution = cfg.Execution
+	return cfg
+}
+
 // usLowPreopenOnly は米国小幅高の日を「寄る前の回の寄指だけ」で取引する設定のとき、9:00 以降の回を
 // 見送りにする（execution.preopen_limit_pct_us_low）。この日のロングを成行で建てると、どの並べ方でも
-// −9〜−12 bp/日——寄る前の回が走らなかった・米国の値が間に合わなかった朝に、後の回が成行で埋めてはいけない。
+// −9〜−12 bp/日——寄る前の回が走らなかった・米国の値が寄る前に取れなかった朝に、後の回が成行で埋めてはいけない。
+// 前夜の米国の値が 9:12 を過ぎても取れない朝は小幅高かどうかが分からず、ここには掛からない
+// （従来どおり平常日として取引する。us_stale の異常に載る）。
 // 寄る前の回で約定しなかった寄指の枠は PlacedToday が使った枠に数えるが、それに頼らずここで止める。
 func usLowPreopenOnly(cfg dtconfig.Config, verdict regime.Verdict, preopen bool) regime.Verdict {
 	if !verdict.Trade || !verdict.UsLow || preopen || !cfg.Execution.UsLowPreopenOnly() {

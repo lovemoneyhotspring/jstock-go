@@ -2,10 +2,12 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/execute"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/regime"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
@@ -52,5 +54,41 @@ func TestDropWithoutOpeningLimit(t *testing.T) {
 	got := dropWithoutOpeningLimit(picks, cfg)
 	if len(got) != 1 || got[0].Symbol != "7203" {
 		t.Errorf("残った銘柄 = %v, want 7203 だけ", got)
+	}
+}
+
+// 小幅高の日の寄指の位置は**発注が読む env.Cfg** に届いていなければならない。届いていないと、
+// この日のロングが黙って寄成で出る（applyDayConfig の env への代入を消すとここが落ちる）。
+func TestApplyDayConfigReachesEntryRequest(t *testing.T) {
+	cfg := dtconfig.Default()
+	cfg.Execution.EntryWindow = []string{"08:59", "09:15"}
+	cfg.Execution.PreopenLegs = dtconfig.PreopenLegsLong
+	cfg.Regime.UsSkipLegs = dtconfig.UsSkipLegsShort
+	cfg.Signal.RankByUsLow = dtconfig.RankByGap
+	cfg.Execution.PreopenLimitPctUsLow = decimal.RequireFromString("1.5")
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	day := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	pick := selection.Pick{Symbol: "7203", Side: domain.SideBuy, Quantity: decimal.NewFromInt(100), PrevClose: decimal.NewFromInt(1000)}
+
+	env := execute.Env{Cfg: cfg}
+	got := applyDayConfig(cfg, &env, true)
+	if got.Signal.RankBy != dtconfig.RankByGap {
+		t.Errorf("小幅高の日の並べ方 = %q", got.Signal.RankBy)
+	}
+	req := execute.EntryRequest(pick, day, env.Cfg, 0, true)
+	// 1000 × 0.985 = 985
+	if req.OrderType != domain.OrderTypeLimit || req.LimitPrice == nil || !req.LimitPrice.Equal(decimal.NewFromInt(985)) ||
+		req.Condition != domain.ConditionOpening {
+		t.Fatalf("小幅高の日の寄る前の注文 = %s / %v / %q, want LIMIT / 985 / OPENING", req.OrderType, req.LimitPrice, req.Condition)
+	}
+
+	// 平常日は寄成のまま
+	env = execute.Env{Cfg: cfg}
+	applyDayConfig(cfg, &env, false)
+	req = execute.EntryRequest(pick, day, env.Cfg, 0, true)
+	if req.OrderType != domain.OrderTypeMarket || req.LimitPrice != nil || req.Condition != domain.ConditionOpening {
+		t.Errorf("平常日の寄る前の注文 = %s / %v / %q, want MARKET / nil / OPENING", req.OrderType, req.LimitPrice, req.Condition)
 	}
 }

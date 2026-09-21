@@ -361,10 +361,12 @@ type Execution struct {
 	// PreopenLimitPctUsLow は**前夜の米国市場が小幅高だった日だけ**使う寄指の位置（%）。0（既定）なら使わない。
 	//
 	// 正の値を入れると、米国小幅高の日は「寄る前の回のロングを、この指値の寄指で出すだけ」の日になる:
-	// 並べ方は signal.rank_by_us_low、ショートは休み（regime.us_skip_legs = "short" が要る）、
+	// 並べ方は signal.rank_by_us_low、ショートは休み（regime.us_skip_legs = "short" のとき。"all" なら
+	// 米国のゲートが両脚とも止めるのでこの設定は眠る——**戻すのは us_skip_legs = "all" の 1 行**）、
 	// **9:00 以降の回は両脚とも休む**（UsLowPreopenOnly）。この日のロングは寄成・成行で建てると
 	// どの並べ方でも −9〜−12 bp/日 で、浅く寄った銘柄を落とす寄指が付いて初めて 0 を超える。
-	// 寄る前の回が走らなかった・米国の値が間に合わなかった朝は、今までどおり休むことになる。
+	// 寄る前の回が走らなかった朝・前夜の米国の値が寄る前に取れなかった朝（小幅高と分かった後の回）は休む。
+	// 指値を作れない銘柄は寄成に戻さず発注しない（cmd/daytrade/open.go の dropWithoutOpeningLimit）。
 	// 数字は模擬の探索の値（LightGBM × 1.5% で +3.20 bp/小幅高の日、t 2.32、20/20。事前登録した 0.5% は不採用）。
 	// 研究ノート vault 2026-09-jp-daytrade-limit-on-open の事前登録 3。
 	PreopenLimitPctUsLow decimal.Decimal `toml:"preopen_limit_pct_us_low"`
@@ -480,7 +482,8 @@ func (e Execution) RunDeadline(name string, now time.Time, useWindow bool, jst *
 	}
 	// 寄る前の回は**板寄せ（9:00:00）まで**。過ぎてから送る寄成は、既に寄った銘柄
 	// （ロング候補の 89.4%）の板寄せに間に合わず約定しない。送れなかった分は 9:00:03
-	// 以降の回が「残りの枚数」として従来のザラ場の成行で埋める。
+	// 以降の回が「残りの枚数」として従来のザラ場の成行で埋める（米国小幅高の日を寄指だけで
+	// 取引する設定の日は埋めない。Execution.UsLowPreopenOnly）。
 	if name == "entry" && e.PreopenAt(now, jst) {
 		local := now.In(jst)
 		auction := time.Date(local.Year(), local.Month(), local.Day(), TSEOpenHour, 0, 0, 0, jst)
@@ -912,10 +915,8 @@ func (c Config) Validate() error {
 		if !c.Execution.PreopenFor(domain.SideBuy) {
 			return fmt.Errorf("execution.preopen_limit_pct_us_low > 0 なら preopen_legs に long を含める（今は %q）", c.Execution.PreopenLegs)
 		}
-		// "all" のままだと米国のゲートが両脚とも止め、この設定は黙って効かない
-		if c.Regime.UsSkipLegs != UsSkipLegsShort {
-			return fmt.Errorf("execution.preopen_limit_pct_us_low > 0 なら regime.us_skip_legs は %q（今は %q）", UsSkipLegsShort, c.Regime.UsSkipLegs)
-		}
+		// regime.us_skip_legs = "all" は弾かない: 米国のゲートが両脚とも止めてこの設定が眠るだけで、
+		// それが「1 行で戻す」手順。ここで弾くと close・protect まで全コマンドが起動時に止まる
 	}
 	// 窓が 9:00 開始のままだと寄る前の回がそもそも走らず、寄成が一度も出ない。
 	// 黙って従来の動きに戻るより、設定の食い違いとして止める

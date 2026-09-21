@@ -105,8 +105,8 @@ func TestValidatePreopenLimitPct(t *testing.T) {
 	}
 }
 
-// preopen_limit_pct_us_low は米国小幅高の日だけ寄指の位置を替える。ロングを寄る前に出し、
-// 米国のゲートがショートだけを止める設定（us_skip_legs = "short"）でなければ黙って効かないので弾く。
+// preopen_limit_pct_us_low は米国小幅高の日だけ寄指の位置を替える。ロングを寄る前に出す設定でなければ弾く。
+// us_skip_legs = "all" は弾かない（米国のゲートが両脚とも止めて眠るだけ。1 行で戻す手順）。
 func TestPreopenLimitPctUsLow(t *testing.T) {
 	c := Default()
 	c.Execution.EntryWindow = []string{"08:59", "09:15"}
@@ -146,8 +146,8 @@ func TestPreopenLimitPctUsLow(t *testing.T) {
 	}
 	c.Execution.PreopenLimitPctUsLow = decimal.RequireFromString("1.5")
 	c.Regime.UsSkipLegs = UsSkipLegsAll
-	if err := c.Validate(); err == nil {
-		t.Error("us_skip_legs = all（この日は両脚とも休む）で preopen_limit_pct_us_low を通した")
+	if err := c.Validate(); err != nil {
+		t.Errorf("us_skip_legs = all（1 行で戻した形）を弾いた。全コマンドが止まる: %v", err)
 	}
 	c.Regime.UsSkipLegs = UsSkipLegsShort
 	c.Execution.PreopenLegs = PreopenLegsShort

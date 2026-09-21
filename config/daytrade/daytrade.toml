@@ -102,7 +102,7 @@ skip_opened = false
 rank_by = "gap_vol"
 # 米国小幅高の日だけ使う並べ方（空 = rank_by と同じ）。平常日 gap_vol・小幅高だけ lgbm を**寄成で**出す形は上の検証で −0.92 bp/日。
 # 2026-09-21 から "lgbm"（execution.preopen_limit_pct_us_low = 1.5 と us_skip_legs = "short" と組）。この日は寄指を付ければ
-# どの指値でも lgbm が gap_vol より上（vault 2026-09-jp-daytrade-limit-on-open の事前登録 3）。戻すなら 3 つとも戻す。
+# どの指値でも lgbm が gap_vol より上（vault 2026-09-jp-daytrade-limit-on-open の事前登録 3）。戻すのは us_skip_legs = "all" の 1 行（下）。
 rank_by_us_low = "lgbm"
 # lgbm のモデル（このファイルからの相対パス）。
 model = "models/lgbm_rank.txt"
@@ -149,7 +149,9 @@ us_vix_override = 24
 # −9〜−11 bp/日（7 年・540 日）。見送りの日も気配・板・順位表は記録に残る（skipped の印付き）。
 # 2026-09-21 から "short"（execution.preopen_limit_pct_us_low = 1.5 と組）。この日のロングは**寄る前の回の寄指だけ**で、
 # 9:00 以降の回は両脚とも休む（cmd/daytrade/open.go の usLowPreopenOnly）。LightGBM で並べられない朝は従来どおり "all" に戻る。
-# 戻すなら "all"・rank_by_us_low = ""・preopen_limit_pct_us_low をコメントに、の 3 つ。
+# **戻すのはこの 1 行を "all" にするだけ**（米国のゲートが両脚とも止め、rank_by_us_low と preopen_limit_pct_us_low は眠る。bin の作り直しは不要）。
+# **preopen_limit_pct_us_low だけをコメントにしてはいけない**——"short" のままだと、この日のロングが LightGBM の寄成・成行で建つ（−11.6 bp/日 の形）。
+# 値を変えたら pkg/daytrade/config/config_test.go の TestLoadRealConfigs（本番の値を固定している）も直す。
 us_skip_legs = "short"
 # 前夜の米国市場（us_skip_high / shock_us_ret の材料）がまだ取れていない回は 9:12 まで判定せずに待つ。
 # open の cron は 9:00:01.2（DT_OPEN_AT）・9:00:25・9:01:03 と 9:03〜9:13 の 3 分おきなので、9:13 の回は取れた値で判定する（取れなければ異常に載せる）。
@@ -228,7 +230,7 @@ preopen_legs = "long"
 # +3.20 bp/小幅高の日（t 2.32、20/20 シード、両期間、誤差 0.8 倍で t 3.01）、全日に均して約 +1.1 bp/日。約定するのは 15% で、そこが +20 bp。
 # **探索の 12 マスの 1 つで、事前登録した 0.5% は不採用（+0.76、t 0.38）。2026-09-21 にユーザ判断で本番へ。**
 # **立花の寄指は実機未検証**——最初の小幅高の日に docs/BROKER_VERIFY.md の「寄指のプローブ」を見る（特に、届かなかった注文が後場寄りに残るか。
-# −1.5% は 85% が届かない）。拒否されたらその日は休むだけ（後の回は埋めない）。
+# −1.5% は 85% が届かない）。拒否されたらその日は休むだけ（後の回は埋めない）。止めるときは regime.us_skip_legs を "all" に（この行だけをコメントにしない）。
 preopen_limit_pct_us_low = 1.5
 # 保険の手仕舞い: 建てた玉に**執行条件「引け」の返済・売りをブローカーへ先に置く**（daytrade protect。
 # 9:20・10:20・13:20 に cron が回す。何度回しても重ならない）。注文は立花に残るので、cron・マシン・
