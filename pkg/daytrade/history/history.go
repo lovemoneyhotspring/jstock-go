@@ -202,6 +202,14 @@ var OpenRunSchema = []history.Column{
 	{Name: "weighting", Type: history.TypeString},
 	// rank_by はロングを並べた規則（gap_vol / lgbm。plan が古くて既存規則に戻した日は gap_vol）。
 	{Name: "rank_by", Type: history.TypeString},
+	// us_low は前夜の米国市場が小幅高だった日（regime.IsUsLow）。rank_by と寄指の位置はこの日だけ替わる。
+	// preopen_limit_pct はその回のロングの寄指の位置（%。0 = 寄成。米国小幅高の日は
+	// execution.preopen_limit_pct_us_low の値）。9:00 以降の回も設定の値が入る——寄指で出たかは台帳の注文で見る。
+	// opening_limit_dropped は寄指の指値を作れず発注から外した銘柄の数（米国小幅高の日を寄指だけで取引する
+	// 設定の日だけ。ほかの日は null）。
+	{Name: "us_low", Type: history.TypeBool},
+	{Name: "preopen_limit_pct", Type: history.TypeFloat64},
+	{Name: "opening_limit_dropped", Type: history.TypeInt64},
 	// short_paused はショートを一時停止している日（margin.paused）。倍率や候補の有無ではなく
 	// 設定で建てない日なので、SELL が 0 件でも異常ではない。枠は spill でロングへ回す。
 	{Name: "short_paused", Type: history.TypeBool},
