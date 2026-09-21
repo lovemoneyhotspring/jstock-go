@@ -170,9 +170,14 @@ trap 'rm -f "$body"' EXIT
   # grep -c は 0 件のとき「0」を出して終了コード 1 を返す。`|| echo 0` を足すと
   # 0 が 2 行になるので、成否は無視して出力だけ取る
   count() { grep -c "$@" 2>/dev/null | head -1; }
-  errs=0; busy=0
+  # 時刻待ちの見送り = deploy/wait-until.sh が後ろの open を起こさずに終わった回（時刻が空・読めない・
+  # 120 秒より先）。with-lock.sh にも daytrade にも届かないので、構造化ログには回そのものが現れず、
+  # 「起動」の数にも入らない——他の回が動いていれば attempts = 0 の ❌ にも掛からない。残るのは
+  # wait-until.sh がこのログに書く [error] [wait_skip] の 1 行だけなので、エラーとは分けて数えて名指しする
+  errs=0; busy=0; waitskips=0
   if [ -f "$OPEN_LOG" ]; then
-    errs=$(count "$TODAY.*\[error\]" "$OPEN_LOG")
+    waitskips=$(count "$TODAY.*\[wait_skip\]" "$OPEN_LOG")
+    errs=$(grep "$TODAY.*\[error\]" "$OPEN_LOG" 2>/dev/null | grep -vc "\[wait_skip\]" | head -1)
     busy=$(count "$TODAY.*lock_busy" "$OPEN_LOG")
   else
     echo "※ $OPEN_LOG がありません（エラーとロック見送りは数えられません）"
@@ -197,7 +202,7 @@ trap 'rm -f "$body"' EXIT
       echo "※ 構造化ログに $TODAY の open が無いので、回数はテキストのログ（$OPEN_LOG）で数えました"
     fi
   fi
-  echo "$OPEN_LABEL: 起動 $attempts 回 / 完了 $runs 回 / 見送り $skips 回 / エラー $errs 件 / ロック見送り $busy 件"
+  echo "$OPEN_LABEL: 起動 $attempts 回 / 完了 $runs 回 / 見送り $skips 回 / エラー $errs 件 / ロック見送り $busy 件 / 時刻待ちの見送り $waitskips 件"
   if [ "$skips" != "0" ] && [ -f "$JSONL" ]; then
     jq -sr --arg d "$TODAY" '
       def jst_day: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 + 32400 | strftime("%Y-%m-%d");
@@ -206,6 +211,10 @@ trap 'rm -f "$body"' EXIT
       | group_by(.) | map("  \(length) \(.[0])") | .[]' "$JSONL" 2>/dev/null
   fi
   [ "$errs" != "0" ] && problems=$((problems + 1))
+  if [ "${waitskips:-0}" != "0" ]; then
+    echo "❌ wait-until.sh が open の起動を $waitskips 回見送りました（crontab の DT_OPEN_AT / DT_PREOPEN_AT が空・不正・120 秒より先。その回は起動していません）"
+    problems=$((problems + 1))
+  fi
   if [ "$counted" = "0" ]; then
     echo "❌ open の回数を数えられませんでした（構造化ログを読めず、$OPEN_LOG もありません）"
     problems=$((problems + 1))
