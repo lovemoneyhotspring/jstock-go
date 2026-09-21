@@ -136,6 +136,13 @@ func printPreopenNote(cfg dtconfig.Config) {
 			"選んだ銘柄は全部が始値で建つ想定のままです（寄指の模擬は test/dt_limit_breakeven.py）\n",
 			cfg.Execution.PreopenLimitPct.String())
 	}
+	if cfg.Execution.PreopenLimitPctUsLow.IsPositive() {
+		// 米国小幅高の日は本番では寄指（約定は 1〜2 割）。backtest はこの日のロングも全部が始値で建つ想定で、
+		// 9:00 以降の回を休む規則も入っていないので、この日の数字は本番の形ではない
+		fmt.Printf("注意: execution.preopen_limit_pct_us_low = %s（米国小幅高の日だけ寄指）は backtest に入っていません。"+
+			"この日のロングも全部が始値で建つ想定です（模擬は test/dt_limit_uslow.py）\n",
+			cfg.Execution.PreopenLimitPctUsLow.String())
+	}
 }
 
 func printBacktest(cfg dtconfig.Config, result *dtbacktest.Result, start, end time.Time, showTrades bool) {

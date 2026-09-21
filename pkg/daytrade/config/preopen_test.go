@@ -104,3 +104,54 @@ func TestValidatePreopenLimitPct(t *testing.T) {
 		t.Error("ロングを寄る前に出さない設定で preopen_limit_pct を通した")
 	}
 }
+
+// preopen_limit_pct_us_low は米国小幅高の日だけ寄指の位置を替える。ロングを寄る前に出し、
+// 米国のゲートがショートだけを止める設定（us_skip_legs = "short"）でなければ黙って効かないので弾く。
+func TestPreopenLimitPctUsLow(t *testing.T) {
+	c := Default()
+	c.Execution.EntryWindow = []string{"08:59", "09:15"}
+	c.Execution.PreopenLegs = PreopenLegsLong
+	c.Regime.UsSkipLegs = UsSkipLegsShort
+	c.Execution.PreopenLimitPctUsLow = decimal.RequireFromString("1.5")
+	if err := c.Validate(); err != nil {
+		t.Fatalf("long × short × 1.5%% で弾かれた: %v", err)
+	}
+	// 平常日は寄成のまま（preopen_limit_pct = 0）、小幅高の日だけ 1.5% の寄指
+	if got := c.Execution.ForDay(false); got.PreopenLimitFor(domain.SideBuy) {
+		t.Error("平常日まで寄指になった")
+	}
+	if got := c.Execution.ForDay(true); !got.PreopenLimitFor(domain.SideBuy) || !got.PreopenLimitPct.Equal(decimal.RequireFromString("1.5")) {
+		t.Errorf("小幅高の日の寄指の位置 = %s", got.PreopenLimitPct)
+	}
+	// 平常日の寄指（0.5%）と併用できる
+	c.Execution.PreopenLimitPct = decimal.RequireFromString("0.5")
+	if got := c.Execution.ForDay(false).PreopenLimitPct; !got.Equal(decimal.RequireFromString("0.5")) {
+		t.Errorf("平常日の寄指の位置 = %s", got)
+	}
+	if !c.Execution.UsLowPreopenOnly() {
+		t.Error("UsLowPreopenOnly が偽")
+	}
+	// 0 なら使わない: 小幅高の日も平常日の値のまま
+	c.Execution.PreopenLimitPctUsLow = decimal.Zero
+	if got := c.Execution.ForDay(true).PreopenLimitPct; !got.Equal(decimal.RequireFromString("0.5")) || c.Execution.UsLowPreopenOnly() {
+		t.Errorf("us_low = 0 なのに替わった: %s", got)
+	}
+
+	c.Execution.PreopenLimitPct = decimal.Zero
+	for _, bad := range []string{"-0.1", "5.1"} {
+		c.Execution.PreopenLimitPctUsLow = decimal.RequireFromString(bad)
+		if err := c.Validate(); err == nil {
+			t.Errorf("preopen_limit_pct_us_low = %s を通した", bad)
+		}
+	}
+	c.Execution.PreopenLimitPctUsLow = decimal.RequireFromString("1.5")
+	c.Regime.UsSkipLegs = UsSkipLegsAll
+	if err := c.Validate(); err == nil {
+		t.Error("us_skip_legs = all（この日は両脚とも休む）で preopen_limit_pct_us_low を通した")
+	}
+	c.Regime.UsSkipLegs = UsSkipLegsShort
+	c.Execution.PreopenLegs = PreopenLegsShort
+	if err := c.Validate(); err == nil {
+		t.Error("ロングを寄る前に出さない設定で preopen_limit_pct_us_low を通した")
+	}
+}

@@ -358,6 +358,16 @@ type Execution struct {
 	// 埋め直さない（PlacedToday は板に残った注文も失効した寄指も使った枠に数える）。
 	// ショートには効かない（測っていない）。研究ノート vault 2026-09-jp-daytrade-limit-on-open。
 	PreopenLimitPct decimal.Decimal `toml:"preopen_limit_pct"`
+	// PreopenLimitPctUsLow は**前夜の米国市場が小幅高だった日だけ**使う寄指の位置（%）。0（既定）なら使わない。
+	//
+	// 正の値を入れると、米国小幅高の日は「寄る前の回のロングを、この指値の寄指で出すだけ」の日になる:
+	// 並べ方は signal.rank_by_us_low、ショートは休み（regime.us_skip_legs = "short" が要る）、
+	// **9:00 以降の回は両脚とも休む**（UsLowPreopenOnly）。この日のロングは寄成・成行で建てると
+	// どの並べ方でも −9〜−12 bp/日 で、浅く寄った銘柄を落とす寄指が付いて初めて 0 を超える。
+	// 寄る前の回が走らなかった・米国の値が間に合わなかった朝は、今までどおり休むことになる。
+	// 数字は模擬の探索の値（LightGBM × 1.5% で +3.20 bp/小幅高の日、t 2.32、20/20。事前登録した 0.5% は不採用）。
+	// 研究ノート vault 2026-09-jp-daytrade-limit-on-open の事前登録 3。
+	PreopenLimitPctUsLow decimal.Decimal `toml:"preopen_limit_pct_us_low"`
 	// ProtectExit は建てた玉に**保険の手仕舞い**（執行条件「引け」の返済・売り）をブローカーへ
 	// 先に置くか（daytrade protect）。注文はブローカーに残るので、cron・マシン・ネットが止まっても
 	// 引けで手仕舞われる。15:20 の close は保険の注文を取り消してから成行で手仕舞う（引け値は
@@ -417,6 +427,21 @@ const MaxPreopenLimitPct = 5
 // PreopenLimitFor はその脚の寄る前の注文を寄指にする設定か（ロングだけ）。
 func (e Execution) PreopenLimitFor(side domain.Side) bool {
 	return side == domain.SideBuy && e.PreopenFor(side) && e.PreopenLimitPct.IsPositive()
+}
+
+// ForDay はその日の寄指の位置を PreopenLimitPct に入れた設定。米国小幅高の日だけ
+// preopen_limit_pct_us_low（0 なら preopen_limit_pct のまま）。発注（execute）にはこれを渡す。
+func (e Execution) ForDay(usLow bool) Execution {
+	if usLow && e.PreopenLimitPctUsLow.IsPositive() {
+		e.PreopenLimitPct = e.PreopenLimitPctUsLow
+	}
+	return e
+}
+
+// UsLowPreopenOnly は米国小幅高の日を「寄る前の回の寄指だけ」で取引する設定か。
+// 真なら、その日の 9:00 以降の回は建てない（open が見送りにする）。
+func (e Execution) UsLowPreopenOnly() bool {
+	return e.PreopenLimitPctUsLow.IsPositive()
 }
 
 // PreopenEnabled はどちらかの脚を寄る前に出す設定か。
@@ -879,6 +904,18 @@ func (c Config) Validate() error {
 	// 寄指はロングの寄る前の注文にしか付かない。脚が合っていないと黙って寄成・成行のままになる
 	if c.Execution.PreopenLimitPct.IsPositive() && !c.Execution.PreopenFor(domain.SideBuy) {
 		return fmt.Errorf("execution.preopen_limit_pct > 0 なら preopen_legs に long を含める（今は %q）", c.Execution.PreopenLegs)
+	}
+	if c.Execution.PreopenLimitPctUsLow.IsNegative() || c.Execution.PreopenLimitPctUsLow.GreaterThan(decimal.NewFromInt(MaxPreopenLimitPct)) {
+		return fmt.Errorf("execution.preopen_limit_pct_us_low は 0〜%d（%%。0 は使わない）", MaxPreopenLimitPct)
+	}
+	if c.Execution.PreopenLimitPctUsLow.IsPositive() {
+		if !c.Execution.PreopenFor(domain.SideBuy) {
+			return fmt.Errorf("execution.preopen_limit_pct_us_low > 0 なら preopen_legs に long を含める（今は %q）", c.Execution.PreopenLegs)
+		}
+		// "all" のままだと米国のゲートが両脚とも止め、この設定は黙って効かない
+		if c.Regime.UsSkipLegs != UsSkipLegsShort {
+			return fmt.Errorf("execution.preopen_limit_pct_us_low > 0 なら regime.us_skip_legs は %q（今は %q）", UsSkipLegsShort, c.Regime.UsSkipLegs)
+		}
 	}
 	// 窓が 9:00 開始のままだと寄る前の回がそもそも走らず、寄成が一度も出ない。
 	// 黙って従来の動きに戻るより、設定の食い違いとして止める
