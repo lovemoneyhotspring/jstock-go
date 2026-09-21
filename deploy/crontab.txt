@@ -89,6 +89,10 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 場中の記事に反応する使い方に進むなら 10 分おきに上げる。そのときは --days 1 にすること
 # （--days 5 のままだと過去 4 日を 1 日 100 回以上取り直す）。docs/NEWS.md の「頻度を上げるとき」。
 20 6 * * *      cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/news.lock $WBJP_BIN/news sync --days 5                                               >> state/logs/news-sync.log        2>&1
+# レーティング（立花の【株価レーティング】【目標株価】の動き）。前営業日ぶんが翌営業日の 07:10 に配信されるので 07:30。
+# **API が遡れるのは 90 日まで。止めた期間は取り返せない**（2026-09-11〜21 は 9/21 に手で取り込んだ）。直近 3 日は済みでも取り直す。
+# 1 日取れなくても止めない（日曜に応答が空の日がある）。グレイル（rate fetch）・トレーダーズ（rate history）は入れない（docs/RATE.md）。
+30 7 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/rate.lock $WBJP_BIN/rate sync --days 5                                               >> state/logs/rate.log        2>&1
 # 平日は open と plan の前にも当日ぶんを取り直す（TOB などの材料をショートから外すため）。
 # 適時開示は配信時刻から 2〜4 分で電文に載る（2026-09-15 の実測。15:30 の 67 件で最大 4.3 分）。
 # 8:52 は 08:30・08:45 の開示を 9:00:03 の open に、20:20 は 15:30〜20:15 の開示を 20:30 の plan に間に合わせる。

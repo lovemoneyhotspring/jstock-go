@@ -45,7 +45,12 @@ func newSyncCmd() *cobra.Command {
 					fmt.Printf("%s  ニュース %3d 件 / レーティングの動き %3d 件\n", d.Day, d.News, d.Events)
 				}
 			}
-			fmt.Printf("取り込み %d 日（既済 %d 日をとばした）/ 動き 合計 %d 件\n", res.Imported, res.Skipped, res.Events)
+			for _, d := range res.Days {
+				if d.Err != nil {
+					fmt.Printf("%s  取れなかった（次回また取る）: %v\n", d.Day, d.Err)
+				}
+			}
+			fmt.Printf("取り込み %d 日（既済 %d 日をとばした、失敗 %d 日）/ 動き 合計 %d 件\n", res.Imported, res.Skipped, res.Failed, res.Events)
 			return err
 		},
 	}

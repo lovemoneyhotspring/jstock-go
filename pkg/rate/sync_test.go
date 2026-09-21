@@ -86,27 +86,36 @@ func TestSyncNewsRefetchesDayDeliveredAfterEarlyRun(t *testing.T) {
 	}
 }
 
-func TestSyncNewsSkipsDoneAndStopsOnFailure(t *testing.T) {
+func TestSyncNewsSkipsDoneAndContinuesPastFailure(t *testing.T) {
 	ctx := context.Background()
 	store := openRateStore(t)
 	setNow(t, time.Date(2026, 9, 15, 23, 30, 0, 0, clock.Tokyo)) // UTC ではもう 9/15 14:30
 	if err := store.SaveEvents(ctx, "2026-09-12", nil, 10); err != nil {
 		t.Fatal(err)
 	}
-	src := &stubNews{fail: map[string]bool{"20260911": true}}
+	src := &stubNews{fail: map[string]bool{"20260913": true}}
 	res, err := SyncNews(ctx, store, src, 5, 1, false)
-	if err == nil {
-		t.Fatal("失敗が返らない")
+	if err != nil {
+		t.Fatalf("1 日の取得失敗で止まった: %v", err)
 	}
-	// 9/15 から遡る。9/12 は済みで飛ばし、9/11 で止まる
+	// 9/15 から遡る。9/13 は失敗しても先へ進み、9/12 は済みで飛ばし、9/11 まで届く
 	if !reflect.DeepEqual(src.calls, []string{"20260915", "20260914", "20260913", "20260911"}) {
 		t.Errorf("calls = %v", src.calls)
 	}
-	if res.Imported != 3 || res.Skipped != 1 {
+	if res.Imported != 3 || res.Skipped != 1 || res.Failed != 1 {
 		t.Errorf("res = %+v", res)
 	}
-	// force なら済みの日も取る
+	// 失敗した日は済みにならず、次の回でまた取りに行く
 	src.calls, src.fail = nil, nil
+	res, err = SyncNews(ctx, store, src, 5, 0, false)
+	if err != nil || res.Failed != 0 {
+		t.Fatalf("2 回目: res = %+v err = %v", res, err)
+	}
+	if !reflect.DeepEqual(src.calls, []string{"20260913"}) {
+		t.Errorf("2 回目の calls = %v（失敗した 9/13 だけを取るはず。9/11 は 1 回目で済み）", src.calls)
+	}
+	// force なら済みの日も取る
+	src.calls = nil
 	if _, err := SyncNews(ctx, store, src, 5, 0, true); err != nil || len(src.calls) != 5 {
 		t.Errorf("force: calls = %v err = %v", src.calls, err)
 	}

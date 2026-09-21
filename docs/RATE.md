@@ -64,22 +64,29 @@ bin/rate query "SELECT ..."         # 直接 SQL
 
 ## cron
 
-朝方に集中するので、その帯を細かく、日中は粗く見る。
+（`fetch` の間隔の話）朝方に集中するので、その帯を細かく、日中は粗く見る。
 
-**2026-09-21 時点で、この cron は `deploy/crontab.txt` にも実際の crontab にも入っていない**（`rate.db` の
-最後の取り込みは 2026-09-11、`fetches` は 1 行）。下は入れるときの例で、`sync` を止めた期間は 90 日を過ぎると取り返せない。
+**`rate sync`（立花 API）だけを `deploy/crontab.txt` に入れている**（2026-09-21〜、平日 07:30。ログは `state/logs/rate.log`）。
+API が遡れるのは 90 日までで、止めた期間は取り返せないため。`rate.db` は 2026-09-11 から 9/21 まで止まっていた
+（cron に無かった）ので、9/21 に手で取り込んだ。
+
+`fetch`（グレイル）と `history`（トレーダーズ）は**入れていない**。どちらも第三者サイトへの継続アクセスで、
+`history` は 2005 年まで遡れて（止めても取り返せる）、`fetch` の 1 か月の窓も `sync` と `history` で埋まる。
+初出時刻を測りたくなったときに、下の例で入れる。
 
 ```cron
-# グレイルの初出時刻を測る（朝方を細かく、日中は粗く）
+# 立花 API の動きを日次で足す（07:10 配信なので 07:30 以降）。これだけが crontab に入っている
+30 7 * * 1-5      cd ~/jstock-go && bin/rate sync --days 5 >> state/logs/rate.log 2>&1
+# 以下は入れていない例。グレイルの初出時刻を測る（朝方を細かく、日中は粗く）
 */5 5-10 * * 1-5  cd ~/jstock-go && bin/rate fetch --quiet >> state/logs/rate.log 2>&1
 */20 11-23 * * *  cd ~/jstock-go && bin/rate fetch --quiet >> state/logs/rate.log 2>&1
-# 立花 API の動きを日次で足す（07:10 配信なので 07:30 以降）
-30 7 * * 1-5      cd ~/jstock-go && bin/rate sync --days 5 >> state/logs/rate.log 2>&1
 # トレーダーズの当月を取り直す（大引け後に更新されるので夜）
 0 20 * * 1-5      cd ~/jstock-go && bin/rate history --from $(date +%Y%m) --force >> state/logs/rate.log 2>&1
 ```
 
 **`sync` は毎日回す。** 90 日を過ぎたぶんは取り返せない。
+1 日取れなくても止めない（`news sync` と同じ）。日曜に立花の応答が空（`aCLMMfdsNews` が無い）で返る日があり、
+以前はそこで止まって、それより前の日が届かなかった。取れなかった日は済みにならず、次の回でまた取る。
 
 `sync` は取り込み済みの日を飛ばすが、**直近 `--recent` 日（既定 3）は済みでも取り直す**。
 まとめは 07:10 に配信されるので、それより前に回した日は `event_count=0` で「済み」になり、
