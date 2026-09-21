@@ -20,9 +20,9 @@
 
 | 知りたいこと | まず読む | 大きさ |
 |---|---|---|
-| 検証の結論 | `~/obsidian-vault/20-research/結論一覧.md` | 3 KB（全文は 225 KB） |
-| 検証の数字（DD・Sharpe・CAGR で絞る） | `bin/jquants query "… read_csv('~/obsidian-vault/20-research/結果.csv') …"` | 86 行 |
-| このリポジトリの仕様 | `docs/README.md` | 1 KB（全文は 155 KB） |
+| 検証の結論 | `~/obsidian-vault/20-research/結論一覧.md` | 60 KB（全文は 1.1 MB） |
+| 検証の数字（DD・Sharpe・CAGR で絞る） | `bin/jquants query "… read_csv('~/obsidian-vault/20-research/結果.csv') …"` | 約 1,800 行 |
+| このリポジトリの仕様 | `docs/README.md` | 1 KB（全文は 300 KB） |
 
 書き方の規約は `~/obsidian-vault/CLAUDE.md`。vault は独立した git リポジトリ（private）なので、
 **書いたら vault 側で commit して push まで済ませる**。頼まれるのを待たない。

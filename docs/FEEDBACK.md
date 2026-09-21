@@ -123,7 +123,7 @@ Discord に流す。人が毎日 `jq` を叩かなくても、崩れたときに
 | `.claude/agents/periodic-report.md` | 週次・月次のサブエージェント。期間で絞って読む |
 | `deploy/report.sh <daily\|weekly\|monthly>` | 起動と配達。期間に応じたサブエージェントを回し、標準出力を Discord に流す |
 | `cmd/discord-post` | Discord の Bot API で送る。スレッドを作り、2000 文字で分割して連投する。実体は `pkg/wbcore/notify` |
-| cron | 日次 `0 21 * * 1-5` / 週次 `30 21 * * 5` / 月次 `0 22 1 * *`（`deploy/crontab.txt`）。日次は evaluate 群と plan が出揃ってから |
+| cron | 日次 `35 17 * * 1-5` / 週次 `30 21 * * 5` / 月次 `0 22 1 * *`（`deploy/crontab.txt`）。日次は 17:05・17:20 の `daytrade evaluate` の後 |
 
 ```console
 # 手で回す（送らずに中身だけ見る）
@@ -134,7 +134,7 @@ DRY_RUN=1 deploy/report.sh monthly 2026-08   # その月
 ```
 
 本文は送信の成否によらず `state/reports/`（`daily-<日付>.md` / `weekly-<開始日>.md` /
-`monthly-<YYYY-MM>.md`）に残る。Discord に流したものの控えは `state/notify/<日付>.jsonl`（45 日）。
+`monthly-<YYYY-MM>.md`）に残る。週次・月次は vault（`~/obsidian-vault/50-reports/`）にも写して commit する（`DRY_RUN=1` では写さない）。Discord に流したものの控えは `state/notify/<日付>.jsonl`（45 日）。
 
 **生成と配達を分けてある。** モデルに「送る」ことまで任せると、送り忘れた日が
 黙って消える。レポートを作るのは AI、Discord に届けるのは決め打ちのスクリプト。

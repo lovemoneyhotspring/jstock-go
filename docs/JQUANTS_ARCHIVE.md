@@ -54,14 +54,14 @@ Standard で**取れない**（設計に入れない）: 前場四本値、売�
 2. **端点 × 月の Parquet。** `data/jquants/<端点>/<YYYY-MM>.parquet`。一括ダウンロードの粒度と同じなので、初回取り込みは変換だけで済む。1 ファイル 1 か月なので、日次の増分は「その月のファイルを読み、鍵で上書きして書き戻す」で足りる（月内 4,000 銘柄 × 20 日 ≈ 8 万行、一瞬）。
 3. **鍵で後勝ち。** 同じ鍵のレコードは新しい取り込みが勝つ。財務の速報→確報、過誤訂正、取り直しがすべてこの一つの規則で片付く。冪等なので何度実行してもよい（cron 前提）。
 4. **取り込みの記録は SQLite の台帳に。** `data/jquants/ledger.db` に「端点・対象日・取得時刻・件数・応答のハッシュ」を残す。「どこまで取れているか」「どの日が欠けているか」「訂正で何件変わったか」はここで答える。Parquet の中身を舐めて推測しない。
-5. **足の読み出しは既存の抽象を通す。** `BarStore`（`data/bars/*.parquet`）は残し、`JQuantsProvider` はこのアーカイブから読む経路も持つ（後述）。戦略・エンジンから見える形は変えない。
+5. **足の読み出しは既存の抽象を通す。** `BarStore`（`data/bars/*.parquet`）は残し、`jquantsProvider`（`pkg/wbcore/data`）はこのアーカイブから読む経路も持つ（後述）。戦略・エンジンから見える形は変えない。
 
 ### 置き場
 
 ```
 data/jquants/
 ├── ledger.db                          取り込み台帳（SQLite）
-├── markets_calendar/all.parquet       小さいので 1 ファイル
+├── markets_calendar/2016-08.parquet …  取引カレンダー（月ごと。翌年ぶんまで入る）
 ├── equities_master/2026-08.parquet    日付付きの銘柄一覧（月次）
 ├── equities_bars_daily/2016-09.parquet … 2026-08.parquet
 ├── indices_bars_daily/…
@@ -82,7 +82,7 @@ data/jquants/
 
 端点名はパスの `/` を `_` にしたもの。月を切る日付列は端点ごとに決める（表の「鍵」の先頭の日付）。
 
-型: 日付列は `Date`、**それ以外はすべて `String`**。API は数値を文字列で返すことがあり、一括 CSV は全部文字列なので、型を揃えようとすると経路で食い違う。数値が要る読み手は `typed()`（数値に解釈できる列だけ Float64 にする）を通す。null は null のまま。
+型: 日付列は `Date`、**それ以外はすべて `String`**。API は数値を文字列で返すことがあり、一括 CSV は全部文字列なので、型を揃えようとすると経路で食い違う。数値が要る読み手は `Typed()`（数値に解釈できる列だけ Float64 にする）を通す。null は null のまま。
 列が増えた（API の仕様変更）ときは足すだけ、減ったときは null で埋める（`diagonal` 結合）。**列は落とさない**。
 
 ### 台帳（`ledger.db`）
@@ -112,20 +112,18 @@ CREATE TABLE ingest (
 
 **日次（増分）— API を日付で叩く。** 1 端点 1 日 1 リクエスト、全部で 15 回程度。
 
-```
-毎営業日 19:00 JST  bars / indices / topix / master / short-ratio / margin-alert / opt225 / short-sale-report / edinet 3 種 / earnings-date / earnings-calendar
-毎営業日 09:00 JST  fins/summary を「前日と前々日」の開示日で取り直す（24:30 の確報を拾う）
-毎週 木曜 19:00     investor-types（直近 8 週）/ margin-interest（直近 2 週）
-毎月 1 日           calendar 全期間 / 前月ぶんを全端点で取り直し（訂正の取りこぼし保険。changed が 0 なら何もしない）
-```
-
-cron は今と同じ「固定間隔で叩き、必要かどうかは中で判断する」。判断材料は台帳（その日の取り込みが無い、または前回から N 時間過ぎている）と取引カレンダー（休場日は bars を取りに行かない）。
+実際の cron（`deploy/crontab.txt`）は端点ごとに時刻を割らず、`jquants sync` を 13・43 分の 30 分刻みで叩く。
+どの端点のどの日を取るかは中で決める（端点ごとの `AvailableAt`（表の「更新」）より前には取らず、
+`MinIntervalHours` 以内には取り直さず、`SettleDays` のあいだは訂正に備えて取り直す）。
+月初（2〜5 日の 3:50）に `jquants backfill` を回して、一括ダウンロードで取りこぼしを埋める。
+分足・ティックの日次は 17:25・17:40、欠けの確認と修復（`repair --notify`）は 20:00。
+判断材料は台帳（その日の取り込みが無い、または前回から N 時間過ぎている）と取引カレンダー（休場日は bars を取りに行かない）。
 
 **取り直しの重ね幅**（訂正に備える）: bars・indices は 5 営業日、fins は 2 日、investor-types は 8 週。`BarStore.OVERLAP_DAYS` と同じ考え方。
 
 ### 既存の足データとの関係
 
-`JQuantsProvider.fetch_bars` は今 API を直接叩く。アーカイブができたら次の順で読む:
+`jquantsProvider.FetchBars` は次の順で読む:
 
 1. `data/jquants/equities_bars_daily/` に要求範囲がすべて有れば、そこから（API を叩かない。オフラインで動く）
 2. 無い部分だけ API から取り、**アーカイブにも書く**（`accum sync` が副産物として蓄積に貢献する）
@@ -135,8 +133,8 @@ cron は今と同じ「固定間隔で叩き、必要かどうかは中で判断
 ### 読み出し（オフラインでの検討）
 
 - DuckDB: `jquants query "SELECT … FROM read_parquet('data/jquants/equities_bars_daily/*.parquet')"`。月ファイルなので期間で絞れば必要な分しか読まない
-- DuckDB: `BarStore.query` と同じく、端点ごとにビューを張る補助を用意する（`jquants.bars`、`jquants.fins` …）。研究ノートから SQL で横断できる
-- 「その時点で見えていた財務」は `fins_summary` を `DiscDate <= 判定日` で絞って `Code` ごとに最新 1 件を取る。ルックアヘッドを避ける定型なので関数にする（`as_of(frame, date)`）
+- `jquants query` は端点ごとにビュー（端点名。`equities_bars_daily` など）を張って SQL を流す。研究ノートから SQL で横断できる
+- 「その時点で見えていた財務」は `fins_summary` を `DiscDate <= 判定日` で絞って `Code` ごとに最新 1 件を取る。ルックアヘッドを避ける定型なので関数にしてある（`archive.AsOf(frame, date, dateColumn, by)`）
 
 ### CLI（案）
 
@@ -160,7 +158,7 @@ jquants query "SELECT …"               DuckDB で端点名のビューを張�
 ### レート制限（120 回/分）
 
 - **送る前に間隔を空ける**（`JQuantsClient` の `Throttle`、既定 100 回/分＝0.6 秒間隔）。バックフィルや EDINET の遡り（数千リクエスト）はこれで上限内に収まり、429 を「起こさない」のが基本
-- **それでも 429 が返ったら** `Retry-After`（無ければ 60 秒）待って再試行（最大 8 回）。窓が 1 分なので数秒の指数バックオフでは足りない
+- **それでも 429 が返ったら** `Retry-After`（無ければ 60 秒）待って再試行（最大 3 回。5xx・接続失敗は 1・2・4 秒待つ）。窓が 1 分なので数秒の指数バックオフでは足りない
 - 署名付き URL からの `csv.gz` ダウンロードは API の回数に数えない（別ホスト）
 - 上限はプロセス内で守る。`accum sync` と `jquants sync` が同時に走ると合計で超えうるため、既定を 120 ではなく 100 にして余白を残す。cron で同時刻に並べない
 
@@ -169,8 +167,8 @@ jquants query "SELECT …"               DuckDB で端点名のビューを張�
 - 同じ日を何度取っても結果は同じ（鍵で後勝ち）。cron の重複起動は `flock` で防ぐ（今と同じ）
 - Parquet の書き戻しは一時ファイルに書いてから `rename`。途中で落ちても壊れたファイルは残らない
 - 一括ダウンロードの CSV は変換後も `data/jquants/_raw/<端点>/<file>.csv.gz` に**残す**（変換にバグがあっても API を叩き直さずに済む。10 年より前が消える問題の最後の保険）
-- API キーは既存の `WBJP_JQUANTS_API_KEY`。ログには出ない（`register_secret` 済み）
-- バックアップ: `data/jquants/` は `accum backup` と同じ仕組みで別の場所に複製する（台帳は小さいので毎日、Parquet は週次）
+- API キーは既存の `WBJP_JQUANTS_API_KEY`。ログには出ない（`logging.RegisterSecret` 済み）
+- バックアップ: 案は `data/jquants/` を `accum backup` と同じ仕組みで別の場所に複製する（台帳は小さいので毎日、Parquet は週次）だったが、2026-09-21 時点で `data/jquants/` を複製する仕組みは見当たらない（`accum backup` は SQLite だけ。`docs/DEPLOY.md`）
 
 ### 容量とコストの見積もり
 
@@ -315,17 +313,18 @@ CSV の列名は API と同じ（`Date,Time,Code,O,H,L,C,Vo,Va`）。値は CSV 
    訂正に備えて 2 日ぶん取り直す）。設計時は「一括の日次ファイルを優先する」と書いたが、
    `live/` の日次ファイルは当月ぶんしか無く、経路を分けるほどの差が無いので API に寄せた。
    `available_at` は日足と同じ 16:30 を仮置き。
-7. **検証への繋ぎ込みは `daytrade/backtest` の `FillModel`**（未実装）。順位付け（ギャップ）と株数は日足の寄付のまま、
-   建値・手仕舞い値だけを分足から返す実装を足す（`SimulateWith` / `SimulateMarginWith` に渡す）。
-   先に測るのは、9:01・9:04・9:07 の約定価格と寄付の差、15:20 の価格と引けの差、張り付き銘柄が 15:20〜15:30 に
+7. **検証への繋ぎ込みは `daytrade/backtest` の `FillModel`**（実装済み。`daytrade backtest --fill-entry / --fill-exit`、
+   `backtest.MinuteBars`）。順位付け（ギャップ）と株数は日足の寄付のまま、
+   建値・手仕舞い値だけを分足から返す（`SimulateWith` / `SimulateMarginWith` に渡す）。
+   測ったのは（結果は vault の `2026-09-jp-gap-minute`）、9:01・9:04・9:07 の約定価格と寄付の差、15:20 の価格と引けの差、張り付き銘柄が 15:20〜15:30 に
    出来ていたか（`carry_penalty` の実測）、日次の損失上限。約定の無い分は行が無いので「その時刻に足が無い」を
    約定不可として扱う規則、昼休み、2024-11-05 の引け時刻の変更、`Time`（JST）とパネルの `Date`（UTC 深夜）の
-   鍵合わせに注意する。`Time` が足の開始か終了かは初回取得で確かめる。
+   鍵合わせに注意する。`Time` は足の**開始**時刻（2026-09-05 に確認。下の立会の構造の表）。
 
 ```bash
 # 契約したら: まず一括で過去 2 年ぶんを取る（履歴は 2 年しか無い）
 JQUANTS_MINUTE_BARS=1 jquants backfill --only equities_bars_minute
-# 日次に載せる（cron の該当行のコメントを外す。deploy/crontab.txt）
+# 日次（deploy/crontab.txt の 17:25 の行が回している）
 JQUANTS_MINUTE_BARS=1 jquants sync --only equities_bars_minute
 JQUANTS_MINUTE_BARS=1 jquants status          # ファイル数・最古・最新
 jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/2026-09-08.parquet')
@@ -351,8 +350,8 @@ jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/202
 
 **取り込みの負荷（実測）**: 一括の日次ファイル 4 本で 9 秒・466MB、月次 1 本（964 万行）で 43 秒・643MB
 （`GOMEMLIMIT=3GiB` の内側）。日次の `sync` は API の `date=` で 1 日 47 万行のページングになる——
-`GetAll` が全ページを集めてから `Frame` にするので同程度を見込むが、まだ実測していない。
-重ければ日次も一括（`live/` の日次ファイル）に切り替える。
+`GetAll` が全ページを集めてから `Frame` にする。cron（17:25）が API の `date=` で回している
+（台帳の `source` は `api`）ので、日次を一括（`live/` の日次ファイル）に切り替える必要は出ていない。
 
 ## ティック（アドオン）
 
@@ -414,7 +413,6 @@ jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/202
 （全体の約 19.5%、2 年で約 3.3GB）。1 回目に書いた 09:11 は抽出の窓の誤りだった。
 **2026-09-08 に刈った**: 491 ファイル・19.6 億行 → 4.15 億行（21%）、17GB → 3.5GB。34 分、最大常駐 2.2GB。
 cron の sync 行にも同じ窓を足したので、以後の日次は 09:00〜09:31 だけ入る。
-寄りだけ（9:00〜9:31）なら行数は **約 19.5%**（1 日 75 万行前後・約 7MB、年 1.7GB）になる。
 
 - **窓の定義は 1 か所**。環境変数 `JQUANTS_TICKS_WINDOWS="09:00-09:31"`（`Endpoint.WindowEnv`）。
   半開区間で、終了は含まない。引けの 15:30:00.xxx を残すには終了を `15:31` にする。空なら全時間帯。
@@ -454,7 +452,7 @@ JQUANTS_TICKS_WINDOWS="09:00-09:31" jquants prune --only equities_trades --yes
 | 最大常駐 | **4.24GB**（`GOMEMLIMIT=4GiB` に張り付いて GC が回る。超過ぶんはヒープ外） |
 | **全期間（残り 23 本・466 日）** | **2 時間 13 分、最大常駐 4.81GB**、失敗 0 |
 
-サーバー（12GB）では他の cron と同時でも収まるが、`GOMEMLIMIT` を下げると GC が回り続けて遅くなる。
+サーバー（実メモリ 11GiB）では他の cron と同時でも収まるが、`GOMEMLIMIT` を下げると GC が回り続けて遅くなる。
 減らしたければ csv.gz をファイルに落として流し読みする改修（1GB ぶん）が先。
 
 ```bash
@@ -462,7 +460,7 @@ JQUANTS_TICKS_WINDOWS="09:00-09:31" jquants prune --only equities_trades --yes
 JQUANTS_TICKS=1 /usr/bin/time -v jquants backfill --only equities_trades --since 2026-08
 # 問題なければ全期間
 JQUANTS_TICKS=1 jquants backfill --only equities_trades
-# 日次に載せる（deploy/crontab.txt の該当行のコメントを外す。check の行にも JQUANTS_TICKS=1 を足す）
+# 日次（deploy/crontab.txt の 17:40 の行が回している。repair の行にも JQUANTS_TICKS=1 が要る）
 JQUANTS_TICKS=1 jquants sync --only equities_trades
 ```
 
@@ -485,8 +483,7 @@ JQUANTS_TICKS=1 jquants sync --only equities_trades
   `Sync()` が一括の日次ファイルで増分を取る（`SyncBulk`）。有効化は `JQUANTS_TICKS=1`。
   時間帯で絞る仕組み（`JQUANTS_TICKS_WINDOWS`・`jquants prune`）も入れた。分析後に寄り・引けだけ残す想定。
   同日に**過去 2 年ぶん（490 日・18.4 億行・17GB）を取り込み、cron（17:40 の sync、20:00 の check）に載せた**。
-  以前の見積もり（年 50〜100GB）は過大で、実測は年 8.5GB。
-- 2026-09-08: ティックを **09:00〜09:31 に刈った**（`jquants prune`、17GB → 3.5GB）。日次の sync も同じ窓。
+  - 2026-09-08: ティックを **09:00〜09:31 に刈った**（`jquants prune`、17GB → 3.5GB）。日次の sync も同じ窓。
   根拠は vault の `2026-09-jp-gap-ticks`。
 - 2026-09-04: `Frame` の行を `map[string]*string` から列に揃えた `[]*string` に変えた（1 セル 96 → 44 バイト）。
   列名で引くときは `Get` / `AppendRow`。読み出し・CSV・ダイジェスト・書き戻しの経路でセルごとのアロケートをやめた。
@@ -496,7 +493,6 @@ JQUANTS_TICKS=1 jquants sync --only equities_trades
   超えたら OOM ではなくエラーで止まるようにした。「メモリ」の節を参照。
 - 2026-09-05: 分足（アドオン）の**取り込みを実装**。`Endpoint` に `Split`（月／日）・`ColumnTypes`（型付き Parquet）・
   `Addon` を足し、`AddonEndpoints` / `ActiveEndpoints()` / `JQUANTS_MINUTE_BARS` で契約前は日次に載せない。
-  日足の端点の挙動は変えていない。**まだ 1 行も取り込んでいない**（アドオン未契約）。
-  `FillModel` への繋ぎ込みは未実装。用途は `docs/OPENING_DATA.md`。
+  日足の端点の挙動は変えていない。同日に契約して過去 2 年ぶんを取り込み、日次の cron も開けた。用途は `docs/OPENING_DATA.md`。
 - 2026-09-03: 分足（アドオン）の設計を追記。実装は未着手。ティックは取らない（→ 2026-09-07 に見積もりを直して経路を作った）。
-- 2026-08-31: 実装済み（`wbcore.data.jquants_client` / `wbcore.data.jquants_archive` / `jquants` CLI）。`JQuantsProvider` はアーカイブに揃っていればそこから読み、API から取ったぶんはアーカイブに書く。**実機（Standard）での疎通は未確認**——一括 CSV の列名が API と同じ前提、`HolDiv` の値、確報の反映時刻は初回実行で確かめる。
+- 2026-08-31: 実装済み（`pkg/wbcore/data` の `jquants_client.go` / `jquants_archive.go`、`pkg/jquants/archive`、`cmd/jquants`）。`jquantsProvider` はアーカイブに揃っていればそこから読み、API から取ったぶんはアーカイブに書く。実機（Standard）で疎通済み（2026-09-21 時点で全端点が cron で日次に動き、10 年ぶんが入っている）。確報の反映時刻は「決めていないこと」の 4。

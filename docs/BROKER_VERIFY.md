@@ -1,8 +1,9 @@
 # 立花証券 e支店 API の検証手順（発注経路を開ける前に）
 
 発注に関わる電文のうち、**実機で 1 度も確認できていないものがある**。この文書は
-何が未検証で、UAT（demo-kabuka）で何をどの順に確かめるかを記す。ここが終わるまで
-`deploy/crontab.txt` の「発注経路」の行は開けない。
+何が未検証で、UAT（demo-kabuka）で何をどの順に確かめるかを記す。
+`daytrade` の発注経路は 2026-09-15 に本番（`--live`）へ切り替えた（`deploy/crontab.txt` の「有効化の段階」。
+残りは下の「未検証の電文」のとおり、承知のうえで本番で確かめている）。`wbjp` / `accum` の発注経路の行はまだ開けていない。
 
 ## 実機で確かめた電文（2026-09-11、本番口座・照会のみ）
 
@@ -20,8 +21,8 @@
 | `CLMStkGetIssueMstKabu`（売買単位） | ✅ 4,447 銘柄。**この電文は sResultCode を返さない**——共通の検査が必須にしていたため、売買単位が黙って空になり既定 100 株に落ちていた（`checkResultOptional` で修正） |
 
 **ここで確かめられたのは「キーがあること」と「0 件を正しく 0 件と読むこと」まで。**
-行が 1 つでもある場合の項目名（約定数量・建玉番号など）は、実際に注文を出すまで確かめられない。
-下の「未検証の電文」はその意味で残っている。
+行が 1 つでもある場合の項目名（約定数量・建玉番号など）は、実際に注文を出すまで確かめられない
+——同日昼（現物）と 2026-09-14（信用）に確かめた（下の 2 節）。
 
 ## 実機で確かめた電文（2026-09-11 昼、本番口座・現物 1 株を発注）
 
@@ -58,12 +59,9 @@
 2. 訂正電文の発火後の値段に `"0"`（成行）を入れていた。元から成行の逆指値では
    「変更が無い」と見なされ拒否される（`sResultCode=12115`）。変えないなら `"*"` で送る
 
-**検証そのものが見つけたバグをもう 1 つ直した。** 同じ日に同じ内容（銘柄・売買・数量）で
-`verify-order` を 2 回叩くと、`client_order_id` が一致する（日付と注文内容から決まる）。
-台帳は同じ ID を上書きするので、**ブローカーには 2 件出るのに台帳は 1 行のまま**残り、
-投下額が過小になり、約定済みの行が PENDING に巻き戻った。`accum run` は `WasPlaced` で
-弾いているので、同じ柵を `verify-order` にも置いた（もう 1 単元出したいなら `--units 2`
-のように数量を変える）。
+**検証そのものが見つけたバグをもう 1 つ直した。** 同じ日に同じ内容で `verify-order` を 2 回叩くと
+`client_order_id` が一致し、**ブローカーには 2 件出るのに台帳は 1 行のまま**上書きされた。`accum run` と同じ柵
+（`WasPlaced`）を `verify-order` にも置いた（もう 1 単元出したいなら `--units 2` のように数量を変える）。
 
 **この日の検証で使った額は手数料 231 円（77 円 × 3 回）。** 563A 1 株（998 円）は保有したまま。
 
@@ -156,7 +154,8 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 成行の空売り（10 株）は空売り価格規制の適用除外（50 単元以内）で、そのまま受理された。
 
 **余力の動き**: 1 回目のあと、現物買付可能額が 1 円減った（= 気配の差 0.1 円 × 10 株）。
-2・3 回目の成行はそれぞれ 0.2 円 × 10 株 = 2 円の損で、3 回の合計は 5 円。
+2・3 回目の成行はそれぞれ 0.2 円 × 10 株 = 2 円の損で、3 回の合計は 5 円。信用の売買代金に新規と返済の 2 件ぶんが載り、
+現物の注文件数は 0 のまま。**信用の手数料は 0 円**で、受渡も信用として処理された。
 
 **返済の単品照会（`CLMOrderListDetail`）に決済の明細が載る。** `aKessaiOrderTategyokuList` の 1 行に
 `sKessaiSoneki`（決済損益、例 `-2`）・`sKessaiTateTesuryou`・`sKessaiKanrihi`・`sKessaiKasikaburyou`・
@@ -182,21 +181,21 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 >
 > 立花の Q&A にある「日計り取引拘束金（受渡日まで計上）」は `sHibakariKousokukin` の方で、**0 だった**。
 > その他拘束金は受渡日から表示範囲の最後（+6 営業日）まで 1,000 円のまま続き、何の拘束かは API にも
-> Q&A・取引ルールのページにも書かれていない（2026-09-14 時点）。翌朝の夜間更新（5:30 頃）後に消えるかを見て、
-> 残るなら立花証券のサポートに聞く。
+> Q&A・取引ルールのページにも書かれていない（2026-09-14 時点）。**消えなかった**——2026-09-16 の照会では
+> 2026-09-18 の行に 3,211 円へ増えていた（下の「委託保証金の内訳」）。正体は未解決で、立花証券のサポートへの問い合わせが残っている。
 >
 > 内訳の電文: `CLMZanKaiGenbutuKaitukeSyousai`（`sHitukeIndex` 0〜5 で日付ごと）は、ザラ場中は
 > 0〜2（当日〜+2）が `991002`（一時的に利用不可）で、3〜5 だけ返った。`CLMZanKaiKanougakuSuii` は 6 日ぶんを
-> 配列（`aKanougakuSuiiList`）でまとめて返し、ザラ場中でも全部取れた。**拘束を調べるならこちら。**信用の売買代金に新規と返済の 2 件ぶんが載り、
-現物の注文件数は 0 のまま。**信用の手数料は 0 円**で、受渡も信用として処理された。
+> 配列（`aKanougakuSuiiList`）でまとめて返し、ザラ場中でも全部取れた。**拘束を調べるならこちら。**
 
 **逆指値だけの注文は、発火待ちの間 `PENDING` で読まれる**（現物の逆指値でも同じ）。`PENDING` は台帳側で
 「送信結果不明」の意味にも使うので、逆指値を台帳に載せる経路を作るときは区別が要る。
 
 **まだ確かめていないこと**（下の「未検証」に残した）:
 
-- `daytrade open` / `close` / `verify` を通した経路（台帳への記録・close の数量・verify の「持ち越しなし」）。
-  いまの設定は 1 注文 100 万円で、1 単元の検証には使えない。プローブは電文だけを直接叩いている
+- `daytrade open` / `close` / `verify` を通した経路（台帳への記録・close の数量・verify の「持ち越しなし」）
+  → **確認済み（2026-09-16）**。本番で 4 件を建て、15:20 の close のあと verify が `carried: 0`（持ち越しなし）で終わった。
+  プローブは電文だけを直接叩いていたので、台帳を通した 1 周はこれが最初
 - 前営業日の注文を `CLMOrderListDetail` で照会できるか。今日の新規・返済の注文番号は日誌
   （`~/obsidian-vault/10-journal/2026-09-14.md`）に残したので、翌営業日に照会する（照会だけ・発注しない）:
 
@@ -205,26 +204,8 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
     TACHIBANA_PROD_PRIVATE_KEY_FILE=$PWD/e_api_private_key.der \
     TACHIBANA_ORDER_DETAIL_PROBE=<注文番号/営業日>,... go test ./pkg/wbcore/broker -run TestOrderDetailProbe -v -count=1
   ```
-- **寄付の執行条件（`sCondition = 2`）＝寄成は実装したが実機で出していない**（`execution.preopen_legs`、
-  既定 `none`）。今の本番は `sCondition = 0`（条件なし）の成行を時間帯の中で出すので、プローブと同じ電文。
-  寄成を本番に出す前に、デモ環境（`demo-kabuka.e-shiten.jp`）で次の 2 つを確かめる:
-
-  1. **電文が通るか。** `sOrderPrice = 0` × `sCondition = 2` の組で受け付けられるか。銘柄・市場に
-     よっては拒否される（エラー「商品市場別設定.執行条件寄付不可」）。51 単元以上の信用新規売りは
-     成行で出せないので、寄成も同じ規制に掛かるはず（下の「制約」）
-  2. **寄らなかったときにいつ失効するか。** 前場中に一度も寄らない銘柄（ストップ高の張り付き）で、
-     注文が前場引けで失効するのか、大引けまで残るのか、後場の寄付の板寄せに参加するのか。
-     リファレンスに記述が無い。**ここが分かるまで「寄らない銘柄の枠をいつ諦めるか」は決められない**
-     （取引所が失効させるなら何もしなくてよく、残るならこちらから取消を送ることになる）
-
-  執行条件のコード（リファレンス v4.5/v4.10）は **0 指定なし / 2 寄付 / 4 引け / 6 不成**。
-  引け（4）と不成（6）は使う予定が無い
-- **注文値段区分（`sOrderOrderPriceKubun`）の 3 / 4 の読みが仕様と食い違っている。**
-  `tachibana_codes.go` の `orderTypeFromCode` は 3 を「引け成行」、4 を「引け指値」と書いているが、
-  リファレンスの CLMOrderList では **1 成行 / 2 指値 / 3 親注文より高い / 4 親注文より低い**
-  （逆指値の親子関係）。引けは執行条件（`sCondition = 4`）の側に出るはず。
-  成行・指値として読む分には大きく外れないので値は変えていないが、注文照会の実データで確かめる。
-  影響しうるのは `tachibana_orders.go` の「`priceKubun` が 2 か 4 のときだけ `LimitPrice` を採る」判定
+- 寄付の執行条件（`sCondition = 2`）＝寄成と、注文値段区分（`sOrderOrderPriceKubun`）の 3 / 4 の読み
+  → 下の「未検証の電文」の表の下へ寄せた
 
 ## 委託保証金の内訳（2026-09-16、本番口座・照会のみ）
 
@@ -266,25 +247,53 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 | 電文 | 使うところ | 実装 |
 |---|---|---|
 | `CLMOrderListDetail`（前営業日の注文） | 持ち越しの判定（`execute.CarriedPositions`） | [pkg/wbcore/broker/tachibana_orders.go](../pkg/wbcore/broker/tachibana_orders.go) |
-| `CLMKabuNewOrder` の `sCondition = 2`（寄成） | 寄る前の発注（`execution.preopen_legs`。既定 `none` なので本番では出ていない） | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
-| 板寄せに**間に合わなかった**寄成（9:00:00 以降に届いた `sCondition = 2`）の行き先 | 寄成の締め切りは 9:00:00 ちょうど（`RunDeadline`）。気配の 1 本が遅れると 8:59:59 台に出る。拒否されるのか、後場寄り（12:30）の板寄せに回るのかを確かめる——後場寄りに回るなら検証していない時刻の建玉になるので、送信の締め切りを 8:59:57 へ詰める。close は板に残った建て注文を取り消す（`RefreshEntries`）ので持ち越しにはならない | [pkg/daytrade/config/config.go](../pkg/daytrade/config/config.go) `RunDeadline` |
-| `CLMKabuNewOrder` の **指値 × `sCondition = 2`（寄指）** | 寄る前のロングを寄指にする（`execution.preopen_limit_pct`。既定 0 なので本番では出ていない）。手順は下の「寄指のプローブ」 | [pkg/daytrade/execute/execute.go](../pkg/daytrade/execute/execute.go) `OpeningLimitPrice` / `EntryRequest` |
+| `CLMKabuNewOrder` の `sCondition = 2`（寄成） | 寄る前の発注（`execution.preopen_legs`。**2026-09-19 から `long`**・最初の営業日は 9/24。確かめる 2 点は表の下） | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
+| 板寄せに**間に合わなかった**寄成（9:00:00 以降に届いた `sCondition = 2`）の行き先 | 寄成の締め切りは 9:00:00 ちょうど（`RunDeadline`）。気配の 1 本が遅れると 8:59:59 台に出る（2026-09-21 から、締め切りまで 1 秒を切ったら送り始めない。`execute.EntrySendMargin`）。拒否されるのか、後場寄り（12:30）の板寄せに回るのかを確かめる——後場寄りに回るなら検証していない時刻の建玉になるので、送信の締め切りを 8:59:57 へ詰める。close は板に残った建て注文を取り消す（`RefreshEntries`）ので持ち越しにはならない | [pkg/daytrade/config/config.go](../pkg/daytrade/config/config.go) `RunDeadline` |
+| `CLMKabuNewOrder` の **指値 × `sCondition = 2`（寄指）** | 寄る前のロングを寄指にする（`execution.preopen_limit_pct`。平常日は既定 0 のままで出ていない。米国小幅高の日だけ `preopen_limit_pct_us_low = 1.5` が 2026-09-21 から有効）。手順は下の「寄指のプローブ」 | [pkg/daytrade/execute/execute.go](../pkg/daytrade/execute/execute.go) `OpeningLimitPrice` / `EntryRequest` |
 | `CLMKabuNewOrder` の `sCondition = 4`（引け）× 信用返済 | **保険の手仕舞い**（`execution.protect_exit`。**2026-09-20 から有効**・本番で検証中）。手順は下の「引けの保険注文」 | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
-| `daytrade` の台帳を通した信用の 1 周 | `open` → `close` → `verify` | [pkg/daytrade/execute](../pkg/daytrade/execute) |
+| 引けの保険が**一部約定**したときの `CLMOrderList` / `CLMOrderListDetail` の返り方 | 保険の聞き直しで「約定数量が減って見えたら台帳へ書き戻さない」保護の前提（一部約定後の取消・失効で約定数量欄に約定分が載るか。2026-09-20 のレビューで未確認と記録） | [pkg/daytrade/execute/protect.go](../pkg/daytrade/execute/protect.go) |
+| 時価問合の `p_no` 検査が**セッション単位か口座単位か** | 番号順にずらして送る途中で再ログインが入ったときだけ効く（弾かれても 2 周目が直列で取り直す）。実験は下の「時価問合を並列に送れるか」 | [pkg/wbcore/broker/tachibana_price.go](../pkg/wbcore/broker/tachibana_price.go) |
+| 発注と照会の**合計 4 回/秒**（`orderLimiter` 2 + `requestLimiter` 2）が上限に当たらないか | 注文の枠は上げていない（実機の上限を確かめていない）。9/24 の朝に `broker.request_failed` が出ないか見る | 同 `requestLimiterFor` |
 
 信用建玉（行あり）・信用新規／返済の発注・信用返済の逆指値は 2026-09-14 に本番口座で確認済み（上の節）。
+`daytrade` の台帳を通した信用の 1 周（`open` → `close` → `verify`）は 2026-09-16 に本番で確認済み（4 件を建て、close のあと verify が `carried: 0`）。
 
 残高・現物建玉（`CLMZanKaiSummary` / `CLMGenbutuKabuList`）は 2026-09-11 に実数で確認済み。
-Go への移植時に項目名を取り違えていた（`aCLMKabuZan` / `sGenkinZandaka` などは実在しない）ので、
-削除済み Python 実装から移植し直してある。
 
 項目名と区分コードの出所は、**削除済みの Python 実装**（`git show ac1eb7a:src/wbcore/broker/tachibana.py`）。
-Go への初回移植で推定に頼って多数取り違えたため、そこから写し直してある。
+Go への初回移植で推定に頼って多数取り違えた（`aCLMKabuZan` / `sGenkinZandaka` などは実在しない）ため、そこから写し直してある。
+
+### 寄付の執行条件（`sCondition = 2`）＝寄成
+
+実装したが実機で出していない。`execution.preopen_legs` は 2026-09-19 から `long`（コードの既定は `none`）で、
+最初の営業日の 2026-09-24 に 8:59:50 の回が初めて出す。それまでの本番は `sCondition = 0`（条件なし）の成行を
+時間帯の中で出していて、プローブと同じ電文。デモ環境（`demo-kabuka.e-shiten.jp`）では確かめていない
+（承知のうえで開けた。[DAYTRADE.md](DAYTRADE.md) の「まだ確かめていないこと」）。本番で次の 2 つを見る:
+
+1. **電文が通るか。** `sOrderPrice = 0` × `sCondition = 2` の組で受け付けられるか。銘柄・市場に
+   よっては拒否される（エラー「商品市場別設定.執行条件寄付不可」）。51 単元以上の信用新規売りは
+   成行で出せないので、寄成も同じ規制に掛かるはず（下の「既知の制約」）。拒否なら台帳に REJECTED が残り、
+   9:00:03 からの回が従来のザラ場成行で埋める
+2. **寄らなかったときにいつ失効するか。** 前場中に一度も寄らない銘柄（ストップ高の張り付き）で、
+   注文が前場引けで失効するのか、大引けまで残るのか、後場の寄付の板寄せに参加するのか。
+   リファレンスに記述が無い。**ここが分かるまで「寄らない銘柄の枠をいつ諦めるか」は決められない**
+   （取引所が失効させるなら何もしなくてよく、残るならこちらから取消を送ることになる）
+
+執行条件のコード（リファレンス v4.5/v4.10）は **0 指定なし / 2 寄付 / 4 引け / 6 不成**。
+引け（4）は保険の手仕舞いで使う（下の「引けの保険注文」）。不成（6）は使う予定が無い。
+
+### 注文値段区分（`sOrderOrderPriceKubun`）の 3 / 4 の読み
+
+**仕様と食い違っている。** `tachibana_codes.go` の `orderTypeFromCode` は 3 を成行、4 を指値と読む（移植元の Python は「引け成行」「引け指値」と書いていた）が、
+リファレンスの CLMOrderList では **1 成行 / 2 指値 / 3 親注文より高い / 4 親注文より低い**
+（逆指値の親子関係）。引けは執行条件（`sCondition = 4`）の側に出るはず。
+成行・指値として読む分には大きく外れないので値は変えていないが、注文照会の実データで確かめる。
+影響しうるのは `tachibana_orders.go` の「`priceKubun` が 2 か 4 のときだけ `LimitPrice` を採る」判定。
 
 ## 引けの保険注文（`execution.protect_exit`）を実機で確かめる
 
 **何のためか。** 建てた玉に、執行条件「引け」（`sCondition = 4`）の返済・売りをブローカーへ先に置く
-（`daytrade protect`、9:20・10:20・13:20）。注文は立花に残るので、cron・マシン・ネットが止まっても
+（`daytrade protect`、9:20・10:20・13:20・15:10）。注文は立花に残るので、cron・マシン・ネットが止まっても
 引けで手仕舞われる。人が気づいて端末を打つ前提にしない安全網。ふだんの手仕舞いは 15:20 の成行のまま
 （引け値は 15:20 より両脚とも不利。分足の検証で合算 +525 万 → +470 万）で、close が保険を取り消してから
 成行を出す。**2026-09-20 に有効にした（ユーザ判断。検証しながら本番で回す。最初の営業日は 9/24）。実機で確かめていないこと:**
@@ -293,11 +302,14 @@ Go への初回移植で推定に頼って多数取り違えたため、そこ�
    その日はもう置かない。売買は止まらない（close は従来どおり 15:20 に手仕舞う）
 2. 保険が**場中に約定してしまわないか**（引けの条件を成行と読み違える）。9:20 に置いた直後に約定したら、
    その日の持ち時間が変わる（利益の源泉は寄り後〜15:20）。台帳・立花の約定一覧で確かめる
-3. 保険の取消が通り、返済できる建玉（`sTategyokuSuryou` の返済可能株数）が**元に戻る**か。
+3. 保険の取消が通り、返済できる建玉（建玉一覧の返済可能株数 `sOrderHensaiKanouSuryou`）が**元に戻る**か。
    戻らないと 15:20 の成行が「返済できる建玉が 0 株」で拒否され、保険に任せる形になる（引け値で手仕舞い。
    通知は出る）。取消の直後に建玉一覧を見て、返済可能株数が戻っているか確かめる
 4. 引けで約定した保険が、台帳（`queryFill`）と翌朝の持ち越し判定（`CarriedPositions`）で「手仕舞い済み」に
    なるか
+5. **前場に出した「引け」が前引け（11:30）で執行されないか**（2 は「場中に約定しないか」までで、前引けを名指ししていなかった。
+   立花の仕様は未確認）。9/24 の 11:30 過ぎに約定一覧を見る。執行されるなら建玉が昼に手仕舞われるので、保険を置く回を
+   後場（12:30 以降）だけにするか、受け入れるかを決める。急ぎで止めるなら `protect_exit = false`（bin・cron の作り直し不要）
 
 **確かめ方（1 単元・1 日）。**
 
@@ -400,22 +412,13 @@ test/.venv/bin/python test/dt_live_shadow.py --since <その日>
 
 ### 検証の実行には必ず `--broker-verify` を付ける
 
-**`env` では切り分けられない。** 本番口座（`env=prod`）で電文を確かめることがあり、
-そのとき `env` は普段の運用と同じ値になる。印が無いと、あとからログを読む
-`night-repair`（6:00）と `daily-report`（17:35）が、検証で出た「時間外の発注」
-「持ち越し」を**本当の異常として拾う**。
+**`env` では切り分けられない。** 本番口座（`env=prod`）で電文を確かめることがあり、印が無いと、あとからログを読む
+`night-repair`（6:00）と `daily-report`（17:35）が、検証で出た「時間外の発注」「持ち越し」を**本当の異常として拾う**。
 
-`--broker-verify` を付けると:
-
-| どこ | 何が付くか | 効き |
-|---|---|---|
-| ログ（`state/logs/<app>-<env>.jsonl`） | その実行の**全行**に `verify: true` | `jq 'select(.verify \| not)'` で本当の異常だけ見られる |
-| ダイジェスト（`state/digest/<env>-<日付>.jsonl`） | `verify: true` | 日次・週次レポートが検証の回を除ける |
-| 台帳（`orders.verify`） | 検証で出した注文の行 | 成績の集計と資産曲線のゲートから外れる |
-| 履歴（`open_run.broker_verify`） | 実行 1 回の要約 | 後から「あの日は検証だった」と分かる |
-
-検証で建てた玉は**本物**なので、`close` / `verify` は普段どおり手仕舞う（印を理由に
-無視したりしない）。外れるのは成績の集計だけ——戦略の判断ではないため。
+`--broker-verify` を付けると、その実行のログの**全行**とダイジェストに `verify: true`、台帳の注文に `orders.verify`、
+履歴に `open_run.broker_verify` が付く。検証で建てた玉は**本物**なので `close` / `verify` は普段どおり手仕舞い、
+外れるのは成績の集計と資産曲線のゲートだけ（詳しくは [LOGGING.md](LOGGING.md) の「`verify`」、
+[DAYTRADE.md](DAYTRADE.md) の「実機検証の印」）。
 
 > **その日の本番の `open` は動かなくなる。** 冪等の判定（「今日もう建てたか」）は
 > 台帳の生きている注文を数えるだけで、検証の印は見ない。**検証で建てた玉の上に
@@ -488,6 +491,9 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
    確かめ方: 翌営業日に `daytrade verify --date <前日> --broker-verify` を回し、前日の注文の
    約定数量が入ること
 
+1・2 は 2026-09-14（上の「信用の発注経路を 1 周させた」）、3 は 2026-09-16 に本番の `open` → `close` → `verify`
+（4 件、`carried: 0`）で確認済み。**残っているのは 4。**
+
 ```bash
 # 5. 逆指値（デモ環境で。信用返済での逆指値はリファレンスに例文が無いので必ず実機で）
 #    a. 現物 1 単元を買い、売りの逆指値（条件価格は現在値の −3%、発火後は成行）を置く
@@ -529,13 +535,13 @@ WBJP_ENV=uat daytrade verify --config-dir config/daytrade_margin --broker-verify
 
 現物と逆指値は 2026-09-11、信用の電文（買建・売建、指値・成行の新規と返済、返済の逆指値）は
 2026-09-14 に本番口座で通した。
-**残っているのは信用の 4 点のうち 3（`daytrade verify` の「持ち越しなし」）と 4（前営業日の単品照会）**。
-3 は `daytrade` の台帳を通して回す必要があり、1 単元で回せる設定がまだ無い。
+信用の 4 点のうち 3（`daytrade verify` の「持ち越しなし」）は 2026-09-16 に本番で確認した。
+**残っているのは 4（前営業日の単品照会）**と、上の「未検証の電文」の執行条件（寄成・寄指・引け）。
 
-上の 8 点がすべて確認できるまで、`deploy/crontab.txt` の発注経路の行は開けない。
-開けるときも **まず `--live` 無しで数日**、次に `--live` の順にする。
+`daytrade` の発注経路は、dry-run を 2026-09-11 から回したうえで 2026-09-15 に `--live` へ切り替えた（残りは本番で確かめる判断）。
+`wbjp` / `accum` の発注経路の行はまだ開けていない。開けるときも **まず `--live` 無しで数日**、次に `--live` の順にする。
 
-停止は `config/<戦略名>/settings.toml`（`daytrade.toml`）の `kill_switch = true`。
+停止は設定の `kill_switch = true`（`config/daytrade/daytrade.toml`・`config/accum/accum.toml`・wbjp は `config/settings.toml`）。
 cron を消さなくても次のサイクルから発注しなくなる。
 
 ## 時価問合を並列に送れるか（2026-09-21、確認済み）

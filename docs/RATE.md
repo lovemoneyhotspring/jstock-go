@@ -66,6 +66,9 @@ bin/rate query "SELECT ..."         # 直接 SQL
 
 朝方に集中するので、その帯を細かく、日中は粗く見る。
 
+**2026-09-21 時点で、この cron は `deploy/crontab.txt` にも実際の crontab にも入っていない**（`rate.db` の
+最後の取り込みは 2026-09-11、`fetches` は 1 行）。下は入れるときの例で、`sync` を止めた期間は 90 日を過ぎると取り返せない。
+
 ```cron
 # グレイルの初出時刻を測る（朝方を細かく、日中は粗く）
 */5 5-10 * * 1-5  cd ~/jstock-go && bin/rate fetch --quiet >> state/logs/rate.log 2>&1
