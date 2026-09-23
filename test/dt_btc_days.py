@@ -5,6 +5,7 @@
   uv run --with yfinance test/dt_btc_days.py --fetch   # BTC-USD の日足を test/out/btc_usd_1d.csv に
   test/.venv/bin/python test/dt_btc_days.py            # 検定
   test/.venv/bin/python test/dt_btc_days.py --since 2025-09-01   # 直近だけ（トレジャリー銘柄が出てきた後）
+  test/.venv/bin/python test/dt_btc_days.py --since 2024-06-01 --add 33500   # メタプラネットを母集団に入れたら
 
 選定は本番のロング（gap_vol の上位 3・業種 1 銘柄まで・1 単元が予算内・逆ボラ配分・流動性別コスト）。
 12 月は本番が休むので除く。日の条件なので日次に畳んでから Welch（シグナル単位だと t が膨らむ）。
@@ -23,7 +24,8 @@ sys.path.insert(0, "test")
 
 BTC = "test/out/btc_usd_1d.csv"
 # プライムの仮想通貨関連（交換所・事業あり）。トレジャリー銘柄（メタプラネットなど）はスタンダード・グロースで母集団の外
-CRYPTO = {"84730": "SBI HD", "86980": "マネックス", "94490": "GMO インターネット", "36960": "セレス"}
+CRYPTO = {"84730": "SBI HD", "86980": "マネックス", "94490": "GMO インターネット", "36960": "セレス",
+          "33500": "メタプラネット（--add のときだけ候補に入る）"}
 
 
 def fetch():
@@ -34,10 +36,37 @@ def fetch():
     print(f"{BTC}: {len(h)} 行 {h.index.min().date()}〜{h.index.max().date()}")
 
 
-def daily_long():
+def extra_rows(codes):
+    """市場区分と赤字の除外だけを外して、指定の銘柄を候補表と同じ形で作る（ほかの除外は本番と同じ）。"""
+    import glob
+    import os
+
+    from dt_candidates import MIN_TURNOVER, VOL_FLOOR, limit_down
+    panel = max(glob.glob("data/jquants/_panel_cache/panel-*.parquet"), key=os.path.getmtime)
+    df = pd.read_parquet(panel, columns=["d", "code", "o", "c", "prev_close", "vol20", "sector", "turnover_med",
+                                         "mkt_cap", "earn_prev", "disc_today", "alert"])
+    df["d"] = pd.to_datetime(df["d"])
+    base = df[df["turnover_med"] >= MIN_TURNOVER].copy()
+    base["mkt_cap"] = base["mkt_cap"].fillna(0.0)
+    base["tercile"] = np.ceil(base.groupby("d")["mkt_cap"].rank(method="first") * 3
+                              / base.groupby("d")["mkt_cap"].transform("size")).clip(1, 3)
+    c = base[base["code"].isin(codes) & (base["prev_close"] > 0) & (base["tercile"] > 1)
+             & ~base["earn_prev"].fillna(False) & ~base["disc_today"].fillna(False) & ~base["alert"].fillna(False)].copy()
+    c["gap"] = c["o"] / c["prev_close"] - 1
+    c = c[(c["gap"] >= -1.0) & (c["gap"] < 0) & (c["o"] > limit_down(c["prev_close"].values))]
+    c["y_raw"] = c["c"] / c["o"] - 1
+    c["key_sort"] = np.where(c["vol20"].notna(),
+                             np.round(c["gap"], 4) / np.maximum(c["vol20"].fillna(VOL_FLOOR), VOL_FLOOR), np.inf)
+    return c
+
+
+def daily_long(add=()):
     from dt_wf_target import CAND, VOL_FLOOR, liq_cost_bp, pick  # lightgbm を読むので --fetch では読まない
 
     df = pd.read_parquet(CAND)
+    if add:
+        x = extra_rows(list(add))
+        df = pd.concat([df, x[[k for k in df.columns if k in x.columns]]], ignore_index=True)
     df["price"] = df["o"]
     df["sector"] = df["sector"].fillna("")
     df = df.sort_values(["d", "key_sort", "code"], kind="mergesort").reset_index(drop=True)
@@ -78,14 +107,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true")
     ap.add_argument("--since", default="", help="この日以降だけで測る（YYYY-MM-DD）")
+    ap.add_argument("--add", default="", help="市場区分・赤字の除外を外して候補に混ぜる銘柄（例 33500）")
     a = ap.parse_args()
     if a.fetch:
         fetch()
         return
 
-    day, picks = daily_long()
+    add = [k for k in a.add.split(",") if k]
+    day, picks = daily_long(add)
     if a.since:
         day, picks = day[day.index >= a.since], picks[picks["d"] >= a.since]
+    if add:
+        base, _ = daily_long()
+        both = day.join(base["bp"].rename("base"), how="inner")
+        diff = both["bp"] - both["base"]
+        ch = diff[diff.abs() > 1e-9]
+        print(f"{','.join(add)} を入れた場合: {both.bp.mean():+.2f} bp/日（入れない {both.base.mean():+.2f}）"
+              f"差 {diff.mean():+.2f} bp/日、選定が変わった日 {len(ch)} 日（その日の差の平均 {ch.mean():+.1f} bp、"
+              f"t {ch.mean() / (ch.std(ddof=1) / np.sqrt(len(ch))) if len(ch) > 1 else float('nan'):+.2f}）\n")
     d = day.join(btc_features(day.index)).dropna()
     print(f"期間 {d.index.min().date()}〜{d.index.max().date()}  日数 {len(d)}  全体 {d.bp.mean():+.2f} bp/日\n")
 
