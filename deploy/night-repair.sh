@@ -160,7 +160,7 @@ STATUS_BEFORE="$(git status --porcelain)"
 printf '%s' "$PROMPT" | timeout 1800 "$CLAUDE_BIN" -p \
   --agent night-repair \
   --model "${NIGHT_REPAIR_MODEL:-claude-fable-5-1}" \
-  --effort "${NIGHT_REPAIR_EFFORT:-low}" \
+  --effort "${NIGHT_REPAIR_EFFORT:-medium}" \
   --permission-mode bypassPermissions \
   --disallowedTools "${DISALLOWED[@]}" \
   > "$REPORT" 2> "$REPORT_DIR/night-repair-$TODAY.err"
