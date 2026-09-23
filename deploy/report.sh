@@ -128,7 +128,7 @@ state/notify/<日付>.jsonl）と、bin/*  の review / evaluate に --from $FRO
 fi
 
 # --agent でエージェントを選ぶ。モデルと effort は明示する（cron は
-# ~/.claude/settings.json の既定に頼らず、fable 5.1 / low で固定。
+# ~/.claude/settings.json の既定に頼らず、fable 5.1 / medium で固定。2026-09-23 に low から上げた。
 # REPORT_MODEL / REPORT_EFFORT で上書き可）。時間切れで cron が詰まるのを防ぐ。
 # 期間が長いほど読む量が増えるので、上限も伸ばす。
 case "$PERIOD" in
@@ -150,7 +150,7 @@ trap 'rm -f "$STARTED_MARK"' EXIT
 printf '%s' "$PROMPT" | timeout "$TIMEOUT" "$CLAUDE_BIN" -p \
   --agent "$AGENT" \
   --model "${REPORT_MODEL:-claude-fable-5-1}" \
-  --effort "${REPORT_EFFORT:-low}" \
+  --effort "${REPORT_EFFORT:-medium}" \
   --permission-mode bypassPermissions \
   --disallowedTools "Edit,Write,NotebookEdit" \
   > "$REPORT" 2> "${REPORT%.md}.err"
