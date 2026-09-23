@@ -4,6 +4,7 @@
 
   uv run --with yfinance test/dt_btc_days.py --fetch   # BTC-USD の日足を test/out/btc_usd_1d.csv に
   test/.venv/bin/python test/dt_btc_days.py            # 検定
+  test/.venv/bin/python test/dt_btc_days.py --since 2025-09-01   # 直近だけ（トレジャリー銘柄が出てきた後）
 
 選定は本番のロング（gap_vol の上位 3・業種 1 銘柄まで・1 単元が予算内・逆ボラ配分・流動性別コスト）。
 12 月は本番が休むので除く。日の条件なので日次に畳んでから Welch（シグナル単位だと t が膨らむ）。
@@ -21,6 +22,8 @@ import pandas as pd
 sys.path.insert(0, "test")
 
 BTC = "test/out/btc_usd_1d.csv"
+# プライムの仮想通貨関連（交換所・事業あり）。トレジャリー銘柄（メタプラネットなど）はスタンダード・グロースで母集団の外
+CRYPTO = {"84730": "SBI HD", "86980": "マネックス", "94490": "GMO インターネット", "36960": "セレス"}
 
 
 def fetch():
@@ -43,9 +46,10 @@ def daily_long():
     inv = 1.0 / np.maximum(p["vol20"].fillna(VOL_FLOOR), VOL_FLOOR)
     p["w"] = inv / inv.groupby(p["d"]).transform("sum")
     p["net"] = p["w"] * (p["y_raw"] - liq_cost_bp(p["turnover_med"].values) / 1e4)
+    p = p[p["d"].dt.month != 12]
     day = p.groupby("d").agg(bp=("net", "sum"), n=("net", "size"))
     day["bp"] *= 1e4
-    return day[day.index.month != 12]
+    return day, p
 
 
 def btc_features(days):
@@ -59,6 +63,11 @@ def btc_features(days):
     return out
 
 
+def liq_cost_bp_(turnover):
+    from dt_wf_target import liq_cost_bp
+    return liq_cost_bp(turnover)
+
+
 def welch(a, b):
     ma, mb = a.mean(), b.mean()
     se = np.sqrt(a.var(ddof=1) / len(a) + b.var(ddof=1) / len(b))
@@ -68,12 +77,15 @@ def welch(a, b):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true")
+    ap.add_argument("--since", default="", help="この日以降だけで測る（YYYY-MM-DD）")
     a = ap.parse_args()
     if a.fetch:
         fetch()
         return
 
-    day = daily_long()
+    day, picks = daily_long()
+    if a.since:
+        day, picks = day[day.index >= a.since], picks[picks["d"] >= a.since]
     d = day.join(btc_features(day.index)).dropna()
     print(f"期間 {d.index.min().date()}〜{d.index.max().date()}  日数 {len(d)}  全体 {d.bp.mean():+.2f} bp/日\n")
 
@@ -101,7 +113,16 @@ def main():
     for q, g in d.groupby("q5"):
         print(f"| {q} | {g.btc5.min():+.1%}〜{g.btc5.max():+.1%} | {len(g)} | {g.bp.mean():+.2f} | {(g.bp > 0).mean():.0%} |")
 
-    # 4. いまの位置（最新の足）
+    # 4. 仮想通貨関連の銘柄が上位 3 に入った日
+    c = picks[picks["code"].isin(CRYPTO)].copy()
+    c["bp"] = (c["y_raw"] - liq_cost_bp_(c["turnover_med"].values) / 1e4) * 1e4
+    print(f"\n仮想通貨関連が上位 3 に入った: {len(c)} 件 / {picks['d'].nunique()} 日"
+          f"（銘柄の平均 {c.bp.mean():+.1f} bp、上位 3 全体の銘柄平均 "
+          f"{((picks.y_raw - liq_cost_bp_(picks.turnover_med.values) / 1e4) * 1e4).mean():+.1f} bp）")
+    for r in c.sort_values("d").tail(10).itertuples():
+        print(f"  {r.d.date()} {CRYPTO[r.code]} ギャップ {r.gap:+.1%} 寄り→引け {r.y_raw:+.1%}")
+
+    # 5. いまの位置（最新の足）
     b = pd.read_csv(BTC, parse_dates=["utc_date"]).set_index("utc_date")["close"]
     print(f"\n最新の足 {b.index[-1].date()} 終値 {b.iloc[-1]:,.0f}  1 日 {b.iloc[-1] / b.iloc[-2] - 1:+.1%}  "
           f"5 日 {b.iloc[-1] / b.iloc[-6] - 1:+.1%}  20 日 {b.iloc[-1] / b.iloc[-21] - 1:+.1%}")
