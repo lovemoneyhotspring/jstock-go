@@ -8,6 +8,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
 	corehistory "github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/history"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/notify"
@@ -49,7 +51,12 @@ func newDataCheckCmd() *cobra.Command {
 				return fmt.Errorf("universe.symbols が空です")
 			}
 
-			results, err := data.Check(appSettings.BarsDir(), setCfg.Universe.Symbols, time.Time{})
+			// 抜けは東証の営業日で数える（連休で誤報を出さない）。カレンダーが無ければ平日で代用
+			cal := calendar.FromArchive(archive.NewArchive(appSettings.JQuantsArchiveDir()))
+			if cal.Empty() {
+				fmt.Println("注意: 取引カレンダーが読めないので平日を営業日とみなします（祝日を挟むと誤報になる）")
+			}
+			results, err := data.Check(appSettings.BarsDir(), setCfg.Universe.Symbols, time.Time{}, cal.IsTradingDay)
 			if err != nil {
 				return err
 			}
