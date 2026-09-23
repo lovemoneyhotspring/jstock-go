@@ -182,7 +182,11 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 085955 は打ち切りをほとんど動かせない（9:00:01.2 の open の前に手放す）ので --max-run の側を詰めた。対象の銘柄が先に並ぶので、落ちるのは候補の外の銘柄。
 # これで [timeout] が出たら本当に固まった回。秒数を触るときは 2 つを組で直す
 # 8:57 は 8:55 と 8:59 の間を埋める（気配の動く速さを特徴量にするため。2026-09-19 追加）
-30,45,55,57 8 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+30,45,55 8 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+# 8:57 だけは既定（170 秒 + KILL 10 秒）にしない。8:57:01 に起きると TERM が 08:59:51・KILL が 09:00:01 に当たり、
+# 8:59:50 の寄成（ロック待ち 5 秒）を [lock_busy] で弾く。snap の自己締め切りは 50 秒（book.max_run_seconds）なので
+# 60 + 5 で足り、遅くとも 08:58:06 にはロックを手放す
+57 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=60 WITH_LOCK_KILL_AFTER=5 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 59 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=25 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 20
 59 8 * * 1-5          cd $WBJP_HOME && sleep 35 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=10 WITH_LOCK_KILL_AFTER=2 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085935 --max-run 8
 59 8 * * 1-5          cd $WBJP_HOME && sleep 55 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=4 WITH_LOCK_KILL_AFTER=2 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085955 --max-run 2
