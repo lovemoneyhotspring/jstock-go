@@ -85,6 +85,10 @@ func ImportFills(
 			wantedOrders[number] = struct{}{}
 		}
 	}
+	// 空白だけの --order で絞り込みが丸ごと外れ、全銘柄の手動の買いまで取り込まないように止める
+	if len(opts.Orders) > 0 && len(wantedOrders) == 0 {
+		return nil, fmt.Errorf("--order に有効な注文番号がありません")
+	}
 
 	jst := clock.ToZone(clock.NowUTC(), clock.Tokyo)
 	monthStart := time.Date(jst.Year(), jst.Month(), 1, 0, 0, 0, 0, clock.Tokyo)

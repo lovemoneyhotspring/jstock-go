@@ -3,7 +3,6 @@ package rate
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/news"
@@ -39,23 +38,11 @@ type SyncNewsResult struct {
 // 休場日（closed。nil なら土日）の失敗は数えない（日曜などは応答が空で毎週失敗になる）。
 // 失敗の件数と表示は Failed・Days に残る。
 func (r SyncNewsResult) FailureError(closed news.ClosedFunc) error {
-	if closed == nil {
-		closed = news.Weekend
+	outcomes := make([]news.DayOutcome, len(r.Days))
+	for k, d := range r.Days {
+		outcomes[k] = news.DayOutcome{Day: d.Day, Err: d.Err}
 	}
-	var days []string
-	for _, d := range r.Days {
-		if d.Err == nil {
-			continue
-		}
-		if day, err := time.ParseInLocation("2006-01-02", d.Day, clock.Tokyo); err == nil && closed(day) {
-			continue
-		}
-		days = append(days, d.Day)
-	}
-	if len(days) == 0 {
-		return nil
-	}
-	return fmt.Errorf("%d 日の取り込みに失敗しました（%s。次回の sync で取り直します）", len(days), strings.Join(days, ", "))
+	return news.FailedDaysError(outcomes, closed)
 }
 
 // SyncNews は JST の今日から days 日さかのぼって、ニュースからレーティングの動きを取り込む。
