@@ -1,5 +1,5 @@
 # push / PR ごとに build・vet・test・staticcheck を回す。
-# ローカルでは `make ci` が同じことをする。
+# ローカルでは `make ci` が同じことをする（ローカルの test は本番機のメモリに合わせて -p 1。ここは並列のまま）。
 name: ci
 
 on:
@@ -17,6 +17,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: gofmt
+        run: make fmt-check
       - name: build
         run: go build ./...
       - name: vet
