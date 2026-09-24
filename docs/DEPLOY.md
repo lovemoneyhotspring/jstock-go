@@ -148,6 +148,7 @@ deploy/install-systemd.sh --remove  # 外す
 systemctl --user list-timers 'jstock-*'
 deploy/tests/guards_test.sh         # スクリプトの試験（スタブの隔離環境。本物には触れない）
 deploy/tests/wait_rollback_test.sh  # wait-until.sh・rollback-bin.sh と、morning-check.sh が時刻待ちの見送りを拾うことの試験
+deploy/tests/with_lock_test.sh      # with-lock.sh の終了コード（打ち切り 124・SIGKILL 137・見送り 75）とログの試験
 ```
 
 - ログは `state/logs/systemd-guard.log`。**通知は「自動で対応した／できなかった」の結果**を 1 通（何も問題が
@@ -213,6 +214,9 @@ deploy/tests/wait_rollback_test.sh  # wait-until.sh・rollback-bin.sh と、morn
 `with-lock.sh` はコマンドに時間の上限も掛ける（`WITH_LOCK_TIMEOUT` 秒。既定 170、0 で無効）。
 コマンドが固まるとロックを握ったままになり、`open` が固まれば `guard` と `close` まで見送られるため。
 ふだんの実行は長くても 10 秒。過ぎたら TERM、さらに 10 秒（`WITH_LOCK_KILL_AFTER`。8:59:35・8:59:55 の `snap` は 2 秒）で KILL し、`[error] [timeout]` をログに残して 124 で終わる。
+上限より前に SIGKILL で終わった回（メモリ不足の OOM killer など）は打ち切りと分けて `[error] [killed]` を残し、137 で終わる
+（どちらも timeout(1) の終了コードは 137 になりうるので、上限まで走ったかどうかで見分ける）。`[killed]` を見たら
+`journalctl -k | grep -i oom` で確かめる。
 
 **既定（170 + 10）のままでよいのは、TERM と KILL が 8:59:50 の寄成より手前に着く行だけ。** 8:30・8:45・8:55 の `snap` は
 最悪でも 08:57:51 なので据え置き、8:57 の回だけは別行に出して 60 + 5 に詰めてある（既定だと KILL が 09:00:01 に当たり、
@@ -298,7 +302,7 @@ Discord（`WBJP_ALERT_CHANNEL_ID` / レポートの送り先）にも短く流�
   - API キーは `.env` の `MACKEREL_APIKEY`、無ければ `/etc/mackerel-agent/mackerel-agent.conf` から読む。
     監視ルールは Mackerel 側にある（名前が `jstock:` で始まる 3 本）。通知先は Mackerel の通知チャンネル。
   - `ping.sh` は `.env` に `HEALTHCHECK_URL_<KEY>` があれば healthchecks.io 型の URL へも打つ（未設定なら打たない）。
-- **打ち切り・見送りの通知（`WITH_LOCK_NOTIFY=1`）。** `with-lock.sh` の `[timeout]`・`[lock_busy]` はログに
+- **打ち切り・見送りの通知（`WITH_LOCK_NOTIFY=1`）。** `with-lock.sh` の `[timeout]`・`[killed]`・`[lock_busy]` はログに
   書くだけだと誰も読まない（朝の点検は open と snap だけ）。open / guard / close / verify / plan の行は
   `WITH_LOCK_NOTIFY=1` を立て、`bin/discord-post` で知らせる。snap のように打ち切り・見送りが設計のうちの行には立てない。
 - **WBJP_ENV（口座）。** Go の既定は `uat`、以前の `report.sh` / `night-repair.sh` / `morning-check.sh`
