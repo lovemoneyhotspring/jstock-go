@@ -14,6 +14,7 @@
 package backup
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,9 +46,13 @@ func BackupSQLite(source, destination string) (string, error) {
 		return "", fmt.Errorf("バックアップ先を作れません %s: %w", destination, err)
 	}
 	// VACUUM INTO は複製先が既にあると失敗する。同じ日に 2 回走ることは
-	// あるので（cron の再試行、手動実行）、先に消して取り直す。
-	if err := os.Remove(destination); err != nil && !os.IsNotExist(err) {
-		return "", fmt.Errorf("古いバックアップを消せません %s: %w", destination, err)
+	// あるので（cron の再試行、手動実行）取り直すが、当日の世代を先に消してから
+	// 最終名へ直接書くと、書き込みに失敗したとき当日の世代が無くなる（途中で落ちれば
+	// 壊れた最終名が残る）。一時名に書き切ってから rename で置き換える。
+	// 一時名は <名前>.db.tmp なので、世代の一覧（<stem>-*.db）には掛からない。
+	temporary := destination + ".tmp"
+	if err := os.Remove(temporary); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("前回の一時ファイルを消せません %s: %w", temporary, err)
 	}
 
 	db, err := storage.OpenSQLite(source)
@@ -57,9 +62,14 @@ func BackupSQLite(source, destination string) (string, error) {
 	defer db.Close()
 
 	// パスは SQL 文字列リテラルとして渡すので、シングルクォートだけ潰す
-	quoted := strings.ReplaceAll(destination, "'", "''")
+	quoted := strings.ReplaceAll(temporary, "'", "''")
 	if _, err := db.Exec("VACUUM INTO '" + quoted + "'"); err != nil {
+		_ = os.Remove(temporary)
 		return "", fmt.Errorf("%s のバックアップに失敗しました: %w", source, err)
+	}
+	if err := os.Rename(temporary, destination); err != nil {
+		_ = os.Remove(temporary)
+		return "", fmt.Errorf("バックアップを置き換えられません %s: %w", destination, err)
 	}
 	return destination, nil
 }
@@ -107,28 +117,35 @@ func BackupState(s *settings.AppSettings, opts Options) (Result, error) {
 	}
 	sort.Strings(sources)
 
+	// 1 つの DB が失敗しても残りは取る（1 つの壊れた台帳で他の台帳の世代まで止めない）。
+	// エラーは集めて最後に返す
+	var failures []error
 	for _, name := range sources {
 		stem := strings.TrimSuffix(name, ".db")
 		target, err := BackupSQLite(filepath.Join(s.StateDir, name), filepath.Join(directory, stem+"-"+stamp+".db"))
 		if err != nil {
-			return result, err
+			// 取れなかった DB の古い世代は削らない（残っている最後の複製になりうる）
+			failures = append(failures, err)
+			continue
 		}
 		result.Copied = append(result.Copied, target)
 
 		if opts.Keep > 0 {
 			old, err := generationsToRemove(directory, stem, opts.Keep)
 			if err != nil {
-				return result, err
+				failures = append(failures, err)
+				continue
 			}
 			for _, path := range old {
 				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-					return result, fmt.Errorf("古い世代を消せません %s: %w", path, err)
+					failures = append(failures, fmt.Errorf("古い世代を消せません %s: %w", path, err))
+					continue
 				}
 				result.Removed = append(result.Removed, path)
 			}
 		}
 	}
-	return result, nil
+	return result, errors.Join(failures...)
 }
 
 // generationsToRemove は保持数を超えた古い世代を返す。
