@@ -184,10 +184,18 @@ func (t *TachibanaBroker) orderList(status string) ([]domain.Order, error) {
 		order, err := toOrder(row, listFields, number, field(row, fieldListDay),
 			t.clientOrderIDFor(number))
 		if err != nil {
-			// 1 行読めないだけで一覧全体を落とさない。ただし黙らせない
-			t.logWarn("broker.order_row_unreadable", "注文一覧の 1 行を解釈できません",
-				map[string]any{"order_number": number, "error": err.Error()})
-			continue
+			fields := map[string]any{"order_number": number, "error": err.Error()}
+			if unsupportedSideCodes[strings.TrimSpace(field(row, fieldSideKubun))] {
+				// 現渡・現引はこのシステムが出さない種類なので、送信結果不明の注文がこの行で
+				// ある見込みは無い。一覧全体は落とさない（手で出した現引で毎回止まらないように）
+				t.logWarn("broker.order_row_unreadable", "注文一覧の現渡・現引の行は扱わない", fields)
+				continue
+			}
+			// 区分の読めない行を捨てると、それが送信結果不明の注文だったとき照合（reconcile）が
+			// 「一覧に無い＝届いていない」と読み、種を変えて送り直す（二重発注）。捨てずに
+			// 一覧の取得ごと失敗にする——呼び出し側は判定できないまま発注しない
+			t.logWarn("broker.order_row_unreadable", "注文一覧の 1 行を解釈できないので一覧を使わない", fields)
+			return nil, fmt.Errorf("注文一覧の行（注文番号 %s）を解釈できません: %w", number, err)
 		}
 		orders = append(orders, order)
 	}

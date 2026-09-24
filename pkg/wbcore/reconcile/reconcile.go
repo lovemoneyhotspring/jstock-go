@@ -14,6 +14,7 @@
 //   - 同じ銘柄・売買の注文が無い   → NotSent（届いていない）。UNSENT にして送り直す
 //   - 同じ銘柄・売買はあるが数量や区分が違う → Ambiguous（決められない）。止めて知らせる
 //   - 送った直後（Grace 未満）      → TooRecent。一覧に反映されるまで待つ
+//   - 一覧が 0 件で台帳も今日の注文番号を知らず、送信から EmptyListGrace 未満 → TooRecent
 //
 // wbjp / accum / daytrade の 3 つの台帳が同じ判定器を使う。台帳の型が違うので、
 // ここは domain の型だけで書き、台帳への書き戻しは各呼び出し側が行う。
@@ -127,6 +128,18 @@ type Options struct {
 // DefaultGrace は送信からこれだけ経てば一覧に載っているとみなす時間。
 const DefaultGrace = 5 * time.Second
 
+// EmptyListGrace は、台帳が今日の注文番号を 1 つも知らず（Expected が空）一覧も 0 件のとき、
+// 「届いていない」と読むまでに送信から待つ時間。Grace（呼び出し側が渡す。daytrade の
+// 発注直後の判定は 0）とは別に、どの呼び出しにも掛ける。
+//
+// 当日最初の注文が結果不明になると Expected で一覧の生死を確かめられない。一覧が空で
+// 返った・反映が遅れた一覧を信じて NotSent にすると、daytrade は 5 秒後に種を変えて送り直す
+// （二重発注）。立花の一覧への反映の遅れは実測が無い（2026-09-25 時点で本番の PENDING は
+// 0 件、一覧の照会は手動の 6 回だけ）ので、発注の往復（p90 0.14 秒）より十分長く、cron の
+// 次の回（daytrade は 1〜3 分おき、accum は 20 分おき）より短い 60 秒にする。
+// 送り直しは次の回に回るだけで、その日の建て漏れにはならない。
+const EmptyListGrace = 60 * time.Second
+
 // earliestCreatedBefore は発注時刻よりどれだけ前の注文まで候補にするか
 // （時計のずれ・台帳の書き込みとブローカーの受付の順序の揺れ）。
 const earliestCreatedBefore = 5 * time.Minute
@@ -183,11 +196,26 @@ func Resolve(pending []Pending, todays []domain.Order, opts Options) []Resolutio
 			out = append(out, Resolution{Pending: p, Outcome: TooRecent,
 				Reason: fmt.Sprintf("当日の注文一覧を信用できない（台帳の知る今日の注文 %d 件がどれも無い。一覧 %d 件）",
 					len(opts.Expected), len(todays))})
+		case len(opts.Expected) == 0 && !anyListed(todays) && !p.PlacedAt.IsZero() && opts.Now.Sub(p.PlacedAt) < EmptyListGrace:
+			// 当日最初の注文が結果不明で、一覧は 0 件。Expected では一覧の生死を確かめられない
+			// （比べる注文が無い）ので、送信から EmptyListGrace 経つまでは「無い」を信じない
+			out = append(out, Resolution{Pending: p, Outcome: TooRecent,
+				Reason: fmt.Sprintf("当日の注文一覧が 0 件で、送信から %s 未満（反映の遅れと区別できない）", EmptyListGrace)})
 		default:
 			out = append(out, Resolution{Pending: p, Outcome: NotSent, Reason: "当日の注文一覧に該当なし"})
 		}
 	}
 	return out
+}
+
+// anyListed は一覧に注文番号のある行が 1 つでもあるか。
+func anyListed(todays []domain.Order) bool {
+	for _, o := range todays {
+		if o.BrokerOrderID != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // listUntrusted は一覧を信用できないか——expected があるのに、そのどれも todays に無い。

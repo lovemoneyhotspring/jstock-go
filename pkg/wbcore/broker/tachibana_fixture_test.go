@@ -635,6 +635,26 @@ func TestOrderListReadsRowsAndSkipsUnreadableOnes(t *testing.T) {
 	}
 }
 
+// 区分の読めない行（現渡・現引以外）は捨てずに一覧ごと失敗にする。捨てると照合が
+// 「一覧に無い＝届いていない」と読み、送信結果不明の注文を送り直しうる
+func TestOrderListFailsOnUnknownCodes(t *testing.T) {
+	for name, mutate := range map[string]func(map[string]any){
+		"売買区分":   func(row map[string]any) { row["sOrderBaibaiKubun"] = "9" },
+		"現金信用区分": func(row map[string]any) { row["sGenkinSinyouKubun"] = "X" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, fake := newFixtureBroker(t)
+			bad := cashOrderRowFixture()
+			bad["sOrderOrderNumber"] = "999"
+			mutate(bad)
+			fake.responses[clmOrderList] = okResponse(map[string]any{orderListKey: []any{cashOrderRowFixture(), bad}})
+			if orders, err := b.GetOrderHistory(time.Now(), time.Now()); err == nil {
+				t.Fatalf("読めない行があるのに一覧が通った: %+v", orders)
+			}
+		})
+	}
+}
+
 func TestGetOrderHistoryIsTodayOnly(t *testing.T) {
 	b, fake := newFixtureBroker(t)
 	log := &recordingLogger{}
