@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
+	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/execute"
 	dtledger "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
@@ -34,40 +37,29 @@ func newGuardCmd() *cobra.Command {
 	return cmd
 }
 
+// guardState は runGuard の 1 回の実行で、段（準備・点検の対象・接続・処置）をまたいで持ち回る値。
+type guardState struct {
+	live, yes bool
+	cfg       dtconfig.Config
+	// now は開始時に 1 回だけ読んだ時刻。判定日・時間帯・締め切り・記録簿の鮮度はこれで見る
+	now     time.Time
+	day     time.Time
+	started time.Time
+	cal     *calendar.Calendar
+	// allowed は実際に送るか（live かつ本番口座かつ kill_switch でない）。reason はその理由
+	allowed bool
+	reason  string
+	// deadline は時間帯の終わり（live で --ignore-window でないとき）と開始 + max_run_seconds の早い方
+	deadline time.Time
+}
+
 func runGuard(live, yes, ignoreWindow bool, date string) error {
-	cfg, err := loadConfig()
-	if err != nil {
+	s, done, err := prepareGuard(live, yes, ignoreWindow, date)
+	if done || err != nil {
 		return err
 	}
-	fmt.Println(appSettings.DescribeMode(live, cfg.Execution.KillSwitch))
-	now := clock.NowUTC()
-	day, err := dayOrToday(date, now)
-	if err != nil {
-		return err
-	}
-	cal, holiday := holidayCalendar(day, "guard", live)
-	if holiday {
-		return nil
-	}
-	if !cfg.Margin.Enabled || !cfg.Margin.CancelOnCorpEvent {
-		fmt.Println("信用売りの脚か margin.cancel_on_corp_event が無効。何もしません")
-		logInfo("daytrade.skip", "材料の点検は無効", map[string]any{"reason": "disabled", "phase": "guard"})
-		return nil
-	}
-	if live && !ignoreWindow && !cfg.Execution.InWindow("guard", now, jst) {
-		fmt.Printf("材料の点検の時間帯の外（%s）。何もしません\n", describeWindow(cfg, "guard"))
-		logInfo("daytrade.skip", "材料の点検の時間帯の外",
-			map[string]any{"reason": "window", "phase": "guard", "window": describeWindow(cfg, "guard")})
-		digest.Skipped("window")
-		return nil
-	}
-	allowed, reason := appSettings.CanExecuteLive(live, cfg.Execution.KillSwitch)
-	started := now
-	deadline := cfg.Execution.RunDeadline("guard", now, live && !ignoreWindow, jst)
-	logConfig(cfg, "guard", map[string]any{
-		"day": day.Format(DateLayout), "live": live,
-		"deadline": deadlineText(deadline), "max_run_seconds": cfg.Execution.MaxRunSeconds,
-	})
+	cfg, day, now, cal := s.cfg, s.day, s.now, s.cal
+	allowed, reason, started, deadline := s.allowed, s.reason, s.started, s.deadline
 
 	led, err := dtledger.Open(appSettings.DaytradeDBPath())
 	if err != nil {
@@ -225,4 +217,45 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 		return fmt.Errorf("材料の出た売建 %d 件を処置できませんでした（口座を確認してください）", len(failed))
 	}
 	return nil
+}
+
+// prepareGuard は設定を読み、判定日と締め切りを決める。休場日・材料の点検が無効・時間帯の外なら
+// 見送りを記録して done を返す（err は nil）。
+func prepareGuard(live, yes, ignoreWindow bool, date string) (s *guardState, done bool, err error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, false, err
+	}
+	fmt.Println(appSettings.DescribeMode(live, cfg.Execution.KillSwitch))
+	now := clock.NowUTC()
+	day, err := dayOrToday(date, now)
+	if err != nil {
+		return nil, false, err
+	}
+	cal, holiday := holidayCalendar(day, "guard", live)
+	if holiday {
+		return nil, true, nil
+	}
+	if !cfg.Margin.Enabled || !cfg.Margin.CancelOnCorpEvent {
+		fmt.Println("信用売りの脚か margin.cancel_on_corp_event が無効。何もしません")
+		logInfo("daytrade.skip", "材料の点検は無効", map[string]any{"reason": "disabled", "phase": "guard"})
+		return nil, true, nil
+	}
+	if live && !ignoreWindow && !cfg.Execution.InWindow("guard", now, jst) {
+		fmt.Printf("材料の点検の時間帯の外（%s）。何もしません\n", describeWindow(cfg, "guard"))
+		logInfo("daytrade.skip", "材料の点検の時間帯の外",
+			map[string]any{"reason": "window", "phase": "guard", "window": describeWindow(cfg, "guard")})
+		digest.Skipped("window")
+		return nil, true, nil
+	}
+	allowed, reason := appSettings.CanExecuteLive(live, cfg.Execution.KillSwitch)
+	deadline := cfg.Execution.RunDeadline("guard", now, live && !ignoreWindow, jst)
+	logConfig(cfg, "guard", map[string]any{
+		"day": day.Format(DateLayout), "live": live,
+		"deadline": deadlineText(deadline), "max_run_seconds": cfg.Execution.MaxRunSeconds,
+	})
+	return &guardState{
+		live: live, yes: yes, cfg: cfg, now: now, day: day, started: now, cal: cal,
+		allowed: allowed, reason: reason, deadline: deadline,
+	}, false, nil
 }
