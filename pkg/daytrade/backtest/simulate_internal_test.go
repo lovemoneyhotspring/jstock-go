@@ -149,3 +149,65 @@ func TestSeesawScalesPausedKeepsShortOffBudget(t *testing.T) {
 		t.Errorf("ショック日: long=%v short=%v, want 1.5 / 0", long, short)
 	}
 }
+
+// 規則 R（capacity_ratio）の検証のショック日は、本番の保証金が読めない朝と同じく長短の固定合計で
+// 頭打ちにする（2026-09-25 のレビュー。従来はロング 500 万 × 1.5 = 750 万で、本番の 700 万を超えていた）
+func TestShockTotalCapMatchesLiveNormalMorning(t *testing.T) {
+	cfg, err := config.Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	if !cfg.Margin.CapacityRatio.IsPositive() {
+		t.Skip("capacity_ratio を置かない設定")
+	}
+	fixed := cfg.Capital.MaxCapital.Add(cfg.Margin.MaxCapital)
+	limit := shockTotalCap(cfg)
+	// 固定合計が平日の比にちょうど当たる朝の、ショック日の比での上限
+	want := fixed.Mul(cfg.Margin.ShockCapacityRatio).Div(cfg.Margin.CapacityRatio).Floor()
+	if !limit.Equal(want) {
+		t.Fatalf("ショック日の上限 %s, want 固定合計 × ショック比 ÷ 平日比 %s", limit, want)
+	}
+	n := cfg.Capital.Positions()
+	shockLong, _ := cfg.Regime.ShockLongScale.Float64()
+	shock := regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: shockLong}
+	b := preScaledBudget(cfg.Capital.BudgetPerOrder(), shock, cfg.Margin.LongShrink, n, limit)
+	if total := b.Mul(decimal.NewFromInt(int64(n))); total.GreaterThan(limit) {
+		t.Errorf("ショック日の総額 %s が上限 %s を超えた", total, limit)
+	}
+	// 平日は頭打ちしない
+	normal := regime.Verdict{Trade: true, Scale: 1, ShockLong: 1}
+	if b := preScaledBudget(cfg.Capital.BudgetPerOrder(), normal, cfg.Margin.LongShrink, n, limit); !b.Equal(cfg.Capital.BudgetPerOrder()) {
+		t.Errorf("平日の予算 %s, want %s", b, cfg.Capital.BudgetPerOrder())
+	}
+	// 比を置かない設定は上限なし（本番も ShockTotalCap を入れない）
+	plain := cfg
+	plain.Margin.CapacityRatio = decimal.Zero
+	if got := shockTotalCap(plain); !got.IsZero() {
+		t.Errorf("比の無い設定の上限 %s, want 0", got)
+	}
+}
+
+// 規則 R の選ぶ前の予算は本番（execute.SizeDay）と同じ丸め: 段ごとに Round(0)。
+// 掛け合わせてから Floor だと 1〜2 円ずれる
+func TestPreScaledBudgetRoundsLikeLive(t *testing.T) {
+	d := decimal.NewFromInt
+	budget := d(691_335) // 11,150,590 × 62% ÷ 10 の端数つき
+	for _, c := range []struct {
+		name   string
+		v      regime.Verdict
+		shrink bool
+		want   decimal.Decimal
+	}{
+		{"平日", regime.Verdict{Trade: true, Scale: 1, ShockLong: 1}, true, budget},
+		// 691,335 × 0.7 = 483,934.5 → 483,935（掛け合わせて Floor なら 483,934）
+		{"縮小", regime.Verdict{Trade: true, Scale: 0.7, ShockLong: 1}, true, d(483_935)},
+		{"縮小しない設定", regime.Verdict{Trade: true, Scale: 0.7, ShockLong: 1}, false, budget},
+		// 483,935 × 1.5 = 725,902.5 → 725,903（0.7 × 1.5 = 1.05 を掛けて Floor なら 725,901）
+		{"縮小のショック日", regime.Verdict{Trade: true, Scale: 0.7, Shock: true, ShockLong: 1.5}, true, d(725_903)},
+		{"止める日", regime.Verdict{Trade: false, Scale: 1, ShockLong: 1}, true, decimal.Zero},
+	} {
+		if got := preScaledBudget(budget, c.v, c.shrink, 10, decimal.Zero); !got.Equal(c.want) {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
+		}
+	}
+}

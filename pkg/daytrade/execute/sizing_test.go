@@ -323,6 +323,48 @@ func TestSizeDayRatioStaysWithinCapacity(t *testing.T) {
 	}
 }
 
+// 規則 R の持ち越しの拘束は N（max_positions）を保って予算を下げる。N を減らすと 1 銘柄の上限
+// （予算 × N ÷ name_divisor）が縮み、残りの資金の一部しか使わない（2026-09-25 のレビュー）
+func TestSizeDayTurnoverTiedKeepsN(t *testing.T) {
+	base, err := config.Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	if base.Capital.Weighting != config.WeightingTurnover {
+		t.Skip("規則 R でない設定")
+	}
+	cfg, _ := margincap.Apply(base, margincap.Snapshot{Day: "2026-09-24", SinyouSinkidate: yenOf(11_150_590)})
+	normal := regime.Verdict{Trade: true, Scale: 1}
+	free := SizeDay(SizingInput{Cfg: cfg, Verdict: normal})
+	for _, c := range []struct {
+		name string
+		tied int64
+		n    int
+	}{
+		{"一部が拘束", 3_000_000, cfg.Capital.MaxPositions},
+		{"ほぼ全部が拘束", cfg.Capital.MaxCapital.IntPart() - 50_000, cfg.Capital.MaxPositions},
+		{"全部が拘束", cfg.Capital.MaxCapital.IntPart(), 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := SizeDay(SizingInput{Cfg: cfg, Verdict: normal, TiedLong: yenOf(c.tied)})
+			if d.Long.N != c.n {
+				t.Fatalf("N = %d, want %d", d.Long.N, c.n)
+			}
+			if c.n == 0 {
+				return
+			}
+			total := d.Long.Budget.Mul(decimal.NewFromInt(int64(d.Long.N)))
+			left := cfg.Capital.MaxCapital.Sub(yenOf(c.tied))
+			if total.GreaterThan(left) || left.Sub(total).GreaterThanOrEqual(decimal.NewFromInt(int64(d.Long.N))) {
+				t.Errorf("総額 %s, want 残り %s（端数 N 円未満）", total, left)
+			}
+			if !d.Long.Budget.LessThan(free.Long.Budget) {
+				t.Errorf("予算 %s が拘束なしの %s から下がっていない", d.Long.Budget, free.Long.Budget)
+			}
+		})
+	}
+}
+
 // 規則 R の再実行: 1 件でも建てた日は余り（上限で頭打ち・載らない銘柄を飛ばした残り）で買い足さない。
 // 寄る前の回が丸ごと失敗した日（建てた分 0）は満額で建てる。
 func TestSizeDayTurnoverRerunDoesNotTopUp(t *testing.T) {

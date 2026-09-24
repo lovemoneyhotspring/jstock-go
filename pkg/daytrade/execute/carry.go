@@ -345,6 +345,29 @@ func CapByTied(n, placed int, capital, tied, budget decimal.Decimal) (int, decim
 	return capByAmount(n, capital.Sub(tied).Sub(spent), budget)
 }
 
+// CapTotalByTied は規則 R（weighting = "turnover"）の持ち越しの拘束。**件数 n は保ち**、1 注文の予算
+// （総額 ÷ n）を下げて総額を capital − tied に収める。
+//
+// 規則 R の N は「順位の何位まで割り当てるか」（max_positions）で、1 銘柄の上限は 予算 × N ÷ name_divisor。
+// CapByTied で N を減らすと上限が N ÷ name_divisor 倍に縮み、残りの資金の一部しか使わない
+// （N = 3 で 43%、N = 1 で 14%。2026-09-25 のレビュー）。残りが無ければ 0 件。
+func CapTotalByTied(n int, capital, tied, budget decimal.Decimal) (int, decimal.Decimal) {
+	if n <= 0 || budget.LessThanOrEqual(decimal.Zero) {
+		return 0, budget
+	}
+	left := capital.Sub(tied)
+	if left.LessThanOrEqual(decimal.Zero) {
+		return 0, budget
+	}
+	if total := budget.Mul(decimal.NewFromInt(int64(n))); left.LessThan(total) {
+		budget = left.Div(decimal.NewFromInt(int64(n))).Floor()
+		if !budget.IsPositive() {
+			return 0, budget
+		}
+	}
+	return n, budget
+}
+
 // capByAmount は残りの資金 left で建てられる件数と 1 注文の予算（CapByTied の規則）。
 // 残りが予算以上なら floor(残り ÷ 予算) 件まで、予算に満たなければ 1 件を残りの金額で。
 func capByAmount(n int, left, budget decimal.Decimal) (int, decimal.Decimal) {

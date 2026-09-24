@@ -854,6 +854,12 @@ func (c Config) Validate() error {
 	if err := validateLongWeighting(c.Capital); err != nil {
 		return err
 	}
+	// 規則 R（turnover）は信用版だけ。現物の検証（backtest.SimulateWith）は倍率を選んだ後に掛けるので、
+	// ショック日・縮小の日に売買代金の上限を倍率ぶん破り、本番（execute.SizeDay は選ぶ前に掛ける）と
+	// 食い違う。使う予定の無い組なので検証で塞ぐ（2026-09-25 のレビュー）
+	if c.Capital.Weighting == WeightingTurnover && !c.Margin.Enabled {
+		return fmt.Errorf("capital.weighting = turnover は margin.enabled = true のときだけ使える")
+	}
 	if err := validateCapacity(c); err != nil {
 		return err
 	}
@@ -1041,8 +1047,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("%s は 0 以上", name)
 		}
 	}
-	// 資金と 1 注文の目安が矛盾していないかは、N を実際に導いて確かめる
-	if !c.Capital.MaxCapital.IsZero() {
+	// 資金と 1 注文の目安が矛盾していないかは、N を実際に導いて確かめる。
+	// 規則 R（turnover）は N = max_positions で order_budget を見ない（Capital.Positions）ので検査しない。
+	// 検査すると建可能額 × capacity_ratio が小さい朝（ロング < order_budget の半分）に検証が落ち、
+	// 上書き前の満額で建てていた（2026-09-25 のレビュー R1）
+	if !c.Capital.MaxCapital.IsZero() && c.Capital.Weighting != WeightingTurnover {
 		if _, err := fees.PositionsFor(c.Capital.MaxCapital, c.Capital.OrderBudget, c.Capital.MaxPositions); err != nil {
 			return fmt.Errorf("capital: %w", err)
 		}

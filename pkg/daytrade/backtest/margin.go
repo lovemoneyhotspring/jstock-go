@@ -104,6 +104,7 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 			longParams: longParams, longRows: longRows, shortTrades: shortTrades, byKey: byKey,
 			shortTotal: cfg.Margin.BudgetPerOrder().Mul(decimal.NewFromInt(int64(nShort))).InexactFloat64(), carryPenalty: carryPenalty,
 			longCapital: longCapital, shortCapital: shortCapital,
+			shockTotalCap: shockTotalCap(cfg),
 		})
 	}
 
@@ -252,6 +253,56 @@ type spillInputs struct {
 	carryPenalty float64
 	longCapital  float64
 	shortCapital float64
+	// shockTotalCap はショック日のロングの総額の上限（0 なら上限なし。shockTotalCap）。
+	shockTotalCap decimal.Decimal
+}
+
+// preScaledBudget は規則 R の選ぶ前の 1 注文の予算: 倍率を掛け、ショック日は総額を limit で頭打ち
+// （本番の execute.SizeDay と同じ順序: 縮小 → ショック日の倍率 → 頭打ち、余りの前）。limit 0 は上限なし。
+//
+// 丸めも本番に揃える: 倍率は段ごとに掛けて円に四捨五入（Round(0)）、頭打ちは切り捨て。
+// 倍率を掛け合わせてから切り捨てると 1〜2 円ずれる（2026-09-25 のレビュー）。
+// 止める日（Trade = false）は 0（呼ぶ側は longScale 0 で建てない）。
+func preScaledBudget(budget decimal.Decimal, v regime.Verdict, longShrink bool, n int, limit decimal.Decimal) decimal.Decimal {
+	if !v.Trade {
+		return decimal.Zero
+	}
+	b := budget
+	if v.Weak() && longShrink {
+		b = b.Mul(decimal.NewFromFloat(v.Scale)).Round(0)
+	}
+	if v.Shock {
+		b = b.Mul(decimal.NewFromFloat(v.ShockLong)).Round(0)
+	}
+	if v.Shock && limit.IsPositive() && n > 0 {
+		if b.Mul(decimal.NewFromInt(int64(n))).GreaterThan(limit) {
+			b = limit.Div(decimal.NewFromInt(int64(n))).Floor()
+		}
+	}
+	return b
+}
+
+// shockTotalCap はショック日のロングの総額の上限。本番は margincap が朝の建可能額 × shock_capacity_ratio
+// を capital.ShockTotalCap に入れる（execute.SizeDay が頭打ち）。検証は資金を固定値で回すので、
+// 「長短の固定合計が平日の比（capacity_ratio）にちょうど当たる朝」に置き直して
+// 固定合計 × shock_capacity_ratio ÷ capacity_ratio を上限にする（今の設定で約 813 万。普段の朝の本番と同じく
+// ×1.5 の 750 万は頭打ちしない）。長短の固定合計（700 万）で切ると、保証金が読めない朝
+// （cmd/daytrade の ratioFallbackConfig）にしか当たらない値でショック日を毎回控えめに測ってしまう
+// （2026-09-25 のレビュー）。比を置かない設定は上限なし（本番と同じ）。
+func shockTotalCap(cfg config.Config) decimal.Decimal {
+	limit := cfg.Capital.ShockTotalCap
+	if !cfg.Margin.CapacityRatio.IsPositive() || !cfg.Margin.ShockCapacityRatio.IsPositive() {
+		return limit
+	}
+	fixed := cfg.Capital.MaxCapital
+	if cfg.Margin.Enabled {
+		fixed = fixed.Add(cfg.Margin.MaxCapital)
+	}
+	normal := fixed.Mul(cfg.Margin.ShockCapacityRatio).Div(cfg.Margin.CapacityRatio).Floor()
+	if !limit.IsPositive() || limit.GreaterThan(normal) {
+		limit = normal
+	}
+	return limit
 }
 
 // simulateMarginSpill は margin.spill_to_long の検証。ショートで使わなかった資金をその日の
@@ -294,7 +345,7 @@ func simulateMarginSpill(panel *Panel, cfg config.Config, signals *Inputs, in sp
 		// 余りが下の順位へ回らない（本番と銘柄数も金額も変わる）。等金額は後から掛けても同じなので従来どおり
 		pickBudget, longMul := budget, longScale
 		if in.preScale {
-			pickBudget, longMul = budget.Mul(decimal.NewFromFloat(longScale)).Floor(), 1
+			pickBudget, longMul = preScaledBudget(budget, verdict, cfg.Margin.LongShrink, nLong, in.shockTotalCap), 1
 			if longScale <= 0 {
 				longMul = 0
 			}

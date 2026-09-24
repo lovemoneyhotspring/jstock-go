@@ -409,6 +409,15 @@ func (o PickOptions) nameCap() decimal.Decimal {
 	return total.Div(decimal.NewFromInt(int64(o.NameDivisor))).Floor()
 }
 
+// PerNameBudget は 1 単元が載らない（over_budget）かを判定する 1 銘柄の予算。規則 R は総額 ÷ name_divisor
+// （nameCap。飛ばす判定の unaffordableReason と同じ）、それ以外は 1 注文の予算。
+func (o PickOptions) PerNameBudget() decimal.Decimal {
+	if o.byTurnover() {
+		return o.nameCap()
+	}
+	return o.Budget
+}
+
 // turnoverAmount は規則 R でこの銘柄に載せてよい金額（残りの総額はまだ見ない）。
 // 売買代金が取れない（0）銘柄は 0——板の厚みが分からない銘柄に載せない。
 func (o PickOptions) turnoverAmount(r Ranked) decimal.Decimal {

@@ -136,7 +136,9 @@ func warmMargin(cfg dtconfig.Config, day time.Time) {
 //   - margin.capacity_ratio あり（規則 R）: 建可能額の比で**上げ下げ両方**に決め直す（margincap.Apply → applyRatio）。
 //     キャッシュが無い・古い朝は ratioFallback（設定の値か前日の値の小さい方。ショック日も同額で頭打ち）
 //
-// 下げた結果が検証を通らない朝は元の設定を返す——保証金が読めないことを理由に売買を止めない。
+// 下げた結果が検証を通らない朝は**建てない**（watchOnlyConfig）。保証金は読めていて、その値が設定より
+// 小さいと言っている朝なので、元の設定（満額）に戻すのは逆向き（2026-09-25 のレビュー R1）。
+// 保証金が読めない朝は従来どおり設定の値で建てる（規則 R では ratioFallback で下げ方向のみ）。
 func applyMarginCap(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 	if !marginCapNeeded(cfg) {
 		return cfg
@@ -170,12 +172,13 @@ func applyMarginCap(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 		alert("daytrade: 追証", "委託保証金に不足額が出ています（"+snapshot.Fusokugaku.StringFixed(0)+" 円）")
 	}
 	// 上書きは Load の外なので Validate は走っていない。ここで確かめ直す
-	// ——通らない設定で建てるくらいなら、元の（検証済みの）設定で建てる
-	if err := capped.Validate(); err != nil {
+	// ——通らない設定では建てない。元の設定に戻すと、小さく建てるべき朝ほど満額で建てる（R1）
+	if out, err := validOrWatchOnly(cfg, capped); err != nil {
 		fields["error"] = err.Error()
-		logError("daytrade.margin_cap", "保証金で下げた設定が検証を通らない（設定の値で建てる）", fields)
-		alert("daytrade: 保証金の上書きに失敗", "下げた設定が Validate を通りませんでした: "+err.Error())
-		return cfg
+		logError("daytrade.margin_cap", "保証金で決め直した設定が検証を通らない（今日は建てない）", fields)
+		alert("daytrade: 保証金の上書きに失敗",
+			"決め直した設定が Validate を通らないので、今日は建てません: "+err.Error()+"。"+snapshot.Describe())
+		return out
 	}
 	// N が 0 に落ちると open は watch-only に転ぶ。**黙って「何もしない朝」にしない**
 	if res.WatchOnly {
@@ -197,10 +200,30 @@ func applyMarginCap(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 	return capped
 }
 
+// watchOnlyConfig は建てない設定（両脚の資金 0 → N = 0 → open は watch-only）。
+// 保証金で決め直した設定が使えない朝の安全側。元の設定（満額）には戻さない（2026-09-25 のレビュー R1）。
+func watchOnlyConfig(cfg dtconfig.Config) dtconfig.Config {
+	cfg.Capital.MaxCapital = decimal.Zero
+	cfg.Capital.ShockTotalCap = decimal.Zero
+	cfg.Margin.MaxCapital = decimal.Zero
+	return cfg
+}
+
+// validOrWatchOnly は保証金で決め直した設定 capped が検証を通ればそれを、通らなければ建てない設定と
+// その理由を返す。**通らないときに元の設定 orig（満額）を返す経路を作らない**ための一本道。
+func validOrWatchOnly(orig, capped dtconfig.Config) (dtconfig.Config, error) {
+	if err := capped.Validate(); err != nil {
+		return watchOnlyConfig(orig), err
+	}
+	return capped, nil
+}
+
 // ratioFallback は規則 R（margin.capacity_ratio）で当日の保証金が読めない朝（8:53 と 8:56 の取得が
 // 両方失敗）の設定。**下げる方向にだけ**動かす:
 //   - 前の日のキャッシュがあれば、それで決め直した総額が設定の固定値より小さいときだけ使う
 //     （前日から保証金が減っていれば、少なくともその分は控える）
+//   - 前の日のキャッシュが追証・建可能額 0（決め直すと N = 0）なら建てない。当日の値が読めない以上、
+//     分かっている最新の値は「建てられない」で、固定値の満額に戻す理由が無い（2026-09-25 のレビュー）
 //   - ショック日の総額は設定の固定値（長短合計）で頭打ち。倍率で固定値を超えて建てない
 //     ——保証金が分からない日に、分かっている日より大きく建てる理由が無い
 //   - 人に知らせる（1 日 1 回）。固定値は建可能額 × capacity_ratio の目安で置いた値で、保証金が大きく減った
@@ -218,8 +241,11 @@ func ratioFallback(cfg dtconfig.Config, day time.Time, stale *margincap.Snapshot
 	fields["fallback_total"] = total.StringFixed(0)
 	fields["shock_total_cap"] = out.Capital.ShockTotalCap.StringFixed(0)
 	msg := fmt.Sprintf("当日の保証金が読めないので、長短合計 %s 円（ショック日も同額で頭打ち）で建てます", yen(total))
+	if !total.IsPositive() {
+		msg = "当日の保証金が読めず、前の日の保証金が追証か建可能額 0 なので、今日は建てません"
+	}
 	fmt.Println(msg)
-	logWarn("daytrade.margin_cap", "規則 R: 保証金が読めず設定の値で建てる", fields)
+	logWarn("daytrade.margin_cap", "規則 R: 保証金が読めない（"+msg+"）", fields)
 	if markOncePerDay(marginCachePath()+".fallback-alerted", day) {
 		alert("daytrade: 保証金が読めません", msg+"。8:53・8:56 の warm-margin が失敗しています（state/logs/daytrade-margin.log）")
 	}
@@ -234,10 +260,19 @@ func ratioFallbackConfig(cfg dtconfig.Config, stale *margincap.Snapshot) (out dt
 		total = total.Add(cfg.Margin.MaxCapital)
 	}
 	out = cfg
-	if stale != nil && !stale.Fusokugaku.IsPositive() {
+	if stale != nil {
 		capped, res := margincap.Apply(cfg, *stale)
-		if res.NormalTotal.IsPositive() && res.NormalTotal.LessThan(total) && !res.WatchOnly && capped.Validate() == nil {
-			out, total, fromStale = capped, res.NormalTotal, true
+		switch {
+		case res.Shortfall || res.WatchOnly || !res.NormalTotal.IsPositive():
+			// 前の日が追証・建可能額 0 → 建てない（固定値の満額に戻さない）
+			return watchOnlyConfig(cfg), decimal.Zero, true
+		case res.NormalTotal.LessThan(total):
+			// 前の日の値で決め直した設定が通らない → 満額でなく建てない側へ（R1）
+			valid, err := validOrWatchOnly(cfg, capped)
+			if err != nil {
+				return valid, decimal.Zero, true
+			}
+			out, total, fromStale = valid, res.NormalTotal, true
 		}
 	}
 	if !out.Capital.ShockTotalCap.IsPositive() || out.Capital.ShockTotalCap.GreaterThan(total) {

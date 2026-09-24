@@ -323,6 +323,8 @@ type Leg struct {
 	RulePicks []selection.Pick
 	N         int
 	Budget    decimal.Decimal
+	// PerName は over_budget を判定する 1 銘柄の予算（selection.PickOptions.PerNameBudget）。
+	PerName decimal.Decimal
 }
 
 // NominalLegs は**通常日**の件数と予算で、open と同じ規則の順位表と選定を作る（ロングが先）。
@@ -352,7 +354,7 @@ func NominalLegs(p plan.Plan, quotes map[string]selection.Quote, cfg config.Conf
 			MaxAmount: cfg.Margin.MaxOrder,
 		}
 		shortPicks := selection.PickFrom(shortRanking, shortOpts)
-		short = &Leg{Side: "SELL", Ranking: shortRanking, Picks: shortPicks, RulePicks: shortPicks, N: shortN, Budget: shortBudget,
+		short = &Leg{Side: "SELL", Ranking: shortRanking, Picks: shortPicks, RulePicks: shortPicks, N: shortN, Budget: shortBudget, PerName: shortBudget,
 			Reasons: selection.PickReasons(shortRanking, shortOpts, shortPicks)}
 		if cfg.Margin.SpillToLong {
 			used := decimal.Zero
@@ -375,7 +377,7 @@ func NominalLegs(p plan.Plan, quotes map[string]selection.Quote, cfg config.Conf
 		ValuePool: cfg.Signal.ValuePool, MaxPerSector: cfg.Signal.MaxPerSector,
 	}, cfg.Capital)
 	longPicks := selection.PickFrom(longRanking, longOpts)
-	legs := []Leg{{Side: "BUY", Ranking: longRanking, Picks: longPicks, N: n, Budget: budget,
+	legs := []Leg{{Side: "BUY", Ranking: longRanking, Picks: longPicks, N: n, Budget: budget, PerName: longOpts.PerNameBudget(),
 		RulePicks: selection.RulePicks(longRanking, longOpts, longPicks),
 		Reasons:   selection.PickReasons(longRanking, longOpts, longPicks)}}
 	if short != nil {

@@ -289,7 +289,7 @@ func (s *openState) pickLong(ranking []selection.Ranked, n int, budget decimal.D
 		rulePicks = nil
 	}
 	s.summary["rule_off"] = ruleOff
-	longFrame := dthistory.RankingFrame(ranking, picks, rulePicks, "BUY", n, budget, longReasons)
+	longFrame := dthistory.RankingFrame(ranking, picks, rulePicks, "BUY", n, budget, longOpts.PerNameBudget(), longReasons)
 	if ruleOff {
 		longFrame = dthistory.MarkRuleOff(longFrame)
 	}
@@ -330,7 +330,7 @@ func (s *openState) recordRanking(short openShortLeg, spill decimal.Decimal, pic
 		fmt.Printf("ショート: %sの倍率 %s × 1 注文 %s 円 = %s 円  対象 %d 銘柄\n",
 			label, short.multiplier.String(), yen(s.cfg.Margin.BudgetPerOrder()), yen(short.budget), len(s.shortUniverse))
 		printPicks(short.picks, len(s.rankQuotes), s.p, false, "寄付の売建（信用）")
-		frames = append(frames, dthistory.RankingFrame(short.ranking, short.picks, short.picks, "SELL", short.n, short.budget, short.reasons))
+		frames = append(frames, dthistory.RankingFrame(short.ranking, short.picks, short.picks, "SELL", short.n, short.budget, short.budget, short.reasons))
 		s.summary["short_n"] = short.n
 		s.summary["short_budget"] = short.budget
 		s.summary["short_multiplier"] = short.multiplier
@@ -960,7 +960,7 @@ func appendSkippedRanking(cfg dtconfig.Config, p dtplan.Plan, quotes map[string]
 	var frames []history.Frame
 	for _, leg := range dtevaluate.NominalLegs(p, quotes, cfg) {
 		frames = append(frames, dthistory.MarkSkipped(
-			dthistory.RankingFrame(leg.Ranking, leg.Picks, leg.RulePicks, leg.Side, leg.N, leg.Budget, leg.Reasons)))
+			dthistory.RankingFrame(leg.Ranking, leg.Picks, leg.RulePicks, leg.Side, leg.N, leg.Budget, leg.PerName, leg.Reasons)))
 	}
 	if path := appendHistory(dthistory.KindRanking, concatFrames(frames), day); path != "" {
 		fmt.Printf("見送りの日の順位表（建てていたら）を履歴に追記 %s\n", path)
@@ -1123,9 +1123,9 @@ func truncate(text string, limit int) string {
 // usFetchTimeout は寄付の判断で FRED を待つ上限（1 リクエスト）。
 const usFetchTimeout = 8 * time.Second
 
-// 寄る前の回（8:59:53〜9:00:00）が米国市場を待つ上限。1 リクエスト 3 秒、合計 5 秒を過ぎたら
+// 寄る前の回（crontab の DT_PREOPEN_AT〜9:00:00）が米国市場を待つ上限。1 リクエスト 3 秒、合計 5 秒を過ぎたら
 // 残りの取得元には繋がない（最悪でも 5 + 3 = 8 秒。取得元 3 つ × 系列 2 本を 8 秒ずつ待つと
-// 最悪 48 秒で、窓の 7 秒を取得だけで使い切る）。取れなければ us_stale で見送り、
+// 最悪 48 秒で、窓の約 10 秒を取得だけで使い切る）。取れなければ us_stale で見送り、
 // 9:00:01.2 からの回が従来どおり取りに行く。実測は取れる朝で 1〜2 秒（2026-09-15〜17）。
 const (
 	usFetchTimeoutPreopen = 3 * time.Second

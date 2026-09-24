@@ -137,7 +137,7 @@ LightGBM 側だけ実際の按分の株数なので、2 つを引き算しない
 が出ていたら異常として書く**——その日は gap_vol の規則で、米国小幅高なら両脚とも休んでいる。
 
 **米国小幅高の日（open の要約 `us_low: true`）は、2026-09-21 から「LightGBM で並べ、前日終値 −1.5% の寄指を
-寄る前の回（8:59:53）に出すだけ」の日**（`execution.preopen_limit_pct_us_low`。`docs/DAYTRADE.md` の
+寄る前の回（crontab の `DT_PREOPEN_AT`）に出すだけ」の日**（`execution.preopen_limit_pct_us_low`。`docs/DAYTRADE.md` の
 「米国小幅高の日だけ寄指で出す」）。この日は次が**正しい姿で、異常と書かない**:
 - 約定は 0〜1 件（模擬の約定率は 15%）。届かなかった寄指は close の `daytrade.opening_unfilled`（info）と
   ダイジェストの `opening_unfilled` に載る。**失敗ではない**

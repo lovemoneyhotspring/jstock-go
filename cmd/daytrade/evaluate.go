@@ -329,9 +329,9 @@ func rankingConfigFor(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 		logInfo("daytrade.ranking_config", "その日の保証金の控えが無いので設定の総額で作り直す", map[string]any{"day": day.Format(DateLayout)})
 		return cfg
 	}
-	capped, res := margincap.Apply(cfg, snap)
-	if res.WatchOnly || capped.Validate() != nil {
-		return cfg
-	}
-	return capped
+	// open（applyMarginCap）と同じ向き: N = 0 の朝はそのまま（何も建てていない）、検証を通らない朝は
+	// 建てない側。元の設定（満額）には戻さない（2026-09-25 のレビュー R1）
+	capped, _ := margincap.Apply(cfg, snap)
+	out, _ := validOrWatchOnly(cfg, capped)
+	return out
 }

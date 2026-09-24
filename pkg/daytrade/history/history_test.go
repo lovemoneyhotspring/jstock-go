@@ -94,7 +94,7 @@ func TestRankingFrameMarksPicks(t *testing.T) {
 		Symbol: "1000", Price: decimal.NewFromInt(950),
 		Quantity: decimal.NewFromInt(100), Side: domain.SideBuy,
 	}}
-	frame := RankingFrame(ranked, picks, picks, "BUY", 1, decimal.NewFromInt(100_000), nil)
+	frame := RankingFrame(ranked, picks, picks, "BUY", 1, decimal.NewFromInt(100_000), decimal.NewFromInt(100_000), nil)
 	// 順位表は**全行**を持つ（「なぜ X が選ばれなかったか」を後から追うため）
 	if frame.Height() != 2 {
 		t.Fatalf("行数 = %d, want 2", frame.Height())
@@ -119,7 +119,7 @@ func TestRankingFrameMarksOverBudgetAndSkipped(t *testing.T) {
 			Price: decimal.NewFromInt(4990), Gap: decimal.RequireFromString("-0.06")},
 	}
 	reasons := map[string]string{"4062": selection.ReasonOverBudget}
-	frame := RankingFrame(ranked, nil, nil, "BUY", 3, decimal.NewFromInt(1_250_000), reasons)
+	frame := RankingFrame(ranked, nil, nil, "BUY", 3, decimal.NewFromInt(1_250_000), decimal.NewFromInt(1_250_000), reasons)
 	if frame.Rows[0]["over_budget"] != true || frame.Rows[1]["over_budget"] != false {
 		t.Errorf("over_budget = %v / %v", frame.Rows[0]["over_budget"], frame.Rows[1]["over_budget"])
 	}
@@ -134,6 +134,29 @@ func TestRankingFrameMarksOverBudgetAndSkipped(t *testing.T) {
 		if row["skipped"] != true {
 			t.Errorf("%v: skipped が立っていない", row["symbol"])
 		}
+	}
+}
+
+// 規則 R の over_budget は 1 銘柄の上限（総額 ÷ name_divisor）で判定し、飛ばす判定と揃える。
+// 列の budget（総額 ÷ N = 69 万）では 1 単元 176 万も 80 万も「載らない」になるが、
+// 総額 691 万 ÷ 7 = 98.7 万には 80 万が載る（2026-09-25 のレビュー）
+func TestRankingFrameOverBudgetTurnover(t *testing.T) {
+	opts := selection.PickOptions{N: 10, Budget: decimal.NewFromInt(691_335), Weighting: "turnover", NameDivisor: 7}
+	if got := opts.PerNameBudget(); !got.Equal(decimal.NewFromInt(987_621)) {
+		t.Fatalf("PerNameBudget = %s, want 987621（総額 ÷ 7）", got)
+	}
+	ranked := []selection.Ranked{
+		{Rank: 1, Symbol: "4062", PrevClose: decimal.NewFromInt(19600),
+			Price: decimal.NewFromInt(17605), Gap: decimal.RequireFromString("-0.10")},
+		{Rank: 2, Symbol: "8000", PrevClose: decimal.NewFromInt(8500),
+			Price: decimal.NewFromInt(8000), Gap: decimal.RequireFromString("-0.06")},
+	}
+	frame := RankingFrame(ranked, nil, nil, "BUY", opts.N, opts.Budget, opts.PerNameBudget(), nil)
+	if frame.Rows[0]["over_budget"] != true || frame.Rows[1]["over_budget"] != false {
+		t.Errorf("over_budget = %v / %v, want true / false", frame.Rows[0]["over_budget"], frame.Rows[1]["over_budget"])
+	}
+	if frame.Rows[1]["budget"] != 691_335.0 {
+		t.Errorf("列の budget = %v, want 総額 ÷ N のまま", frame.Rows[1]["budget"])
 	}
 }
 
