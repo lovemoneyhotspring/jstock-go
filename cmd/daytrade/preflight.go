@@ -21,7 +21,7 @@ const preflightMinFreeBytes = 1 << 30
 
 // newPreflightCmd は寄る前の事前点検。**読むだけ**でブローカーには繋がない（ロックも要らない）。
 //
-// 8:59:53 の open が落ちる理由のうち、前もって分かるものを 8:40 に確かめる: この bin が設定を
+// 寄る前の open（crontab の DT_PREOPEN_AT）が落ちる理由のうち、前もって分かるものを 8:40 に確かめる: この bin が設定を
 // 読めるか（項目を足して build.sh を忘れると strict mode で全コマンドが止まる）、今日の plan が
 // 読めるか、台帳を開けるか、ディスクに空きがあるか。問題があれば通知して異常終了する。
 // 20 分あれば人が直せる（plan は `daytrade plan`、bin は `deploy/build.sh`）。
@@ -75,7 +75,7 @@ func newPreflightCmd() *cobra.Command {
 			digest.Anomaly("daytrade.preflight", fmt.Sprintf("寄る前の点検で %d 件の問題", len(problems)))
 			// 自動復旧の側が結果をまとめて通知するときは、ここでは送らない（PREFLIGHT_NO_ALERT=1）
 			if os.Getenv("PREFLIGHT_NO_ALERT") != "1" {
-				alert(fmt.Sprintf("デイトレ: 寄る前の点検で %d 件の問題（8:59:53 の open までに直す）", len(problems)), body)
+				alert(fmt.Sprintf("デイトレ: 寄る前の点検で %d 件の問題（寄る前の open までに直す）", len(problems)), body)
 			}
 			return fmt.Errorf("寄る前の点検で %d 件の問題", len(problems))
 		},

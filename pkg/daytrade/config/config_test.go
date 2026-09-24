@@ -394,8 +394,9 @@ func TestValidateTurnoverAndCapacity(t *testing.T) {
 }
 
 // 寄成は 9:00 までに送り切らないと寄付に参加できない。注文の送信は 2 回/秒（broker.orderLimiter）で、
-// 8:59:53 開始・注文は約 1 秒後から送り、締め切りの 1 秒前（execute.EntrySendMargin）で止まるので、
-// n 本目は 54.0 + (n−2) × 0.5 秒 ≤ 59.0 → 12 本が境目。1 秒の余裕を取って 10 本まで。
+// 開始（crontab の DT_PREOPEN_AT）の約 1 秒後から送り、締め切りの 1 秒前（execute.EntrySendMargin）で止まるので、
+// n 本目は 開始 + 1.0 + (n−2) × 0.5 秒 ≤ 59.0。8:59:50 開始なら 18 本が境目（1 秒の余裕で 16 本）。
+// 10 本は 8:59:53 開始（12 本が境目）のときに決めた上限のまま据え置いている（上げるのは margin_s を見てから）。
 // 規則 R は 1 日に max_positions 本まで出すので、これを上げるなら開始時刻か送信の上限を先に見直す。
 func TestTurnoverMaxPositionsFitsPreopenWindow(t *testing.T) {
 	cfg, err := Load("../../../config/daytrade_margin")

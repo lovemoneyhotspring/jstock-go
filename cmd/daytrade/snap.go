@@ -87,7 +87,7 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string, maxRun int) error {
 	tachibana.Broker.SetLogger(run)
 	// snap は open / close とロックを共有する。遅い日にここで粘ると 9:01 の発注がロックを
 	// 取れずに消えるので、book.max_run_seconds で切る（記録は次の回で足りる。発注が優先）
-	// 8:59:43 の回は 8:59:53 の open（寄成）の直前なので、cron で --max-run を短くする（候補が先に並ぶので、
+	// 寄る前の回（crontab の DT_PRESNAP_AT）は寄る前の open（寄成、DT_PREOPEN_AT）の直前なので、cron で --max-run を短くする（候補が先に並ぶので、
 	// 切れても落ちるのは候補の外の銘柄）
 	if maxRun <= 0 {
 		maxRun = cfg.Book.MaxRunSeconds
@@ -132,9 +132,9 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string, maxRun int) error {
 		logWarn("daytrade.snap", "板の一部を取れなかった（取れた分は記録した）", fields)
 	}
 	fmt.Printf("  取れなかったバッチ %d/%d（%d 銘柄）: %v\n", len(failed), failed[0].Batches, missing, failed[0])
-	// 締め切り（--max-run）で打ち切ったのは設計どおり（8:59:43 の回は 5 秒で切る）。一部でも取れた分は
+	// 締め切り（--max-run）で打ち切ったのは設計どおり（寄る前の回は 5 秒で切る）。一部でも取れた分は
 	// 記録したので失敗にしない——error にするとダイジェストの異常に数えられ、毎営業日
-	// 6:00 の night-repair が直す物の無いまま起動する（2026-09-24 の 8:59:55 の回。今は無い）
+	// 6:00 の night-repair が直す物の無いまま起動する（2026-09-24 まであった 8:59:55 の回）
 	if len(rows) > 0 && !deadline.IsZero() && !clock.NowUTC().Before(deadline) {
 		return nil
 	}
