@@ -76,6 +76,10 @@ func ImportFills(
 	// 注文番号は「番号/営業日」でも番号だけでも指定できるようにする
 	wantedOrders := make(map[string]struct{}, len(opts.Orders))
 	for _, o := range opts.Orders {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
 		wantedOrders[o] = struct{}{}
 		if number, _, ok := splitOrderNumber(o); ok {
 			wantedOrders[number] = struct{}{}
@@ -174,13 +178,18 @@ func ImportFills(
 	return found, nil
 }
 
-// splitOrderNumber は "番号/営業日" を分ける（営業日が無ければ ok は偽）。
+// splitOrderNumber は "番号/営業日" を分ける。前後の空白は落とし、番号か営業日が空
+// （"123/"・"/20260925"）なら ok は偽で番号も空を返す。
+//
+// broker の splitBrokerOrderID（pkg/wbcore/broker/tachibana_orders.go。broker_order_id を
+// 作る brokerOrderIDOf の逆）と同じ規則。あちらは export されていないので同じ形をここに持つ。
+// 以前は空白を落とさず、"123/" も番号 "123" として通していた。
 func splitOrderNumber(value string) (number, day string, ok bool) {
-	parts := strings.SplitN(value, "/", 2)
-	if len(parts) != 2 {
-		return value, "", false
+	number, day, ok = strings.Cut(strings.TrimSpace(value), "/")
+	if !ok || number == "" || day == "" {
+		return "", "", false
 	}
-	return parts[0], parts[1], true
+	return number, day, true
 }
 
 // matchesOrder は注文番号が指定に合うか。"番号/営業日" と番号だけのどちらでも拾う。
@@ -188,7 +197,10 @@ func matchesOrder(wanted map[string]struct{}, brokerID string) bool {
 	if _, ok := wanted[brokerID]; ok {
 		return true
 	}
-	number, _, _ := splitOrderNumber(brokerID)
-	_, ok := wanted[number]
+	number, _, ok := splitOrderNumber(brokerID)
+	if !ok {
+		return false
+	}
+	_, ok = wanted[number]
 	return ok
 }
