@@ -392,3 +392,70 @@ func TestSyncOrderStatusDefersWhenExpectedOrderMissing(t *testing.T) {
 		t.Errorf("PENDING のまま残っていない: %+v", pending)
 	}
 }
+
+// 同じ client_order_id の dry-run 行（同日・同株数）がある状態で --live に切り替えて送ると、
+// PENDING の記録し直しで placed_at が付け直されず、送信直後の猶予が dry-run の時刻から
+// 数えられていた。送信結果不明のまま猶予内にやり直した run が「届いていない」（UNSENT）と
+// 判定し、送り直し（二重買付）になりうる。猶予は送った時刻から数える。
+func TestSyncOrderStatusGraceStartsAtSendAfterDryRunRow(t *testing.T) {
+	dryAt := time.Date(2026, 9, 24, 0, 30, 0, 0, time.UTC) // 9:30 JST に dry-run
+	sentAt := dryAt.Add(20 * time.Minute)                  // 9:50 JST に --live で送信
+	clock.Now = func() time.Time { return dryAt }
+	t.Cleanup(func() { clock.Now = time.Now })
+
+	led := openTestLedger(t)
+	price := decimal.NewFromInt(2500)
+	req, err := domain.NewOrderRequest("order-1", "1306.T", domain.SideBuy, domain.OrderTypeLimit,
+		decimal.NewFromInt(100), &price, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+	if err != nil {
+		t.Fatalf("注文を作れません: %v", err)
+	}
+	month := "2026-09-01"
+	market := domain.MarketJP
+	dryAmt := decimal.NewFromInt(240_000)
+	if err := led.Record(req, ledger.DryRunStatus, nil, &month, &dryAmt, &market); err != nil {
+		t.Fatalf("dry-run 行を記録できません: %v", err)
+	}
+
+	clock.Now = func() time.Time { return sentAt }
+	amt := decimal.NewFromInt(250_000)
+	if err := led.Record(req, string(domain.OrderStatusPending), nil, &month, &amt, &market); err != nil {
+		t.Fatalf("PENDING を記録できません: %v", err)
+	}
+	open, _ := led.OpenOrders()
+	if len(open) != 1 || open[0].PlacedAt != sentAt.Format(time.RFC3339) {
+		t.Fatalf("placed_at が送信時刻に付け直されていません: %+v", open)
+	}
+	if open[0].Amount == nil || !open[0].Amount.Equal(amt) {
+		t.Errorf("amount = %v, want %s（送った額）", open[0].Amount, amt)
+	}
+
+	// 一覧は生きているがこの注文はまだ載っていない。送信から 2 分（dry-run から 22 分）
+	other := "999/20260924"
+	b := &lookupBroker{orders: map[string]*domain.Order{}, history: []domain.Order{{
+		ClientOrderID: other, BrokerOrderID: &other, Symbol: "2559", Side: domain.SideBuy,
+		Trade: domain.TradeTypeCash, Quantity: decimal.NewFromInt(1), Status: domain.OrderStatusFilled,
+	}}}
+	synced, err := SyncOrderStatus(led, b, sentAt.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("照会に失敗: %v", err)
+	}
+	if len(synced.Changes) != 0 {
+		t.Fatalf("猶予内なのに状態が変わった: %+v", synced.Changes)
+	}
+	open, _ = led.OpenOrders()
+	if len(open) != 1 || open[0].Status != string(domain.OrderStatusPending) {
+		t.Errorf("PENDING のまま残っていません: %+v", open)
+	}
+
+	// 受理の記録し直し（PENDING 以外）は送信時刻を動かさない
+	clock.Now = func() time.Time { return sentAt.Add(time.Minute) }
+	brokerID := "123/20260924"
+	if err := led.Record(req, string(domain.OrderStatusSubmitted), &brokerID, &month, &amt, &market); err != nil {
+		t.Fatalf("受理を記録できません: %v", err)
+	}
+	open, _ = led.OpenOrders()
+	if len(open) != 1 || open[0].PlacedAt != sentAt.Format(time.RFC3339) {
+		t.Errorf("受理の記録で placed_at が動いた: %+v", open)
+	}
+}
