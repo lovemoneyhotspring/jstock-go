@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -157,6 +158,50 @@ func TestWasPlacedIgnoresRejectedUnsentAndDryRun(t *testing.T) {
 		if placed, err = r.WasPlaced(req.ClientOrderID); err != nil || placed {
 			t.Errorf("%s は送り直せる: placed=%v err=%v", status, placed, err)
 		}
+	}
+}
+
+// TestWasPlacedByStatus は状態ごとの WasPlaced。拒否・未送信・dry-run だけが「出していない」。
+// 取消・失効は約定 0 株でも「出した」（daytrade とは違う。理由は WasPlaced のコメント）。
+func TestWasPlacedByStatus(t *testing.T) {
+	r := openTemp(t)
+	startRun(t, r, "run-1")
+	cases := []struct {
+		status string
+		filled string
+		want   bool
+	}{
+		{string(domain.OrderStatusPending), "0", true},
+		{string(domain.OrderStatusSubmitted), "0", true},
+		{string(domain.OrderStatusPartiallyFilled), "50", true},
+		{string(domain.OrderStatusFilled), "100", true},
+		{string(domain.OrderStatusUnknown), "0", true},
+		{string(domain.OrderStatusCancelled), "0", true},
+		{string(domain.OrderStatusCancelled), "50", true}, // 一部約定してから取消
+		{string(domain.OrderStatusExpired), "0", true},
+		{string(domain.OrderStatusRejected), "0", false},
+		{string(domain.OrderStatusUnsent), "0", false},
+		{"dry_run", "0", false},
+	}
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%s_filled%s", tc.status, tc.filled), func(t *testing.T) {
+			req := newRequest(t, fmt.Sprintf("cid-%d", i), "7203", domain.SideBuy, 100)
+			if err := r.RecordOrder("run-1", req, tc.status, nil); err != nil {
+				t.Fatal(err)
+			}
+			if tc.filled != "0" {
+				if err := r.UpdateOrder(req.ClientOrderID, domain.OrderStatus(tc.status), dec(tc.filled), nil, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			placed, err := r.WasPlaced(req.ClientOrderID)
+			if err != nil {
+				t.Fatalf("台帳を読めません: %v", err)
+			}
+			if placed != tc.want {
+				t.Errorf("WasPlaced(%s, 約定 %s 株) = %v, want %v", tc.status, tc.filled, placed, tc.want)
+			}
+		})
 	}
 }
 

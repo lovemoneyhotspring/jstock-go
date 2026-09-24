@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -94,6 +95,60 @@ func TestWasPlacedIgnoresDryRunAndDead(t *testing.T) {
 	}
 	if n := led.DeadCount(day, "9984", domain.SideBuy); n != 1 {
 		t.Errorf("DeadCount = %d, want 1", n)
+	}
+}
+
+// 状態ごとの WasPlaced。daytrade は約定 0 株で終わった取消・失効・拒否・未送信を「出していない」と
+// 数え、一部でも約定した注文は終わっていても「出した」と数える（accum・wbjp とは意味が違う。
+// 理由は WasPlaced のコメント）。送信結果不明（PENDING）と不明（UNKNOWN）は届いたかもしれないので出した側。
+func TestWasPlacedByStatus(t *testing.T) {
+	led := openTest(t)
+	cases := []struct {
+		status string
+		filled int64
+		want   bool
+	}{
+		{string(domain.OrderStatusPending), 0, true},
+		{string(domain.OrderStatusSubmitted), 0, true},
+		{string(domain.OrderStatusPartiallyFilled), 50, true},
+		{string(domain.OrderStatusFilled), 100, true},
+		{string(domain.OrderStatusUnknown), 0, true},
+		{string(domain.OrderStatusCancelled), 0, false},
+		{string(domain.OrderStatusCancelled), 50, true}, // 一部約定してから取消
+		{string(domain.OrderStatusExpired), 0, false},
+		{string(domain.OrderStatusExpired), 50, true}, // 一部約定してから失効
+		{string(domain.OrderStatusRejected), 0, false},
+		{string(domain.OrderStatusUnsent), 0, false},
+		{DryRunStatus, 0, false},
+	}
+	for i, tc := range cases {
+		name := fmt.Sprintf("%s_filled%d", tc.status, tc.filled)
+		t.Run(name, func(t *testing.T) {
+			id := fmt.Sprintf("order-%d", i)
+			if err := led.Record(request(id, "7203", domain.SideBuy, 100, domain.TradeTypeCash), day,
+				string(domain.OrderStatusSubmitted), nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			// 状態は照会の結果として書く（本番と同じ UpdateStatus）。dry-run は記録のときの状態
+			if tc.status == DryRunStatus {
+				if err := led.Record(request(id, "7203", domain.SideBuy, 100, domain.TradeTypeCash), day,
+					DryRunStatus, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := led.UpdateStatus(id, domain.OrderStatus(tc.status), decimal.NewFromInt(tc.filled), nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			placed, err := led.WasPlaced(id)
+			if err != nil {
+				t.Fatalf("台帳を読めません: %v", err)
+			}
+			if placed != tc.want {
+				t.Errorf("WasPlaced(%s, 約定 %d 株) = %v, want %v", tc.status, tc.filled, placed, tc.want)
+			}
+		})
+	}
+	if placed, err := led.WasPlaced("無い注文"); err != nil || placed {
+		t.Errorf("WasPlaced(無い注文) = (%v, %v), want (false, nil)", placed, err)
 	}
 }
 
