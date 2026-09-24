@@ -105,6 +105,11 @@ type openState struct {
 	// carried は寄付で手仕舞った持ち越し、held はブローカーの建玉（台帳外の検査に使う）
 	carried []execute.Carried
 	held    broker.LegPositions
+
+	// placed は今日すでに建てた件数と金額。remaining* は残りの件数、tied* は持ち越しが拘束する資金
+	placed                        execute.Placed
+	remainingLong, remainingShort int
+	tiedLong, tiedShort           decimal.Decimal
 }
 
 func runOpen(opts openOptions) error {
@@ -134,32 +139,8 @@ func runOpen(opts openOptions) error {
 	if err := s.connect(); err != nil {
 		return err
 	}
-	// 生きている／約定した建玉の数。再実行は「N − これ」だけを建てる——1 回目が途中で
-	// 落ちても（通信エラー・締め切り）、次の cron が残りを埋める。拒否・失効は数えない
-	placed, err := execute.PlacedToday(s.env)
-	if err != nil {
+	if done, err := s.countPlaced(); done || err != nil {
 		return err
-	}
-	remainingLong, remainingShort := execute.Remaining(s.cfg, placed, s.watchOnly)
-	// 持ち越しが拘束している資金（残り株数 × 建値）。返済注文は出したが、寄っていない銘柄は
-	// まだ約定しておらず資金は戻っていない。件数と予算への反映は、倍率を掛けた後の予算が
-	// 決まったところで行う（execute.SizeDay）
-	tiedLong, tiedShort := execute.TiedCapital(s.carried)
-	if placed.Total() > 0 {
-		// 余りをロングに回す設定では件数だけで「済み」と言わない（execute.DoneForToday）
-		if execute.DoneForToday(s.cfg, placed, s.watchOnly) {
-			fmt.Printf("今日の建玉は発注済み（ロング %d / ショート %d 件、冪等）。何もしません\n", placed.Long, placed.Short)
-			logInfo("daytrade.skip", "発注済み", map[string]any{
-				"reason": "already", "orders": placed.Total(), "long": placed.Long, "short": placed.Short})
-			return nil
-		}
-		fmt.Printf("今日は既にロング %d / ショート %d 件を建てています。残り（ロング %d / ショート %d）だけ建てます\n",
-			placed.Long, placed.Short, max(remainingLong, 0), max(remainingShort, 0))
-		logInfo("daytrade.resume", "建玉の残りを建て直す", map[string]any{
-			"long": placed.Long, "short": placed.Short,
-			"remaining_long": max(remainingLong, 0), "remaining_short": max(remainingShort, 0),
-			"symbols": sortedKeys(placed.Symbols),
-		})
 	}
 
 	eligible := s.p.Eligible()
@@ -220,8 +201,8 @@ func runOpen(opts openOptions) error {
 		"quotes_opened": nil,
 		// margin.spill_to_long でロングに回したショートの余り（円。回さなかった日は null）
 		"spill":         nil,
-		"already_long":  placed.Long,
-		"already_short": placed.Short,
+		"already_long":  s.placed.Long,
+		"already_short": s.placed.Short,
 		"deadline":      deadlineText(s.deadline),
 		"broker_verify": s.opts.brokerVerify,
 		// 材料（TOB・MBO など）でショートの対象から外した銘柄と、記録簿が使えずショートを見送った理由
@@ -302,7 +283,7 @@ func runOpen(opts openOptions) error {
 		digest.Note(map[string]any{"regime_skip": strings.Join(verdict.Reasons, "、")})
 		// 見送りの日も「建てていたら」の順位表を残す。無いと evaluate が始値で作り直すので、
 		// 9:01 の気配で何を選んでいたかが消え、dt_missed も欠けと見送りを見分けられない
-		skippedQuotes, _ := execute.RankQuotes(quotes, placed.Symbols, execute.SweptSymbols(s.carried), s.cfg.Signal.SkipOpened)
+		skippedQuotes, _ := execute.RankQuotes(quotes, s.placed.Symbols, execute.SweptSymbols(s.carried), s.cfg.Signal.SkipOpened)
 		appendSkippedRanking(s.cfg, s.p, skippedQuotes, s.day)
 		finish("regime", nil)
 		return nil
@@ -311,7 +292,7 @@ func runOpen(opts openOptions) error {
 	// 件数と 1 注文の予算: 縮小 → ショック → 拘束 → ショートの倍率 → （選定の後に）余り。
 	// その日の全体で決めてから、今日すでに建てた件数と金額を引く（execute.SizeDay）
 	sizing := execute.SizeDay(execute.SizingInput{
-		Cfg: s.cfg, Verdict: verdict, Placed: placed, TiedLong: tiedLong, TiedShort: tiedShort,
+		Cfg: s.cfg, Verdict: verdict, Placed: s.placed, TiedLong: s.tiedLong, TiedShort: s.tiedShort,
 		WatchOnly: s.watchOnly, WatchRows: watchRows,
 	})
 	execute.EmitNotes(s.env, sizing.Notes)
@@ -327,7 +308,7 @@ func runOpen(opts openOptions) error {
 		logWarn("daytrade.sweep", "台帳外の返済に回した銘柄を今日の候補から外す",
 			map[string]any{"symbols": sortedKeys(swept)})
 	}
-	rankQuotes, dropped := execute.RankQuotes(quotes, placed.Symbols, swept, s.cfg.Signal.SkipOpened)
+	rankQuotes, dropped := execute.RankQuotes(quotes, s.placed.Symbols, swept, s.cfg.Signal.SkipOpened)
 	if s.cfg.Signal.SkipOpened {
 		summary["quotes_opened"] = int64(len(dropped))
 		fmt.Printf("既に寄っている %d 銘柄を候補から外しました（signal.skip_opened。残り %d）\n",
@@ -480,8 +461,8 @@ func runOpen(opts openOptions) error {
 		summary["short_multiplier"] = shortMultiplier
 		logRanking(s.day, "SELL", shortRanking, shortPicks, shortReasons, shortN, shortBudget, verdict.Scale, s.cfg.Margin.Weighting, len(rankQuotes))
 		picks = append(picks, shortPicks...)
-	case s.cfg.Margin.Enabled && !s.watchOnly && remainingShort <= 0 && placed.Short > 0:
-		fmt.Printf("ショート: 発注済み（%d 件）\n", placed.Short)
+	case s.cfg.Margin.Enabled && !s.watchOnly && s.remainingShort <= 0 && s.placed.Short > 0:
+		fmt.Printf("ショート: 発注済み（%d 件）\n", s.placed.Short)
 	case s.cfg.Margin.Enabled && !s.watchOnly:
 		fmt.Println("ショート: この日は建てない（倍率 0）")
 	}
@@ -549,13 +530,48 @@ func runOpen(opts openOptions) error {
 		"phase": "open", "live": s.allowed, "reason": s.reason,
 		"n": n, "budget": budget.String(), "scale": verdict.Scale,
 		"picks": len(picks), "failures": len(failures),
-		"already_long": placed.Long, "already_short": placed.Short,
+		"already_long": s.placed.Long, "already_short": s.placed.Short,
 		"elapsed_ms": clock.NowUTC().Sub(s.started).Milliseconds(), "deadline": deadlineText(s.deadline),
 	})
 	digest.Note(map[string]any{
 		"phase": "open", "live": s.allowed, "picks": len(picks), "failures": len(failures),
 	})
 	return nil
+}
+
+// countPlaced は今日すでに建てた件数を数え、残りの枠と持ち越しが拘束する資金を決める。
+// 建て切っていれば（execute.DoneForToday）見送りを記録して done を返す。
+func (s *openState) countPlaced() (done bool, err error) {
+	// 生きている／約定した建玉の数。再実行は「N − これ」だけを建てる——1 回目が途中で
+	// 落ちても（通信エラー・締め切り）、次の cron が残りを埋める。拒否・失効は数えない
+	placed, err := execute.PlacedToday(s.env)
+	if err != nil {
+		return false, err
+	}
+	remainingLong, remainingShort := execute.Remaining(s.cfg, placed, s.watchOnly)
+	// 持ち越しが拘束している資金（残り株数 × 建値）。返済注文は出したが、寄っていない銘柄は
+	// まだ約定しておらず資金は戻っていない。件数と予算への反映は、倍率を掛けた後の予算が
+	// 決まったところで行う（execute.SizeDay）
+	tiedLong, tiedShort := execute.TiedCapital(s.carried)
+	if placed.Total() > 0 {
+		// 余りをロングに回す設定では件数だけで「済み」と言わない（execute.DoneForToday）
+		if execute.DoneForToday(s.cfg, placed, s.watchOnly) {
+			fmt.Printf("今日の建玉は発注済み（ロング %d / ショート %d 件、冪等）。何もしません\n", placed.Long, placed.Short)
+			logInfo("daytrade.skip", "発注済み", map[string]any{
+				"reason": "already", "orders": placed.Total(), "long": placed.Long, "short": placed.Short})
+			return true, nil
+		}
+		fmt.Printf("今日は既にロング %d / ショート %d 件を建てています。残り（ロング %d / ショート %d）だけ建てます\n",
+			placed.Long, placed.Short, max(remainingLong, 0), max(remainingShort, 0))
+		logInfo("daytrade.resume", "建玉の残りを建て直す", map[string]any{
+			"long": placed.Long, "short": placed.Short,
+			"remaining_long": max(remainingLong, 0), "remaining_short": max(remainingShort, 0),
+			"symbols": sortedKeys(placed.Symbols),
+		})
+	}
+
+	s.placed, s.remainingLong, s.remainingShort, s.tiedLong, s.tiedShort = placed, remainingLong, remainingShort, tiedLong, tiedShort
+	return false, nil
 }
 
 // connect は発注の環境を作り、live ならブローカーに繋いで送信結果不明の注文を判定し、
