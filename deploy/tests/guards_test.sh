@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# deploy/close-net.sh と deploy/guard-preopen.sh の試験。スタブの bin と crontab を使う隔離環境で動かし、
+# deploy/close-net.sh・deploy/guard-preopen.sh・deploy/unit-done.sh（ユニットの ExecStopPost）の試験。スタブの bin と crontab を使う隔離環境で動かし、
 # 本物の bin・crontab・Discord には触れない。
 #
 #   deploy/tests/guards_test.sh
+# check は式を eval するので、式の中の変数は単一引用符のまま・代入は未使用に見える
+# shellcheck disable=SC2016,SC2034
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 T="$(mktemp -d)"
@@ -15,7 +17,7 @@ check() { if eval "$2"; then ok "$1"; else ng "$1"; fi; }
 new_home() {
   H="$T/home$1"; rm -rf "$H"
   mkdir -p "$H/deploy" "$H/bin" "$H/state/logs" "$H/state/digest" "$H/fakebin"
-  cp "$REPO"/deploy/{with-lock.sh,lib-notify.sh,close-net.sh,guard-preopen.sh} "$H/deploy/"
+  cp "$REPO"/deploy/{with-lock.sh,lib-notify.sh,close-net.sh,guard-preopen.sh,unit-done.sh,ping.sh,mackerel-alive.sh} "$H/deploy/"
   # discord-post: 標準入力を posted に残す
   cat > "$H/bin/discord-post" <<'EOS'
 #!/bin/sh
@@ -205,4 +207,67 @@ printf '30 20 * * 1-5 cd $WBJP_HOME && $WBJP_BIN/daytrade plan\n59 8 * * 1-5 cd 
 echo "# 空" > "$H/crontab.store"; touch "$H/state/crontab.paused"
 bash "$H/deploy/guard-preopen.sh"
 check "crontab.paused があれば戻さない" '[ "$(cat "$H/crontab.store")" = "# 空" ] && [ ! -f "$H/posted" ]'
+# --- guard-preopen: 時間の上限（systemd の TimeoutStartSec=600 に殺される前に終える）------------------
+export GUARD_HOUR=8
+# 16. preflight が固まる → 上限で打ち切り、作り直しも戻しもせず通知して rc=1
+new_home 19
+printf '#!/bin/sh\nexec sleep 30\n' > "$H/bin/daytrade"; chmod +x "$H/bin/daytrade"
+stub_common '' ''
+git_home
+t0=$(date +%s)
+GUARD_PREFLIGHT_TIMEOUT=6 bash "$H/deploy/guard-preopen.sh"; rc=$?
+el=$(( $(date +%s) - t0 ))
+check "preflight が固まっても上限で打ち切る（${el} 秒）" '[ "$el" -lt 25 ] && [ "$rc" = 1 ]'
+check "時間切れは作り直し・戻しをしない" '[ ! -f "$H/build.calls" ] && [ ! -f "$H/rb.calls" ] && grep -q "終わりませんでした" "$H/posted"'
+# 17. 締め切りまでの残りが足りなければ段を飛ばす（作り直しが固まっても全体は GUARD_BUDGET に収まる）
+new_home 20
+printf '#!/bin/sh\necho "preflight-problems: config"\nexit 1\n' > "$H/bin/daytrade"; chmod +x "$H/bin/daytrade"
+stub_common 'exec sleep 60' ''
+git_home
+t0=$(date +%s)
+GUARD_BUDGET=25 bash "$H/deploy/guard-preopen.sh"; rc=$?
+el=$(( $(date +%s) - t0 ))
+check "作り直しが固まっても締め切り内に終える（${el} 秒）" '[ "$el" -lt 40 ] && [ "$rc" = 1 ] && grep -q "作り直しが時間内に終わりませんでした" "$H/posted"'
+# 18. 1 世代前へ戻しても設定を読めない → 戻す前の版へ進め直す（rollback-bin.sh をもう一度）
+new_home 21
+printf '#!/bin/sh\necho "preflight-problems: config"\nexit 1\n' > "$H/bin/daytrade"; chmod +x "$H/bin/daytrade"
+stub_common '' ''
+git_home
+bash "$H/deploy/guard-preopen.sh"; rc=$?
+check "戻しても直らなければ戻す前の版へ進め直す" '[ "$(wc -l < "$H/rb.calls")" = 2 ] && grep -q "戻す前の実行ファイルへ進め直しました" "$H/posted" && [ "$rc" = 1 ]'
+# 19. 戻して設定は読めたが plan だけ無い → 戻した版のまま plan を作る
+new_home 22
+printf '#!/bin/sh\necho "preflight-problems: config"\nexit 1\n' > "$H/bin/daytrade"; chmod +x "$H/bin/daytrade"
+stub_common '' "$(cat <<'EOS'
+cat > "$(dirname "$0")/../bin/daytrade" <<'EOD'
+#!/bin/sh
+D="$(dirname "$0")/.."
+case "$1" in
+  plan) touch "$D/plan.ok" ;;
+  preflight) [ -f "$D/plan.ok" ] && exit 0; echo "preflight-problems: plan"; exit 1 ;;
+esac
+EOD
+chmod +x "$(dirname "$0")/../bin/daytrade"
+EOS
+)"
+git_home
+bash "$H/deploy/guard-preopen.sh"; rc=$?
+check "戻した版が設定を読めれば進め直さず plan へ進む" '[ "$(wc -l < "$H/rb.calls")" = 1 ] && grep -q "plan を作りました" "$H/posted" && [ "$rc" = 0 ]'
+unset GUARD_HOUR
+
+# --- unit-done.sh（ExecStopPost）と mackerel-alive.sh --------------------------------------
+new_home 23
+SERVICE_RESULT=success EXIT_CODE=exited EXIT_STATUS=0 bash "$H/deploy/unit-done.sh" GUARD "寄る前の自動復旧"
+check "成功なら ping 0・通知なし" 'grep -q " 0$" "$H/state/ping/GUARD" && [ ! -f "$H/posted" ]'
+SERVICE_RESULT=exit-code EXIT_CODE=exited EXIT_STATUS=1 bash "$H/deploy/unit-done.sh" GUARD "寄る前の自動復旧"
+check "ふつうの失敗は ping 1・通知はスクリプト任せ" 'grep -q " 1$" "$H/state/ping/GUARD" && [ ! -f "$H/posted" ]'
+SERVICE_RESULT=timeout EXIT_CODE=killed EXIT_STATUS=TERM bash "$H/deploy/unit-done.sh" CLOSENET "引けの安全網" "建玉を確かめる"
+check "時間切れは ping に残して「途中で止められた」を通知" 'grep -q " TERM$" "$H/state/ping/CLOSENET" && grep -q "途中で止められました（timeout）" "$H/posted" && grep -q "建玉を確かめる" "$H/posted"'
+now="$(TZ=Asia/Tokyo date +%F) 1600 3"
+body=$(MACKEREL_ALIVE_NOW="$now" sh "$H/deploy/mackerel-alive.sh" --dry-run)
+check "mackerel-alive: 止められた CLOSENET は 1、成功の後に失敗した GUARD は 1" 'grep -q "\"alive.closenet\",\"time\":[0-9]*,\"value\":1" <<<"$body" && grep -q "\"alive.guard\",\"time\":[0-9]*,\"value\":1" <<<"$body"'
+rm -f "$H/state/ping/GUARD"
+body=$(MACKEREL_ALIVE_NOW="$now" sh "$H/deploy/mackerel-alive.sh" --dry-run)
+check "mackerel-alive: 平日の期限後に GUARD の印が無ければ 2" 'grep -q "\"alive.guard\",\"time\":[0-9]*,\"value\":2" <<<"$body"'
+
 exit "$fail"

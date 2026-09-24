@@ -9,5 +9,11 @@ Environment=WBJP_HOME=@HOME_DIR@
 Environment=WBJP_ENV=prod
 Environment=PATH=@PATH@
 ExecStart=@HOME_DIR@/deploy/guard-preopen.sh
-# 作り直し（deploy/build.sh）に 1〜2 分かかりうる
+# 作り直し（deploy/build.sh）に 1〜2 分かかりうる。guard-preopen.sh は各段に timeout を掛け、
+# 全体を GUARD_BUDGET（既定 500 秒）＋最後の通知（最大 70 秒）に収める。この上限はその外側の保険
 TimeoutStartSec=600
+# 終わり方を state/ping/GUARD に残し（Mackerel の alive.guard）、時間切れ・シグナルで止められたときは
+# Discord に知らせる（スクリプトは自分では通知できない）。止めたあとの後始末なので、止める側の猶予
+# （TimeoutStopSec。SIGTERM から SIGKILL まで・ExecStopPost の上限）を ping の再試行と通知が収まる長さにする
+ExecStopPost=@HOME_DIR@/deploy/unit-done.sh GUARD "デイトレ: 寄る前の自動復旧" "8:59 の open までに bin/daytrade preflight を手で確かめてください。"
+TimeoutStopSec=150

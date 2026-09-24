@@ -8,8 +8,10 @@
 #   - マシン停止・ネット断 … mackerel-agent の connectivity 監視（もとから動いている）
 #   - cron 停止           … alive.cron の途切れ監視（この投稿が来なくなる）
 #   - 点検の失敗・未実行   … alive.morning / alive.verify が 0 でなくなる
+#   - systemd の安全網の失敗・未実行 … alive.guard / alive.closenet が 0 でなくなる
+#   - レーティングの取り込みの失敗・未実行 … alive.rate が 0 でなくなる
 #
-# 値の意味（alive.morning / alive.verify）:
+# 値の意味（alive.morning / alive.verify / alive.guard / alive.closenet / alive.rate）:
 #   0 = 正常（今日の ping が終了コード 0 で届いた・まだ期限前・土日）
 #   1 = 今日の ping は届いたが終了コードが 0 でない
 #   2 = 平日で期限を過ぎたのに今日の ping が無い
@@ -34,7 +36,13 @@ hhmm=${rest%% *}
 dow=${rest#* }
 
 # KEY:期限（HHMM）。9:22 の朝の点検と 15:40 の verify に、終わるまでの猶予を足した時刻
-checks="MORNING:0940 VERIFY:1600"
+# GUARD・CLOSENET は cron ではなく systemd のタイマー（jstock-guard 8:42・15:12、jstock-close-net
+# 15:22・15:26）の ExecStopPost（deploy/unit-done.sh）が打つ。期限は 8:42 の回の上限（600 秒）と
+# 15:26 の回の上限（240 秒）に猶予を足した時刻。1 日に 2 回打つので、値は後の回の終わり方になる。
+# **Mackerel 側の監視ルール（alive.guard > 0・alive.closenet > 0）は人が足す**。足すまでは投稿されるだけ
+# （deploy/install-systemd.sh でユニットを入れ直す前は印が無く、平日の期限後は 2 になる。ルールは入れ直した後に）
+# RATE は 7:30 の rate sync（cron。平日の日単位の失敗で終了 1）。ふだん数十秒で終わるので期限は 8:30
+checks="MORNING:0940 VERIFY:1600 GUARD:0900 CLOSENET:1535 RATE:0830"
 
 state_of() {
   key=$1

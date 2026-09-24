@@ -316,6 +316,12 @@ Discord（`WBJP_ALERT_CHANNEL_ID` / レポートの送り先）にも短く流�
     `state/ping/<KEY>` に印（日付 時刻 終了コード）を残す。`mackerel-alive.sh` がそれを読んで
     `alive.morning` / `alive.verify` を投稿する。0 = 正常、1 = 終了コードが 0 以外、
     2 = 平日の期限（9:40 / 16:00）を過ぎても今日の印が無い。0 を超えたら警報。休場日も印は残る。
+    朝の点検の終了コードは 0 = 問題なし・1 = 要確認あり・3 = Discord に送れなかった（`deploy/morning-check.sh` の末尾）。
+  - 同じ仕組みで `alive.guard`（jstock-guard、期限 9:00）・`alive.closenet`（jstock-close-net、期限 15:35）・
+    `alive.rate`（7:30 の rate sync、期限 8:30）も投稿する。systemd の 2 本は ExecStopPost の `deploy/unit-done.sh` が
+    印を残し、時間切れ・シグナルで止められたときは Discord にも「途中で止められた」を送る。
+    **この 3 本の監視ルールは Mackerel 側に人が足す**（足すまでは投稿されるだけ。systemd の 2 本は
+    `deploy/install-systemd.sh` でユニットを入れ直してから）。
   - API キーは `.env` の `MACKEREL_APIKEY`、無ければ `/etc/mackerel-agent/mackerel-agent.conf` から読む。
     監視ルールは Mackerel 側にある（名前が `jstock:` で始まる 3 本）。通知先は Mackerel の通知チャンネル。
   - `ping.sh` は `.env` に `HEALTHCHECK_URL_<KEY>` があれば healthchecks.io 型の URL へも打つ（未設定なら打たない）。
