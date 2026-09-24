@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/news"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/rate"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/credentials"
@@ -51,11 +54,25 @@ func newSyncCmd() *cobra.Command {
 				}
 			}
 			fmt.Printf("取り込み %d 日（既済 %d 日をとばした、失敗 %d 日）/ 動き 合計 %d 件\n", res.Imported, res.Skipped, res.Failed, res.Events)
-			return err
+			if err != nil {
+				return err
+			}
+			// 日単位の失敗も終了コードで知らせる（news sync と同じ。済みにしないので次回また取りに行く）。
+			// 休場日（応答が空で失敗になる）は問わない
+			if res.Failed == 0 {
+				return nil
+			}
+			return res.FailureError(closedDays())
 		},
 	}
 	cmd.Flags().IntVar(&days, "days", 90, "さかのぼる日数（API の上限は 90）")
 	cmd.Flags().IntVar(&recent, "recent", 3, "済みでも取り直す直近の日数（07:10 の配信より前に回した日を拾うため）")
 	cmd.Flags().BoolVar(&force, "force", false, "既に取り込んだ日も取り直す")
 	return cmd
+}
+
+// closedDays は取引カレンダー（J-Quants のアーカイブ）の休場日の判定。カレンダーが読めない・
+// 範囲外の日は土日で代用する（Calendar.IsTradingDay。平日の失敗は問う側に倒れる）。
+func closedDays() news.ClosedFunc {
+	return calendar.FromArchive(archive.NewArchive(appSettings.JQuantsArchiveDir())).Closed
 }
