@@ -228,6 +228,9 @@ func connectBroker(cfg dtconfig.Config) (broker.Broker, error) {
 	return run.ConnectBroker(cfg.Execution.Broker, appSettings)
 }
 
+// openBroker は open が繋ぐブローカーの差し替え口（試験用。流れのテストが偽のブローカーを渡す）。
+var openBroker = connectBroker
+
 // confirmLive は本番発注の前に人に確かめる（部品は wbcore/cli）。
 func confirmLive(allowed, yes bool) error { return cli.ConfirmLive(appSettings, allowed, yes) }
 
