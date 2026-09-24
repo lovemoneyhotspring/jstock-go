@@ -376,6 +376,13 @@ func (l *Ledger) Record(req domain.OrderRequest, status string, brokerOrderID *s
 		mktStr = &s
 	}
 
+	// 同じ client_order_id の行（同日・同株数の dry-run 行、REJECTED / UNSENT の行）へ
+	// PENDING を記録し直すのは「これから送り直す」とき。placed_at を付け直さないと、
+	// 照合（SyncOrderStatus・reconcile）の送信直後の猶予（UnconfirmedGrace）が古い行の
+	// 時刻から数えられ、送った直後の注文を「届いていない」（UNSENT）として送り直しうる。
+	// 送った内容（株数・金額・市場・verify の印）もこの回のものに揃える。
+	// 受理・拒否などの記録し直し（PENDING 以外）は送信時刻を変えない。
+	pending := string(domain.OrderStatusPending)
 	query := `INSERT INTO orders (
 		client_order_id, broker_order_id, symbol, quantity, status, reason, placed_at,
 		plan_month, amount, market, filled_quantity, verify
@@ -383,6 +390,13 @@ func (l *Ledger) Record(req domain.OrderRequest, status string, brokerOrderID *s
 	ON CONFLICT(client_order_id) DO UPDATE SET
 		broker_order_id = excluded.broker_order_id,
 		status = excluded.status,
+		placed_at = CASE WHEN excluded.status = ? THEN excluded.placed_at ELSE orders.placed_at END,
+		quantity = CASE WHEN excluded.status = ? THEN excluded.quantity ELSE orders.quantity END,
+		reason = CASE WHEN excluded.status = ? THEN excluded.reason ELSE orders.reason END,
+		plan_month = CASE WHEN excluded.status = ? THEN excluded.plan_month ELSE orders.plan_month END,
+		amount = CASE WHEN excluded.status = ? THEN excluded.amount ELSE orders.amount END,
+		market = CASE WHEN excluded.status = ? THEN excluded.market ELSE orders.market END,
+		verify = CASE WHEN excluded.status = ? THEN excluded.verify ELSE orders.verify END,
 		updated_at = excluded.placed_at;`
 
 	_, err := l.db.Exec(query,
@@ -398,6 +412,7 @@ func (l *Ledger) Record(req domain.OrderRequest, status string, brokerOrderID *s
 		mktStr,
 		"0",
 		boolToInt(l.Verify),
+		pending, pending, pending, pending, pending, pending, pending,
 	)
 	return err
 }

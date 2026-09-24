@@ -108,6 +108,7 @@ type Endpoint struct {
 	// 訂正の猶予（SettleDays）が明けるまでは 0 行の日を欠けと数える。猶予の明けた後に
 	// 取り直してもまだ 0 行なら「本当に 0 行の日」とみなして欠けから外す（Gaps）。
 	// RowsEveryTradingDay と違い、明けた後の 0 行を欠けに残し続けない（毎晩誤報になるため）。
+	// 大納会（年の最後の営業日）の 0 行は猶予の内でも欠けにしない（取り直しは続ける。emptyIsGap）。
 	RetryEmpty bool
 	// Bulk は一括ダウンロード（/bulk）にあるか。
 	Bulk bool

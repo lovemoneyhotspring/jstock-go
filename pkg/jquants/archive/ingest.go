@@ -499,7 +499,11 @@ func (e Endpoint) retriesEmpty() bool {
 // emptyIsGap は、台帳の最新が 0 行（fetched に取った）の日を欠けと数えるか。
 //   - 毎営業日行があるはずの端点（RowsEveryTradingDay）は常に欠け
 //   - 0 行の日もある端点（RetryEmpty）は、訂正の猶予が明けるより前に取った 0 行だけ欠け。
-//     明けた後に取り直してまだ 0 行なら、本当に 0 行の日とみなす（毎晩の repair で誤報を繰り返さない）
+//     明けた後に取り直してまだ 0 行なら、本当に 0 行の日とみなす（毎晩の repair で誤報を繰り返さない）。
+//     さらに大納会（年の最後の営業日）の 0 行は猶予の内でも欠けにしない（Gaps が取引カレンダーで判定）。
+//     決算短信は大納会に 0 行の年が多く（台帳で 2019・2022・2025 の 12-30）、猶予（2 日）が明けるまでの
+//     12/30・12/31 の 20:00 の repair が毎年 exit 3 の通知と夜間自己修復を起こしていた。取り直し（Plan）は
+//     変えないので、公開の遅れで空を掴んだ大納会も 50 分おきに取り直される。通知しないだけ
 //   - それ以外（信用残高・EDINET など）は欠けではない
 func (e Endpoint) emptyIsGap(day, fetched time.Time) bool {
 	if !e.TradingDaysOnly {
@@ -513,6 +517,44 @@ func (e Endpoint) emptyIsGap(day, fetched time.Time) bool {
 	}
 	final := e.AvailableAt.On(day, clock.Tokyo).UTC().AddDate(0, 0, e.SettleDays)
 	return fetched.Before(final)
+}
+
+// lastTradingDayOfYear は year の最後の営業日（大納会）。取引カレンダーから引き、cache に年ごとに持つ。
+//
+// カレンダーがその年の 12-31 まで無い（取り込みが止まっている・まだ無い）ときは "" を返す。
+// 手元の最後の営業日を大納会と取り違えて、ふつうの日の 0 行を黙らせないため（通知する側に倒す）。
+func (i *Ingestor) lastTradingDayOfYear(year int, cache map[int]string) (string, error) {
+	if last, ok := cache[year]; ok {
+		return last, nil
+	}
+	start := time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(year, 12, 31, 0, 0, 0, 0, time.UTC)
+	frame, err := i.Archive.Read(CalendarEndpoint(), start, end)
+	if err != nil {
+		return "", err
+	}
+	last := ""
+	if frame.Height() > 0 && frame.HasColumn("HolDiv") {
+		divIdx, dateIdx := frame.col("HolDiv"), frame.col("Date")
+		coversYearEnd := false
+		for _, row := range frame.Rows {
+			div, date := cell(row, divIdx), cell(row, dateIdx)
+			if date == nil {
+				continue
+			}
+			if *date == end.Format(dateLayout) {
+				coversYearEnd = true
+			}
+			if div != nil && TradingDayDivisions[*div] && *date > last {
+				last = *date
+			}
+		}
+		if !coversYearEnd {
+			last = ""
+		}
+	}
+	cache[year] = last
+	return last, nil
 }
 
 // EmptyRetryInterval は、毎営業日行があるはずの端点（と RetryEmpty の端点）で 0 行を掴んだ日を取り直す間隔。
@@ -685,6 +727,7 @@ func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]tim
 	}
 	targets := make([]string, 0, len(latest))
 	fetched := map[string]bool{}
+	yearLast := map[int]string{}
 	for t, rec := range latest {
 		targets = append(targets, t)
 		fetched[t] = true
@@ -692,9 +735,20 @@ func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]tim
 			continue
 		}
 		// 0 行を欠けと数える端点なら、取ったことにしない
-		if day, err := time.Parse(dateLayout, t); err == nil && ep.emptyIsGap(day, rec.FetchedUTC) {
-			fetched[t] = false
+		day, err := time.Parse(dateLayout, t)
+		if err != nil || !ep.emptyIsGap(day, rec.FetchedUTC) {
+			continue
 		}
+		if ep.RetryEmpty && !ep.RowsEveryTradingDay {
+			last, err := i.lastTradingDayOfYear(day.Year(), yearLast)
+			if err != nil {
+				return nil, err
+			}
+			if t == last {
+				continue // 大納会の 0 行は欠けにしない（emptyIsGap の説明）
+			}
+		}
+		fetched[t] = false
 	}
 	sort.Strings(targets)
 	covered, err := i.BulkCoverage(ep)
