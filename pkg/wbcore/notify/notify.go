@@ -94,7 +94,7 @@ func missingConfig(channelID string, channelEnv string) string {
 //
 // 呼ぶたびに新しいスレッドを作り、その中に本文を入れる。固定のスレッドを
 // 使い回さないので、通知ごとに読み分けられる。送っても送れなくても
-// state/notify に控えを残す（30 日）。
+// state/notify に控えを残す（ArchiveRetainDays 日）。
 //
 // 本番（WBJP_ENV=prod）以外は本文とスレッド名に口座を付ける（例: [wbjp uat]）。
 // .env は uat と prod で共用なので送り先のチャンネルも同じで、付けないと

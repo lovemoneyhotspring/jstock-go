@@ -23,7 +23,7 @@
 #   3. 2026-09-15〜: **daytrade の open / close / verify を本番（--live）に切り替え**。dry-run の行は
 #      コメントにした。台帳を通した 1 周（verify の「持ち越しなし」）と前営業日の単品照会は
 #      本番の初日に確かめる。止めるときは config/daytrade/daytrade.toml の kill_switch = true
-#   wbjp / accum の発注経路はまだ開けていない（下のコメント行）
+#   wbjp / accum の発注経路はまだ開けていない（下のコメント行）。state のバックアップ（accum backup）だけは 2026-09-24 から回す
 
 # 時刻はすべて JST（docs/DEPLOY.md「cron の環境」）。
 # CRON_TZ は cronie（RHEL 系）ならスケジュールの時刻帯になる。Ubuntu / Debian の cron
@@ -339,4 +339,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 #*/20 * * * *        cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  $WBJP_BIN/wbjp  run --config-dir config --live --yes >> state/logs/wbjp-run.log  2>&1
 # 積立（発注時間帯 14:00〜15:00 の外では自動でスキップ）
 #7-59/20 * * * *     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/accum-run.lock $WBJP_BIN/accum run --live --yes                     >> state/logs/accum-run.log 2>&1
-#37 * * * *          cd $WBJP_HOME && WBJP_ENV=prod flock    /tmp/accum-run.lock $WBJP_BIN/accum backup                               >> state/logs/accum-backup.log 2>&1
+# state/ の全 SQLite（daytrade・accum・wbjp の台帳）を state/backup/ へ複製する。発注はしない。
+# 2026-09-24 に積立の発注の行から切り離して有効にした（それまで daytrade-prod.db の複製は 9/11 が最後だった）。
+# 場中を避けて 1 日 2 回。同じ日の分は上書きなので世代は 1 日 1 つ。失敗は accum backup 自身が Discord に知らせる
+37 16,22 * * *        cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/accum-run.lock 60 state/logs/accum-backup.log $WBJP_BIN/accum backup

@@ -584,3 +584,24 @@ func TestPostSectionsSplitsOnlyTheLongSection(t *testing.T) {
 		t.Errorf("スレッド名 = %q, want 短い節（見出しが無ければ 1 行目）", f.threads[0].Name)
 	}
 }
+
+// 控えのファイルは JST の日付で分ける。9/20 6:00 JST（UTC では 9/19 21:00）の night-repair の
+// 通知が 2026-09-19.jsonl に入り、JST の日付で期間を選ぶ週次・月次のレポートから漏れていた。
+func TestArchiveSplitsByJSTDay(t *testing.T) {
+	t.Setenv(archiveDirEnvVar, t.TempDir())
+	dir := ArchiveDir()
+
+	morning := time.Date(2026, 9, 19, 21, 0, 0, 0, time.UTC) // 2026-09-20 06:00 JST
+	archive(Record{At: morning, Kind: KindReport, Title: "夜間修復"})
+
+	if _, err := os.Stat(filepath.Join(dir, "2026-09-20.jsonl")); err != nil {
+		t.Fatalf("JST の日付のファイルに入っていない: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "2026-09-19.jsonl")); err == nil {
+		t.Error("UTC の日付のファイルに入っている")
+	}
+	records, err := ReadArchive("2026-09-20", "2026-09-20")
+	if err != nil || len(records) != 1 || records[0].Title != "夜間修復" {
+		t.Errorf("JST の日付で読めない: %+v, %v", records, err)
+	}
+}

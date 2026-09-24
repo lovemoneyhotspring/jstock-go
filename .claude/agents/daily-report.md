@@ -169,7 +169,7 @@ jq -c 'select(.run_id == "<run_id>" and .routine != true and (.verify | not))' s
 
 ### 過去に Discord へ流したもの（「昨日は何を通知した？」に答えるとき）
 
-`state/notify/<日付>.jsonl` に 30 日ぶんの控えがある（1 投稿 1 行）。
+`state/notify/<日付>.jsonl` に 45 日ぶんの控えがある（1 投稿 1 行、JST の日付。2026-09-24 までは UTC の日付）。
 `kind` は `alert`（異常）と `report`（日次レポート）、`ok: false` は届かなかったもの。
 
 ```bash

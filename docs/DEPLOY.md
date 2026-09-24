@@ -113,8 +113,9 @@ TACHIBANA_UAT_ORDER_PASSWORD=...
 
 crontab の内容は [`deploy/crontab.txt`](../deploy/crontab.txt) に置いてある（これが正）。
 デイトレ（`daytrade`）は 2026-09-15 から本番（`--live`）で回っている。スイング（`wbjp run`）と
-積立（`accum run`・`accum backup`）の発注経路はまだ開けておらず、その行はコメントアウトしてある
-（データ取得・監視・評価は回る）。
+積立（`accum run`）の発注経路はまだ開けておらず、その行はコメントアウトしてある
+（データ取得・監視・評価は回る）。`state/` のバックアップ（`accum backup`）は発注しないので、
+2026-09-24 に発注の行から切り離して有効にした。
 
 crontab には**暗号資産の他ジョブと rcguard が同居している**（合わせて 440 行超）。
 `crontab deploy/crontab.txt` で丸ごと入れると他のジョブが消える。**jstock-go のブロックだけ差し替える**
@@ -357,8 +358,8 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
 - **1 回きりの cron を作らない。** 失敗すると次の機会（翌日・翌月）までバックアップや
   取り込みの無い状態が続くため、どのジョブも「何度叩いても同じ（冪等）」に作り、
   頻度を上げて失敗を次の実行で自動回復させる。失敗自体は Discord（`WBJP_ALERT_CHANNEL_ID`）に通知される
-  - `accum backup` は毎時（37 分。積立の発注経路と一緒にいまはコメントアウト中）。同日分は上書きなので世代は 1 日 1 つのまま。
-    1 回失敗しても 1 時間後に取り直し、失敗が続けば毎時通知が来る
+  - `accum backup` は毎日 16:37 と 22:37（場中を避けた）。同日分は上書きなので世代は 1 日 1 つのまま。
+    16:37 に失敗しても 22:37 に取り直し、失敗するたびに通知が来る
   - 月次の `jquants backfill` は 2〜5 日の 4 回。成功していれば 2 回目以降は
     更新された一括ファイル（過誤訂正、月末数日の取り漏れ）だけを取り直す
 - 平日 20:00 の `jquants repair --notify` は欠けの監視と自動修復。当日ぶん（16:30〜18:00 公開）が
@@ -367,8 +368,8 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
   （分足・ティックも見るなら cron と同じく `JQUANTS_MINUTE_BARS=1 JQUANTS_TICKS=1` を付ける）。
   `jquants check` は取り直さずに見るだけ
 
-- `accum backup` は `state/` の全 SQLite（積立台帳 `accum-prod.db` とスイング売買の記録
-  `wbjp-prod.db`）を `state/backup/<名前>-YYYYMMDD.db` に複製する（各 30 世代、SQLite の
+- `accum backup` は `state/` の全 SQLite（デイトレの台帳 `daytrade-prod.db`、積立台帳 `accum-prod.db`、
+  スイング売買の記録 `wbjp-prod.db`）を `state/backup/<名前>-YYYYMMDD.db` に複製する（各 30 世代、SQLite の
   オンラインバックアップなので実行中でも一貫する）。
   台帳は「今月いくら発注済みか」の唯一の記録で失うと当月を買い直すので、`state/backup/` は
   別ディスクやオブジェクトストレージへ同期しておく。`accum run` は起動時にブローカーの当月の
