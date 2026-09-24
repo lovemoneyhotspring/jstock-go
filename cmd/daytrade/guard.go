@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -181,7 +183,8 @@ func (s *guardState) markShorts() (done bool, err error) {
 	}
 
 	marks := map[string]string{}
-	for symbol := range s.shorts {
+	// 銘柄の順に出す（map の順だと表示とログの並びが実行ごとに入れ替わる）
+	for _, symbol := range slices.Sorted(maps.Keys(s.shorts)) {
 		m, ok := ev.marks[symbol]
 		if !ok {
 			continue
