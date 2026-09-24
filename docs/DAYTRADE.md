@@ -358,7 +358,7 @@ open の要約は `short_paused = true` で `short_n` / `short_multiplier` は�
 - **戻すとき: `us_skip_legs = "all"` の 1 行だけ**（bin の作り直しは不要）。`preopen_limit_pct_us_low` だけをコメントにしてはいけない——
   `short` のままだと、この日のロングが LightGBM の寄成・成行で建つ（−11.6 bp/日 の形）
 - **届かなかった寄指を自動で取り消す経路は 15:20 の `close` まで無い**（`protect` は約定 0 の注文を飛ばす）。立花が前場の寄付で失効させるなら問題ないが、
-  後場寄りまで持つなら 12:30 に約定しうる（13:20 の保険と 15:20 の手仕舞いは掛かるので持ち越しにはならない）。最初の小幅高の日に [BROKER_VERIFY.md](BROKER_VERIFY.md) の 3 で確かめる
+  後場寄りまで持つなら 12:30 に約定しうる（12:31 以降の保険と 15:20 の手仕舞いは掛かるので持ち越しにはならない）。最初の小幅高の日に [BROKER_VERIFY.md](BROKER_VERIFY.md) の 3 で確かめる
 
 **費用の物差しが遡らないようにしてある。** `evaluate` の `cost_bp` は設定ではなく**その日の台帳の
 `condition` 列**を見て寄付のスプレッドを免除する——設定で決めると `preopen_legs` を `long` にした

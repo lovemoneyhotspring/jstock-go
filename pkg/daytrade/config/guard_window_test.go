@@ -19,7 +19,7 @@ func TestValidateGuardWindow(t *testing.T) {
 
 // protect_window が前場に掛かると、保険の「引け」が前引け（11:30）で約定する。検査で弾く。
 func TestValidateProtectWindow(t *testing.T) {
-	for _, bad := range [][]string{{"09:00", "15:19"}, {"12:29", "15:19"}, {"12:30"}, nil} {
+	for _, bad := range [][]string{{"09:00", "15:19"}, {"12:29", "15:19"}, {"12:30", "15:30"}, {"12:30"}, nil} {
 		c := Default()
 		c.Execution.ProtectWindow = bad
 		if err := c.Validate(); err == nil {

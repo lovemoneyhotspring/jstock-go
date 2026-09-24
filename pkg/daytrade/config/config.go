@@ -499,7 +499,7 @@ func (e Execution) RunDeadline(name string, now time.Time, useWindow bool, jst *
 	return deadline
 }
 
-// InWindow は now が name（entry / exit）の時間帯か（JST）。
+// InWindow は now が name（entry / guard / protect / exit）の時間帯か（JST）。
 //
 // 終わりは RunDeadline と同じ「HH:MM:00」で、秒まで見て切る。分単位で両端を含めると
 // 9:15:30 が「窓の中」なのに締め切り済みになり、全候補が失敗として通知される。
@@ -684,7 +684,15 @@ func (m Margin) BudgetPerOrder() decimal.Decimal {
 	return m.MaxCapital.Div(decimal.NewFromInt(int64(n))).Floor()
 }
 
-// Window は entry / guard / exit の時間帯（JST の時・分）。それ以外の名前は exit。
+// ProtectEarliestHour / ProtectEarliestMinute は保険の引け注文を置いてよい最も早い時刻（後場寄り）。
+// 前場に置いた「引け」は前引け（11:30）で約定する（2026-09-24 に実機で確認）。protect_window の検査と、
+// --ignore-window でも越えない下限に使う。
+const (
+	ProtectEarliestHour   = 12
+	ProtectEarliestMinute = 30
+)
+
+// Window は entry / guard / protect / exit の時間帯（JST の時・分）。それ以外の名前は exit。
 func (e Execution) Window(name string) (startHour, startMinute, endHour, endMinute int, err error) {
 	raw := e.ExitWindow
 	switch name {
@@ -942,12 +950,15 @@ func (c Config) Validate() error {
 	if _, _, _, _, err := c.Execution.Window("guard"); err != nil {
 		return err
 	}
-	// 前場に掛かると、保険が前引けで約定して建玉が昼に手仕舞われる
-	if sh, sm, _, _, err := c.Execution.Window("protect"); err != nil {
+	// 前場に掛かると、保険が前引けで約定して建玉が昼に手仕舞われる。15:20 の close に掛かると成行と重なる
+	if sh, sm, eh, em, err := c.Execution.Window("protect"); err != nil {
 		return err
-	} else if sh*60+sm < 12*60+30 {
-		return fmt.Errorf("execution.protect_window の開始は後場の 12:30 以降にする（今は %s。前場に置いた「引け」は前引けで約定する）",
-			c.Execution.ProtectWindow[0])
+	} else if sh*60+sm < ProtectEarliestHour*60+ProtectEarliestMinute {
+		return fmt.Errorf("execution.protect_window の開始は後場の %02d:%02d 以降にする（今は %s。前場に置いた「引け」は前引けで約定する）",
+			ProtectEarliestHour, ProtectEarliestMinute, c.Execution.ProtectWindow[0])
+	} else if xh, xm, _, _, err := c.Execution.Window("exit"); err == nil && eh*60+em > xh*60+xm {
+		return fmt.Errorf("execution.protect_window の終わり（%s）が exit_window の開始（%s）より後。close の成行と重なる",
+			c.Execution.ProtectWindow[1], c.Execution.ExitWindow[0])
 	}
 	if c.Execution.MaxRunSeconds < 0 || c.Book.MaxRunSeconds < 0 {
 		return fmt.Errorf("execution.max_run_seconds / book.max_run_seconds は 0 以上")

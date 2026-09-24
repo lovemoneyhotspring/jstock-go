@@ -324,7 +324,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 取り消して成行を出す。cron・マシン・ネットが止まっても、引けで手仕舞われる安全網
 31 12 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-protect.log $WBJP_BIN/daytrade protect --config-dir config/daytrade_margin --live --yes
 20 13 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-protect.log $WBJP_BIN/daytrade protect --config-dir config/daytrade_margin --live --yes
-# 15:10 は最後の置き直し（guard_window は 15:19 まで。15:20 の close の前に、午後に増えた約定にも保険を置く）
+# 15:10 は最後の置き直し（protect_window は 15:19 まで。15:20 の close の前に、午後に増えた約定にも保険を置く）
 10 15 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-protect.log $WBJP_BIN/daytrade protect --config-dir config/daytrade_margin --live --yes
 # 15:20・15:24・15:28: 当日建てた分を返済（1 回目で済めば以降は何もしない）
 20,24,28 15 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-close.log $WBJP_BIN/daytrade close  --config-dir config/daytrade_margin --live --yes
