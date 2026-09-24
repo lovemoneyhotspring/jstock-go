@@ -136,7 +136,7 @@ type DaySizing struct {
 // SizeDay は今日の件数と 1 注文の予算を決める。open の順序（検証と同じ）:
 //
 //  1. 縮小（資産曲線。margin では long_shrink のときだけ）→ ショック日の倍率
-//  2. 持ち越しの拘束（CapByTied）
+//  2. 持ち越しの拘束（CapByTied。規則 R は CapTotalByTied で N を保つ）
 //  3. ショートの倍率（通常日／弱い日 × ショック）と拘束
 //  4. ショートの余りをロングへ（WithSpill。ショートの選定の後）
 //
@@ -184,10 +184,16 @@ func SizeDay(in SizingInput) DaySizing {
 		}
 	}
 	// 持ち越しの拘束: 残りの資金で建てられる件数に減らす。1 注文の予算に満たなくても残りがあれば
-	// 1 件を小さく建てる——一部が拘束されただけで一日を休むのは機会損失
+	// 1 件を小さく建てる——一部が拘束されただけで一日を休むのは機会損失。
+	// 規則 R（turnover）は件数 N を保って予算を下げる（CapTotalByTied。N を減らすと 1 銘柄の上限
+	// 予算 × N ÷ name_divisor が縮み、残りの資金の一部しか使わない）
 	if in.TiedLong.IsPositive() && !in.WatchOnly {
 		before := dayN
-		dayN, budget = CapByTied(dayN, 0, cfg.Capital.MaxCapital, in.TiedLong, budget)
+		if cfg.Capital.Weighting == config.WeightingTurnover {
+			dayN, budget = CapTotalByTied(dayN, cfg.Capital.MaxCapital, in.TiedLong, budget)
+		} else {
+			dayN, budget = CapByTied(dayN, 0, cfg.Capital.MaxCapital, in.TiedLong, budget)
+		}
 		d.note(SizingNote{
 			Text: fmt.Sprintf("持ち越しがロングの資金 %s 円を拘束 → 今日は %d 件（%s）",
 				cli.Yen(in.TiedLong), max(dayN-placed.Long, 0), LongBudgetText(cfg.Capital, dayN, budget)),

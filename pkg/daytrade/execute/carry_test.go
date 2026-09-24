@@ -639,3 +639,25 @@ func TestResolvePendingFindsCarryRepaymentUnderEntryDay(t *testing.T) {
 		t.Errorf("前日の下の PENDING が帰属されていない: %+v", o)
 	}
 }
+
+func TestCapTotalByTied(t *testing.T) {
+	d := decimal.NewFromInt
+	for _, c := range []struct {
+		name                  string
+		n                     int
+		capital, tied, budget int64
+		wantN                 int
+		wantBudget            int64
+	}{
+		{"拘束なしの範囲", 10, 5_000_000, 0, 500_000, 10, 500_000},
+		{"残りが総額未満 → N を保って予算を下げる", 10, 5_000_000, 2_000_000, 500_000, 10, 300_000},
+		{"ショック日の予算も残りで頭打ち", 10, 5_000_000, 1_000_000, 750_000, 10, 400_000},
+		{"残り 0", 10, 5_000_000, 5_000_000, 500_000, 0, 500_000},
+		{"残りが N 円未満", 10, 5_000_000, 4_999_995, 500_000, 0, 0},
+	} {
+		n, budget := CapTotalByTied(c.n, d(c.capital), d(c.tied), d(c.budget))
+		if n != c.wantN || !budget.Equal(d(c.wantBudget)) {
+			t.Errorf("%s: (%d, %s), want (%d, %d)", c.name, n, budget, c.wantN, c.wantBudget)
+		}
+	}
+}
