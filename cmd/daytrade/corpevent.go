@@ -9,6 +9,7 @@ import (
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	dtplan "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/plan"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/news"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 )
 
 // corpEvents は記録簿（news の TDnet 適時開示）から判定した、その日の材料の印。
@@ -17,8 +18,26 @@ type corpEvents struct {
 	marks map[string]dtplan.CorpEvent
 	// notes は銘柄 → 記録だけの種類（一部報道・買集め・自己株式の公開買付）の最後の開示。
 	notes map[string]dtplan.CorpEvent
-	// lastFetched は記録簿の最後の取り込み（成功）。一度も無ければゼロ値。
+	// lastFetched は記録簿がこの時刻まで揃っているか（news.Store.Fresh。必要な日ごとに見た最も古いもの）。
+	// 取れていない日があればゼロ値。
 	lastFetched time.Time
+	// freshDay は lastFetched を決めた日（YYYY-MM-DD）。取れていない日があればその日。
+	freshDay string
+}
+
+// staleness は記録簿を使えない理由。使えるなら空文字。
+func (ev corpEvents) staleness(now time.Time, maxMinutes int) string {
+	age := now.Sub(ev.lastFetched)
+	switch {
+	case ev.lastFetched.IsZero() && ev.freshDay != "":
+		return fmt.Sprintf("%s の取り込みに成功していない", ev.freshDay)
+	case ev.lastFetched.IsZero():
+		return "取り込みに成功した日が 1 日も無い"
+	case age > time.Duration(maxMinutes)*time.Minute:
+		return fmt.Sprintf("%s ぶんの最後の取り込みが %s（%d 分前。上限 %d 分）", ev.freshDay,
+			clock.ToZone(ev.lastFetched, clock.Tokyo).Format("01-02 15:04"), int(age.Minutes()), maxMinutes)
+	}
+	return ""
 }
 
 // loadCorpEvents は day の判定に使う材料を記録簿から読む。knownAt より後に入った記事は使わない。
@@ -49,7 +68,8 @@ func loadCorpEvents(ctx context.Context, m dtconfig.Margin, day, knownAt time.Ti
 			}
 		}
 	}
-	if out.lastFetched, _, err = store.LastFetched(ctx); err != nil {
+	// 鮮度は必要な日（今日から news.FreshDays 日）ごとに見る。前日だけ取り込みに失敗した朝を通さない
+	if out.lastFetched, out.freshDay, err = store.Fresh(ctx, knownAt, news.FreshDays); err != nil {
 		return corpEvents{}, err
 	}
 	return out, nil

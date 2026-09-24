@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -170,27 +171,68 @@ func splitList(s string) []string {
 	return strings.Split(s, "|")
 }
 
-// LastFetched は取り込みに成功した最後の時刻。失敗の記録（RecordFailure）も fetched_at を
-// 更新するので、status = 'ok' の行だけを見る。1 日も無ければ ok = false。
-// 時刻は書いた側の時間帯のまま入っている（UTC / JST）ので、文字列の MAX ではなく読んでから比べる。
-func (s *Store) LastFetched(ctx context.Context) (at time.Time, ok bool, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT fetched_at FROM news_days WHERE status = 'ok'`)
+// FreshDays は鮮度を見る日数（今日を含む暦日）。土日と祝日をはさんでも、前の営業日の
+// 夜の配信まで入る。朝の news sync（--days 5）が取り直す範囲と揃えてある。
+const FreshDays = 5
+
+// Fresh は記録簿がいつの時点まで揃っているか。**必要な日（今日から days 日さかのぼる）ごとに見る。**
+//
+//   - 今日: 最後に取れた（ok の）時刻
+//   - 過去の日: 日が明けてから取れていれば揃っている（制約にならない）。明ける前にしか
+//     取れていなければその時刻（その日の夜の配信が抜けている）
+//   - 取れていない日（失敗・未取得）: ゼロ値
+//
+// のうち最も古いものを at に、それを決めた日を day に返す。以前は全日の最大値を見ていたので、
+// 前日だけ取り込みに失敗した朝も「新しい」と判定していた（2026-09-24 のレビュー）。
+// 失敗の記録（RecordFailure）は fetched_at を上書きするので、status = 'ok' の行だけを見る。
+// 時刻は書いた側の時間帯のまま入っている（UTC / JST）ので、文字列ではなく読んでから比べる。
+func (s *Store) Fresh(ctx context.Context, now time.Time, days int) (at time.Time, day string, err error) {
+	if days < 1 {
+		days = 1
+	}
+	today := now.In(clock.Tokyo)
+	from := today.AddDate(0, 0, -(days - 1)).Format("2006-01-02")
+	to := today.Format("2006-01-02")
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT feed_date, fetched_at FROM news_days WHERE status = 'ok' AND feed_date BETWEEN ? AND ?`, from, to)
 	if err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, "", err
 	}
 	defer func() { _ = rows.Close() }()
+	fetched := map[string]time.Time{}
 	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			return time.Time{}, false, err
+		var d, v string
+		if err := rows.Scan(&d, &v); err != nil {
+			return time.Time{}, "", err
 		}
 		t, err := time.Parse(time.RFC3339, v)
 		if err != nil {
-			return time.Time{}, false, fmt.Errorf("fetched_at を読めません（%s）: %w", v, err)
+			return time.Time{}, "", fmt.Errorf("fetched_at を読めません（%s）: %w", v, err)
 		}
-		if !ok || t.After(at) {
-			at, ok = t, true
+		fetched[d] = t
+	}
+	if err := rows.Err(); err != nil {
+		return time.Time{}, "", err
+	}
+	first := true
+	for i := days - 1; i >= 0; i-- {
+		d := today.AddDate(0, 0, -i).Format("2006-01-02")
+		t, ok := fetched[d]
+		if !ok {
+			return time.Time{}, d, nil // 取れていない日がある
+		}
+		if d != to {
+			end, err := dayEnd(d)
+			if err != nil {
+				return time.Time{}, "", err
+			}
+			if !t.Before(end) {
+				continue // 日が明けてから取れている
+			}
+		}
+		if first || t.Before(at) {
+			at, day, first = t, d, false
 		}
 	}
-	return at, ok, rows.Err()
+	return at, day, nil
 }

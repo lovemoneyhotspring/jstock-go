@@ -155,15 +155,10 @@ func runOpen(opts openOptions) error {
 	// ショートの一時停止中（margin.paused）は売らないので、記録簿の鮮度でショートを見送る判定も要らない
 	if cfg.Margin.Enabled && cfg.Margin.ExcludeCorpEvents && !cfg.Margin.Paused {
 		ev, dropped, err := markPlanCorpEvents(cfg, &p, day, now)
-		age := now.Sub(ev.lastFetched)
-		switch {
-		case err != nil:
+		if err != nil {
 			corpStale = err.Error()
-		case ev.lastFetched.IsZero():
-			corpStale = "取り込みに成功した日が 1 日も無い"
-		case age > time.Duration(cfg.Margin.CorpEventMaxStalenessMinutes)*time.Minute:
-			corpStale = fmt.Sprintf("最後の取り込みが %s（%d 分前。上限 %d 分）",
-				clock.ToZone(ev.lastFetched, jst).Format("01-02 15:04"), int(age.Minutes()), cfg.Margin.CorpEventMaxStalenessMinutes)
+		} else {
+			corpStale = ev.staleness(now, cfg.Margin.CorpEventMaxStalenessMinutes)
 		}
 		corpDropped = dropped
 		if corpStale != "" {
