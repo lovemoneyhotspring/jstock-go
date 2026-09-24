@@ -3,8 +3,12 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
@@ -157,6 +161,16 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 	atrMap := make(map[string]decimal.Decimal)
 	lotSizes := make(map[string]decimal.Decimal)
 	allBars := make(map[string][]domain.Bar)
+	// 足が古い・読めない銘柄（銘柄 → 理由）。この回は売りも買いも出さない（W6）
+	unusable := make(map[string]string)
+	today, err := time.Parse("2006-01-02", todayJST)
+	if err != nil {
+		return fmt.Errorf("今日の日付を読めません: %w", err)
+	}
+	cal := calendar.FromArchive(archive.NewArchive(appSettings.JQuantsArchiveDir()))
+	if cal.Empty() {
+		logger.Warn("wbjp.calendar_missing", "取引カレンダーが読めないので平日を営業日とみなします（祝日明けは足が古いとみなして止まる）")
+	}
 
 	for _, sym := range setCfg.Universe.Symbols {
 		lotSizes[sym] = decimal.NewFromInt(100)
@@ -165,6 +179,9 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 		}
 
 		bars, err := barStore.Read(sym, "", "")
+		if why := barsUnusable(bars, err, today, cal.PreviousTradingDay); why != "" {
+			unusable[sym] = why
+		}
 		if err != nil || len(bars) == 0 {
 			continue
 		}
@@ -187,6 +204,29 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 		if len(atrVals) > 0 {
 			atrMap[sym] = decimal.NewFromFloat(atrVals[len(atrVals)-1])
 		}
+	}
+
+	// 足が古い・読めない銘柄は、この回は判断しない（売りも買いも出さない）。
+	// ストップの判定（損切り・利確）にも使わない。利確を決めると ScaledOut が保存され、
+	// 売りを出さないまま「利確済み」になるため
+	decisionCloses := make(map[string]decimal.Decimal, len(lastPrices))
+	for sym, px := range lastPrices {
+		if _, ng := unusable[sym]; !ng {
+			decisionCloses[sym] = px
+		}
+	}
+	if len(unusable) > 0 {
+		lines := make([]string, 0, len(unusable))
+		for sym, why := range unusable {
+			held := ""
+			if pos, ok := posMap[sym]; ok && pos.Quantity.IsPositive() {
+				held = fmt.Sprintf("（保有 %s 株）", pos.Quantity)
+			}
+			lines = append(lines, fmt.Sprintf("%s%s: %s", sym, held, why))
+		}
+		sort.Strings(lines)
+		logger.Warn("wbjp.bars_unusable", "足が古い・読めないため、この回は判断しません（売りも買いも出さない）:\n"+strings.Join(lines, "\n"))
+		digest.Anomaly("wbjp.bars_unusable", fmt.Sprintf("%d 銘柄の足が古い・読めない（その銘柄は判断しない）", len(unusable)))
 	}
 
 	// 2. ストップロスの管理と更新
@@ -221,9 +261,9 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 	}
 	stopBook.EnsureWithOptions(posMap, atrMap, todayJST,
 		risk.EnsureOptionsFrom(setCfg.Stops, setCfg.Sizing.ATRStopMultiple))
-	stopBook.UpdateTrailing(lastPrices, atrMap)
+	stopBook.UpdateTrailing(decisionCloses, atrMap)
 	// 建値への引き上げは利確・トレーリングより先に行う。
-	stopBook.UpdateBreakeven(lastPrices, setCfg.Stops.BreakevenAfterR)
+	stopBook.UpdateBreakeven(decisionCloses, setCfg.Stops.BreakevenAfterR)
 	// ストップの保存は利確（ScaledOut・建値への引き上げ）を決めた後（3-4）
 
 	// 3. 戦略の評価
@@ -274,6 +314,10 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 		if !stratCtx.HasBars(sym, 1) {
 			continue
 		}
+		// 足が古い銘柄も同じ（古い足での「シグナル消滅」で全株を売らない。W6）
+		if _, ng := unusable[sym]; ng {
+			continue
+		}
 		combined := combineFunc(sym, signalsBySymbol[sym], weights)
 		combinedSignals = append(combinedSignals, combined)
 		signalMap[sym] = combined
@@ -307,10 +351,13 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 	// 並べ方・重ね方は backtest と同じ risk.ExitPlan（損切りが残り玉の「維持」に負けない）
 	quantities := quantitiesOf(posMap)
 	stopTargets := decideStopExits(rep, stopBook, setCfg.Stops, risk.ExitInputs{
-		Closes: lastPrices, Quantities: quantities, LotSizes: lotSizes, AsOf: todayJST,
+		Closes: decisionCloses, Quantities: quantities, LotSizes: lotSizes, AsOf: todayJST,
 		Bars: func(sym string) []domain.Bar { return allBars[sym] },
 	}, canLive, logger)
 	for _, t := range risk.ApplyStopPriority(strategyTargets, stopTargets) {
+		if _, ng := unusable[t.Symbol]; ng {
+			continue // 判断しない銘柄の目標（シグナルが無いための手仕舞い）を台帳に残さない
+		}
 		targets[t.Symbol] = t
 	}
 
@@ -410,6 +457,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 			TaxType:           taxType,
 			Topix500:          symbolSet(setCfg.Universe.TOPIX500Symbols),
 			BlocksSameDaySale: true,
+			Frozen:            unusable,
 		},
 		boughtToday, todayJST)
 	if err != nil {
@@ -502,7 +550,8 @@ var decimalZero = decimal.Zero
 // dailyPnL は当日の損益を実現（台帳の約定した売り）と含み（保有中の建玉の当日の値動き）に分けて返す。
 //
 // 含みの基準は、当日買い付けた銘柄なら取得単価、それ以外は判断に使う直近の終値
-// （場中は前営業日の終値）。現値（LastPrice）が無い・直近の終値が無い（足が古い）建玉は数えない。
+// （場中は前営業日の終値。足が古い銘柄ではその古い終値からの値動き）。
+// 現値（LastPrice）が無い・終値が無い（足が無い）建玉は数えない。
 // unpriced は実現損益に入れられなかった売り（1 件でもあれば当日の損益は確かでない）。
 func dailyPnL(rep *repo.Repo, todayJST string, positions map[string]domain.Position,
 	lastPrices map[string]decimal.Decimal, boughtToday map[string]struct{},
