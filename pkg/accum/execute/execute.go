@@ -589,10 +589,52 @@ func RunAccumulation(
 	}
 
 	// 1. 前回までに送った注文がどうなったかを先に確かめる。
+	synced := syncPrevious(led, b, now, logger)
+	// 通知は最後にまとめて 1 通。保留した PENDING の銘柄に今日の注文が立つと、発注できなかった
+	// 銘柄（OrdersFailedError）として同じ注文を知らせる。以前はそれとは別に「照会できません」を
+	// 送り、1 件の PENDING で 2 通になっていた。失敗の行で知らせた注文はここから外す
+	coveredByFailure := map[string]bool{}
+	defer func() { alertHeld(synced.Unresolved, coveredByFailure, !isLive, logger) }()
+
+	// 送信結果不明（PENDING）が残る銘柄は発注しない。
 	//
-	// 失効・拒否なら「発注済み」から外れ、この後の差額の計算で自動的に
-	// 埋め直される。照会できないときは前回の状態のまま先へ進む——
-	// ここで止めると、ブローカー側の一時的な不調で積立が丸ごと飛ぶ。
+	// 照会の後でも PENDING のままの注文は、届いたかどうかを決められなかったもの（前日以前の
+	// 注文は立花の当日の注文一覧に出ない・一覧が空・候補が曖昧）。届いていたなら同じ額を
+	// もう一度買うことになる。台帳を読み直して決める——照会が途中で失敗しても漏らさない。
+	pendingBySymbol, err := led.PendingSymbols()
+	if err != nil {
+		logger.Error("accum.ledger_read_failed", err.Error())
+		return fmt.Errorf("台帳を読めないため発注を中止しました: %w", err)
+	}
+
+	// 2. 本日の発注計画
+	planned, err := planToday(cfg, b, barStore, led, logger, hist, now, ignoreWindow, isLive)
+	if err != nil {
+		return err
+	}
+
+	// 3. 台帳に無い当月の約定がないか確かめる。
+	if isLive {
+		if err := checkUnrecorded(led, b, planned, now, logger); err != nil {
+			return err
+		}
+	}
+
+	// 4. 発注処理
+	run := &orderRun{
+		b: b, led: led, logger: logger, isLive: isLive, monthStart: monthStart,
+		pendingBySymbol: pendingBySymbol, coveredByFailure: coveredByFailure,
+	}
+	return run.placeAll(planned)
+}
+
+// syncPrevious は前回までに送った注文の状態を照会して台帳に反映し、結果をログと
+// ダイジェストに残す。
+//
+// 失効・拒否なら「発注済み」から外れ、この後の差額の計算で自動的に
+// 埋め直される。照会できないときは前回の状態のまま先へ進む——
+// ここで止めると、ブローカー側の一時的な不調で積立が丸ごと飛ぶ。
+func syncPrevious(led *ledger.Ledger, b broker.Broker, now time.Time, logger *logging.Logger) SyncResult {
 	synced, err := SyncOrderStatus(led, b, now)
 	if err != nil {
 		logger.Warn("accum.sync_failed",
@@ -629,30 +671,29 @@ func RunAccumulation(
 			digest.Anomaly("accum.unresolved", other)
 		}
 	}
-	// 通知は最後にまとめて 1 通。保留した PENDING の銘柄に今日の注文が立つと、発注できなかった
-	// 銘柄（OrdersFailedError）として同じ注文を知らせる。以前はそれとは別に「照会できません」を
-	// 送り、1 件の PENDING で 2 通になっていた。失敗の行で知らせた注文はここから外す
-	coveredByFailure := map[string]bool{}
-	defer func() { alertHeld(synced.Unresolved, coveredByFailure, !isLive, logger) }()
+	return synced
+}
 
-	// 送信結果不明（PENDING）が残る銘柄は発注しない。
-	//
-	// 照会の後でも PENDING のままの注文は、届いたかどうかを決められなかったもの（前日以前の
-	// 注文は立花の当日の注文一覧に出ない・一覧が空・候補が曖昧）。届いていたなら同じ額を
-	// もう一度買うことになる。台帳を読み直して決める——照会が途中で失敗しても漏らさない。
-	pendingBySymbol, err := led.PendingSymbols()
-	if err != nil {
-		logger.Error("accum.ledger_read_failed", err.Error())
-		return fmt.Errorf("台帳を読めないため発注を中止しました: %w", err)
-	}
-
-	// 2. 本日の発注計画（本発注の run なら、開始日の無い銘柄に今日を開始日として残す）
-	// 銘柄マスタ（立花は全銘柄が一括で返る）は、今日出す注文が立ったときだけ引く
+// planToday は本日の発注計画を立て、判断の履歴を残す。
+//
+// 本発注の run なら、開始日の無い銘柄に今日を開始日として残す。
+// 銘柄マスタ（立花は全銘柄が一括で返る）は、今日出す注文が立ったときだけ引く。
+func planToday(
+	cfg *accumcfg.AccumConfig,
+	b broker.Broker,
+	barStore *data.BarStore,
+	led *ledger.Ledger,
+	logger *logging.Logger,
+	hist *wbhistory.Store,
+	now time.Time,
+	ignoreWindow bool,
+	isLive bool,
+) ([]PlannedOrder, error) {
 	planned, staleSignals, err := PlanOrders(cfg, barStore, led, now, ignoreWindow, isLive,
 		func() map[string]decimal.Decimal { return b.LotSizes(orderableSymbols(cfg)) })
 	if err != nil {
 		logger.Error("accum.plan_failed", err.Error())
-		return fmt.Errorf("発注計画を立てられないため発注を中止しました: %w", err)
+		return nil, fmt.Errorf("発注計画を立てられないため発注を中止しました: %w", err)
 	}
 	// dry-run は銘柄マスタを持たない（PaperBroker）。売買単位の不明を失敗にすると、
 	// lot_size_overrides に無い銘柄（1629・2559）で毎回、失敗の通知と非 0 終了になる。
@@ -677,172 +718,205 @@ func RunAccumulation(
 			logger.Warn("accum.history_failed", fmt.Sprintf("判断履歴を残せませんでした: %v", err))
 		}
 	}
+	return planned, nil
+}
 
-	// 3. 台帳に無い当月の約定がないか確かめる。
-	//
-	// 台帳を失った状態で走ると当月の予算をもう一度買う。ブローカー側にだけ
-	// 約定がある注文を見つけたら、額の計算が信用できないので発注を止める。
-	if isLive {
-		var symbols []string
-		for _, po := range planned {
-			if po.Request != nil {
-				symbols = append(symbols, po.Symbol)
-			}
-		}
-		if len(symbols) > 0 {
-			unrecorded, err := UnrecordedFills(led, b, symbols, now)
-			if err != nil {
-				// 照会できないなら二重買付を否定できない。安全側に倒して止める。
-				logger.Error("accum.unrecorded_check_failed", err.Error())
-				return fmt.Errorf("台帳とブローカーの突き合わせができないため発注を中止しました: %w", err)
-			}
-			if len(unrecorded) > 0 {
-				var detail []string
-				for sym, amt := range unrecorded {
-					detail = append(detail, fmt.Sprintf("%s %s円", sym, amt.Round(0)))
-				}
-				sort.Strings(detail)
-				msg := strings.Join(detail, "、")
-				logger.Error("accum.unrecorded_fills",
-					fmt.Sprintf("台帳に無い当月の約定があります（二重買付の恐れ）: %s", msg))
-				return fmt.Errorf(
-					"台帳に無い当月の約定があります（二重買付になります）: %s\n"+
-						"台帳（%s）が失われているか、別の環境で発注した可能性があります。"+
-						"状態を確かめてから実行してください", msg, led.Path())
-			}
+// checkUnrecorded は今日出す注文の銘柄に、台帳に無い当月の約定がないか確かめる。
+//
+// 台帳を失った状態で走ると当月の予算をもう一度買う。ブローカー側にだけ
+// 約定がある注文を見つけたら、額の計算が信用できないので発注を止める（エラーを返す）。
+func checkUnrecorded(led *ledger.Ledger, b broker.Broker, planned []PlannedOrder, now time.Time, logger *logging.Logger) error {
+	var symbols []string
+	for _, po := range planned {
+		if po.Request != nil {
+			symbols = append(symbols, po.Symbol)
 		}
 	}
-
-	// 4. 発注処理
-	//
-	// 出すべきなのに出せなかった銘柄（足が無い・判定用の足が読めない・見積り失敗・余力不足・
-	// 拒否・送信結果不明が残る）は failures に集め、最後に OrdersFailedError で返す。
-	// 以前はログの warn に留まり、通知にもダイジェストにも出ず終了コード 0 だった（A6）。
-	var failures []string
-	fail := func(symbol, detail string) {
-		line := fmt.Sprintf("%s: %s", symbol, detail)
-		failures = append(failures, line)
-		logger.Error("accum.order_failed", line)
+	if len(symbols) == 0 {
+		return nil
 	}
+	unrecorded, err := UnrecordedFills(led, b, symbols, now)
+	if err != nil {
+		// 照会できないなら二重買付を否定できない。安全側に倒して止める。
+		logger.Error("accum.unrecorded_check_failed", err.Error())
+		return fmt.Errorf("台帳とブローカーの突き合わせができないため発注を中止しました: %w", err)
+	}
+	if len(unrecorded) == 0 {
+		return nil
+	}
+	var detail []string
+	for sym, amt := range unrecorded {
+		detail = append(detail, fmt.Sprintf("%s %s円", sym, amt.Round(0)))
+	}
+	sort.Strings(detail)
+	msg := strings.Join(detail, "、")
+	logger.Error("accum.unrecorded_fills",
+		fmt.Sprintf("台帳に無い当月の約定があります（二重買付の恐れ）: %s", msg))
+	return fmt.Errorf(
+		"台帳に無い当月の約定があります（二重買付になります）: %s\n"+
+			"台帳（%s）が失われているか、別の環境で発注した可能性があります。"+
+			"状態を確かめてから実行してください", msg, led.Path())
+}
 
+// orderRun は発注処理の段の材料と、発注できなかった銘柄の控え。
+//
+// 出すべきなのに出せなかった銘柄（足が無い・判定用の足が読めない・見積り失敗・余力不足・
+// 拒否・送信結果不明が残る）は failures に集め、最後に OrdersFailedError で返す。
+// 以前はログの warn に留まり、通知にもダイジェストにも出ず終了コード 0 だった（A6）。
+type orderRun struct {
+	b               broker.Broker
+	led             *ledger.Ledger
+	logger          *logging.Logger
+	isLive          bool
+	monthStart      string
+	pendingBySymbol map[string][]string
+	// coveredByFailure は失敗の行で知らせた送信結果不明の注文（alertHeld が別に知らせない）
+	coveredByFailure map[string]bool
+	failures         []string
+}
+
+func (r *orderRun) fail(symbol, detail string) {
+	line := fmt.Sprintf("%s: %s", symbol, detail)
+	r.failures = append(r.failures, line)
+	r.logger.Error("accum.order_failed", line)
+}
+
+// failPending は送信結果不明の注文が残る銘柄を失敗の行で知らせ、印を付ける。
+// 印を付けないと alertHeld が「照会できません」を別に送り、1 件の PENDING で 2 通になる
+func (r *orderRun) failPending(symbol string, ids []string) {
+	for _, id := range ids {
+		r.coveredByFailure[id] = true
+	}
+	r.fail(symbol, pendingFailureNote(ids))
+}
+
+// placeAll は計画の注文を順に出し、発注できなかった銘柄があれば OrdersFailedError を返す。
+func (r *orderRun) placeAll(planned []PlannedOrder) error {
 	// 余力が分からないまま「余力不足」と記録すると、照会の失敗が資金の不足に化けて
 	// 切り分けられない。照会できない回は発注せず、理由をそのまま残す
-	bal, err := b.GetBalance()
+	bal, err := r.b.GetBalance()
 	if err != nil || bal == nil {
 		if err == nil {
 			err = errors.New("応答が空")
 		}
-		logger.Warn("accum.balance_failed",
+		r.logger.Warn("accum.balance_failed",
 			fmt.Sprintf("買付余力を照会できないため、この回は発注しません: %v", err))
 		for _, po := range planned {
 			switch {
 			case po.Failed:
-				fail(po.Symbol, po.Note)
-			case po.Request != nil && len(pendingBySymbol[po.Symbol]) > 0:
-				// 送信結果不明の注文はこの失敗の行で知らせる（下の本流と同じ）。印を付けないと
-				// alertHeld が「照会できません」を別に送り、1 件の PENDING で 2 通になる
-				ids := pendingBySymbol[po.Symbol]
-				for _, id := range ids {
-					coveredByFailure[id] = true
-				}
-				fail(po.Symbol, pendingFailureNote(ids))
+				r.fail(po.Symbol, po.Note)
+			case po.Request != nil && len(r.pendingBySymbol[po.Symbol]) > 0:
+				// 送信結果不明の注文はこの失敗の行で知らせる（下の本流と同じ）
+				r.failPending(po.Symbol, r.pendingBySymbol[po.Symbol])
 			case po.Request != nil:
-				fail(po.Symbol, fmt.Sprintf("買付余力を照会できないため発注しません: %v", err))
+				r.fail(po.Symbol, fmt.Sprintf("買付余力を照会できないため発注しません: %v", err))
 			}
 		}
-		return failedOrders(failures, !isLive)
+		return failedOrders(r.failures, !r.isLive)
 	}
 	buyingPower := bal.BuyingPower
 
 	for _, po := range planned {
-		if po.Request == nil {
-			switch {
-			case po.Failed:
-				fail(po.Symbol, po.Note)
-			case po.Note != "":
-				logger.Info("accum.skip", fmt.Sprintf("%s: %s", po.Symbol, po.Note))
-			}
-			continue
-		}
-
-		req := *po.Request
-		if ids := pendingBySymbol[po.Symbol]; len(ids) > 0 {
-			for _, id := range ids {
-				coveredByFailure[id] = true
-			}
-			fail(po.Symbol, pendingFailureNote(ids))
-			continue
-		}
-		placed, err := led.WasPlaced(req.ClientOrderID)
+		spent, err := r.placeOne(po, buyingPower)
 		if err != nil {
-			// 台帳が読めないなら二重発注を否定できない。安全側に倒して以降を止める。
-			logger.Error("accum.ledger_read_failed", err.Error())
-			return fmt.Errorf("台帳を読めないため発注を中止しました: %w", err)
-		}
-		if placed {
-			logger.Info("accum.skip", fmt.Sprintf("%s: 既に発注済み (ID: %s)", po.Symbol, req.ClientOrderID))
-			continue
-		}
-
-		// 見積りと買付余力チェック
-		preview, err := b.Preview(req)
-		if err != nil {
-			fail(po.Symbol, fmt.Sprintf("見積り失敗: %v", err))
-			continue
-		}
-		totalCost := preview.EstimatedCost.Add(preview.EstimatedFee)
-		if totalCost.GreaterThan(buyingPower) {
-			fail(po.Symbol, fmt.Sprintf("買付余力不足 (必要 %s / 余力 %s)", totalCost, buyingPower))
-			continue
-		}
-
-		mkt := domain.MarketJP
-		amt := po.Amount
-
-		if !isLive {
-			// dry-run
-			if rerr := led.Record(req, ledger.DryRunStatus, nil, &monthStart, &amt, &mkt); rerr != nil {
-				logger.Warn("accum.ledger", fmt.Sprintf("%s: dry-run の記録に失敗: %v", po.Symbol, rerr))
-			}
-			logger.Info("accum.dry_run", fmt.Sprintf("[dry-run] %s %s株 @ %s円 (%s)", po.Symbol, req.Quantity, po.LimitPrice, req.Reason))
-			continue
-		}
-
-		// 実発注。台帳に送信中で先に記録してから送る。
-		ack, err := placeRecorded(b, led, req, monthStart, amt, mkt)
-		if err != nil {
-			var rejected *broker.OrderRejectedError
-			if errors.As(err, &rejected) {
-				// 届いた上で拒否された。台帳は REJECTED で、次回の差額で埋め直す
-				fail(po.Symbol, fmt.Sprintf("発注拒否: %v", err))
-				continue
-			}
-			// それ以外は止める。送信結果不明（ErrUnconfirmedOrder）・送ったのに台帳を
-			// 書けない（ErrOrderNotRecorded・拒否を REJECTED にできない ErrRejectionNotRecorded）・
-			// 送る前の記録に失敗——どれも台帳が実態を
-			// 表していないので、続けて出すと二重発注を否定できない
-			code := "accum.order_aborted"
-			var unconfirmed *ErrUnconfirmedOrder
-			var unrecorded *ErrOrderNotRecorded
-			var rejectionUnrecorded *ErrRejectionNotRecorded
-			switch {
-			case errors.As(err, &unconfirmed):
-				code = "accum.unconfirmed"
-			case errors.As(err, &unrecorded), errors.As(err, &rejectionUnrecorded):
-				code = "accum.order_not_recorded"
-			}
-			logger.Error(code, fmt.Sprintf("%s: %v", po.Symbol, err))
-			if len(failures) > 0 {
-				return fmt.Errorf("%w（ほかに発注できなかった銘柄: %s）", err, strings.Join(failures, " / "))
-			}
 			return err
 		}
-
-		logger.Info("accum.order", fmt.Sprintf("発注成功: %s %s株 (ID: %s)", po.Symbol, req.Quantity, ack.ClientOrderID))
-		buyingPower = buyingPower.Sub(totalCost)
+		buyingPower = buyingPower.Sub(spent)
 	}
 
-	return failedOrders(failures, !isLive)
+	return failedOrders(r.failures, !r.isLive)
+}
+
+// placeOne は計画の 1 行を出す（dry-run は記録だけ）。spent は買付余力から引く額
+// （本発注が受理されたときだけ）。エラーは以降の発注を止めるべきもの。
+func (r *orderRun) placeOne(po PlannedOrder, buyingPower decimal.Decimal) (spent decimal.Decimal, err error) {
+	if po.Request == nil {
+		switch {
+		case po.Failed:
+			r.fail(po.Symbol, po.Note)
+		case po.Note != "":
+			r.logger.Info("accum.skip", fmt.Sprintf("%s: %s", po.Symbol, po.Note))
+		}
+		return decimal.Zero, nil
+	}
+
+	req := *po.Request
+	if ids := r.pendingBySymbol[po.Symbol]; len(ids) > 0 {
+		r.failPending(po.Symbol, ids)
+		return decimal.Zero, nil
+	}
+	placed, err := r.led.WasPlaced(req.ClientOrderID)
+	if err != nil {
+		// 台帳が読めないなら二重発注を否定できない。安全側に倒して以降を止める。
+		r.logger.Error("accum.ledger_read_failed", err.Error())
+		return decimal.Zero, fmt.Errorf("台帳を読めないため発注を中止しました: %w", err)
+	}
+	if placed {
+		r.logger.Info("accum.skip", fmt.Sprintf("%s: 既に発注済み (ID: %s)", po.Symbol, req.ClientOrderID))
+		return decimal.Zero, nil
+	}
+
+	// 見積りと買付余力チェック
+	preview, err := r.b.Preview(req)
+	if err != nil {
+		r.fail(po.Symbol, fmt.Sprintf("見積り失敗: %v", err))
+		return decimal.Zero, nil
+	}
+	totalCost := preview.EstimatedCost.Add(preview.EstimatedFee)
+	if totalCost.GreaterThan(buyingPower) {
+		r.fail(po.Symbol, fmt.Sprintf("買付余力不足 (必要 %s / 余力 %s)", totalCost, buyingPower))
+		return decimal.Zero, nil
+	}
+
+	mkt := domain.MarketJP
+	amt := po.Amount
+
+	if !r.isLive {
+		// dry-run
+		if rerr := r.led.Record(req, ledger.DryRunStatus, nil, &r.monthStart, &amt, &mkt); rerr != nil {
+			r.logger.Warn("accum.ledger", fmt.Sprintf("%s: dry-run の記録に失敗: %v", po.Symbol, rerr))
+		}
+		r.logger.Info("accum.dry_run", fmt.Sprintf("[dry-run] %s %s株 @ %s円 (%s)", po.Symbol, req.Quantity, po.LimitPrice, req.Reason))
+		return decimal.Zero, nil
+	}
+
+	// 実発注。台帳に送信中で先に記録してから送る。
+	ack, err := placeRecorded(r.b, r.led, req, r.monthStart, amt, mkt)
+	if err != nil {
+		var rejected *broker.OrderRejectedError
+		if errors.As(err, &rejected) {
+			// 届いた上で拒否された。台帳は REJECTED で、次回の差額で埋め直す
+			r.fail(po.Symbol, fmt.Sprintf("発注拒否: %v", err))
+			return decimal.Zero, nil
+		}
+		return decimal.Zero, r.abort(po.Symbol, err)
+	}
+
+	r.logger.Info("accum.order", fmt.Sprintf("発注成功: %s %s株 (ID: %s)", po.Symbol, req.Quantity, ack.ClientOrderID))
+	return totalCost, nil
+}
+
+// abort は拒否以外の発注の失敗をログに残し、以降の発注を止めるエラーにする。
+//
+// 送信結果不明（ErrUnconfirmedOrder）・送ったのに台帳を書けない（ErrOrderNotRecorded・
+// 拒否を REJECTED にできない ErrRejectionNotRecorded）・送る前の記録に失敗——どれも台帳が
+// 実態を表していないので、続けて出すと二重発注を否定できない
+func (r *orderRun) abort(symbol string, err error) error {
+	code := "accum.order_aborted"
+	var unconfirmed *ErrUnconfirmedOrder
+	var unrecorded *ErrOrderNotRecorded
+	var rejectionUnrecorded *ErrRejectionNotRecorded
+	switch {
+	case errors.As(err, &unconfirmed):
+		code = "accum.unconfirmed"
+	case errors.As(err, &unrecorded), errors.As(err, &rejectionUnrecorded):
+		code = "accum.order_not_recorded"
+	}
+	r.logger.Error(code, fmt.Sprintf("%s: %v", symbol, err))
+	if len(r.failures) > 0 {
+		return fmt.Errorf("%w（ほかに発注できなかった銘柄: %s）", err, strings.Join(r.failures, " / "))
+	}
+	return err
 }
 
 // describeHeld は保留した注文をダイジェストの異常の文にする。
