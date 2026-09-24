@@ -33,6 +33,22 @@ func TestReportRunErrorAlertsFailedOrders(t *testing.T) {
 	}
 }
 
+// dry-run の回の失敗は件名に [dry-run] を付ける（本発注の失敗と見分ける）。
+func TestReportRunErrorMarksDryRun(t *testing.T) {
+	var titles []string
+	r := &cli.Run{App: "accum", Alerter: func(title, _ string, _ *logging.Logger) bool {
+		titles = append(titles, title)
+		return true
+	}}
+	failed := &execute.OrdersFailedError{Lines: []string{"2559: 足が無い"}, DryRun: true}
+	if err := reportRunError(r, failed); !errors.Is(err, failed) {
+		t.Fatalf("エラーを返すべき: %v", err)
+	}
+	if len(titles) != 1 || !strings.HasPrefix(titles[0], "[dry-run] 積立: 1 銘柄を発注できませんでした") {
+		t.Fatalf("通知 = %v", titles)
+	}
+}
+
 // 失敗が無ければ何もしない。ほかのエラーは異常終了として通知する。
 func TestReportRunErrorPassesThrough(t *testing.T) {
 	var titles []string

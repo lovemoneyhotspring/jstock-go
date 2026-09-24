@@ -70,16 +70,28 @@ func TestRunAccumulationFailsWhenLotSizeUnknown(t *testing.T) {
 }
 
 // 2. dry-run（PaperBroker）は与えていない銘柄の売買単位を持たない。以前は 100 株を
-// 返し、本発注（銘柄マスタの値）と違う計画になっていた。dry-run でも失敗として出る。
-func TestRunAccumulationDryRunFailsWhenPaperHasNoLotSize(t *testing.T) {
+// 返し、本発注（銘柄マスタの値）と違う計画になっていた。100 株では丸めないが、失敗にすると
+// lot_size_overrides に無い銘柄（1629・2559）で dry-run が毎回、失敗の通知と非 0 終了に
+// なるので、dry-run に限り見送り（通知しない・エラーを返さない）にする。本発注は失敗のまま（1.）。
+func TestRunAccumulationDryRunSkipsWhenPaperHasNoLotSize(t *testing.T) {
 	e := newReviewEnv(t)
 	e.cfg.Execution.LotSizeOverrides = nil
-	stubAlerts(t)
+	alerts := stubAlerts(t)
 
-	err := e.run(broker.NewPaperBroker(decimal.Zero, "open"), false)
-	var failed *OrdersFailedError
-	if !errors.As(err, &failed) || !strings.Contains(err.Error(), "売買単位が分からない") {
-		t.Fatalf("dry-run でも OrdersFailedError（売買単位が分からない）を返すべき: %v", err)
+	if err := e.run(broker.NewPaperBroker(decimal.Zero, "open"), false); err != nil {
+		t.Fatalf("dry-run の売買単位の不明を失敗にした: %v", err)
+	}
+	if len(*alerts) != 0 {
+		t.Errorf("dry-run の売買単位の不明で通知した: %v", *alerts)
+	}
+	if recent, err := e.led.Recent(1); err != nil || len(recent) != 0 {
+		t.Errorf("株数が決まらないのに dry_run を記録した: %+v (err: %v)", recent, err)
+	}
+
+	// 計画の段では見送りの理由が dry-run 用の文になる
+	planned, _, err := PlanOrders(e.cfg, e.store, e.led, clock.NowUTC(), false, false, nil)
+	if err != nil || len(planned) != 1 || !planned[0].LotUnknown || !planned[0].Failed {
+		t.Fatalf("PlanOrders は売買単位の不明を LotUnknown の失敗として返すべき: %+v (err: %v)", planned, err)
 	}
 
 	// 上書きがあれば dry-run でも計画どおり記録する
@@ -90,6 +102,40 @@ func TestRunAccumulationDryRunFailsWhenPaperHasNoLotSize(t *testing.T) {
 	recent, err := e2.led.Recent(1)
 	if err != nil || len(recent) != 1 || recent[0].Status != ledger.DryRunStatus {
 		t.Errorf("dry_run の記録 = %+v (err: %v)", recent, err)
+	}
+}
+
+// 2 の 2. dry-run の回の通知は件名に [dry-run] を付け、本発注の失敗と見分けられるようにする。
+func TestRunAccumulationDryRunAlertsAreMarked(t *testing.T) {
+	e := newReviewEnv(t)
+	alerts := stubAlerts(t)
+	// 足の無い銘柄（失敗）と、前日以前の送信結果不明（保留の通知）を作る
+	e.cfg.Tactics[0].Symbols = append(e.cfg.Tactics[0].Symbols, "2559.T")
+	e.cfg.Execution.LotSizeOverrides["2559.T"] = 1
+	recordOrder(t, e.led, "前日の不明", string(domain.OrderStatusPending), &e.thisMonth, 200_000)
+	backdate(t, e.led, "前日の不明")
+
+	err := e.run(broker.NewPaperBroker(decimal.Zero, "open"), false)
+	var failed *OrdersFailedError
+	if !errors.As(err, &failed) || !failed.DryRun || !strings.Contains(err.Error(), "2559") {
+		t.Fatalf("dry-run の印つきの OrdersFailedError を返すべき: %v (%+v)", err, failed)
+	}
+	if len(*alerts) != 1 || !strings.HasPrefix((*alerts)[0], DryRunTitlePrefix) {
+		t.Errorf("保留の通知の件名に [dry-run] が無い: %v", *alerts)
+	}
+
+	// 本発注の回は印を付けない
+	*alerts = nil
+	b := &runBroker{buyingPower: dec(1_000_000), cost: dec(101_000),
+		lots: map[string]decimal.Decimal{"1306": dec(100), "2559": dec(1)}}
+	err = e.run(b, true)
+	if !errors.As(err, &failed) || failed.DryRun {
+		t.Fatalf("本発注の OrdersFailedError に dry-run の印が付いた: %v (%+v)", err, failed)
+	}
+	for _, a := range *alerts {
+		if strings.HasPrefix(a, DryRunTitlePrefix) {
+			t.Errorf("本発注の通知に [dry-run] が付いた: %s", a)
+		}
 	}
 }
 

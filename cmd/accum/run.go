@@ -54,8 +54,11 @@ func reportRunError(r *cli.Run, err error) error {
 	}
 	r.Error("accum.order_failed", failed.Error())
 	digest.Fail("accum.order_failed", failed.Error())
-	r.Alert(fmt.Sprintf("積立: %d 銘柄を発注できませんでした", len(failed.Lines)),
-		strings.Join(failed.Lines, "\n"))
+	title := fmt.Sprintf("積立: %d 銘柄を発注できませんでした", len(failed.Lines))
+	if failed.DryRun {
+		title = execute.DryRunTitlePrefix + title
+	}
+	r.Alert(title, strings.Join(failed.Lines, "\n"))
 	return err
 }
 

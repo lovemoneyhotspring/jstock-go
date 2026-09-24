@@ -39,6 +39,10 @@ type PlannedOrder struct {
 	// 読めない・注文を組み立てられない）。時間帯の外や単元未満のような正常な見送りとは分け、
 	// run の最後に通知・ダイジェストの失敗・非 0 終了にする（A6）。
 	Failed bool
+	// LotUnknown は売買単位が分からない（lot_size_overrides にも銘柄情報にも無い）失敗。
+	// dry-run（PaperBroker）は銘柄マスタを持たないので、RunAccumulation は dry-run に限り
+	// これを失敗から外して見送りにする。
+	LotUnknown bool
 
 	// 以下は判断履歴に残すための材料。発注に至らなかった日
 	// （時間帯の外・単元未満）も残さないと、後から「倍率の付け方は
@@ -317,6 +321,7 @@ func PlanOrders(
 					Reason:     reason,
 					Note:       lotErr.Error(),
 					Failed:     true,
+					LotUnknown: errors.Is(lotErr, errLotUnknown),
 					Market:     entry.MarketResolved(),
 					JudgedOn:   lastRow.Date,
 					Month:      monthStart,
@@ -429,7 +434,7 @@ func PlanOrders(
 //   - どちらも無い → エラー。以前は既定の 100 株で丸め、1 株単位の ETF（2559・1629）が
 //     銘柄マスタを取れなかった回に「単元未満で見送り」になり、失敗として通知されなかった
 //     （2026-09-24 のレビュー）。dry-run（PaperBroker）は与えていない銘柄の値を持たないので、
-//     上書きの無い銘柄は dry-run でもここで失敗になる
+//     上書きの無い銘柄は dry-run でもここでエラーになる（RunAccumulation が dry-run に限り見送りに直す）
 func lotSizeFor(cfg *accumcfg.AccumConfig, symbol string, brokerLots map[string]decimal.Decimal) (decimal.Decimal, error) {
 	ov, hasOverride := cfg.Execution.LotSizeFor(symbol)
 	lot, hasBroker := brokerLots[symbol]
@@ -447,10 +452,17 @@ func lotSizeFor(cfg *accumcfg.AccumConfig, symbol string, brokerLots map[string]
 	case hasBroker:
 		return lot, nil
 	}
-	return decimal.Zero, errors.New(
-		"売買単位が分からないため発注しません（ブローカーの銘柄情報に無い・取得できない。" +
-			"lot_size_overrides にも無い。既定の 100 株では丸めない）")
+	return decimal.Zero, errLotUnknown
 }
+
+// errLotUnknown は売買単位が設定にも銘柄情報にも無い（lotSizeFor）。
+var errLotUnknown = errors.New(
+	"売買単位が分からないため発注しません（ブローカーの銘柄情報に無い・取得できない。" +
+		"lot_size_overrides にも無い。既定の 100 株では丸めない）")
+
+// dryRunLotNote は dry-run で売買単位が分からない銘柄の見送りの理由。
+const dryRunLotNote = "売買単位が分からないため見送り（dry-run は銘柄マスタを引かない。" +
+	"本発注ではブローカーの銘柄マスタを使う。lot_size_overrides に書けば dry-run でも株数を出す）"
 
 // isStale は最終足が maxStaleDays より古いかと、その日数を返す。
 func isStale(bars []domain.Bar, todayJST string, maxStaleDays int) (bool, int) {
@@ -541,7 +553,7 @@ func RunAccumulation(
 	// 銘柄（OrdersFailedError）として同じ注文を知らせる。以前はそれとは別に「照会できません」を
 	// 送り、1 件の PENDING で 2 通になっていた。失敗の行で知らせた注文はここから外す
 	coveredByFailure := map[string]bool{}
-	defer func() { alertHeld(synced.Unresolved, coveredByFailure, logger) }()
+	defer func() { alertHeld(synced.Unresolved, coveredByFailure, !isLive, logger) }()
 
 	// 送信結果不明（PENDING）が残る銘柄は発注しない。
 	//
@@ -561,6 +573,17 @@ func RunAccumulation(
 	if err != nil {
 		logger.Error("accum.plan_failed", err.Error())
 		return fmt.Errorf("発注計画を立てられないため発注を中止しました: %w", err)
+	}
+	// dry-run は銘柄マスタを持たない（PaperBroker）。売買単位の不明を失敗にすると、
+	// lot_size_overrides に無い銘柄（1629・2559）で毎回、失敗の通知と非 0 終了になる。
+	// 本発注ではブローカーの銘柄マスタを引くので、dry-run に限り見送りにする
+	if !isLive {
+		for i := range planned {
+			if planned[i].LotUnknown {
+				planned[i].Failed = false
+				planned[i].Note = dryRunLotNote
+			}
+		}
 	}
 	for _, s := range staleSignals {
 		logger.Warn("accum.stale_signal",
@@ -647,7 +670,7 @@ func RunAccumulation(
 				fail(po.Symbol, fmt.Sprintf("買付余力を照会できないため発注しません: %v", err))
 			}
 		}
-		return failedOrders(failures)
+		return failedOrders(failures, !isLive)
 	}
 	buyingPower := bal.BuyingPower
 
@@ -739,7 +762,7 @@ func RunAccumulation(
 		buyingPower = buyingPower.Sub(totalCost)
 	}
 
-	return failedOrders(failures)
+	return failedOrders(failures, !isLive)
 }
 
 // describeHeld は保留した注文をダイジェストの異常の文にする。
@@ -778,7 +801,7 @@ func describeHeld(held []UnresolvedOrder) (pending, other string) {
 // alertHeld は保留した注文を 1 通で知らせる。covered（発注できなかった銘柄の行で既に
 // 知らせる注文）は外す。前日以前の送信結果不明が 1 件でもあれば、件名で
 // `accum pending resolve` が要ることを言う（次の run を待っても消えない）。
-func alertHeld(held []UnresolvedOrder, covered map[string]bool, logger *logging.Logger) {
+func alertHeld(held []UnresolvedOrder, covered map[string]bool, dryRun bool, logger *logging.Logger) {
 	var lines []string
 	needsResolve := false
 	for _, u := range held {
@@ -794,6 +817,9 @@ func alertHeld(held []UnresolvedOrder, covered map[string]bool, logger *logging.
 	title := "積立: 前回の注文を照会できません（次の run で再判定。続くなら口座を確認してください）"
 	if needsResolve {
 		title = "積立: 送信結果不明の注文が残っています（口座の約定履歴で確かめて `accum pending resolve` で確定するまで、その銘柄は発注しません）"
+	}
+	if dryRun {
+		title = DryRunTitlePrefix + title
 	}
 	alert(title, strings.Join(lines, "\n"), logger)
 }
@@ -824,18 +850,23 @@ func orderableSymbols(cfg *accumcfg.AccumConfig) []string {
 // 出せた銘柄の注文はそのまま（止めるのは知らせることだけ）。
 type OrdersFailedError struct {
 	Lines []string
+	// DryRun は dry-run の回か。通知の件名に DryRunTitlePrefix を付ける（本発注の失敗と見分ける）
+	DryRun bool
 }
+
+// DryRunTitlePrefix は dry-run の回の運用通知の件名に付ける印。
+const DryRunTitlePrefix = "[dry-run] "
 
 func (e *OrdersFailedError) Error() string {
 	return fmt.Sprintf("%d 件を発注できませんでした: %s", len(e.Lines), strings.Join(e.Lines, " / "))
 }
 
 // failedOrders は失敗が無ければ nil（型付きの nil をエラーとして返さない）。
-func failedOrders(lines []string) error {
+func failedOrders(lines []string, dryRun bool) error {
 	if len(lines) == 0 {
 		return nil
 	}
-	return &OrdersFailedError{Lines: lines}
+	return &OrdersFailedError{Lines: lines, DryRun: dryRun}
 }
 
 // WindowState は今が発注時間帯かと、有効な戦略の時間帯の説明を返す。
