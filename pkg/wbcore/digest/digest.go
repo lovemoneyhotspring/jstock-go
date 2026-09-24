@@ -232,9 +232,21 @@ func Flush() error {
 	mu.Unlock()
 
 	// encoding/json はマップの鍵を辞書順に書くので、Python 版の sort_keys と同じ
-	line, err := json.Marshal(record)
-	if err != nil {
-		return err
+	line, marshalErr := json.Marshal(record)
+	if marshalErr != nil {
+		// 項目に NaN・Inf などが入ると直列化できない。その日の実行が「無かった」ことに
+		// ならないよう、項目を外した最小の行に失敗の理由を添えて書き、エラーも返す
+		minimal := map[string]any{}
+		for _, key := range []string{"schema", "ts_utc", "app", "env", "command", "run_id", "outcome", "dur_ms", "verify"} {
+			if value, ok := record[key]; ok {
+				minimal[key] = value
+			}
+		}
+		minimal["marshal_error"] = marshalErr.Error()
+		var err error
+		if line, err = json.Marshal(minimal); err != nil {
+			return marshalErr
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -248,7 +260,11 @@ func Flush() error {
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		return err
 	}
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	// 最小の行で残せても、項目を失ったことは呼び出し側に知らせる
+	return marshalErr
 }
 
 // Reset はテスト用。実行中の記録を捨てる。

@@ -210,11 +210,16 @@ func (l *Logger) log(level, code, msg string, extra map[string]any) {
 	}
 
 	bytes, err := json.Marshal(record)
-	if err == nil {
-		if l.file != nil {
-			_, _ = l.file.Write(bytes)
-			_, _ = l.file.WriteString("\n")
-		}
+	if err != nil {
+		// extra に NaN・Inf などが入ると直列化できない。黙って捨てると「その行が
+		// あったこと」まで消えるので、extra を外した最小の行に失敗の理由を添えて残す
+		record.Extra = map[string]any{"marshal_error": err.Error()}
+		bytes, err = json.Marshal(record)
+	}
+	if err == nil && l.file != nil {
+		// O_APPEND で開いたファイルへの 1 回の write にまとめる。本文と改行を
+		// 2 回に分けると、同じファイルへ追記する別の実行と行がつながりうる
+		_, _ = l.file.Write(append(bytes, '\n'))
 	}
 
 	// 端末表示 (簡潔なフォーマット)

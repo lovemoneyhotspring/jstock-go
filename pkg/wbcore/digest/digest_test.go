@@ -2,6 +2,7 @@ package digest
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -63,6 +64,26 @@ func TestFlushWritesOneLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	readOnly(t, dir)
+}
+
+func TestFlushKeepsMinimalLineOnMarshalError(t *testing.T) {
+	dir := t.TempDir()
+	start(t, dir)
+	Note(map[string]any{"ratio": math.NaN()})
+
+	if err := Flush(); err == nil {
+		t.Fatal("直列化の失敗はエラーで返すべき")
+	}
+	record := readOnly(t, dir)
+	if record["run_id"] != "abc123" || record["outcome"] != "ok" {
+		t.Fatalf("固定項目が残っていない: %v", record)
+	}
+	if _, has := record["marshal_error"]; !has {
+		t.Errorf("失敗の理由が無い: %v", record)
+	}
+	if _, has := record["ratio"]; has {
+		t.Errorf("直列化できない項目が残っている: %v", record)
+	}
 }
 
 func TestAnomalyAndFail(t *testing.T) {
