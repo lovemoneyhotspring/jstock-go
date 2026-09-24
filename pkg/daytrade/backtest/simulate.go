@@ -485,13 +485,13 @@ func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options
 	trades := pickAndPrice(longRows, panel.Days, withDayRules(legParams{
 		n: n, budget: budget, sign: 1, commission: true, fill: opts.fill(),
 		side: domain.SideBuy, signal: cfg.Signal, margin: cfg.Margin,
-		pick: selection.PickOptions{
+		pick: selection.TurnoverOptions(selection.PickOptions{
 			Weighting:    cfg.Capital.Weighting,
 			Side:         domain.SideBuy,
 			MaxAmount:    cfg.Capital.MaxOrder,
 			ValuePool:    cfg.Signal.ValuePool,
 			MaxPerSector: cfg.Signal.MaxPerSector,
-		},
+		}, cfg.Capital),
 	}, cfg, opts, signals, panel.Days))
 	trades = applyCarry(trades, rowsByKey(panel), 1, carryPenalty)
 

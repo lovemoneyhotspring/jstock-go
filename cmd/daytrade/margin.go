@@ -122,6 +122,8 @@ func warmMargin(cfg dtconfig.Config, day time.Time) {
 }
 
 // applyMarginCap は朝の保証金で建玉の上限を下げる。**下げ方向のみ**。
+// ただし margin.capacity_ratio を置いた設定（規則 R）では、建可能額の比で上げ下げ両方に決め直す
+// （margincap.Apply → applyRatio）。キャッシュが無い・古い朝は同じく設定の値で建てる。
 //
 // 設定は狙いの水準で、ここは「その日それが本当に建てられるか」の検算。
 // 保証金が増えていても勝手には上げない（増えたぶんを使うかは人が決める）。
@@ -146,7 +148,8 @@ func applyMarginCap(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 
 	capped, res := margincap.Apply(cfg, snapshot)
 	// 縮小した後の設定でも、ショック日の倍率まで含めると枠を超えることがある
-	if over, total := margincap.ShockExceeds(capped, snapshot); over {
+	// （比で決め直す margin.capacity_ratio ではショック日の総額を SizeDay が頭打ちにするので見ない）
+	if over, total := margincap.ShockExceeds(capped, snapshot); over && !res.Ratio {
 		fields["shock_total"] = total.StringFixed(0)
 		logWarn("daytrade.margin_cap", "ショック日の倍率を掛けると建玉が保証金から導いた上限を超える", fields)
 	}
@@ -171,6 +174,11 @@ func applyMarginCap(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 		logWarn("daytrade.margin_cap", "保証金が足りず N が 0 になった（今日は建てない）", fields)
 		alert("daytrade: 保証金不足で建てません",
 			"保証金から導いた建玉が 1 注文に届かず、今日は何も建てません。"+snapshot.Describe())
+		return capped
+	}
+	if res.Ratio {
+		logInfo("daytrade.margin_cap", res.Describe(), fields)
+		fmt.Println(res.Describe())
 		return capped
 	}
 	if !res.Applied {

@@ -39,6 +39,19 @@ max_order = 2500000        # 1 銘柄の上限（1 注文予算の 1.5 倍）。
                            # 150→167 +9.0% / 167→200 +8.8% / 200→250 +1.9% / 250→300 +0.1%）。
                            # 150 万据え置きは order_budget 167 万を下回って毎日張り付くが、結果は「壊れる」ではなく
                            # 「小さく回る」（損益 −17%、Sharpe 2.95 → 2.90）。下げない理由は Sharpe が下がるから
+# 規則 R（2026-09-25〜）: 業種上限後の gap_vol 順に、1 銘柄 min(売買代金 20 日中央値 × 0.2%, 総額 ÷ 7) を
+# 順位の上から割り当て、総額を使い切ったら止める（余りは現金）。N は資金で動かさず max_positions。
+# 本番の形（気配の誤差・休み・ショック日）で資金 3,000 万の年率が N=3 の 1% → 16%、今の規模でも負けない。
+# 研究は 20 位までだが max_positions = 12 で止める: 注文の送信は 2 回/秒（broker.orderLimiter）で、
+# 寄成（8:59:53 開始、注文は約 1 秒後から）が 9:00 までに送れるのは 12 本まで（54.0 + (n−2)×0.5 秒）。
+# 資金 700 万では 1 日の銘柄数は中央値 9・99% 点 12 で、13 銘柄以上の日は 0.3%（止めて使えない資金は平均 0.02%）
+# ÷ 7 は 1 銘柄が総額の 14% まで（÷ 5〜÷ 9 は差が無く、集中を避ける好みで選んだ）。
+# 研究ノート 20-research/2026-09-jp-daytrade-nscale.md。上の max_capital は保証金が読めない朝の値
+# （[margin] capacity_ratio が毎朝の建可能額から決め直す）。max_order は規則 R では総額 ÷ 7 が先に効く
+weighting = "turnover"
+turnover_ratio = 0.002
+name_divisor = 7
+max_positions = 12
 
 # [signal]（rank_by = lgbm とモデルを含む）は土台 config/daytrade をそのまま継ぐ。
 # ロングの規則は土台と子で同一であること（config_test の TestMarginConfigMatchesBaseLongRules）。
@@ -57,6 +70,13 @@ shock_short_scale = 0.0
 [margin]
 enabled = true
 cash = 2000000             # 保証金として差し入れる現金（円）。年率・DD はこれに対して見る
+# 長短合計の上限を毎朝の信用新規建可能額から決め直す（上げ下げ両方。2026-09-25〜）。
+# 平日 68%・ショック日（ロング ×1.5 の後）77%（= 1 ÷ 1.3、従来の安全率）・天井 1,000 万。
+# 天井は本番の滑りを測るまでの栓（20-research/2026-09-jp-daytrade-margin-80pct-compound。60 件で 1,500 万を判断）。
+# ショートは下の max_capital が上限のまま先に取り、残りがロング。使わなかったショートの枠は spill_to_long でロングへ
+capacity_ratio = 0.68
+shock_capacity_ratio = 0.77
+capacity_ceiling = 10000000
 max_capital = 2000000      # ショート側の 1 日の上限（円）。倍率 1.0 のときの建玉金額
 order_budget = 670000      # ロングと同額（1 注文が小さいと滑りの bp 負担が上がる）
 max_positions = 10

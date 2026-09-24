@@ -143,6 +143,18 @@ func SizeDay(in SizingInput) DaySizing {
 			Level: "info", Code: "daytrade.regime", Msg: "ショック日",
 			Fields: map[string]any{"reason": v.ShockReason, "long_scale": v.ShockLong, "short_scale": v.ShockShort},
 		})
+		// 保証金から導いたショック日の上限（margin.shock_capacity_ratio。margincap が入れる）で頭打ち。
+		// 倍率を掛けた総額が建可能額を超えると発注が弾かれる
+		if limit := cfg.Capital.ShockTotalCap; limit.IsPositive() && dayN > 0 {
+			if total := budget.Mul(decimal.NewFromInt(int64(dayN))); total.GreaterThan(limit) {
+				budget = limit.Div(decimal.NewFromInt(int64(dayN))).Floor()
+				d.note(SizingNote{
+					Text:  fmt.Sprintf("ショック日の総額 %s 円を保証金の上限 %s 円で頭打ち（1 注文 %s 円）", cli.Yen(total), cli.Yen(limit), cli.Yen(budget)),
+					Level: "info", Code: "daytrade.margin_cap", Msg: "ショック日の総額を保証金で頭打ち",
+					Fields: map[string]any{"total": total.String(), "cap": limit.String(), "budget": budget.String()},
+				})
+			}
+		}
 	}
 	// 持ち越しの拘束: 残りの資金で建てられる件数に減らす。1 注文の予算に満たなくても残りがあれば
 	// 1 件を小さく建てる——一部が拘束されただけで一日を休むのは機会損失
@@ -232,6 +244,13 @@ func (d DaySizing) longAfterPlaced(dayN int, budget decimal.Decimal) (int, decim
 	placed := d.in.Placed
 	if placed.Long == 0 && !placed.LongAmount.IsPositive() {
 		return dayN, budget
+	}
+	// 規則 R は総額を使い切らない日がある（上限で頭打ち・1 単元が載らない銘柄を飛ばす）。その余りを
+	// 再実行が「まだ建てていない枠」と読むと、寄りの後に 13 位以下を成行で買い足す——寄り後の買い増しは
+	// 効きが無く（研究ノート 2026-09-jp-daytrade-nscale）、max_positions の栓も破る。1 件でも建てた日は
+	// 足さない（寄る前の回が丸ごと失敗した日は placed が 0 なので、9:01 の回が満額で建てる）
+	if d.in.Cfg.Capital.Weighting == config.WeightingTurnover {
+		return 0, budget
 	}
 	left := budget.Mul(decimal.NewFromInt(int64(dayN))).Sub(placed.LongAmount)
 	return capByAmount(dayN-placed.Long, left, budget)

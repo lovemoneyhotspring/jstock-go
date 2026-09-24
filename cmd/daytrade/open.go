@@ -273,11 +273,11 @@ func (s *openState) warnNoSector(ranking []selection.Ranked) {
 
 // pickLong はロングの脚を選び、順位表（BUY）を作って表示・ログに残す。
 func (s *openState) pickLong(ranking []selection.Ranked, n int, budget decimal.Decimal) (picks []selection.Pick, frames []history.Frame) {
-	longOpts := selection.PickOptions{
+	longOpts := selection.TurnoverOptions(selection.PickOptions{
 		N: n, Budget: budget, Weighting: s.sizing.Long.Weighting, Side: domain.SideBuy,
 		MaxAmount: s.cfg.Capital.MaxOrder, ValuePool: s.cfg.Signal.ValuePool,
 		MaxPerSector: s.cfg.Signal.MaxPerSector,
-	}
+	}, s.cfg.Capital)
 	picks = selection.PickFrom(ranking, longOpts)
 	longReasons := selection.PickReasons(ranking, longOpts, picks)
 	rulePicks := selection.RulePicks(ranking, longOpts, picks)
