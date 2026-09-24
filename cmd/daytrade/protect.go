@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/execute"
 	dtledger "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
@@ -29,7 +31,7 @@ func newProtectCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&liveFlag, "live", false, "注文を送る。無ければ何もしない")
 	cmd.Flags().BoolVarP(&yesFlag, "yes", "y", false, "本番の確認を省く（cron 用）")
-	cmd.Flags().BoolVar(&ignoreWindowFlag, "ignore-window", false, "時間帯の外でも送る")
+	cmd.Flags().BoolVar(&ignoreWindowFlag, "ignore-window", false, "時間帯の外でも送る（後場寄り 12:30 より前は付けても送らない。前引けで約定するため）")
 	cmd.Flags().StringVar(&dateFlag, "date", "", "判定日（YYYY-MM-DD、既定は今日）")
 	return cmd
 }
@@ -54,18 +56,28 @@ func runProtect(live, yes, ignoreWindow bool, date string) error {
 		digest.Skipped("disabled")
 		return nil
 	}
-	// 場が開いている間（寄った後〜15:20 の close の前）だけ。close の後に置くと、close が出した
-	// 成行と重なる。guard と同じ時間帯を使う
-	if live && !ignoreWindow && !cfg.Execution.InWindow("guard", now, jst) {
-		fmt.Printf("保険を置く時間帯の外（%s）。何もしません\n", describeWindow(cfg, "guard"))
+	// 後場（12:30〜15:20 の close の前）だけ。前場に置いた「引け」は前引けで約定し、close の後に置くと
+	// close が出した成行と重なる
+	if live && !ignoreWindow && !cfg.Execution.InWindow("protect", now, jst) {
+		fmt.Printf("保険を置く時間帯の外（%s）。何もしません\n", describeWindow(cfg, "protect"))
 		logInfo("daytrade.skip", "保険を置く時間帯の外",
-			map[string]any{"reason": "window", "phase": "protect", "window": describeWindow(cfg, "guard")})
+			map[string]any{"reason": "window", "phase": "protect", "window": describeWindow(cfg, "protect")})
+		digest.Skipped("window")
+		return nil
+	}
+	// --ignore-window でも後場寄りより前には置かない（前引けで約定し、建玉が昼に手仕舞われる）
+	if local := now.In(jst); live && local.Before(time.Date(local.Year(), local.Month(), local.Day(),
+		dtconfig.ProtectEarliestHour, dtconfig.ProtectEarliestMinute, 0, 0, jst)) {
+		fmt.Printf("後場寄り（%02d:%02d）より前。前場に置いた「引け」は前引けで約定するので置きません\n",
+			dtconfig.ProtectEarliestHour, dtconfig.ProtectEarliestMinute)
+		logInfo("daytrade.skip", "保険を置く時間帯の外（前場）",
+			map[string]any{"reason": "morning", "phase": "protect", "window": describeWindow(cfg, "protect")})
 		digest.Skipped("window")
 		return nil
 	}
 	allowed, reason := appSettings.CanExecuteLive(live, cfg.Execution.KillSwitch)
 	started := now
-	deadline := cfg.Execution.RunDeadline("guard", now, live && !ignoreWindow, jst)
+	deadline := cfg.Execution.RunDeadline("protect", now, live && !ignoreWindow, jst)
 	logConfig(cfg, "protect", map[string]any{
 		"day": day.Format(DateLayout), "live": live,
 		"deadline": deadlineText(deadline), "max_run_seconds": cfg.Execution.MaxRunSeconds,

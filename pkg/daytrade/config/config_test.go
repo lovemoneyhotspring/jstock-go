@@ -316,6 +316,11 @@ func TestInWindow(t *testing.T) {
 		{"終わりちょうどは外（締め切りと同じ）", "entry", at(9, 15, 0), false},
 		{"終わりの分の途中も外", "entry", at(9, 15, 30), false},
 		{"引け", "exit", at(15, 25, 0), true},
+		{"保険は前場に置かない", "protect", at(11, 0, 0), false},
+		{"保険は後場寄りの 1 秒前も外", "protect", at(12, 29, 59), false},
+		{"保険は後場寄りから", "protect", at(12, 30, 0), true},
+		{"保険の終わりの 1 秒前", "protect", at(15, 18, 59), true},
+		{"保険の終わりちょうどは外", "protect", at(15, 19, 0), false},
 		{"UTC では前日でも JST で判定", "entry", time.Date(2026, 9, 14, 0, 5, 0, 0, time.UTC), true},
 	}
 	for _, c := range cases {

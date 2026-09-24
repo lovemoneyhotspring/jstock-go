@@ -382,7 +382,12 @@ type Execution struct {
 	// GuardWindow は材料の出た売建を取消・返済してよい時間帯（daytrade guard）。引けの手仕舞い
 	// （15:20〜）と重ねない。
 	GuardWindow []string `toml:"guard_window"`
-	KillSwitch  bool     `toml:"kill_switch"`
+	// ProtectWindow は保険の手仕舞いを置いてよい時間帯（daytrade protect）。**後場（12:30〜）だけ。**
+	// 立花の「引け」（sCondition = 4）は前場に置くと前引け（11:30）で約定する（2026-09-24 に実機で確認。
+	// 前引けの手仕舞いは 15:20 の成行より 1 日 −4,758 円、t −2.62。vault 2026-09-jp-daytrade-exit-midday）。
+	// 終わりは guard と同じく 15:20 の close の前。
+	ProtectWindow []string `toml:"protect_window"`
+	KillSwitch    bool     `toml:"kill_switch"`
 	// MaxQuoteAge は気配のタイムスタンプがこれより古ければ使わない（秒）。
 	MaxQuoteAge int `toml:"max_quote_age"`
 	// MaxRunSeconds は open / close の 1 回の実行に許す時間（秒）。開始からこれだけ経つか
@@ -494,7 +499,7 @@ func (e Execution) RunDeadline(name string, now time.Time, useWindow bool, jst *
 	return deadline
 }
 
-// InWindow は now が name（entry / exit）の時間帯か（JST）。
+// InWindow は now が name（entry / guard / protect / exit）の時間帯か（JST）。
 //
 // 終わりは RunDeadline と同じ「HH:MM:00」で、秒まで見て切る。分単位で両端を含めると
 // 9:15:30 が「窓の中」なのに締め切り済みになり、全候補が失敗として通知される。
@@ -598,6 +603,7 @@ func Default() Config {
 			PreopenLegs:    PreopenLegsNone,
 			ExitWindow:     []string{"15:20", "15:30"},
 			GuardWindow:    []string{"09:00", "15:19"},
+			ProtectWindow:  []string{"12:30", "15:19"},
 			MaxQuoteAge:    90,
 			MaxRunSeconds:  150,
 			SpreadBPOpen:   decimal.NewFromInt(27),
@@ -678,7 +684,15 @@ func (m Margin) BudgetPerOrder() decimal.Decimal {
 	return m.MaxCapital.Div(decimal.NewFromInt(int64(n))).Floor()
 }
 
-// Window は entry / guard / exit の時間帯（JST の時・分）。それ以外の名前は exit。
+// ProtectEarliestHour / ProtectEarliestMinute は保険の引け注文を置いてよい最も早い時刻（後場寄り）。
+// 前場に置いた「引け」は前引け（11:30）で約定する（2026-09-24 に実機で確認）。protect_window の検査と、
+// --ignore-window でも越えない下限に使う。
+const (
+	ProtectEarliestHour   = 12
+	ProtectEarliestMinute = 30
+)
+
+// Window は entry / guard / protect / exit の時間帯（JST の時・分）。それ以外の名前は exit。
 func (e Execution) Window(name string) (startHour, startMinute, endHour, endMinute int, err error) {
 	raw := e.ExitWindow
 	switch name {
@@ -686,6 +700,8 @@ func (e Execution) Window(name string) (startHour, startMinute, endHour, endMinu
 		raw = e.EntryWindow
 	case "guard":
 		raw = e.GuardWindow
+	case "protect":
+		raw = e.ProtectWindow
 	}
 	if len(raw) != 2 {
 		return 0, 0, 0, 0, fmt.Errorf("%s_window は開始と終了の 2 要素", name)
@@ -933,6 +949,16 @@ func (c Config) Validate() error {
 	// 書き間違えると guard が毎回「時間帯の外」で黙って何もしなくなる
 	if _, _, _, _, err := c.Execution.Window("guard"); err != nil {
 		return err
+	}
+	// 前場に掛かると、保険が前引けで約定して建玉が昼に手仕舞われる。15:20 の close に掛かると成行と重なる
+	if sh, sm, eh, em, err := c.Execution.Window("protect"); err != nil {
+		return err
+	} else if sh*60+sm < ProtectEarliestHour*60+ProtectEarliestMinute {
+		return fmt.Errorf("execution.protect_window の開始は後場の %02d:%02d 以降にする（今は %s。前場に置いた「引け」は前引けで約定する）",
+			ProtectEarliestHour, ProtectEarliestMinute, c.Execution.ProtectWindow[0])
+	} else if xh, xm, _, _, err := c.Execution.Window("exit"); err == nil && eh*60+em > xh*60+xm {
+		return fmt.Errorf("execution.protect_window の終わり（%s）が exit_window の開始（%s）より後。close の成行と重なる",
+			c.Execution.ProtectWindow[1], c.Execution.ExitWindow[0])
 	}
 	if c.Execution.MaxRunSeconds < 0 || c.Book.MaxRunSeconds < 0 {
 		return fmt.Errorf("execution.max_run_seconds / book.max_run_seconds は 0 以上")
