@@ -78,12 +78,16 @@ func CarryOver(
 	month time.Time,
 	budget decimal.Decimal,
 	started *time.Time,
-	hadOrders func(symbol string, month time.Time) bool,
-	placedAmount func(symbol string, month time.Time) decimal.Decimal,
-) decimal.Decimal {
+	hadOrders func(symbol string, month time.Time) (bool, error),
+	placedAmount func(symbol string, month time.Time) (decimal.Decimal, error),
+) (decimal.Decimal, error) {
 	previous := month.AddDate(0, -1, 0)
-	if !hadOrders(symbol, previous) {
-		return decimal.Zero
+	had, err := hadOrders(symbol, previous)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	if !had {
+		return decimal.Zero, nil
 	}
 
 	prevKey := previous.Format("2006-01")
@@ -94,15 +98,19 @@ func CarryOver(
 		}
 	}
 	if len(lastMonth) == 0 {
-		return decimal.Zero
+		return decimal.Zero, nil
 	}
 
-	base, extras, _ := MonthTarget(lastMonth, budget, previous, started)
-	remaining := base.Add(extras).Sub(placedAmount(symbol, previous))
-	if remaining.IsNegative() {
-		return decimal.Zero
+	placed, err := placedAmount(symbol, previous)
+	if err != nil {
+		return decimal.Zero, err
 	}
-	return remaining
+	base, extras, _ := MonthTarget(lastMonth, budget, previous, started)
+	remaining := base.Add(extras).Sub(placed)
+	if remaining.IsNegative() {
+		return decimal.Zero, nil
+	}
+	return remaining, nil
 }
 
 // IsReleaseDay は直前の確定足が入金日か増額のリリース日か。

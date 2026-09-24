@@ -67,6 +67,8 @@ func recordOrder(t *testing.T, led *ledger.Ledger, id, status string, planMonth 
 
 func strPtr(s string) *string { return &s }
 
+func boolPtr(b bool) *bool { return &b }
+
 // --- PlanOrders --------------------------------------------------------
 
 func TestPlanOrders(t *testing.T) {
@@ -87,10 +89,13 @@ func TestPlanOrders(t *testing.T) {
 		budget       int64
 		setup        func(t *testing.T, cfg *accumcfg.AccumConfig, led *ledger.Ledger)
 		ignoreWindow bool
-		wantRows     int
-		wantQty      int64  // 0 なら注文なし
-		wantNote     string // 含むべき文字列。空なら Note なし
-		check        func(t *testing.T, po PlannedOrder)
+		// noStart なら開始日を台帳に入れない（既定は前年から積み立てている銘柄）
+		noStart   bool
+		markStart bool
+		wantRows  int
+		wantQty   int64  // 0 なら注文なし
+		wantNote  string // 含むべき文字列。空なら Note なし
+		check     func(t *testing.T, po PlannedOrder)
 	}{
 		{
 			name: "通常の日は予算ぶんを指値で出す", now: monday,
@@ -119,6 +124,11 @@ func TestPlanOrders(t *testing.T) {
 		{
 			name: "足が無ければ見送りの行だけ残す", now: monday, budget: 200_000,
 			wantRows: 1, wantNote: "足データなし",
+			check: func(t *testing.T, po PlannedOrder) {
+				if !po.Failed {
+					t.Error("失敗として印が付いていない（通知されない。A6）")
+				}
+			},
 		},
 		{
 			name: "今月分を発注済みなら何も作らない", now: monday,
@@ -220,6 +230,64 @@ func TestPlanOrders(t *testing.T) {
 			},
 		},
 		{
+			// 設定の表記（"1306.T"）で書いた売買単位の上書きが発注の表記（"1306"）で効く（A5）。
+			// 以前は一度も当たらず、既定の 100 株で丸めて見送りになっていた
+			name: "売買単位の上書きは足の表記のキーでも効く", now: monday,
+			from: "2026-08-25", to: "2026-09-13", budget: 50_000,
+			setup: func(t *testing.T, cfg *accumcfg.AccumConfig, _ *ledger.Ledger) {
+				cfg.Execution.LotSizeOverrides = map[string]int{"1306.T": 10}
+			},
+			// floor(50000 / 1010) = 49 → 10 株単位で 40 株
+			wantRows: 1, wantQty: 40,
+		},
+		{
+			// 開始日の記録が無ければ今日（9/14）を開始日として日割りする。dry-run は台帳に残さない（A4）
+			name: "開始日が無ければ今日から日割りし、dry-run は記録しない", now: monday,
+			from: "2026-08-25", to: "2026-09-13", budget: 300_000, noStart: true,
+			// 9 月は 30 日、9/14 から 17 日 → 300000 × 17/30 = 170000 → floor(170000/1010)=168 → 100 株
+			wantRows: 1, wantQty: 100,
+			check: func(t *testing.T, po PlannedOrder) {
+				if !po.Target.Equal(dec(170_000)) || !strings.Contains(po.Reason, "日割り") {
+					t.Errorf("目標 = %s（%s）, want 170000 の日割り", po.Target, po.Reason)
+				}
+			},
+		},
+		{
+			name: "本発注の run は開始日を台帳に残す", now: monday,
+			from: "2026-08-25", to: "2026-09-13", budget: 300_000, noStart: true, markStart: true,
+			wantRows: 1, wantQty: 100,
+			check: func(t *testing.T, po PlannedOrder) {
+				if !po.Target.Equal(dec(170_000)) {
+					t.Errorf("目標 = %s, want 170000", po.Target)
+				}
+			},
+		},
+		{
+			name: "記録済みの開始日を使う", now: monday,
+			from: "2026-08-25", to: "2026-09-13", budget: 300_000, noStart: true,
+			setup: func(t *testing.T, _ *accumcfg.AccumConfig, led *ledger.Ledger) {
+				if err := led.MarkStarted("1306", "2026-09-10"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			// 9/10 から 21 日 → 300000 × 21/30 = 210000 → floor(210000/1010)=207 → 200 株
+			wantRows: 1, wantQty: 200,
+		},
+		{
+			// 判定用の足が無いとき、黙って買う銘柄自身の足で判定しない（A7）
+			name: "判定用の足が無ければ見送り、失敗として残す", now: monday,
+			from: "2026-08-25", to: "2026-09-13", budget: 200_000,
+			setup: func(t *testing.T, cfg *accumcfg.AccumConfig, _ *ledger.Ledger) {
+				cfg.Tactics[0].SignalSymbol = "^IXIC"
+			},
+			wantRows: 1, wantNote: "判定用の足（^IXIC）",
+			check: func(t *testing.T, po PlannedOrder) {
+				if !po.Failed {
+					t.Error("失敗として印が付いていない（通知されない）")
+				}
+			},
+		},
+		{
 			name: "前月の買い残しを当月に繰り越す", now: monday,
 			from: "2026-08-01", to: "2026-09-13", budget: 200_000,
 			setup: func(t *testing.T, _ *accumcfg.AccumConfig, led *ledger.Ledger) {
@@ -245,14 +313,41 @@ func TestPlanOrders(t *testing.T) {
 				writeBars(t, store, "1306.T", tc.from, tc.to, 1000)
 			}
 			led := newLedger(t)
+			if !tc.noStart {
+				if err := led.MarkStarted("1306", "2025-01-01"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			cfg := planConfig(tc.budget, window.Unrestricted())
 			if tc.setup != nil {
 				tc.setup(t, cfg, led)
 			}
-
-			orders, stale, err := PlanOrders(cfg, store, led, tc.now, tc.ignoreWindow)
+			startedBefore, err := led.StartedOn("1306")
 			if err != nil {
 				t.Fatal(err)
+			}
+
+			orders, stale, err := PlanOrders(cfg, store, led, tc.now, tc.ignoreWindow, tc.markStart, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			startedAfter, err := led.StartedOn("1306")
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case startedBefore != nil:
+				if startedAfter == nil || *startedAfter != *startedBefore {
+					t.Errorf("記録済みの開始日が変わった: %v → %v", *startedBefore, startedAfter)
+				}
+			case tc.markStart && tc.wantRows > 0:
+				if want := tc.now.Format("2006-01-02"); startedAfter == nil || *startedAfter != want {
+					t.Errorf("開始日 = %v, want %s（本発注の run が残す）", startedAfter, want)
+				}
+			case !tc.markStart:
+				if startedAfter != nil {
+					t.Errorf("dry-run が開始日 %s を台帳に残した", *startedAfter)
+				}
 			}
 			if len(stale) != 0 {
 				t.Errorf("判定用の銘柄が無いのに古い警告: %v", stale)
@@ -290,6 +385,95 @@ func TestPlanOrders(t *testing.T) {
 	}
 }
 
+// 開始日の記録が無くても注文が既にある銘柄は、最初の注文の日を開始日にする（A4）。
+// 開始日を記録する経路が無かった間に発注・取り込みした銘柄（本番の台帳の 563A・1629・2559 は
+// 2026-09-11 の注文だけがある）を、今日から始めたものとして日割りしない。
+func TestPlanOrdersStartsFromFirstOrderWhenUnmarked(t *testing.T) {
+	store := data.NewBarStore(t.TempDir())
+	writeBars(t, store, "1306.T", "2026-08-25", "2026-09-13", 1000)
+	cfg := planConfig(300_000, window.Unrestricted())
+	led := newLedger(t)
+	// 計画月の違う注文（当月・前月の額には効かない）。placed_at は実時計で入る
+	recordOrder(t, led, "以前", string(domain.OrderStatusRejected), strPtr("2026-06-01"), 100_000)
+	first, err := led.FirstOrderDay("1306", clock.Tokyo)
+	if err != nil || first == nil {
+		t.Fatalf("最初の注文日 = %v, %v", first, err)
+	}
+
+	now := time.Date(2026, 9, 14, 14, 30, 0, 0, clock.Tokyo)
+	if _, _, err := PlanOrders(cfg, store, led, now, false, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := led.StartedOn("1306")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || *got != *first {
+		t.Errorf("開始日 = %v, want %s（最初の注文の日。今日 %s ではない）", got, *first, now.Format("2006-01-02"))
+	}
+}
+
+// 売買単位は設定の上書き → ブローカーの銘柄情報 → 既定 100 株の順に決める。
+// 設定に書かない 1 株単位の ETF（2559）を既定の 100 株で丸めると、予算が 100 株に届かず
+// 毎回「単元未満」で見送りになっていた。
+func TestPlanOrdersLotSizeFromBroker(t *testing.T) {
+	now := time.Date(2026, 9, 14, 14, 30, 0, 0, clock.Tokyo)
+	cases := []struct {
+		name      string
+		overrides map[string]int
+		lots      map[string]decimal.Decimal
+		want      int64
+	}{
+		// 25000 / 1010 = 24 株
+		{name: "銘柄情報の 1 株単位で丸める", lots: map[string]decimal.Decimal{"1306": dec(1)}, want: 24},
+		{name: "設定の上書きが銘柄情報より先", overrides: map[string]int{"1306.T": 10},
+			lots: map[string]decimal.Decimal{"1306": dec(1)}, want: 20},
+		{name: "どちらも無ければ既定の 100 株（単元未満で見送り）", want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := data.NewBarStore(t.TempDir())
+			writeBars(t, store, "1306.T", "2026-08-25", "2026-09-13", 1000)
+			cfg := planConfig(25_000, window.Unrestricted())
+			cfg.Execution.LotSizeOverrides = tc.overrides
+			led := newLedger(t)
+			if err := led.MarkStarted("1306", "2025-01-01"); err != nil {
+				t.Fatal(err)
+			}
+			orders, _, err := PlanOrders(cfg, store, led, now, false, false, tc.lots)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(orders) != 1 {
+				t.Fatalf("行数 = %d: %+v", len(orders), orders)
+			}
+			po := orders[0]
+			if tc.want == 0 {
+				if po.Request != nil || !strings.Contains(po.Note, "単元株数") {
+					t.Errorf("見送りになるべき: %+v", po)
+				}
+				return
+			}
+			if po.Request == nil || !po.Request.Quantity.Equal(dec(tc.want)) {
+				t.Errorf("株数 = %v（%s）, want %d", po.Request, po.Note, tc.want)
+			}
+		})
+	}
+}
+
+// 銘柄情報を引く対象は有効な戦略の発注できる銘柄だけ（指数・止めた戦略・重複を除く）。
+func TestOrderableSymbols(t *testing.T) {
+	cfg := &accumcfg.AccumConfig{Tactics: []accumcfg.TacticEntry{
+		{ID: "a", Symbols: []string{"2559.T", "^N225", "1629.T"}},
+		{ID: "b", Symbols: []string{"2559.T"}},
+		{ID: "c", Symbols: []string{"1306.T"}, Enabled: boolPtr(false)},
+	}}
+	got := strings.Join(orderableSymbols(cfg), ",")
+	if got != "2559,1629" {
+		t.Errorf("orderableSymbols = %s, want 2559,1629", got)
+	}
+}
+
 // 設定に未知の戦略があれば計画を立てない（黙って飛ばすと積立が止まったことに気付けない）。
 func TestPlanOrdersRejectsUnknownTactic(t *testing.T) {
 	store := data.NewBarStore(t.TempDir())
@@ -298,8 +482,26 @@ func TestPlanOrdersRejectsUnknownTactic(t *testing.T) {
 	cfg.Tactics[0].Tactic = "no_such_tactic"
 
 	now := time.Date(2026, 9, 14, 14, 30, 0, 0, clock.Tokyo)
-	if _, _, err := PlanOrders(cfg, store, newLedger(t), now, false); err == nil {
+	if _, _, err := PlanOrders(cfg, store, newLedger(t), now, false, false, nil); err == nil {
 		t.Fatal("未知の戦略でもエラーにならない")
+	}
+}
+
+// 台帳が読めなければ計画を立てない（A3）。以前は発注済み額の読み失敗を 0 と読み、
+// 同じ月の予算をもう一度買う計画を立てていた。
+func TestPlanOrdersFailsWhenLedgerUnreadable(t *testing.T) {
+	store := data.NewBarStore(t.TempDir())
+	writeBars(t, store, "1306.T", "2026-08-25", "2026-09-13", 1000)
+	cfg := planConfig(200_000, window.Unrestricted())
+	led := newLedger(t)
+	if err := led.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 9, 14, 14, 30, 0, 0, clock.Tokyo)
+	orders, _, err := PlanOrders(cfg, store, led, now, false, false, nil)
+	if err == nil {
+		t.Fatalf("台帳が読めないのに計画を立てた: %+v", orders)
 	}
 }
 
@@ -313,7 +515,7 @@ func TestPlanOrdersWarnsStaleSignalButStillPlans(t *testing.T) {
 	cfg.Tactics[0].SignalSymbol = "1321.T"
 
 	now := time.Date(2026, 9, 14, 14, 30, 0, 0, clock.Tokyo)
-	orders, stale, err := PlanOrders(cfg, store, newLedger(t), now, false)
+	orders, stale, err := PlanOrders(cfg, store, newLedger(t), now, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,6 +538,8 @@ type runBroker struct {
 	cost        decimal.Decimal // 見積りの金額
 	balanceErr  error
 	placeErr    error
+	onPlace     func()                     // 受理を返す直前に呼ぶ（台帳を壊すなど）
+	lots        map[string]decimal.Decimal // 銘柄情報の売買単位
 
 	balances int
 	previews int
@@ -348,6 +552,17 @@ func (r *runBroker) GetOrder(clientOrderID string, _ *string) (*domain.Order, er
 
 func (r *runBroker) GetOrderHistory(time.Time, time.Time) ([]domain.Order, error) {
 	return r.history, nil
+}
+
+// LotSizes は銘柄情報の売買単位（lots に無い銘柄は返さない）。
+func (r *runBroker) LotSizes(symbols []string) map[string]decimal.Decimal {
+	out := map[string]decimal.Decimal{}
+	for _, s := range symbols {
+		if lot, ok := r.lots[s]; ok {
+			out[s] = lot
+		}
+	}
+	return out
 }
 
 func (r *runBroker) GetBalance() (*domain.Balance, error) {
@@ -374,6 +589,9 @@ func (r *runBroker) Place(req domain.OrderRequest) (*domain.OrderAck, error) {
 	r.orders[req.ClientOrderID] = &domain.Order{
 		ClientOrderID: req.ClientOrderID, Symbol: req.Symbol, Side: req.Side,
 		Quantity: req.Quantity, FilledQuantity: decimal.Zero, Status: domain.OrderStatusSubmitted,
+	}
+	if r.onPlace != nil {
+		r.onPlace()
 	}
 	return &domain.OrderAck{ClientOrderID: req.ClientOrderID, Status: domain.OrderStatusSubmitted}, nil
 }
@@ -451,6 +669,8 @@ func TestRunAccumulation(t *testing.T) {
 			setup: func(t *testing.T, e env) {
 				e.b.placeErr = &broker.OrderRejectedError{Message: "値幅制限"}
 			},
+			// 拒否は失敗として返す（通知・非 0 終了。A6）
+			wantErr:      "発注拒否",
 			wantBalances: 1, wantPreviews: 1, wantPlaced: 1,
 			then: func(t *testing.T, e env) {
 				if wasPlaced(t, e.led, orderID) {
@@ -499,24 +719,58 @@ func TestRunAccumulation(t *testing.T) {
 			wantBalances: 1, wantPreviews: 0, wantPlaced: 0,
 		},
 		{
+			// 以前は計画が発注済み額を 0 と読んで進み、余力の照会まで行っていた（A3）
 			name: "台帳が読めなければ発注に進まない", live: false,
 			closeLedger:  true,
 			wantErr:      "台帳を読めない",
-			wantBalances: 1, wantPreviews: 0, wantPlaced: 0,
+			wantBalances: 0, wantPreviews: 0, wantPlaced: 0,
 		},
 		{
-			name: "買付余力が足りなければ送らない", live: true,
+			name: "買付余力が足りなければ送らず、失敗として返す", live: true,
 			setup: func(t *testing.T, e env) {
 				e.b.buyingPower = dec(1000)
 			},
+			wantErr:      "買付余力不足",
 			wantBalances: 1, wantPreviews: 1, wantPlaced: 0,
 		},
 		{
-			name: "買付余力を照会できなければ発注しない", live: true,
+			name: "買付余力を照会できなければ発注せず、失敗として返す", live: true,
 			setup: func(t *testing.T, e env) {
 				e.b.balanceErr = errors.New("接続できません")
 			},
+			wantErr:      "買付余力を照会できない",
 			wantBalances: 1, wantPreviews: 0, wantPlaced: 0,
+		},
+		{
+			// 届いたかどうか分からない注文が残る銘柄には出さない（A1）。
+			// 送った直後（猶予の内側）の PENDING でも同じ——当日の一覧で決まるまで待つ
+			name: "送信結果不明の注文が残る銘柄は発注しない", live: true,
+			setup: func(t *testing.T, e env) {
+				// 額 0 の行にして、差額（200000）が今日の注文として立つようにする
+				recordOrder(t, e.led, "不明", string(domain.OrderStatusPending), &thisMonth, 0)
+			},
+			wantErr:      "送信結果不明の注文 不明",
+			wantBalances: 1, wantPreviews: 0, wantPlaced: 0,
+		},
+		{
+			// 受理されたのに台帳を書けなければ、次の銘柄へ進まず止める（A2）
+			name: "受理後に台帳を書けなければ止める", live: true,
+			setup: func(t *testing.T, e env) {
+				e.b.onPlace = func() { _ = e.led.Close() }
+			},
+			wantErr:      "台帳を更新できません",
+			wantBalances: 1, wantPreviews: 1, wantPlaced: 1,
+			then: func(t *testing.T, e env) {
+				led, err := ledger.OpenLedger(e.led.Path())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer led.Close()
+				recent, err := led.Recent(1)
+				if err != nil || len(recent) != 1 || recent[0].Status != string(domain.OrderStatusPending) {
+					t.Errorf("送った事実が PENDING で残っていない（次の run の照合に回らない）: %+v (err: %v)", recent, err)
+				}
+			},
 		},
 		{
 			name: "台帳に無い当月の約定があれば止める", live: true,
@@ -548,6 +802,11 @@ func TestRunAccumulation(t *testing.T) {
 			}
 			cfg := planConfig(200_000, w)
 			led := newLedger(t)
+			// 前年から積み立てている銘柄（開始月の日割りを掛けない）
+			if err := led.MarkStarted("1306", "2025-01-01"); err != nil {
+				t.Fatal(err)
+			}
+			stubAlerts(t)
 			b := &runBroker{buyingPower: dec(1_000_000), cost: dec(101_000)}
 			e := env{b: b, led: led, run: func() error {
 				return RunAccumulation(cfg, b, store, led, &logging.Logger{}, nil, tc.live, false)
@@ -592,4 +851,17 @@ func TestRunAccumulation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// stubAlerts は運用通知を控えるだけにする（Discord に送らず、state/notify にも書かない）。
+func stubAlerts(t *testing.T) *[]string {
+	t.Helper()
+	var got []string
+	saved := alert
+	alert = func(title, body string, _ *logging.Logger) bool {
+		got = append(got, title+"\n"+body)
+		return true
+	}
+	t.Cleanup(func() { alert = saved })
+	return &got
 }

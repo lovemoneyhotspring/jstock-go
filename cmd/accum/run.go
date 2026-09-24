@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	accumcfg "github.com/lovemoneyhotspring/jstock-go/pkg/accum/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/execute"
@@ -10,6 +12,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 )
@@ -25,7 +28,7 @@ func newRunCmd() *cobra.Command {
 		Use:   "run",
 		Short: "本日の積立を実行する（--live で発注）",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run.Crash("積立の実行", "accum.crash",
+			return reportRunError(run,
 				runAccumulation(liveFlag, yesFlag, ignoreWindowFlag, noSyncFlag, brokerVerifyFlag))
 		},
 	}
@@ -37,6 +40,23 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&brokerVerifyFlag, "broker-verify", false,
 		"発注経路の実機検証（docs/BROKER_VERIFY.md）。台帳・ログ・ダイジェストに印を付ける")
 	return cmd
+}
+
+// reportRunError は run の失敗を記録・通知して返す（返れば main が非 0 で終わる）。
+//
+// 「出すべきなのに出せなかった銘柄がある」回（execute.OrdersFailedError）は異常終了とは
+// 分けて、銘柄ごとの理由を並べて知らせる。以前はログの warn だけで、通知にもダイジェストにも
+// 出ず終了コード 0 だった（2026-09-24 のレビュー A6）。それ以外は run.Crash に任せる。
+func reportRunError(r *cli.Run, err error) error {
+	var failed *execute.OrdersFailedError
+	if !errors.As(err, &failed) {
+		return r.Crash("積立の実行", "accum.crash", err)
+	}
+	r.Error("accum.order_failed", failed.Error())
+	digest.Fail("accum.order_failed", failed.Error())
+	r.Alert(fmt.Sprintf("積立: %d 銘柄を発注できませんでした", len(failed.Lines)),
+		strings.Join(failed.Lines, "\n"))
+	return err
 }
 
 // runAccumulation は本体。RunE から切り出してあるのは、異常終了を run.Crash で記録・通知するため。
