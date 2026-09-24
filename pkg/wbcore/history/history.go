@@ -257,8 +257,36 @@ func (s *Store) Read(kind string, window Range) (Frame, error) {
 	return reorderKeyFirst(frame), nil
 }
 
+// Head は期間の行を新しい順（day・recorded_at の降順）に並べた先頭 n 行と、期間の全行数を返す。
+// Read してから SortBy（降順・安定）・Head するのと同じ結果を、全行を展開せずに作る（history show の表）。
+func (s *Store) Head(kind string, window Range, n int) (Frame, int, error) {
+	paths := s.Files(kind, window)
+	if len(paths) == 0 {
+		return Frame{Columns: []Column{}, Rows: []map[string]any{}}, 0, nil
+	}
+	frame, total, err := readParquetHead(paths, n)
+	if err != nil {
+		return Frame{}, 0, err
+	}
+	return reorderKeyFirst(frame), total, nil
+}
+
 // Latest はその日の最後の実行ぶんだけ（recorded_at が最大の行）を返す。
+// 最後の実行のファイルだけを読む（その日の他の実行ぶんは展開しない）。
 func (s *Store) Latest(kind string, day time.Time) (Frame, error) {
+	paths := s.Files(kind, Range{Start: day, End: day})
+	if len(paths) == 0 {
+		return Frame{Columns: []Column{}, Rows: []map[string]any{}}, nil
+	}
+	if frame, last, ok, err := readParquetLatest(paths); err != nil {
+		return Frame{}, err
+	} else if ok {
+		return reorderKeyFirst(frame).Filter(func(row map[string]any) bool {
+			t, ok := row["recorded_at"].(time.Time)
+			return ok && t.Equal(last)
+		}), nil
+	}
+	// recorded_at が時刻として読めない（古い形式など）。全部読んで同じ規則で絞る
 	frame, err := s.Read(kind, Range{Start: day, End: day})
 	if err != nil || frame.Height() == 0 {
 		return frame, err
