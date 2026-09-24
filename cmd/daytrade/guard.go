@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/execute"
 	dtledger "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
@@ -46,7 +45,8 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 	if err != nil {
 		return err
 	}
-	if skipHolidayFor(day, "guard", live) {
+	cal, holiday := holidayCalendar(day, "guard", live)
+	if holiday {
 		return nil
 	}
 	if !cfg.Margin.Enabled || !cfg.Margin.CancelOnCorpEvent {
@@ -103,20 +103,15 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 		return nil
 	}
 
-	ev, err := loadCorpEvents(context.Background(), cfg.Margin, day, now)
+	ev, err := loadCorpEvents(context.Background(), cfg.Margin, day, now, cal.Closed)
 	if err != nil {
 		logError("daytrade.news_stale", "ニュースの記録簿を読めず売建の材料を点検できない", map[string]any{"error": err.Error()})
 		digest.Anomaly("daytrade.news_stale", "売建の材料を点検できない: "+err.Error())
 		alert("デイトレ: ニュースの記録簿を読めず、売建の材料（TOB など）を点検できません", err.Error())
 		return err
 	}
-	if age := now.Sub(ev.lastFetched); ev.lastFetched.IsZero() ||
-		age > time.Duration(cfg.Margin.CorpEventMaxStalenessMinutes)*time.Minute {
+	if detail := ev.staleness(now, cfg.Margin.CorpEventMaxStalenessMinutes); detail != "" {
 		// 古くても手元の分では点検する。取り込み（news sync）が止まっていることは知らせる
-		detail := "取り込みに成功した日が 1 日も無い"
-		if !ev.lastFetched.IsZero() {
-			detail = fmt.Sprintf("最後の取り込みが %s（%d 分前）", clock.ToZone(ev.lastFetched, jst).Format("01-02 15:04"), int(age.Minutes()))
-		}
 		fmt.Println("ニュースの記録簿が古いまま点検します: " + detail)
 		logWarn("daytrade.news_stale", "ニュースの記録簿が古いまま売建を点検", map[string]any{"reason": detail, "phase": "guard"})
 		digest.Anomaly("daytrade.news_stale", "売建の点検の記録簿が古い: "+detail)

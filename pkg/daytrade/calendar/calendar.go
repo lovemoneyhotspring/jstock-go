@@ -89,6 +89,11 @@ func (c *Calendar) IsTradingDay(day time.Time) bool {
 	return c.set[day.Format("2006-01-02")]
 }
 
+// Closed は休場日か（IsTradingDay の否定）。day はその日の暦（年月日）で見るので、
+// JST の日付を渡すこと。範囲外・カレンダーが空なら土日を休場とみなす（IsTradingDay の代用）。
+// news.ClosedFunc にそのまま渡せる形（ニュースの鮮度・news sync の終了コードで休場日の失敗を問わない）。
+func (c *Calendar) Closed(day time.Time) bool { return !c.IsTradingDay(day) }
+
 // IsHalfDay は半日立会（HolDiv = 2）の日か。カレンダーに無い日・範囲外は偽
 // （分からない日を半日と答えて建玉を止めない。営業日かどうかは IsTradingDay が答える）。
 func (c *Calendar) IsHalfDay(day time.Time) bool {

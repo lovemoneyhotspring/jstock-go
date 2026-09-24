@@ -20,7 +20,7 @@ func newCheckCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "check",
-		Short: "営業日ごとの欠けと、古くなった端点を探す（あれば終了コード 2）",
+		Short: "営業日ごとの欠けと、古くなった端点を探す（あれば終了コード 3）",
 		Long: "監視用。cron から回すときは --notify を付けると、ログを開かなくても気づける。\n" +
 			"確認そのものに失敗したときも通知する（監視役が黙って死ぬのを防ぐ）。\n" +
 			"日付で取る端点は営業日の欠けを、全件・範囲で取る端点（取引カレンダー・TOPIX・\n" +
@@ -69,15 +69,8 @@ func newCheckCmd() *cobra.Command {
 			if err != nil {
 				return fail("最終取得", err)
 			}
-			for _, st := range stale {
-				text := fmt.Sprintf("最終取得 %s（%.0f 日を超えて古い）",
-					clock.Fmt(st.LastFetched, clock.Tokyo, false), st.Limit.Hours()/24)
-				if st.LastFetched.IsZero() {
-					text = "一度も取っていません"
-				}
-				table = append(table, fmt.Sprintf("%s\t%s", st.Endpoint.Path, text))
-				lines = append(lines, fmt.Sprintf("%s: %s", st.Endpoint.Path, text))
-			}
+			staleTable, staleLines := staleRows(stale)
+			table, lines = append(table, staleTable...), append(lines, staleLines...)
 
 			span := fmt.Sprintf("%s 〜 %s", start.Format("2006-01-02"), end.Format("2006-01-02"))
 			if missingTotal == 0 && len(stale) == 0 {
@@ -98,10 +91,7 @@ func newCheckCmd() *cobra.Command {
 				notify.Alert(fmt.Sprintf("J-Quants の蓄積に欠け（%d 件、古い端点 %d）", missingTotal, len(stale)),
 					strings.Join(lines, "\n"), s.logger)
 			}
-			// os.Exit は defer を飛ばすので、ダイジェストとログを先に畳む
-			s.close()
-			os.Exit(2)
-			return nil
+			return exitWith(exitGaps, "欠け %d 件、古い端点 %d（%s）", missingTotal, len(stale), strings.Join(lines, " / "))
 		},
 	}
 	cmd.Flags().StringVar(&date, "date", "", "確認する日（YYYY-MM-DD、JST）。既定は JST の今日")

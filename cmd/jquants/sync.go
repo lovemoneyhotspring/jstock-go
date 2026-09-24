@@ -63,10 +63,9 @@ func newSyncCmd() *cobra.Command {
 			}
 			printIngests(result.Ingests,
 				fmt.Sprintf("取り込み（%s）", clock.Fmt(clock.NowUTC(), clock.MustZone(appSettings.Timezone), false)))
+			noteIngests(result.Ingests, result.Failures)
 			if printFailures(result.Failures, "次回の sync で再試行されます") {
-				// os.Exit は defer を飛ばすので、ダイジェストとログを先に畳む
-				s.close()
-				os.Exit(1)
+				return exitWith(1, "%s", failureSummary(result.Failures))
 			}
 			return nil
 		},

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/storage"
 )
 
@@ -188,11 +189,18 @@ func (s *Store) Save(ctx context.Context, day string, items []broker.NewsItem, a
 
 // RecordFailure は取れなかった日を残す。
 // 「取れなかった日」と「1 件も無かった日」を混ぜると、後から穴を埋められない。
+//
+// **ok の行は失敗で上書きしない。** 取れていた日を取り直して一時的に失敗した（平日にも
+// aCLMMfdsNews の無い応答が返る。2026-09-18・09-24）だけで ok を消すと、Fresh がその日を
+// 「取れていない」と見て、open が丸 1 日ショートを見送る（2026-09-24 のレビュー）。
+// 残った ok の行の fetched_at はそのままなので、日が明ける前にしか取れていない日は
+// DoneDays で済みにならず、次回また取りに行く。失敗の理由は sync の出力とログに残る。
 func (s *Store) RecordFailure(ctx context.Context, day string, at time.Time, cause string) error {
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO news_days (feed_date, items, new_items, status, fetched_at)
         VALUES (?, 0, 0, ?, ?)
-        ON CONFLICT(feed_date) DO UPDATE SET status = excluded.status, fetched_at = excluded.fetched_at`,
+        ON CONFLICT(feed_date) DO UPDATE SET status = excluded.status, fetched_at = excluded.fetched_at
+        WHERE news_days.status != 'ok'`,
 		day, cause, at.Format(time.RFC3339))
 	return err
 }
@@ -202,21 +210,51 @@ func (s *Store) RecordFailure(ctx context.Context, day string, at time.Time, cau
 // 以前は items > 0 に絞っていたので、休日が 90 日ぶん毎回取り直されていた。
 // 配信の前に回して 0 件を掴んだ日の取り直しは、Sync が直近 recent 日を
 // 済みでも取り直すことで拾う（それより古い 0 件の日は本当に 0 件とみなす）。
+//
+// **日が明ける前（その日の 23:59 まで）にしか取れていない日は済みにしない。** 当日ぶんは
+// 23:59 まで配信が続くので、夜の配信が抜けたままになる。朝の --days 5 が取り直して埋める
+// （鮮度の判定 Fresh も同じ基準で「揃っていない」と見る）。
 func (s *Store) DoneDays(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT feed_date FROM news_days WHERE status = 'ok'`)
+	rows, err := s.db.QueryContext(ctx, `SELECT feed_date, fetched_at FROM news_days WHERE status = 'ok'`)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	out := map[string]bool{}
 	for rows.Next() {
-		var day string
-		if err := rows.Scan(&day); err != nil {
+		var day, stamp string
+		if err := rows.Scan(&day, &stamp); err != nil {
 			return nil, err
 		}
-		out[day] = true
+		complete, err := completeDay(day, stamp)
+		if err != nil {
+			return nil, err
+		}
+		out[day] = complete
 	}
 	return out, rows.Err()
+}
+
+// completeDay は feed_date の日が、日が明けてから（翌日 0:00 JST 以降に）取れているか。
+func completeDay(day, fetchedAt string) (bool, error) {
+	at, err := time.Parse(time.RFC3339, fetchedAt)
+	if err != nil {
+		return false, fmt.Errorf("fetched_at を読めません（%s %s）: %w", day, fetchedAt, err)
+	}
+	end, err := dayEnd(day)
+	if err != nil {
+		return false, err
+	}
+	return !at.Before(end), nil
+}
+
+// dayEnd は feed_date（YYYY-MM-DD）の日が明ける時刻（翌日 0:00 JST）。
+func dayEnd(day string) (time.Time, error) {
+	d, err := time.ParseInLocation("2006-01-02", day, clock.Tokyo)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("feed_date を読めません（%s）: %w", day, err)
+	}
+	return d.AddDate(0, 0, 1), nil
 }
 
 // Coverage は溜まり具合（日数・記事数・最初と最後の日）を返す。

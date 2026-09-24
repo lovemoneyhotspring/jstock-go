@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 )
@@ -17,6 +19,10 @@ import (
 var (
 	appSettings = settings.LoadAppSettings()
 	jquantsDir  = filepath.Join(appSettings.DataDir, "jquants")
+	// run はこの実行の記録（run_id・ログ・ダイジェスト）。newSession が起こし、main が
+	// コマンドの結果を付けて Finish する。cli.Guarded が panic の記録にも使う。
+	// 台帳を使わないコマンド（query）では nil のまま（Finish も Guarded も nil で動く）。
+	run *cli.Run
 )
 
 // session はコマンド 1 回ぶんの土台（保管庫・台帳・ロガー・取り込み役）。
@@ -24,47 +30,106 @@ type session struct {
 	ingestor *archive.Ingestor
 	ledger   *archive.Ledger
 	logger   *logging.Logger
-	run      *cli.Run
-	once     sync.Once
 }
 
-// close は台帳を閉じ、ダイジェストを書き出す。何度呼んでも 1 回しか畳まない。
+// close は台帳を閉じる。何度呼んでもよい。ダイジェストは main が結果を付けて書き出す
+// （以前はここで Finish(nil) を固定で呼び、失敗した回もダイジェストでは ok になっていた）。
 func (s *session) close() {
-	s.once.Do(func() {
-		if s.ledger != nil {
-			_ = s.ledger.Close()
+	if s.ledger != nil {
+		_ = s.ledger.Close()
+		s.ledger = nil
+	}
+}
+
+// exitError は終了コードつきの失敗。表示と通知は RunE の中で済んでいるので、main は
+// 印字せず、ダイジェストに失敗として残してからその終了コードで終える。
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Unwrap() error { return e.err }
+
+// exitGaps は check・repair が「欠け・古い端点」を見つけたときの終了コード。
+// ふつうの失敗は 1、panic は 2（cli.ExitPanic）。以前は 2 で panic と区別できなかった
+// （2026-09-24 のレビュー）。crontab・deploy/*.sh は jquants の終了コードの値で分岐していない。
+const exitGaps = 3
+
+// exitWith は終了コード code の失敗を返す。os.Exit を RunE の中で呼ぶと defer と
+// ダイジェストの書き出しを飛ばすので、終了は main に任せる。
+func exitWith(code int, format string, args ...any) error {
+	return &exitError{code: code, err: fmt.Errorf(format, args...)}
+}
+
+// noteIngests は取り込みと失敗の件数をダイジェストに足す。
+func noteIngests(ingests []archive.Ingest, failures []archive.Failure) {
+	rows := 0
+	for _, r := range ingests {
+		rows += r.Rows
+	}
+	digest.Add(map[string]int{"ingests": len(ingests), "rows": rows, "failures": len(failures)})
+}
+
+// failureSummary は失敗の要約（件数と先頭の数件）。ダイジェストと終了時のエラーに使う。
+func failureSummary(failures []archive.Failure) string {
+	const head = 3
+	parts := make([]string, 0, head)
+	for i, f := range failures {
+		if i == head {
+			break
 		}
-		s.run.Finish(nil)
-	})
+		parts = append(parts, fmt.Sprintf("%s %s: %s", f.Endpoint, f.Target, f.Error))
+	}
+	text := fmt.Sprintf("%d 件の取り込みに失敗（%s", len(failures), strings.Join(parts, " / "))
+	if len(failures) > head {
+		text += fmt.Sprintf(" ほか %d 件", len(failures)-head)
+	}
+	return text + "）"
+}
+
+// staleRows は古い端点を表の行（端点\t説明）と通知の行（端点: 説明）にする。check と repair で共有。
+func staleRows(stale []archive.Stale) (table, lines []string) {
+	for _, st := range stale {
+		text := fmt.Sprintf("最終取得 %s（%.0f 日を超えて古い）",
+			clock.Fmt(st.LastFetched, clock.Tokyo, false), st.Limit.Hours()/24)
+		if st.LastFetched.IsZero() {
+			text = "一度も取っていません"
+		}
+		table = append(table, fmt.Sprintf("%s\t%s", st.Endpoint.Path, text))
+		lines = append(lines, fmt.Sprintf("%s: %s", st.Endpoint.Path, text))
+	}
+	return table, lines
+}
+
+// newClient は API クライアントを組み立てる。試験ではスタブに差し替える（本番の API を叩かない）。
+var newClient = func() (archive.Client, error) {
+	return data.NewJQuantsClientFromEnv(appSettings.DotenvMap)
 }
 
 // newSession は保管庫・台帳・（要れば）API クライアントを組み立てる。
 // status / check のように手元だけ見るコマンドは API キーが無くても動く。
 func newSession(command string, needClient bool) (*session, error) {
-	run := cli.StartRun("jquants", appSettings, command)
+	// 失敗も execute の Finish がダイジェストに残す（ここで畳まない）
+	run = cli.StartRun("jquants", appSettings, command)
 	runID, logger := run.RunID, run.Logger
 
 	arch := archive.NewArchive(jquantsDir)
 	ledger, err := archive.OpenLedger(arch.LedgerPath())
 	if err != nil {
-		run.Finish(err)
 		return nil, err
 	}
 	var client archive.Client
 	if needClient {
-		jq, err := data.NewJQuantsClientFromEnv(appSettings.DotenvMap)
-		if err != nil {
+		if client, err = newClient(); err != nil {
 			_ = ledger.Close()
-			run.Finish(err)
 			return nil, err
 		}
-		client = jq
 	}
 	return &session{
 		ingestor: archive.NewIngestor(client, arch, ledger, runID, logger),
 		ledger:   ledger,
 		logger:   logger,
-		run:      run,
 	}, nil
 }
 

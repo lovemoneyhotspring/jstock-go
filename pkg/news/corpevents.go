@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -170,27 +171,101 @@ func splitList(s string) []string {
 	return strings.Split(s, "|")
 }
 
-// LastFetched は取り込みに成功した最後の時刻。失敗の記録（RecordFailure）も fetched_at を
-// 更新するので、status = 'ok' の行だけを見る。1 日も無ければ ok = false。
-// 時刻は書いた側の時間帯のまま入っている（UTC / JST）ので、文字列の MAX ではなく読んでから比べる。
-func (s *Store) LastFetched(ctx context.Context) (at time.Time, ok bool, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT fetched_at FROM news_days WHERE status = 'ok'`)
+// FreshDays は鮮度を見る日数（今日を含む暦日）。土日と祝日をはさんでも、前の営業日の
+// 夜の配信まで入る。朝の news sync（--days 5）が取り直す範囲と揃えてある。
+const FreshDays = 5
+
+// Weekend は JST の土日か。取引カレンダーが無いときの休場日の代わり（ClosedFunc の既定）。
+func Weekend(day time.Time) bool {
+	wd := day.In(clock.Tokyo).Weekday()
+	return wd == time.Saturday || wd == time.Sunday
+}
+
+// ClosedFunc は JST の日が休場日（取引所の非営業日）か。
+//
+// 立花のニュースは、記事の無い日に一覧の項目（aCLMMfdsNews）の無い応答を返し、取り込みは
+// 失敗として残る（2026-09-13・09-20 の日曜。rowsOf は形の違う応答を 0 件と読まない）。
+// 適時開示（TOB など）も休場日は出ないので、休場日の失敗は鮮度（Fresh）と news sync の終了コード
+// （SyncResult.FailureError）で問わない。取れた休場日は平日と同じく「日が明けてから取れたか」を見る。
+//
+// 呼び出し側が取引カレンダー（pkg/daytrade/calendar の Calendar.Closed）を渡す。土日だけだと
+// 平日の休場日（年末年始・祝日）に記事が 0 件で同じ応答が返ると、窓に入る 5 日間ショートを見送り、
+// news sync も毎朝 1 で終わる。nil なら土日（Weekend）で代用する。このパッケージは daytrade に
+// 依存しない（判定だけを受け取る）。
+type ClosedFunc func(day time.Time) bool
+
+// orWeekend は nil のとき Weekend に倒す。
+func (f ClosedFunc) orWeekend() ClosedFunc {
+	if f == nil {
+		return Weekend
+	}
+	return f
+}
+
+// Fresh は記録簿がいつの時点まで揃っているか。**必要な日（今日から days 日さかのぼる）ごとに見る。**
+//
+//   - 今日: 最後に取れた（ok の）時刻
+//   - 過去の日: 日が明けてから取れていれば揃っている（制約にならない）。明ける前にしか
+//     取れていなければその時刻（その日の夜の配信が抜けている）
+//   - 取れていない日（失敗・未取得）: ゼロ値。ただし今日でない休場日（closed。nil なら土日）は問わない
+//
+// のうち最も古いものを at に、それを決めた日を day に返す。以前は全日の最大値を見ていたので、
+// 前日だけ取り込みに失敗した朝も「新しい」と判定していた（2026-09-24 のレビュー）。
+// 失敗の行（status が ok 以外）は取れた時刻を持たないので、status = 'ok' の行だけを見る。
+// ok の行は後の失敗で上書きされない（RecordFailure）。
+// 時刻は書いた側の時間帯のまま入っている（UTC / JST）ので、文字列ではなく読んでから比べる。
+func (s *Store) Fresh(ctx context.Context, now time.Time, days int, closed ClosedFunc) (at time.Time, day string, err error) {
+	closed = closed.orWeekend()
+	if days < 1 {
+		days = 1
+	}
+	today := now.In(clock.Tokyo)
+	from := today.AddDate(0, 0, -(days - 1)).Format("2006-01-02")
+	to := today.Format("2006-01-02")
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT feed_date, fetched_at FROM news_days WHERE status = 'ok' AND feed_date BETWEEN ? AND ?`, from, to)
 	if err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, "", err
 	}
 	defer func() { _ = rows.Close() }()
+	fetched := map[string]time.Time{}
 	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			return time.Time{}, false, err
+		var d, v string
+		if err := rows.Scan(&d, &v); err != nil {
+			return time.Time{}, "", err
 		}
 		t, err := time.Parse(time.RFC3339, v)
 		if err != nil {
-			return time.Time{}, false, fmt.Errorf("fetched_at を読めません（%s）: %w", v, err)
+			return time.Time{}, "", fmt.Errorf("fetched_at を読めません（%s）: %w", v, err)
 		}
-		if !ok || t.After(at) {
-			at, ok = t, true
+		fetched[d] = t
+	}
+	if err := rows.Err(); err != nil {
+		return time.Time{}, "", err
+	}
+	first := true
+	for i := days - 1; i >= 0; i-- {
+		date := today.AddDate(0, 0, -i)
+		d := date.Format("2006-01-02")
+		t, ok := fetched[d]
+		if !ok {
+			if d != to && closed(date) {
+				continue // 休場日の取れていない日は問わない（記事の無い日の空応答。ClosedFunc）
+			}
+			return time.Time{}, d, nil // 取れていない日がある
+		}
+		if d != to {
+			end, err := dayEnd(d)
+			if err != nil {
+				return time.Time{}, "", err
+			}
+			if !t.Before(end) {
+				continue // 日が明けてから取れている
+			}
+		}
+		if first || t.Before(at) {
+			at, day, first = t, d, false
 		}
 	}
-	return at, ok, rows.Err()
+	return at, day, nil
 }

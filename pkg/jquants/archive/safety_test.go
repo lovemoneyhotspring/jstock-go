@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 )
 
 // 刈り込みは読む前にロックを取る。ロックを持っている間に別プロセスが日のファイルを
@@ -160,6 +162,83 @@ func TestGapsCountsEmptyDayOnEveryDayEndpoint(t *testing.T) {
 	}
 }
 
+// 0 行の日もある端点（日々公表銘柄・決算短信）は、訂正の猶予が明ける前に掴んだ 0 行を欠けに数える。
+// 明けた後に取り直してまだ 0 行なら本当に 0 行の日（大納会など）とみなし、欠けから外す。
+// 以前は 0 行を一切欠けと数えず、最初に空を掴んだ日がそのまま残っても誰も気づかなかった（2026-09-24 のレビュー N5）。
+func TestGapsCountsEarlyEmptyDayOnRetryEmptyEndpoint(t *testing.T) {
+	cal := CalendarEndpoint()
+	f, _ := RowsToFrame([]map[string]any{
+		{"Date": "2025-01-06", "HolDiv": "1"},
+		{"Date": "2025-01-07", "HolDiv": "1"},
+	}, cal)
+	start := time.Date(2025, 1, 6, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2025, 1, 7, 0, 0, 0, 0, time.UTC)
+	for _, name := range []string{"markets_margin_alert", "fins_summary"} {
+		t.Run(name, func(t *testing.T) {
+			ep := MustEndpoint(name)
+			if !ep.RetryEmpty || ep.RowsEveryTradingDay {
+				t.Fatalf("前提が変わった: %s RetryEmpty=%v RowsEveryTradingDay=%v", ep.Path, ep.RetryEmpty, ep.RowsEveryTradingDay)
+			}
+			ing := newTestIngestor(t, &stubClient{})
+			if _, err := ing.Archive.Upsert(cal, f); err != nil {
+				t.Fatal(err)
+			}
+			// 1/6 は公開の直後に 0 行を掴んだまま。1/7 は猶予の明けた後に取り直しても 0 行
+			for _, rec := range []IngestRecord{
+				{Target: "2025-01-06", FetchedUTC: ep.AvailableAt.On(start, clock.Tokyo).Add(13 * time.Minute)},
+				{Target: "2025-01-07", FetchedUTC: ep.AvailableAt.On(end, clock.Tokyo).Add(13 * time.Minute)},
+				{Target: "2025-01-07", FetchedUTC: jstAt(2025, 1, 20, 20, 0)},
+			} {
+				rec.Endpoint, rec.Source, rec.Digest = ep.Path, "api", "d"
+				if err := ing.Ledger.Record(rec); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// 公開当日の 20:00 の repair: 空を掴んだ 1/6 は欠け（1/7 はまだ公開前）
+			gaps, err := ing.Gaps(ep, start, end, jstAt(2025, 1, 6, 20, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := JoinDays(gaps); got != "2025-01-06" {
+				t.Fatalf("当日の欠け = %s, want 2025-01-06", got)
+			}
+			// 猶予が明けた後: 明ける前の 0 行しか無い 1/6 は欠けのまま（repair が一度取り直す）。
+			// 明けた後に取り直しても 0 行の 1/7 は本当に 0 行の日なので欠けにしない
+			gaps, err = ing.Gaps(ep, start, end, jstAt(2025, 1, 21, 20, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := JoinDays(gaps); got != "2025-01-06" {
+				t.Fatalf("猶予の後の欠け = %s, want 2025-01-06", got)
+			}
+		})
+	}
+}
+
+// 0 行の日もある端点も、最初の 0 行を 20 時間放置せず EmptyRetryInterval で取り直す。
+func TestPlanRetriesEmptyDayOnRetryEmptyEndpoint(t *testing.T) {
+	for _, name := range []string{"markets_margin_alert", "fins_summary"} {
+		t.Run(name, func(t *testing.T) {
+			ep := MustEndpoint(name)
+			day := time.Date(2025, 1, 6, 0, 0, 0, 0, time.UTC)
+			first := ep.AvailableAt.On(day, clock.Tokyo).Add(13 * time.Minute).UTC()
+			ing := newTestIngestor(t, &stubClient{})
+			if err := ing.Ledger.Record(IngestRecord{
+				Endpoint: ep.Path, Target: "2025-01-06", Source: "api", FetchedUTC: first, Digest: "d",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			jobs, err := ing.Plan(first.Add(EmptyRetryInterval), -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasJob(jobs, ep.Path, "2025-01-06") {
+				t.Errorf("0 行を掴んだ日を %v 後に取り直していない", EmptyRetryInterval)
+			}
+		})
+	}
+}
+
 // 全件・範囲で取る端点は、最終取得が古ければ Stale に出る。
 func TestStale(t *testing.T) {
 	ing := newTestIngestor(t, &stubClient{})
@@ -176,7 +255,8 @@ func TestStale(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	record(cal, now.Add(-10*24*time.Hour))      // 週 1 回の端点。上限は 14 日なのでまだ新しい
+	// 取引カレンダーは日に 1 回取る。以前は週 1 回で上限が 14 日に緩み、10 日止まっても出なかった
+	record(cal, now.Add(-10*24*time.Hour))      // 7 日を超えて古い
 	record(topix, now.Add(-8*24*time.Hour))     // 7 日を超えて古い
 	record(investors, now.Add(-2*24*time.Hour)) // 新しい
 	// earnings は一度も取っていない
@@ -189,8 +269,11 @@ func TestStale(t *testing.T) {
 	for _, s := range stale {
 		got[s.Endpoint.Path] = s
 	}
-	if len(stale) != 2 {
-		t.Fatalf("古い端点 = %+v, want topix と earnings-calendar", stale)
+	if len(stale) != 3 {
+		t.Fatalf("古い端点 = %+v, want calendar と topix と earnings-calendar", stale)
+	}
+	if s, ok := got[cal.Path]; !ok || s.Limit != 7*24*time.Hour {
+		t.Errorf("calendar = %+v（上限は 7 日）", s)
 	}
 	if s, ok := got[topix.Path]; !ok || s.LastFetched.IsZero() || s.Limit != 7*24*time.Hour {
 		t.Errorf("topix = %+v", s)
@@ -213,7 +296,7 @@ func TestStaleLimit(t *testing.T) {
 	}{
 		{MustEndpoint("indices_bars_daily_topix"), 0, 7 * 24 * time.Hour},
 		{MustEndpoint("indices_bars_daily_topix"), 3, 3 * 24 * time.Hour},
-		{CalendarEndpoint(), 0, 14 * 24 * time.Hour}, // 取得間隔 7 日の 2 倍
+		{CalendarEndpoint(), 0, 7 * 24 * time.Hour}, // 日に 1 回取るので既定の 7 日（以前は取得間隔 7 日の 2 倍で 14 日）
 		{CalendarEndpoint(), 30, 30 * 24 * time.Hour},
 	}
 	for _, c := range cases {

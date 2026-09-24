@@ -2,6 +2,9 @@ package news
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
@@ -30,6 +33,56 @@ type SyncResult struct {
 	Days     []SyncDay
 }
 
+// FailureError は営業日の日単位の失敗があればエラーを返す（news sync の終了コードに使う）。
+// 失敗した日は台帳に残り次回また取りに行くが、終了 0 だと cron のログを読まない限り
+// 取り込みが止まっていることに気づけない。
+//
+// 休場日（closed。nil なら土日）の失敗は数えない（ClosedFunc。記事の無い日曜は毎週失敗になり、
+// 朝の --days 5 が月〜木に毎回 1 で終わってしまう）。失敗の件数と表示は Failed・Days に残る。
+func (r SyncResult) FailureError(closed ClosedFunc) error {
+	closed = closed.orWeekend()
+	var days []string
+	for _, d := range r.Days {
+		if d.Err == nil {
+			continue
+		}
+		if day, err := time.ParseInLocation("2006-01-02", d.Day, clock.Tokyo); err == nil && closed(day) {
+			continue
+		}
+		days = append(days, d.Day)
+	}
+	if len(days) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d 日の取り込みに失敗しました（%s。次回の sync で取り直します）", len(days), strings.Join(days, ", "))
+}
+
+// Walk は JST の now から days 日さかのぼり、取るべき日のニュースを source から引いて visit に渡す。
+// news sync と rate sync（レーティングの動き）が同じ電文を同じ規則で引くための共通の骨組み。
+//
+//   - done（済みの日）は飛ばす。ただし直近 recent 日は訂正・追記が入るので取り直す。force なら全部取り直す
+//   - 1 日取れなくても止めない。取れなかった日は fetchErr 付きで visit に渡す（済みにするかは visit が決める）
+//   - visit がエラーを返したら（記録簿への書き込みの失敗など）そこで止める
+//
+// 戻りは飛ばした日数。
+func Walk(now time.Time, source Source, days, recent int, force bool, done map[string]bool,
+	visit func(day time.Time, key string, items []broker.NewsItem, fetchErr error) error) (skipped int, err error) {
+	now = now.In(clock.Tokyo)
+	for i := 0; i < days; i++ {
+		day := now.AddDate(0, 0, -i)
+		key := day.Format("2006-01-02")
+		if done[key] && !force && i >= recent {
+			skipped++
+			continue
+		}
+		items, ferr := source.News(day.Format("20060102"))
+		if err := visit(day, key, items, ferr); err != nil {
+			return skipped, err
+		}
+	}
+	return skipped, nil
+}
+
 // Sync は JST の今日から days 日さかのぼってニュースを取り込む。
 //
 //   - 済みの日（DoneDays）は飛ばす。ただし直近 recent 日は訂正・追記が入るので取り直す。
@@ -43,29 +96,24 @@ func Sync(ctx context.Context, store *Store, source Source, days, recent int, fo
 		return res, err
 	}
 	now := clock.NowJST()
-	for i := 0; i < days; i++ {
-		day := now.AddDate(0, 0, -i)
-		key := day.Format("2006-01-02")
-		if done[key] && !force && i >= recent {
-			res.Skipped++
-			continue
-		}
-		items, err := source.News(day.Format("20060102"))
-		if err != nil {
-			if rerr := store.RecordFailure(ctx, key, now, err.Error()); rerr != nil {
-				return res, rerr
+	res.Skipped, err = Walk(now, source, days, recent, force, done,
+		func(_ time.Time, key string, items []broker.NewsItem, fetchErr error) error {
+			if fetchErr != nil {
+				if err := store.RecordFailure(ctx, key, now, fetchErr.Error()); err != nil {
+					return err
+				}
+				res.Failed++
+				res.Days = append(res.Days, SyncDay{Day: key, Err: fetchErr})
+				return nil
 			}
-			res.Failed++
-			res.Days = append(res.Days, SyncDay{Day: key, Err: err})
-			continue
-		}
-		n, err := store.Save(ctx, key, items, now)
-		if err != nil {
-			return res, err
-		}
-		res.Imported++
-		res.Added += n
-		res.Days = append(res.Days, SyncDay{Day: key, Items: len(items), New: n})
-	}
-	return res, nil
+			n, err := store.Save(ctx, key, items, now)
+			if err != nil {
+				return err
+			}
+			res.Imported++
+			res.Added += n
+			res.Days = append(res.Days, SyncDay{Day: key, Items: len(items), New: n})
+			return nil
+		})
+	return res, err
 }

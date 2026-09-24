@@ -131,8 +131,8 @@ vault `20-research/2026-09-jp-gap-up-short`。**いまは一時停止中**（`ma
   判定は `news.Classify`（TDnet 適時開示の見出し。対象会社の「当社株券等に対する公開買付」と、買付者側の
   「（証券コード：NNNN）」の対象だけ。買付者・自己株式の公開買付・買集め・一部報道は外さない）。
   直近 `corp_event_lookback_days`（120 暦日）の開示を、**open の時点の記録簿**で付け直す（plan でも付けて parquet の
-  `corp_event` 列に残す）。記録簿の最後の取り込み（成功）が `corp_event_max_staleness_minutes`（90 分）より古いか
-  読めなければ、その回の**ショートを見送る**（ログ `daytrade.news_stale`。ロングは止めず、余りの回し先の設定に従う）。
+  `corp_event` 列に残す）。記録簿の鮮度（必要な日ごとに見る。`docs/NEWS.md`）が `corp_event_max_staleness_minutes`（90 分）より古いか、
+  取れていない日があるか、読めなければ、その回の**ショートを見送る**（ログ `daytrade.news_stale`。ロングは止めず、余りの回し先の設定に従う）。
   外した銘柄はログ `daytrade.corp_event`、`open_run` の `corp_excluded`。判定の一覧は `news events`。
   **検証では効かない**（電文が 2026-06-17 からしか無い）。
 - **建てた後に分かった材料は `daytrade guard` が処置する**（`cancel_on_corp_event`、場中 10 分おき、時間帯は

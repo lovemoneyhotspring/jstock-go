@@ -126,30 +126,145 @@ func TestCorporateEventsRespectsKnownAt(t *testing.T) {
 	}
 }
 
-// 最後の取り込みは成功した日だけで見る。失敗も fetched_at を更新するので、混ぜると新しく見える。
-func TestLastFetchedIgnoresFailures(t *testing.T) {
-	s := openTemp(t)
-	ctx := context.Background()
-	if _, ok, err := s.LastFetched(ctx); err != nil || ok {
-		t.Fatalf("空の記録簿: ok=%v err=%v", ok, err)
-	}
+// 鮮度は必要な日ごとに見る。前日だけ取り込みに失敗した朝も、全日の最大値では「新しい」に
+// 見えていた（2026-09-24 のレビュー）。失敗は fetched_at を更新するので ok の行だけで見る。
+func TestFreshChecksEachDay(t *testing.T) {
 	jst := time.FixedZone("JST", 9*3600)
-	okAt := time.Date(2026, 9, 15, 6, 20, 0, 0, jst)
-	if _, err := s.Save(ctx, "2026-09-14", nil, okAt); err != nil {
-		t.Fatal(err)
+	now := time.Date(2026, 9, 15, 9, 0, 0, 0, jst) // 火曜の寄付
+	// fill は 9/11〜9/14 を日が明けてから、今日を 8:52 に取った記録簿を作る
+	fill := func(t *testing.T) *Store {
+		t.Helper()
+		s := openTemp(t)
+		ctx := context.Background()
+		for _, d := range []string{"2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14"} {
+			// UTC で書いた行も混ぜる（文字列の大小ではなく時刻で比べる）
+			if _, err := s.Save(ctx, d, nil, time.Date(2026, 9, 14, 21, 20, 0, 0, time.UTC)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.Save(ctx, "2026-09-15", items(), time.Date(2026, 9, 15, 8, 52, 0, 0, jst)); err != nil {
+			t.Fatal(err)
+		}
+		return s
 	}
-	// UTC で書いた古い成功（文字列の大小では新しく見える）
-	if _, err := s.Save(ctx, "2026-09-12", nil, time.Date(2026, 9, 14, 20, 0, 0, 0, time.UTC)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.RecordFailure(ctx, "2026-09-15", time.Date(2026, 9, 15, 8, 52, 0, 0, jst), "timeout"); err != nil {
-		t.Fatal(err)
-	}
-	at, ok, err := s.LastFetched(ctx)
-	if err != nil || !ok {
-		t.Fatalf("ok=%v err=%v", ok, err)
-	}
-	if !at.Equal(okAt) {
-		t.Errorf("LastFetched = %v, want %v", at, okAt)
-	}
+	ctx := context.Background()
+
+	t.Run("揃っていれば今日の最後の取り込み", func(t *testing.T) {
+		s := fill(t)
+		at, day, err := s.Fresh(ctx, now, FreshDays, nil)
+		if err != nil || day != "2026-09-15" || !at.Equal(time.Date(2026, 9, 15, 8, 52, 0, 0, jst)) {
+			t.Fatalf("Fresh = %v %s %v", at, day, err)
+		}
+	})
+	t.Run("前日が失敗なら取れていない", func(t *testing.T) {
+		s := fill(t)
+		if _, err := s.DB().Exec(`DELETE FROM news_days WHERE feed_date = '2026-09-14'`); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RecordFailure(ctx, "2026-09-14", time.Date(2026, 9, 15, 8, 52, 0, 0, jst), "timeout"); err != nil {
+			t.Fatal(err)
+		}
+		at, day, err := s.Fresh(ctx, now, FreshDays, nil)
+		if err != nil || !at.IsZero() || day != "2026-09-14" {
+			t.Fatalf("Fresh = %v %s %v, want ゼロ値と 2026-09-14", at, day, err)
+		}
+	})
+	t.Run("前日が夜の配信の前にしか取れていなければその時刻", func(t *testing.T) {
+		s := fill(t)
+		evening := time.Date(2026, 9, 14, 20, 20, 0, 0, jst)
+		if _, err := s.Save(ctx, "2026-09-14", nil, evening); err != nil {
+			t.Fatal(err)
+		}
+		at, day, err := s.Fresh(ctx, now, FreshDays, nil)
+		if err != nil || day != "2026-09-14" || !at.Equal(evening) {
+			t.Fatalf("Fresh = %v %s %v, want %v", at, day, err, evening)
+		}
+	})
+	t.Run("日曜の失敗は問わない", func(t *testing.T) {
+		// 記事の無い日曜は一覧の項目の無い応答で失敗になる（2026-09-13・09-20）。
+		// 問うと、日曜が窓に入る月〜木の朝はいつもショートを見送ってしまう
+		s := fill(t)
+		if err := s.RecordFailure(ctx, "2026-09-13", time.Date(2026, 9, 15, 6, 20, 0, 0, jst), "応答に aCLMMfdsNews がありません"); err != nil {
+			t.Fatal(err)
+		}
+		at, day, err := s.Fresh(ctx, now, FreshDays, nil)
+		if err != nil || day != "2026-09-15" || !at.Equal(time.Date(2026, 9, 15, 8, 52, 0, 0, jst)) {
+			t.Fatalf("Fresh = %v %s %v, want 9/15 8:52", at, day, err)
+		}
+	})
+	t.Run("取れていた日の取り直しの失敗で ok を消さない", func(t *testing.T) {
+		// 平日にも aCLMMfdsNews の無い応答が一時的に返る（2026-09-18・09-24）。ok の行を失敗で
+		// 上書きすると、その日が「取れていない」になって open が丸 1 日ショートを見送る
+		s := fill(t)
+		if err := s.RecordFailure(ctx, "2026-09-14", time.Date(2026, 9, 15, 8, 55, 0, 0, jst), "応答に aCLMMfdsNews がありません"); err != nil {
+			t.Fatal(err)
+		}
+		at, day, err := s.Fresh(ctx, now, FreshDays, nil)
+		if err != nil || day != "2026-09-15" || !at.Equal(time.Date(2026, 9, 15, 8, 52, 0, 0, jst)) {
+			t.Fatalf("Fresh = %v %s %v, want 9/15 8:52", at, day, err)
+		}
+		done, err := s.DoneDays(ctx)
+		if err != nil || !done["2026-09-14"] {
+			t.Fatalf("取れていた日が済みでなくなった: %v %v", done, err)
+		}
+	})
+	t.Run("日が明ける前の ok は失敗のあとも時刻を保ち、次回また取りに行く", func(t *testing.T) {
+		s := fill(t)
+		evening := time.Date(2026, 9, 14, 20, 20, 0, 0, jst)
+		if _, err := s.Save(ctx, "2026-09-14", nil, evening); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RecordFailure(ctx, "2026-09-14", time.Date(2026, 9, 15, 6, 20, 0, 0, jst), "timeout"); err != nil {
+			t.Fatal(err)
+		}
+		at, day, err := s.Fresh(ctx, now, FreshDays, nil)
+		if err != nil || day != "2026-09-14" || !at.Equal(evening) {
+			t.Fatalf("Fresh = %v %s %v, want %v", at, day, err, evening)
+		}
+		done, err := s.DoneDays(ctx)
+		if err != nil || done["2026-09-14"] {
+			t.Fatalf("日が明ける前にしか取れていない日を済みにした: %v %v", done, err)
+		}
+	})
+	t.Run("平日の休場日の失敗は、渡した判定で問わない", func(t *testing.T) {
+		// 9/14 を休場日（祝日）とする判定を渡す。土日だけの判定（nil）なら問う
+		s := fill(t)
+		if _, err := s.DB().Exec(`DELETE FROM news_days WHERE feed_date = '2026-09-14'`); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RecordFailure(ctx, "2026-09-14", time.Date(2026, 9, 15, 6, 20, 0, 0, jst), "応答に aCLMMfdsNews がありません"); err != nil {
+			t.Fatal(err)
+		}
+		holiday := func(d time.Time) bool { return Weekend(d) || d.Format("2006-01-02") == "2026-09-14" }
+		at, day, err := s.Fresh(ctx, now, FreshDays, holiday)
+		if err != nil || day != "2026-09-15" || !at.Equal(time.Date(2026, 9, 15, 8, 52, 0, 0, jst)) {
+			t.Fatalf("Fresh(休場日つき) = %v %s %v, want 9/15 8:52", at, day, err)
+		}
+		if at, day, err := s.Fresh(ctx, now, FreshDays, nil); err != nil || !at.IsZero() || day != "2026-09-14" {
+			t.Fatalf("Fresh(nil) = %v %s %v, want 土日だけの判定で 9/14 を問う", at, day, err)
+		}
+		// 休場日でも今日は問う
+		todayClosed := func(d time.Time) bool { return true }
+		if _, err := s.DB().Exec(`DELETE FROM news_days WHERE feed_date = '2026-09-15'`); err != nil {
+			t.Fatal(err)
+		}
+		if at, day, err := s.Fresh(ctx, now, FreshDays, todayClosed); err != nil || !at.IsZero() || day != "2026-09-15" {
+			t.Fatalf("Fresh(全日休場) = %v %s %v, want 今日を問う", at, day, err)
+		}
+	})
+	t.Run("窓の外の日は見ない", func(t *testing.T) {
+		s := fill(t)
+		if err := s.RecordFailure(ctx, "2026-09-10", now, "timeout"); err != nil {
+			t.Fatal(err)
+		}
+		if at, _, err := s.Fresh(ctx, now, FreshDays, nil); err != nil || at.IsZero() {
+			t.Fatalf("窓の外の失敗で取れていない扱い: %v %v", at, err)
+		}
+	})
+	t.Run("空の記録簿", func(t *testing.T) {
+		s := openTemp(t)
+		if at, _, err := s.Fresh(ctx, now, FreshDays, nil); err != nil || !at.IsZero() {
+			t.Fatalf("空の記録簿: %v %v", at, err)
+		}
+	})
 }

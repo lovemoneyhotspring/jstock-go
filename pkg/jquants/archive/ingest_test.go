@@ -689,6 +689,74 @@ func TestSyncBulkSkipsMonthsBeforeLookback(t *testing.T) {
 	}
 }
 
+// 月が締まって現れた月次ファイルは、日次で全営業日が埋まっている月なら取らない
+// （ティックは 4.2GB・9 分かかり 20:30 の plan と重なる。2026-09-24 のレビュー）。
+// 1 日でも欠けていれば取る。手動の Backfill は従来どおり取る。
+func TestSyncBulkSkipsMonthlyFileWhenDailyFilled(t *testing.T) {
+	ep := ticks()
+	cal := CalendarEndpoint()
+	header := "Date,Code,Time,SessionDistinction,Price,TradingVolume,TransactionId\n"
+	monthly := "equities/trades/historical/2026/equities_trades_202608.csv.gz"
+	daily := func(d string) string { return "equities/trades/live/equities_trades_" + d + ".csv.gz" }
+	setup := func(t *testing.T, dailyDays []string) (*Ingestor, *stubClient) {
+		t.Helper()
+		items := []map[string]any{{"Key": monthly, "LastModified": "m"}}
+		client := &stubClient{
+			bulk:  map[string][]map[string]any{ep.Path: items},
+			files: map[string][]byte{monthly: gzipped(header + "2026-08-31,1,09:00:00.000000,01,1,1,1\n")},
+		}
+		ing := newTestIngestor(t, client)
+		f, _ := RowsToFrame([]map[string]any{
+			{"Date": "2026-08-28", "HolDiv": "1"},
+			{"Date": "2026-08-29", "HolDiv": "0"},
+			{"Date": "2026-08-31", "HolDiv": "1"},
+		}, cal)
+		if _, err := ing.Archive.Upsert(cal, f); err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range dailyDays {
+			if err := ing.Ledger.Record(IngestRecord{
+				Endpoint: ep.Path, Target: "bulk:" + daily(d), Source: "bulk", Rows: 1, Digest: "s",
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return ing, client
+	}
+	now := jstAt(2026, 9, 1, 17, 40)
+
+	t.Run("日次で埋まっている月は取らない", func(t *testing.T) {
+		ing, _ := setup(t, []string{"20260828", "20260831"})
+		result, err := ing.SyncBulk(ep, now, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Ingests) != 0 || len(result.Failures) != 0 {
+			t.Fatalf("日次で埋まっている月の月次ファイルを取った: %+v", result)
+		}
+	})
+	t.Run("1 日でも欠けていれば取る", func(t *testing.T) {
+		ing, _ := setup(t, []string{"20260828"})
+		result, err := ing.SyncBulk(ep, now, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Ingests) != 1 || result.Ingests[0].Target != "bulk:"+monthly {
+			t.Fatalf("欠けのある月の月次ファイルを取っていない: %+v", result)
+		}
+	})
+	t.Run("手動の Backfill は取る", func(t *testing.T) {
+		ing, _ := setup(t, []string{"20260828", "20260831"})
+		result, err := ing.Backfill(ep, "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Ingests) != 1 {
+			t.Fatalf("手動の Backfill が月次ファイルを取らない: %+v", result)
+		}
+	})
+}
+
 func TestIngestTrimsToWindows(t *testing.T) {
 	t.Setenv(TicksWindowsEnv, "09:00-09:00") // 不正（開始 = 終了）はエラーで止まる
 	ep := ticks()

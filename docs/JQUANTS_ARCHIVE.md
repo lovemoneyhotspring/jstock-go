@@ -145,15 +145,25 @@ jquants sync [--days N] [--only 端点]   台帳を見て必要な端点・日�
 jquants backfill [--since 2016-09]     一括ダウンロードで初回取り込み。再実行は更新ファイルだけ
 jquants status                         端点ごとの月数・最古・最新・最終取得
 jquants check [--date D] [--days 30] [--stale-days 7]
-                                       営業日の欠けと、最終取得が古い全件・範囲の端点を探す（あれば 2 で終了。監視用）
-jquants repair [--days 30] [--only 端点] [--dry-run]
-                                       check と同じ判定で欠けを探し、その日だけ取り直す（埋まらなければ非 0）
+                                       営業日の欠けと、最終取得が古い全件・範囲の端点を探す（あれば 3 で終了。監視用）
+jquants repair [--days 30] [--stale-days 7] [--only 端点] [--dry-run]
+                                       check と同じ判定で欠けを探し、その日だけ取り直す。終わりに古い端点も見る
+                                       （埋まらない・古い端点があれば 3、取り込みの失敗だけなら 1）
 jquants prune [--only 端点] [--windows W] [--yes]
                                        日分割の端点を時間帯で刈る。既定は数えるだけ（書き換えは --yes）
 jquants query "SELECT …"               DuckDB で端点名のビューを張って SQL（研究用）
 ```
 
-ログは `docs/LOGGING.md` の規約どおり `jquants-<env>.jsonl` に。`code` は `jquants.ingest`（端点・対象・rows・changed・source）と `jquants.gap`（欠け検出）。
+ログは `docs/LOGGING.md` の規約どおり `jquants-<env>.jsonl` に。`code` は `jquants.ingest`（端点・対象・rows・changed・source）と `jquants.gap`（欠け検出）・`jquants.stale`（古い端点）。
+ダイジェストは終了コードと揃える: 非 0 で終わった回（取り込みの失敗・埋まらない欠け・古い端点・panic）は `outcome: error` で、
+`anomalies` に `jquants.command_failed: <要約>` が入る。取り込みの件数は `ingests` / `rows` / `failures`。
+
+終了コード: 0 = 正常、1 = 失敗（取り込みの失敗・引数の誤りなど）、2 = panic（`cli.ExitPanic`。記録・通知してから終わる）、
+3 = `check` / `repair` が欠け・古い端点を見つけた（2026-09-24〜。以前は 2 で panic と区別できなかった）。
+crontab・`deploy/*.sh` はこの値で分岐していない（0 か否かだけ）。
+
+一括ファイルのダウンロードの失敗は、エラー文に**署名付き URL を出さない**（2026-09-24〜）。`*url.Error` は URL を
+クエリ（署名）ごと文にするので、ホストと理由だけを残す——エラー文はダイジェストの `command_failed` と通知に載る。
 
 ### レート制限（120 回/分）
 
@@ -382,7 +392,10 @@ jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/202
 1. **API が無い（`Endpoint.BulkOnly`）**。`Plan()` は date= の仕事を立てず、`Sync()` の最後に `SyncBulk()` が
    一括の一覧を見て、**当月の日次ファイル（`live/`）のうち台帳に無いか `LastModified` が変わったもの**を取る。
    `Backfill` と同じ経路で、対象を「遡る日（`SettleDays`）を含む月から先」に絞っただけ。月が締まって
-   月次ファイル（`historical/`）に置き換わっても、日次で取り込み済みなので取り直しは起きない。
+   月次ファイル（`historical/`）が現れても、**その月の全営業日を日次で取り込み済みなら取らない**
+   （`filledByDaily`。2026-09-24 に足した。それまでは鍵の違う月次ファイルを新しいとみなし、公開が月初 2 日以内に
+   早まれば 4.2GB・9 分の取り直しが 20:30 の plan と重なりえた）。1 日でも欠けていれば取る。`repair` も同じ。
+   手動の `jquants backfill` は明示の取り直しなので従来どおり取る。
    `sync --dry-run` は一覧を見るまで対象が分からないので `bulk` と 1 行だけ出す。
 2. **鍵は `(Date, Code, TransactionId)`**。`TransactionId` は先頭ゼロ付き（`000000000012`）なので文字列のまま。
    `Time` も `HH:MM:SS.ffffff` の文字列。数値にするのは `Price`（Float64）と `TradingVolume`（Int64）だけ。
@@ -396,13 +409,20 @@ jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/202
 - **範囲は JST の暦日**。`--date` 省略時は JST の今日（`clock.TodayJST`）、`--date` も JST で読む。
   以前は UTC の今日だったので、00:00〜09:00 JST に回すと範囲が 1 日早く終わっていた。
 - **全件・範囲で取る端点の鮮度**。取引カレンダー・TOPIX・決算予定・投資部門別は日の欠けを数えないので、
-  台帳の最終取得が `--stale-days`（既定 7 日。取得間隔の 2 倍の方が長ければそちら＝カレンダーは 14 日）より
-  古ければ「古い端点」として出し、欠けと同じく終了コード 2・通知にする（`Ingestor.Stale`）。
-  `repair` はこれを直さない（`sync` が次の回に取る）。
+  台帳の最終取得が `--stale-days`（既定 7 日。取得間隔の 2 倍の方が長ければそちら）より
+  古ければ「古い端点」として出し、欠けと同じく終了コード 3・通知にする（`Ingestor.Stale`）。
+  `repair` も終わりに同じ確認をする（2026-09-24。20:00 の cron を `repair --notify` に替えたときに抜けていた）。
+  取り直しはしない（`sync` が次の回に取る）。取引カレンダーは 2026-09-24 から日に 1 回取る
+  （`MinIntervalHours` 24*7 → 20。週 1 回のままだと上限が 14 日に緩んでいた）。
 - **毎営業日行があるはずの端点で 0 行の日は欠け**。日足・銘柄一覧・指数・業種別空売り比率・日経 225 オプション・分足
   （`Endpoint.RowsEveryTradingDay`）は、台帳に「取ったが 0 行」とだけ残っている営業日を欠けと数える。
   公開前に叩いて空を掴んだ日は、訂正の猶予を過ぎると `sync` が見直さないため。信用残高（週次）・適時開示・
   EDINET のように 0 行の日が普通にある端点は、これまでどおり 0 行でも取った日とみなす。
+- **ほぼ毎営業日行があるが、本当に 0 行の日もある端点**（日々公表銘柄 `margin-alert`・決算短信 `fins/summary`。
+  `Endpoint.RetryEmpty`）は、0 行を掴んだら毎営業日の端点と同じく 50 分で取り直し、**訂正の猶予が明ける前に
+  取った 0 行だけ**を欠けと数える。猶予の明けた後に（repair が）取り直してもまだ 0 行なら、本当に 0 行の日
+  （大納会の 12-30 など。台帳では 2018〜2026 に fins/summary 4 日・margin-alert 1 日）とみなして欠けから外す。
+  毎晩の誤報を繰り返さず、公開の遅れで空を掴んだ日は少なくとも 1 回通知する側に倒した（2026-09-24）。
 
 ### 時間帯で絞る（分析が終わったあとの容量の削減）
 
@@ -473,6 +493,10 @@ JQUANTS_TICKS=1 jquants sync --only equities_trades
 
 ## 状態
 
+- 2026-09-24: 横断レビューの取り込み系を直した。失敗した回をダイジェストでも `error` にする（以前は常に ok）、
+  `repair` の終わりで全件・範囲の端点の鮮度も見る、取引カレンダーを日に 1 回、`margin-alert`・`fins/summary` の
+  0 行の取り直し（`RetryEmpty`）、日次で埋まった月の月次一括を取らない、再試行切れのエラーに最後の理由を残す、
+  `cli.Guarded` で panic を通知。
 - 2026-09-08: **欠けの確認と修復をコマンドにした**。`check` は端点が最初に持っている日より前を欠けと数えない
   （EDINET は 2016-09、アドオンは直近 2 年から始まるので、`--days` を広げても誤検知しない）。
   `repair` は同じ判定で見つけた日だけ取り直す。API のある端点は 1 日ずつ `date=`（0 行でも台帳に残るので、
