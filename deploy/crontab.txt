@@ -42,7 +42,9 @@ WBJP_HOME=/home/abobo/jstock-go
 # 9:00 の open の回を始める時刻（JST、0.1 秒刻み）。下の「9:00 の回だけは」を参照
 DT_OPEN_AT=09:00:01.2
 # 寄る前の open の回（寄成）を始める時刻。下の「2026-09-21 から開始は」を参照
-DT_PREOPEN_AT=08:59:50.0
+DT_PREOPEN_AT=08:59:53.0
+# 寄る前の snap（slot 085943）を始める時刻。DT_PREOPEN_AT とは組で動かす（下の「2026-09-24 に」を参照）
+DT_PRESNAP_AT=08:59:43.0
 WBJP_BIN=/home/abobo/jstock-go/bin
 
 # --- データ ------------------------------------------------------------------
@@ -114,7 +116,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # ロックは with-lock.sh で 30 秒待ち、取れずに見送った回・打ち切った回は Discord に知らせる（flock -n は無言で消える）
 30 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 WITH_LOCK_TIMEOUT=300 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-plan.log $WBJP_BIN/daytrade plan --config-dir config/daytrade_margin
 # 朝 6:40 の保険: 前夜の plan を読めない（無い・壊れている）ときだけ作り直して知らせる。在れば何もしない。
-# 無いまま 8:59:50 を迎えると、その日の open は全部の回が落ちる
+# 無いまま 8:59:53 を迎えると、その日の open は全部の回が落ちる
 40 6 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 WITH_LOCK_TIMEOUT=300 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-plan.log $WBJP_BIN/daytrade plan --if-missing --config-dir config/daytrade_margin
 # 17:05・20:20（日足の取り込み後）: 朝の候補（選んだ銘柄も次点も）に当日の日足を当てて結果を履歴に残す。
 # 9:00 の順位表が無い日は plan × 始値で順位を作り直して評価する。妥当性の確認は `daytrade review`
@@ -138,7 +140,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 期間がそのまま観測期間になる。1 日遅らせれば 1 日ぶん永久に欠ける
 # snap は待たない（wait 0）。open / close が握っていれば見送る（発注が優先）。snap 自身は
 # book.max_run_seconds（50 秒）で切れる。9:00 台は open の回が 22〜38 秒おきなので、その時間帯の
-# snap（8:59:00・8:59:35・8:59:55・9:00:05）は --max-run と WITH_LOCK_TIMEOUT でさらに短く切る。
+# snap（8:59:00・8:59:43・9:00:05）は --max-run と WITH_LOCK_TIMEOUT でさらに短く切る。
 # snap は open と同じ分に置かない（同時に始まると open が 30 秒待っても取れない日が出る）。
 # 9:02・9:05・9:11 は open（9:00・9:03・9:06・9:09・9:13）の間。取れなかったバッチは snap が
 # 1 度取り直し、取れた分だけでも記録する。
@@ -156,41 +158,35 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 9:01:50 までロックを握り、9:00 台の open 3 回がまとめて見送りになる。
 # **--max-run 20 / 打ち切り 25 秒**（2026-09-19 に 35 / 40 から詰めた）。3,682 銘柄でも実測 8〜9 秒で
 # 終わるので 20 秒あれば足り、遅くとも 8:59:25 にはロックを手放す——35 / 40 のままだと固まった朝に
-# 8:59:40 まで握り、下の 8:59:35 の回（ロック待ち 0 秒）が黙って落ち、8:59:45 の open（待ち 5 秒）の
+# 8:59:40 まで握り、当時の 8:59:35 の回（ロック待ち 0 秒）が黙って落ち、8:59:45 の open（待ち 5 秒）の
 # 余裕も 5 秒しか残らなかった。切られた回は取れたバッチだけ記録する（全部失うわけではない）。
 # 打ち切りの秒数がそのまま上限になる（timeout の -k 10 の猶予まで伸びるのは TERM を握り潰す
 # プロセスだけで、snap は既定の動作でその場で終わる。TERM を受けるのは open だけ）。
 #
-# **2026-09-19 に 8:59:45 の snap（slot 085945）を 8:59:35 と 8:59:55 に割った**——8:59:45 は
-# 寄る前の open（寄成）に明け渡したため。どちらも**ロックを待たず（wait 0）、取れなければ
-# 何もせず終わる**（発注が優先）。必ず回る保証が無いので morning-check の必須スロットには
-# 入れない（deploy/morning-check.sh の EXPECTED_SLOTS）。
-#   085935: open の前に滑り込む回。--max-run 8 と WITH_LOCK_TIMEOUT=10 で、固まっても
-#           8:59:46〜47 に TERM、死ななくても WITH_LOCK_KILL_AFTER=2 で 8:59:49 までに手放し、8:59:50 の open
-#           （DT_PREOPEN_AT。ロック待ち 5 秒）を塞がない。KILL の猶予が既定の 10 秒のままだと 8:59:57 まで握りうる
-#   085955: 板寄せの 5 秒前。open（実測 4〜9 秒）の後の回で、取れた日の板は始値にいちばん近い。
-#           --max-run 2 と WITH_LOCK_TIMEOUT=4。--max-run は起動とログインの前から測るので問合せに使えるのは 1 秒前後、
-#           その後の parquet の書き出しに 2 秒残す（3 だと書き出しが TERM に当たり、取れた分まで捨てる）。ふだんは 8:59:59 ごろに終わる。
-#           固まった回は 9:00:00〜01 に TERM——9:00:01.2 の open（ロック待ち 30 秒）が最悪 1〜2 秒待つ
-# **--max-run は必ず WITH_LOCK_TIMEOUT より手前に置く**（2026-09-21 のレビュー。それまでは 8 / 8 と 4 / 3。いまは 8 / 10 と 2 / 4）。
-# --max-run は snap が自分で切り上げる締め切りで、過ぎたら送信中の電文を切って**取れたバッチだけ記録して
-# 正常に終わる**。WITH_LOCK_TIMEOUT は外からの TERM で、当たると**何も記録せず** [timeout] が残る。
-# 同じか逆だと、全銘柄（実測 7.3 秒）を取り切れない回は必ず TERM が先に当たり——085955 は毎回——
-# 取れた分まで捨てたうえ、固まった回と見分けられない。締め切りの後に残るのは parquet の書き出しだけ
-# なので差は 1〜2 秒で足りる。085935 は --max-run 8 を残して打ち切りの側を 10 に延ばした——全銘柄は実測 7.3 秒で、
-# --max-run を 6 に詰めると候補の外の銘柄が毎日 2 割ほど記録から落ちる。固まった回がロックを手放すのは 8:59:45〜47 で、
-# 寄る前の open（DT_PREOPEN_AT = 08:59:50.0、ロック待ち 5 秒）には掛からない。**DT_PREOPEN_AT を 08:59:45.0 に戻すなら 8 / 6 に詰める**。
-# 085955 は打ち切りをほとんど動かせない（9:00:01.2 の open の前に手放す）ので --max-run の側を詰めた。対象の銘柄が先に並ぶので、落ちるのは候補の外の銘柄。
-# これで [timeout] が出たら本当に固まった回。秒数を触るときは 2 つを組で直す
+# **2026-09-24 に寄る前の snap を 8:59:43 の 1 回（slot 085943）にまとめた**（ユーザ判断）。それまでは
+# 8:59:35（085935）と 8:59:55（085955）の 2 回。085955 は寄る前の open の後に回るため --max-run 2 で毎回途中で切れ
+# （9/24 は 3,698 銘柄中 2,640）、open を遅らせる余地も塞いでいた。狙いは「snap を撮って演算してから寄る前に発注する」形の土台:
+# snap は寄る前の open（DT_PREOPEN_AT = 08:59:53.0）の**前**に全銘柄を取り切り、固まっても open の前にロックを手放す。
+#   ロックを待たず（wait 0）、取れなければ何もせず終わる（発注が優先）。必ず回る保証が無いので morning-check の
+#   必須スロットには入れない（deploy/morning-check.sh の EXPECTED_SLOTS）。
+#   秒の内訳（9/24 の実測）: 起動とログイン 1.8 秒 + 全銘柄の取得と書き出し 3.3〜3.6 秒 ⇒ ふだんは 8:59:48.4 ごろに終わる。
+#   --max-run 5（起動の後から数える。3.6 秒に 1.4 秒の余裕）/ WITH_LOCK_TIMEOUT=8（起動 1.8 + 5 + 書き出しの余裕 1）/
+#   WITH_LOCK_KILL_AFTER=1（snap は TERM でその場で終わる）⇒ 固まった朝でも 8:59:43 + 8 + 1 = **8:59:52 に手放し**、
+#   8:59:53 の open（ロック待ち 5 秒）を塞がない。開始は sleep でなく deploy/wait-until.sh（cron の揺れを経路から消す）。
+# **--max-run は必ず WITH_LOCK_TIMEOUT より手前に置く**（2026-09-21 のレビュー）。--max-run は snap が自分で切り上げる
+# 締め切りで、過ぎたら送信中の電文を切って**取れたバッチだけ記録して正常に終わる**。WITH_LOCK_TIMEOUT は外からの TERM で、
+# 当たると**何も記録せず** [timeout] が残る。締め切りの後に残るのは parquet の書き出しだけなので差は 1〜2 秒で足りる。
+# 遅い朝（9/21 より前の 7.3 秒の水準）は --max-run で切れて候補の外の銘柄が落ちる（対象の銘柄が先に並ぶ）。
+# これで [timeout] が出たら本当に固まった回。**DT_PRESNAP_AT・--max-run・打ち切り・DT_PREOPEN_AT は組で直す**:
+#   DT_PRESNAP_AT + WITH_LOCK_TIMEOUT + WITH_LOCK_KILL_AFTER ≤ DT_PREOPEN_AT − 1 秒
 # 8:57 は 8:55 と 8:59 の間を埋める（気配の動く速さを特徴量にするため。2026-09-19 追加）
 30,45,55 8 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 # 8:57 だけは既定（170 秒 + KILL 10 秒）にしない。8:57:01 に起きると TERM が 08:59:51・KILL が 09:00:01 に当たり、
-# 8:59:50 の寄成（ロック待ち 5 秒）を [lock_busy] で弾く。snap の自己締め切りは 50 秒（book.max_run_seconds）なので
+# 8:59:53 の寄成（ロック待ち 5 秒）を [lock_busy] で弾く。snap の自己締め切りは 50 秒（book.max_run_seconds）なので
 # 60 + 5 で足り、遅くとも 08:58:06 にはロックを手放す
 57 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=60 WITH_LOCK_KILL_AFTER=5 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 59 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=25 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 20
-59 8 * * 1-5          cd $WBJP_HOME && sleep 35 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=10 WITH_LOCK_KILL_AFTER=2 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085935 --max-run 8
-59 8 * * 1-5          cd $WBJP_HOME && sleep 55 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=4 WITH_LOCK_KILL_AFTER=2 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085955 --max-run 2
+59 8 * * 1-5          cd $WBJP_HOME && WAIT_UNTIL_LOG=state/logs/daytrade-snap.log deploy/wait-until.sh $DT_PRESNAP_AT && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=8 WITH_LOCK_KILL_AFTER=1 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085943 --max-run 5
 0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=18 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 15
 2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 # 15:19 は 15:20 の close（ロック待ち 30 秒）の直前なので、固まっても 15:19:50 で手放すよう打ち切りを詰める
@@ -200,8 +196,8 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 7:30・8:20・8:50: 前夜の米国市場（S&P500・VIX）を data/daytrade/us.json に焼く。open はこれを読むだけになる。
 # 20:30 の plan は温めない（当夜の米国市場がまだ開いていないので、朝の判定に要る行は入らない。6:40 の --if-missing の回だけ温める）
 # ——2026-09-15〜17 は 3 朝とも初回の open が 9:00 台に Cboe / Yahoo へ取りに行っていた（1〜2 秒。
-# 取得元が詰まれば 1 リクエスト 8 秒 × 取得元 3 × 系列 2）。寄る前の回（8:59:50〜9:00:00）は窓が
-# 10 秒しかないので、外へ取りに行かせない。
+# 取得元が詰まれば 1 リクエスト 8 秒 × 取得元 3 × 系列 2）。寄る前の回（8:59:53〜9:00:00）は窓が
+# 7 秒しかないので、外へ取りに行かせない。
 # 前夜の行が VIX つきで入っていれば何も取りに行かない（冪等）。3 回置くのは、取得元の反映が遅い朝と
 # VIX だけ欠けた朝を後の回で埋めるため。ブローカーに繋がないので /tmp/daytrade.lock は取らない。
 # 3 回とも取れなければ open が従来どおり取りに行く（寄る前の回は合計 5 秒まで。cmd/daytrade/open.go）
@@ -287,17 +283,17 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 9:00:00 に寄り、10 秒で始値 +14 bp、65 秒で +19 bp）。3 秒待つのは寄付を時価問合に反映させるため
 # （9:00:06 の snap では 9:00:00 台に寄った銘柄の 100% に始値が入っていた。9/16・9/17）。
 # 9:13 は us_stale_wait_until（09:12）の後に 1 回回すために残す
-# 8:59:50（DT_PREOPEN_AT）: 寄る前の回（execution.preopen_legs = long）。ここで出した注文だけが**寄成**になり、
+# 8:59:53（DT_PREOPEN_AT）: 寄る前の回（execution.preopen_legs = long）。ここで出した注文だけが**寄成**になり、
 # 始値を決める板寄せで建つ。締め切りはコードが 9:00:00（板寄せ）に切る——過ぎてから届く寄成は
 # 既に寄った銘柄に約定しないため。実測 4〜9 秒で終わるので 15 秒あれば足りる。
 # 送れなかった分は下の 9:00:01.2 からの回が「残りの枚数」を従来のザラ場の成行で埋める。
-# 8:59 の snap は 8:59:35（slot 085935）へ前倒しし、この回にロックを明け渡している
+# 寄る前の snap は 8:59:43（slot 085943、DT_PRESNAP_AT）で、この回より前に取り終えてロックを明け渡す
 # 2026-09-21 から開始は DT_PREOPEN_AT ちょうど（deploy/wait-until.sh）。それまでは sleep 45 で実際は 8:59:46〜47。
 # **遅いほど気配は始値に近いが、9:00:00 までに 4 本とも届かなければ意味が無い**ので刻んで遅らせている途中。
 # 順調な朝の所要の見積もりは約 2.6 秒（建玉 0.4・気配 0.6・判定 0.3・余力 0.2・注文 4 本 1.1）。朝ごとに
 #   test/.venv/bin/python test/dt_preopen_timing.py
-# で「最後の注文から 9:00:00 までの余裕」を見る。8:59:53 より遅くするなら、上の 8:59:55 の snap を先に動かす
-# （同じロック。snap が先に取ると open が待たされて板寄せに間に合わない）。戻すなら 08:59:45.0
+# で「最後の注文から 9:00:00 までの余裕」を見る。さらに遅くするなら DT_PRESNAP_AT も組で動かす（上の式）。8:59:55 以降にする前に、遅れた寄成の
+# 行き先を 1 株で実機検証する（vault daytrade-open-latency）。戻すなら 2026-09-24 の前の crontab.txt（08:59:50.0、snap は 085935 と 085955）を git から
 # WITH_LOCK_TIMEOUT=15: 固まったら 9:00:05〜10 に手放す（既定の 170 秒だと 9:02:40 まで握り、9:00:01.2・9:00:25・
 # 9:01:03 の回が lock_busy で全部消えて建つのが 9:03 になる）。締め切りは 9:00:00 なので、切られて困る仕事は残っていない
 # **DT_PREOPEN_AT + WITH_LOCK_TIMEOUT は 09:00:05 以上に保つ**（08:59:45.0 に戻すなら 20）。9:00:00 ちょうどに切ると最後の寄成の送信中に当たる

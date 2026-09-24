@@ -355,7 +355,7 @@ WBJP_ENV=prod ./bin/daytrade protect --config-dir config/daytrade_margin --live 
 # 1. bin を作り直す（preopen_limit_pct を知らない古い bin は strict mode で全コマンドが止まる）
 deploy/build.sh && WBJP_ENV=prod ./bin/daytrade preflight --config-dir config/daytrade_margin
 # 2. config/daytrade/daytrade.toml の preopen_limit_pct = 0.5 のコメントを外す（戻すならコメントに戻すだけ）
-# 3. 翌営業日の 8:59:50 の回の後:
+# 3. 翌営業日の寄る前の回（DT_PREOPEN_AT）の後:
 ./bin/daytrade status --config-dir config/daytrade_margin      # 理由の欄に「（寄指 1234）」、condition = OPENING
 # 4. 9:05 ごろ、立花の注文一覧で: 約定した注文の単価 = 始値、届かなかった注文の状態（失効 / 受付済みのまま）
 # 5. 15:20 の close の後: ログに daytrade.opening_unfilled（届かなかった件数と銘柄）、15:40 の verify が持ち越しなし
