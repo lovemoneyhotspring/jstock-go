@@ -520,8 +520,9 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 		}
 	}
 	// 発注済みの確認・リスク審査・送信・台帳の更新と、受理したぶんの余力の差し引きは
-	// execute.PlaceOrders（テストあり）
-	result, err := execute.PlaceOrders(rep, b, requests, riskCtx, execute.Options{
+	// execute.PlaceOrders（テストあり）。売りを先に並べる（max_orders_per_day を買いで
+	// 使い切って損切りを見送らない。execute.SellsFirst）
+	result, err := execute.PlaceOrders(rep, b, execute.SellsFirst(requests), riskCtx, execute.Options{
 		RunID: runID, Live: canLive, Risk: riskMgr, Report: logger,
 	})
 	// 見送りの理由は発注が途中で止まっても残す（explain で引く）

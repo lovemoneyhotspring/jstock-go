@@ -271,6 +271,45 @@ func TestPlaceOrdersPendingCountsTowardWeight(t *testing.T) {
 	}
 }
 
+// TestSellsFirstKeepsStopLossUnderDailyCap は 2026-09-24 の再点検の再現。
+//
+// max_orders_per_day は売りにも効く。銘柄コード順（買い 1001・1002 → 売り 9984）のまま
+// 審査すると、上限 2 件を買いで使い切り、損切りの売りが見送られた。売りを先に並べる。
+func TestSellsFirstKeepsStopLossUnderDailyCap(t *testing.T) {
+	limit := dec("1000")
+	sell, err := domain.NewOrderRequest("s", "9984", domain.SideSell, domain.OrderTypeLimit,
+		dec("100"), &limit, domain.TaxAccountSpecific, "損切り", domain.TradeTypeCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orders := []domain.OrderRequest{buy(t, "a", "1001", 1000, 100), buy(t, "b", "1002", 1000, 100), sell}
+
+	sorted := SellsFirst(orders)
+	if got := []string{sorted[0].ClientOrderID, sorted[1].ClientOrderID, sorted[2].ClientOrderID}; got[0] != "s" || got[1] != "a" || got[2] != "b" {
+		t.Fatalf("並び: %v（売りが先、買い同士は元の順）", got)
+	}
+	if orders[0].ClientOrderID != "a" {
+		t.Error("元の並びを書き換えた")
+	}
+
+	mgr := risk.NewRiskManager(wbjpcfg.RiskConfig{
+		MaxOrderValue: dec("10000000"), MaxOrdersPerDay: 2, MaxDailyLoss: dec("1000000"),
+		MaxPositionWeight: dec("1"), MaxGrossExposure: dec("10"),
+	}, []string{"1001", "1002", "9984"})
+	ctx := riskContext("10000000", map[string]decimal.Decimal{"1001": dec("1000"), "1002": dec("1000"), "9984": dec("1000")})
+	ctx.Positions["9984"] = domain.Position{Symbol: "9984", Quantity: dec("100"), AvailableQuantity: dec("100"), CostPrice: dec("1200")}
+	res, err := PlaceOrders(openRepo(t), &stubBroker{}, sorted, ctx, Options{RunID: "run-1", Live: true, Risk: mgr, Report: &recorder{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, rejected := res.RiskRejected["9984"]; rejected || res.Placed != 2 {
+		t.Errorf("損切りの売りが件数の上限で見送られた: %+v", res)
+	}
+	if !strings.Contains(res.RiskRejected["1002"], "発注件数") {
+		t.Errorf("上限を超えた買いが見送られない: %+v", res)
+	}
+}
+
 func TestPlaceOrdersSellDoesNotReserveBuyingPower(t *testing.T) {
 	ctx := riskContext("1000", nil)
 	limit := dec("1000")
