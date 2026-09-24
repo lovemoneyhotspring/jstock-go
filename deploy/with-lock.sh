@@ -55,7 +55,7 @@ notify() {
   post=${POST_BIN:-$(dirname "$0")/../bin/discord-post}
   [ -x "$post" ] || return 0
   if command -v timeout >/dev/null 2>&1; then
-    printf '%s\n' "$2" | timeout 60 "$post" --title "$1" >> "$log" 2>&1 || true
+    printf '%s\n' "$2" | timeout -k 10 60 "$post" --title "$1" >> "$log" 2>&1 || true
   else
     printf '%s\n' "$2" | "$post" --title "$1" >> "$log" 2>&1 || true
   fi

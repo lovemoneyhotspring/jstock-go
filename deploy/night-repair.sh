@@ -51,7 +51,8 @@ with_dotenv() {
     "$@"
   )
 }
-post() { with_dotenv "$POST_BIN" "$@"; }
+# 送信が固まっても flock を握ったまま残らないよう時間を区切る
+post() { with_dotenv timeout -k 10 120 "$POST_BIN" "$@"; }
 
 # 口座は明示させる（Go の既定は uat。docs/DEPLOY.md「cron の環境」）。cron の行は WBJP_ENV=prod を
 # 渡す。環境に無ければ .env の値を使う
@@ -89,13 +90,43 @@ fi
 # 30 分ぶんのトリアージと PR が生まれる。同じ規則で除く。
 # command == "backtest" も除く。研究で手で叩く検証で本番の売買経路ではなく、設定の置き忘れや
 # 試作の OOM で落ちても直す物が無い（2026-09-13 に 5 件でトリアージが起きた）。
-ANOMALY_COUNT="$(jq -c 'select((.anomalies or .outcome == "error") and (.verify | not) and .command != "backtest")' "${DIGESTS[@]}" 2>/dev/null | wc -l | tr -d ' ')"
+#
+# 行ごとに読む（-R で 1 行ずつ文字列として受け、fromjson を try で包む）。以前は
+# `jq -c 'select(…)' … 2>/dev/null | wc -l` で、壊れた行が 1 つあるとそこで jq が止まって後ろを
+# 数えず、jq が無いと 0 件——どちらも「異常なし」で claude を起こさなかった（2026-09-25 のレビュー）。
+# 壊れた行（JSON でない・オブジェクトでない）は数えて異常に含める。ダイジェストは 1 行を 1 回の
+# 書き込みで足すので、壊れた行があること自体が書き手の異常。jq が無い・jq が落ちたときも
+# 「判定できない」として異常の側に倒し、claude に調べさせる（黙って 0 件にしない）。
+JUDGE_NOTE=""
+if ! command -v jq >/dev/null 2>&1; then
+  ANOMALY_COUNT=1
+  JUDGE_NOTE="jq が見つからず、ダイジェストの異常を判定できませんでした（判定できないので異常として扱う）。"
+else
+  kinds="$(jq -R -r '
+    select(test("\\S"))
+    | (try fromjson catch null) as $r
+    | if ($r | type) != "object" then "broken"
+      elif ($r | (.anomalies or .outcome == "error") and (.verify | not) and .command != "backtest") then "anomaly"
+      else empty end' "${DIGESTS[@]}" 2>"$REPORT_DIR/night-repair-$TODAY.jq.err")"
+  jq_rc=$?
+  ANOMALY_COUNT="$(grep -c '^anomaly$' <<<"$kinds")"
+  BROKEN_COUNT="$(grep -c '^broken$' <<<"$kinds")"
+  if [ "$jq_rc" -ne 0 ]; then
+    JUDGE_NOTE="jq が終了コード $jq_rc で止まり、ダイジェストを最後まで判定できませんでした（$(head -c 200 "$REPORT_DIR/night-repair-$TODAY.jq.err" 2>/dev/null | tr '\n' ' ')）。数えられたのは途中までです。"
+    [ "$ANOMALY_COUNT" -gt 0 ] || ANOMALY_COUNT=1
+  fi
+  if [ "$BROKEN_COUNT" -gt 0 ]; then
+    JUDGE_NOTE="${JUDGE_NOTE}JSON として読めない行が $BROKEN_COUNT 行ありました（異常の件数に含めています）。"
+    ANOMALY_COUNT=$((ANOMALY_COUNT + BROKEN_COUNT))
+  fi
+fi
+rm -f "$REPORT_DIR/night-repair-$TODAY.jq.err"
 if [ "$ANOMALY_COUNT" = "0" ]; then
   echo "異常なし（$YESTERDAY 〜 $TODAY）。claude は起動しません"
   exit 0
 fi
 
-echo "異常 $ANOMALY_COUNT 件を検知。night-repair エージェントを起動します"
+echo "異常 $ANOMALY_COUNT 件を検知。night-repair エージェントを起動します${JUDGE_NOTE:+（$JUDGE_NOTE）}"
 
 # cron の PATH には ~/.local/bin が入っていないので絶対パスで持つ
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
@@ -132,7 +163,8 @@ DISALLOWED=(
 )
 
 PROMPT="$TODAY（JST 今 $NOW）の運用ログに異常が $ANOMALY_COUNT 件見つかりました。
-原因を調べ、直せるならコードの修正案を作ってください（.claude/agents/night-repair.md の
+${JUDGE_NOTE:+$JUDGE_NOTE
+}原因を調べ、直せるならコードの修正案を作ってください（.claude/agents/night-repair.md の
 手順・制約に従うこと）。コードを直すときは本番の作業ツリー $HOME_DIR では作業せず、
 git worktree（/tmp/night-repair-<YYYYMMDD>-<slug>）を作ってその中で編集・テスト・コミットしてください。
 標準出力にはレポート本文だけを書いてください。"
@@ -155,12 +187,13 @@ BRANCH_BEFORE="$(prod_branch)"
 HEAD_BEFORE="$(git rev-parse -q HEAD)"
 STATUS_BEFORE="$(git status --porcelain)"
 
-# --agent で night-repair を使う。1800 秒（30 分）で打ち切る。
+# --agent で night-repair を使う。1800 秒（30 分）で打ち切る。TERM で終わらなければ 30 秒後に KILL
+# （cron の行の flock を握ったまま残らないように）。
 # プロンプトは標準入力から渡す（--disallowedTools は可変長引数で、後ろの引数を飲み込む）
 # モデルは系統名で指定し、版とエフォートは ~/.config/claude-models/models.conf で決める（claude-model）
 MODEL="${NIGHT_REPAIR_MODEL:-fable}"
 EFFORT="${NIGHT_REPAIR_EFFORT:-$(claude-model effort "$MODEL" 2>/dev/null || true)}"
-printf '%s' "$PROMPT" | timeout 1800 "$CLAUDE_BIN" -p \
+printf '%s' "$PROMPT" | timeout -k 30 1800 "$CLAUDE_BIN" -p \
   --agent night-repair \
   --model "$MODEL" \
   ${EFFORT:+--effort "$EFFORT"} \
@@ -212,7 +245,7 @@ if [ $STATUS -ne 0 ] || [ ! -s "$REPORT" ]; then
     tail -c 800 "$REPORT_DIR/night-repair-$TODAY.err" 2>/dev/null
     echo '```'
     echo "サーバーで確認: \`WBJP_ENV=$WBJP_ENV $HOME_DIR/deploy/night-repair.sh\`"
-  } | post --title "夜間自己修復 $TODAY"
+  } | post --title "夜間自己修復 $TODAY" || echo "[error] 生成の失敗を Discord に送れませんでした" >&2
   exit 1
 fi
 
@@ -221,9 +254,15 @@ if [ "${DRY_RUN:-}" = "1" ]; then
   exit 0
 fi
 
-post --title "夜間自己修復 $TODAY" < "$REPORT"
+# 配達の失敗は終了コードに出す（本文は $REPORT に残っている）
+POST_STATUS=0
+post --title "夜間自己修復 $TODAY" < "$REPORT" || POST_STATUS=$?
+if [ "$POST_STATUS" -ne 0 ]; then
+  echo "[error] Discord への配達に失敗しました（終了コード $POST_STATUS。本文は $REPORT）" >&2
+fi
 
 # 45 日より古い控えを消す（report.sh と同じ約束）
 find "$REPORT_DIR" -maxdepth 1 -type f -mtime +45 \
   \( -name 'night-repair-*.md' -o -name 'night-repair-*.err' \) \
   -delete 2>/dev/null || :
+[ "$POST_STATUS" -eq 0 ] || exit 3
