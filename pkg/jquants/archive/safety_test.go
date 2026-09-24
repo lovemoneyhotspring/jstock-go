@@ -215,6 +215,73 @@ func TestGapsCountsEarlyEmptyDayOnRetryEmptyEndpoint(t *testing.T) {
 	}
 }
 
+// 0 行の日もある端点でも、大納会（年の最後の営業日）の 0 行は猶予の内でも欠けにしない。
+// 決算短信は大納会に 0 行の年が多く（台帳で 2019・2022・2025 の 12-30）、猶予（2 日）が明けるまで
+// 12/30・12/31 の 20:00 の repair が exit 3 で通知し、夜間自己修復も起きていた。
+// 取り直し（Plan の 50 分おき）は残す。カレンダーが 12-31 まで無ければ大納会と決めず、欠けのまま。
+func TestGapsSkipsEmptyYearEndOnRetryEmptyEndpoint(t *testing.T) {
+	cal := CalendarEndpoint()
+	full, _ := RowsToFrame([]map[string]any{
+		{"Date": "2025-12-29", "HolDiv": "1"},
+		{"Date": "2025-12-30", "HolDiv": "1"},
+		{"Date": "2025-12-31", "HolDiv": "0"},
+		{"Date": "2026-01-01", "HolDiv": "0"},
+	}, cal)
+	partial, _ := RowsToFrame([]map[string]any{
+		{"Date": "2025-12-29", "HolDiv": "1"},
+		{"Date": "2025-12-30", "HolDiv": "1"},
+	}, cal)
+	start := time.Date(2025, 12, 29, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2025, 12, 30, 0, 0, 0, 0, time.UTC)
+	for _, name := range []string{"markets_margin_alert", "fins_summary"} {
+		for _, tc := range []struct {
+			label    string
+			calendar *Frame
+			want     string
+		}{
+			{"カレンダーが年末まである", full, "2025-12-29"},
+			{"カレンダーが 12-31 まで無い", partial, "2025-12-29, 2025-12-30"},
+		} {
+			t.Run(name+"/"+tc.label, func(t *testing.T) {
+				ep := MustEndpoint(name)
+				ing := newTestIngestor(t, &stubClient{})
+				if _, err := ing.Archive.Upsert(cal, tc.calendar); err != nil {
+					t.Fatal(err)
+				}
+				// 12-29・12-30 とも公開の直後に 0 行を掴んだまま
+				var lastFetch time.Time
+				for _, day := range []time.Time{start, end} {
+					lastFetch = ep.AvailableAt.On(day, clock.Tokyo).Add(13 * time.Minute).UTC()
+					if err := ing.Ledger.Record(IngestRecord{
+						Endpoint: ep.Path, Target: day.Format(dateLayout), Source: "api",
+						FetchedUTC: lastFetch, Digest: "d",
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// 12/30・12/31 の 20:00 の repair（猶予の内）
+				for _, now := range []time.Time{jstAt(2025, 12, 30, 20, 0), jstAt(2025, 12, 31, 20, 0)} {
+					gaps, err := ing.Gaps(ep, start, end, now)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := JoinDays(gaps); got != tc.want {
+						t.Errorf("%s の欠け = %s, want %s", now.In(clock.Tokyo).Format("01-02 15:04"), got, tc.want)
+					}
+				}
+				// 取り直しは残す（公開の遅れで空を掴んだ大納会も 50 分おきに取りに行く）
+				jobs, err := ing.Plan(lastFetch.Add(EmptyRetryInterval), -1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !hasJob(jobs, ep.Path, "2025-12-30") {
+					t.Errorf("大納会の 0 行を %v 後に取り直していない", EmptyRetryInterval)
+				}
+			})
+		}
+	}
+}
+
 // 0 行の日もある端点も、最初の 0 行を 20 時間放置せず EmptyRetryInterval で取り直す。
 func TestPlanRetriesEmptyDayOnRetryEmptyEndpoint(t *testing.T) {
 	for _, name := range []string{"markets_margin_alert", "fins_summary"} {
