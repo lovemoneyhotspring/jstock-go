@@ -126,6 +126,9 @@ type openState struct {
 	prevAll map[string]float64
 	// summary はこの回の要約。段ごとに項目を足し、finish が open_run の履歴に積む
 	summary map[string]any
+
+	// verdict は寄付の判定（危険信号・米国小幅高・倍率）
+	verdict regime.Verdict
 }
 
 func runOpen(opts openOptions) error {
@@ -167,68 +170,14 @@ func runOpen(opts openOptions) error {
 		return nil
 	}
 
-	// 市場ギャップは候補全体の中央値で代用する（TOPIX の寄付は取れない）
-	var gaps []float64
-	for symbol, q := range s.quotes {
-		if prev, ok := s.prevAll[symbol]; ok && prev > 0 {
-			price, _ := q.Price.Float64()
-			gaps = append(gaps, price/prev-1)
-		}
-	}
-	// ロングの並べ方を寄付の判定より先に決める: LightGBM で並べられない日は gap_vol で取引し、
-	// 米国小幅高の日は両脚とも休む（us_skip_legs を all に戻す。config.FallbackToGapVol）
-	s.cfg = resolveRankBy(s.cfg, s.p, s.eligible, s.quotes)
-	verdict, usStale, err := evaluateRegime(s.cfg, s.p, s.day, regime.MarketGapOf(gaps), s.led, s.env.Preopen, s.deadline)
-	if err != nil {
+	if done, err := s.judgeDay(); done || err != nil {
 		return err
-	}
-	// 並べ方は米国小幅高の日だけ替わる（signal.rank_by_us_low）。危険信号の判定より後でしか
-	// 決まらないので、summary への記録もここまで待つ
-	// 寄指の位置も米国小幅高の日だけ替わる（execution.preopen_limit_pct_us_low）。この設定の日のロングは
-	// 寄る前の回の寄指でしか建てない——9:00 以降の回は見送りにする
-	s.cfg = applyDayConfig(s.cfg, &s.env, verdict.UsLow)
-	verdict = usLowPreopenOnly(s.cfg, verdict, s.env.Preopen)
-	s.summary["rank_by"] = s.cfg.Signal.RankBy
-	s.summary["us_low"] = verdict.UsLow
-	s.summary["preopen_limit_pct"] = s.cfg.Execution.PreopenLimitPct
-	s.summary["trade"] = verdict.Trade
-	s.summary["reasons"] = strings.Join(verdict.Reasons, "、")
-	s.summary["scale"] = verdict.Scale
-	for k, v := range verdict.Notes {
-		s.summary[k] = v
-	}
-	// 前夜の米国市場がまだ取れていない回は、待つ時刻（regime.us_stale_wait_until）までは判定せず
-	// 次の回に任せる。前々夜の値で見送り・取引を決めない（見送りの順位表も積まない）
-	if usStale {
-		want := usmarket.ExpectedSession(s.day).Format(DateLayout)
-		if s.cfg.Regime.WaitsForUs(clock.NowUTC(), jst) {
-			fmt.Printf("前夜（%s）の米国市場がまだ取れていません。%s までは判定せず次の回を待ちます\n",
-				want, s.cfg.Regime.UsStaleWaitUntil)
-			logInfo("daytrade.skip", "前夜の米国市場を待って見送り",
-				map[string]any{"reason": "us_stale", "want": want, "until": s.cfg.Regime.UsStaleWaitUntil})
-			digest.Skipped("us_stale")
-			s.finish("us_stale", map[string]any{"trade": false, "reasons": "前夜 " + want + " の米国市場を待つ"})
-			return nil
-		}
-		logWarn("daytrade.us_stale", "前夜の米国市場が取れないまま判定", map[string]any{"want": want})
-		digest.Anomaly("daytrade.us_stale", "前夜 "+want+" の米国市場が取れないまま判定")
-	}
-	if !verdict.Trade {
-		fmt.Println("危険信号により今日は取引しません: " + strings.Join(verdict.Reasons, "、"))
-		logInfo("daytrade.skip", "危険信号で見送り", map[string]any{"reason": "regime", "reasons": verdict.Reasons})
-		digest.Note(map[string]any{"regime_skip": strings.Join(verdict.Reasons, "、")})
-		// 見送りの日も「建てていたら」の順位表を残す。無いと evaluate が始値で作り直すので、
-		// 9:01 の気配で何を選んでいたかが消え、dt_missed も欠けと見送りを見分けられない
-		skippedQuotes, _ := execute.RankQuotes(s.quotes, s.placed.Symbols, execute.SweptSymbols(s.carried), s.cfg.Signal.SkipOpened)
-		appendSkippedRanking(s.cfg, s.p, skippedQuotes, s.day)
-		s.finish("regime", nil)
-		return nil
 	}
 
 	// 件数と 1 注文の予算: 縮小 → ショック → 拘束 → ショートの倍率 → （選定の後に）余り。
 	// その日の全体で決めてから、今日すでに建てた件数と金額を引く（execute.SizeDay）
 	sizing := execute.SizeDay(execute.SizingInput{
-		Cfg: s.cfg, Verdict: verdict, Placed: s.placed, TiedLong: s.tiedLong, TiedShort: s.tiedShort,
+		Cfg: s.cfg, Verdict: s.verdict, Placed: s.placed, TiedLong: s.tiedLong, TiedShort: s.tiedShort,
 		WatchOnly: s.watchOnly, WatchRows: watchRows,
 	})
 	execute.EmitNotes(s.env, sizing.Notes)
@@ -294,22 +243,22 @@ func runOpen(opts openOptions) error {
 		// gap_vol で並べて続ける。米国小幅高で「ショートだけ休む」と判定した日は、gap_vol なら
 		// ロングも休む日なので建てない（順位表は残す）
 		logWarn("daytrade.rerank", "LightGBM で並べられないため gap_vol で並べる（寄付の判定の後）",
-			map[string]any{"error": err.Error(), "short_off": verdict.ShortOff})
+			map[string]any{"error": err.Error(), "short_off": s.verdict.ShortOff})
 		digest.Anomaly("daytrade.rerank", "LightGBM で並べられず gap_vol で取引（判定の後）: "+err.Error())
 		fmt.Printf("LightGBM で並べられないため gap_vol で並べます: %v\n", err)
 		s.cfg = s.cfg.FallbackToGapVol()
 		s.summary["rank_by"] = s.cfg.Signal.RankBy
 		ranking = selection.Rank(s.eligible, s.quotes, s.cfg.Signal)
-		if verdict.ShortOff {
+		if s.verdict.ShortOff {
 			// gap_vol はこの日を両脚とも休む（us_skip_legs = "all"）。危険信号で見送った日と
 			// 同じ形で終える——余りをロングに回した通知だけ出して no_picks で終わると、
 			// 見送りの印の無い順位表が残り、評価が「候補なし」と読む
-			fmt.Printf("gap_vol の米国小幅高の日なのでロングも休みます（%s）\n", verdict.ShortOffReason)
+			fmt.Printf("gap_vol の米国小幅高の日なのでロングも休みます（%s）\n", s.verdict.ShortOffReason)
 			logInfo("daytrade.skip", "gap_vol に戻して見送り",
-				map[string]any{"reason": "regime", "reasons": verdict.ShortOffReason})
-			digest.Note(map[string]any{"regime_skip": verdict.ShortOffReason})
+				map[string]any{"reason": "regime", "reasons": s.verdict.ShortOffReason})
+			digest.Note(map[string]any{"regime_skip": s.verdict.ShortOffReason})
 			appendSkippedRanking(s.cfg, s.p, rankQuotes, s.day)
-			s.finish("regime", map[string]any{"trade": false, "reasons": verdict.ShortOffReason})
+			s.finish("regime", map[string]any{"trade": false, "reasons": s.verdict.ShortOffReason})
 			return nil
 		}
 	}
@@ -350,7 +299,7 @@ func runOpen(opts openOptions) error {
 	// 既存規則（gap_vol）は米国小幅高の日を両脚とも休む（us_skip_legs = "all"）。LightGBM だけが
 	// 取引するこの日に同じ N で選んだことにすると、gap_vol が建てない日の成績が比べに混ざるので
 	// 比べる相手を 0 件にして、候補なしと区別する印（rule_off）を残す
-	ruleOff := verdict.ShortOff && s.cfg.Signal.RankBy == dtconfig.RankByLGBM
+	ruleOff := s.verdict.ShortOff && s.cfg.Signal.RankBy == dtconfig.RankByLGBM
 	if ruleOff {
 		rulePicks = nil
 	}
@@ -370,7 +319,7 @@ func runOpen(opts openOptions) error {
 		}
 		fmt.Printf("  参考: 既存規則（gap_vol）なら %s\n", strings.Join(names, " "))
 	}
-	logRanking(s.day, "BUY", ranking, picks, longReasons, n, budget, verdict.Scale, weighting, len(rankQuotes))
+	logRanking(s.day, "BUY", ranking, picks, longReasons, n, budget, s.verdict.Scale, weighting, len(rankQuotes))
 
 	switch {
 	case s.cfg.Margin.Enabled && !s.watchOnly && s.cfg.Margin.Paused:
@@ -395,7 +344,7 @@ func runOpen(opts openOptions) error {
 		s.summary["short_n"] = shortN
 		s.summary["short_budget"] = shortBudget
 		s.summary["short_multiplier"] = shortMultiplier
-		logRanking(s.day, "SELL", shortRanking, shortPicks, shortReasons, shortN, shortBudget, verdict.Scale, s.cfg.Margin.Weighting, len(rankQuotes))
+		logRanking(s.day, "SELL", shortRanking, shortPicks, shortReasons, shortN, shortBudget, s.verdict.Scale, s.cfg.Margin.Weighting, len(rankQuotes))
 		picks = append(picks, shortPicks...)
 	case s.cfg.Margin.Enabled && !s.watchOnly && s.remainingShort <= 0 && s.placed.Short > 0:
 		fmt.Printf("ショート: 発注済み（%d 件）\n", s.placed.Short)
@@ -438,7 +387,7 @@ func runOpen(opts openOptions) error {
 
 	// 米国小幅高の日を寄指だけで取引する設定では、指値を作れない銘柄（前日終値が無い・呼値に丸められない）を
 	// 寄成で出さない。平常日は寄成に戻るだけでよいが、この日の寄成は損の側（−9〜−12 bp/日）
-	if verdict.UsLow && s.cfg.Execution.UsLowPreopenOnly() {
+	if s.verdict.UsLow && s.cfg.Execution.UsLowPreopenOnly() {
 		before := len(picks)
 		picks = dropWithoutOpeningLimit(picks, s.cfg)
 		s.summary["opening_limit_dropped"] = before - len(picks)
@@ -464,7 +413,7 @@ func runOpen(opts openOptions) error {
 	s.finish("picked", map[string]any{"orders": orders, "failures": len(failures)})
 	logInfo("daytrade.run", "寄付の買いを終了", map[string]any{
 		"phase": "open", "live": s.allowed, "reason": s.reason,
-		"n": n, "budget": budget.String(), "scale": verdict.Scale,
+		"n": n, "budget": budget.String(), "scale": s.verdict.Scale,
 		"picks": len(picks), "failures": len(failures),
 		"already_long": s.placed.Long, "already_short": s.placed.Short,
 		"elapsed_ms": clock.NowUTC().Sub(s.started).Milliseconds(), "deadline": deadlineText(s.deadline),
@@ -473,6 +422,71 @@ func runOpen(opts openOptions) error {
 		"phase": "open", "live": s.allowed, "picks": len(picks), "failures": len(failures),
 	})
 	return nil
+}
+
+// judgeDay はその日の並べ方と危険信号（寄付の判定）を決め、要約に記録する。前夜の米国市場を待つ回・
+// 危険信号で見送る回は見送りを記録して done を返す（見送りの日も「建てていたら」の順位表は積む）。
+func (s *openState) judgeDay() (done bool, err error) {
+	// 市場ギャップは候補全体の中央値で代用する（TOPIX の寄付は取れない）
+	var gaps []float64
+	for symbol, q := range s.quotes {
+		if prev, ok := s.prevAll[symbol]; ok && prev > 0 {
+			price, _ := q.Price.Float64()
+			gaps = append(gaps, price/prev-1)
+		}
+	}
+	// ロングの並べ方を寄付の判定より先に決める: LightGBM で並べられない日は gap_vol で取引し、
+	// 米国小幅高の日は両脚とも休む（us_skip_legs を all に戻す。config.FallbackToGapVol）
+	s.cfg = resolveRankBy(s.cfg, s.p, s.eligible, s.quotes)
+	verdict, usStale, err := evaluateRegime(s.cfg, s.p, s.day, regime.MarketGapOf(gaps), s.led, s.env.Preopen, s.deadline)
+	if err != nil {
+		return false, err
+	}
+	// 並べ方は米国小幅高の日だけ替わる（signal.rank_by_us_low）。危険信号の判定より後でしか
+	// 決まらないので、summary への記録もここまで待つ
+	// 寄指の位置も米国小幅高の日だけ替わる（execution.preopen_limit_pct_us_low）。この設定の日のロングは
+	// 寄る前の回の寄指でしか建てない——9:00 以降の回は見送りにする
+	s.cfg = applyDayConfig(s.cfg, &s.env, verdict.UsLow)
+	verdict = usLowPreopenOnly(s.cfg, verdict, s.env.Preopen)
+	s.summary["rank_by"] = s.cfg.Signal.RankBy
+	s.summary["us_low"] = verdict.UsLow
+	s.summary["preopen_limit_pct"] = s.cfg.Execution.PreopenLimitPct
+	s.summary["trade"] = verdict.Trade
+	s.summary["reasons"] = strings.Join(verdict.Reasons, "、")
+	s.summary["scale"] = verdict.Scale
+	for k, v := range verdict.Notes {
+		s.summary[k] = v
+	}
+	// 前夜の米国市場がまだ取れていない回は、待つ時刻（regime.us_stale_wait_until）までは判定せず
+	// 次の回に任せる。前々夜の値で見送り・取引を決めない（見送りの順位表も積まない）
+	if usStale {
+		want := usmarket.ExpectedSession(s.day).Format(DateLayout)
+		if s.cfg.Regime.WaitsForUs(clock.NowUTC(), jst) {
+			fmt.Printf("前夜（%s）の米国市場がまだ取れていません。%s までは判定せず次の回を待ちます\n",
+				want, s.cfg.Regime.UsStaleWaitUntil)
+			logInfo("daytrade.skip", "前夜の米国市場を待って見送り",
+				map[string]any{"reason": "us_stale", "want": want, "until": s.cfg.Regime.UsStaleWaitUntil})
+			digest.Skipped("us_stale")
+			s.finish("us_stale", map[string]any{"trade": false, "reasons": "前夜 " + want + " の米国市場を待つ"})
+			return true, nil
+		}
+		logWarn("daytrade.us_stale", "前夜の米国市場が取れないまま判定", map[string]any{"want": want})
+		digest.Anomaly("daytrade.us_stale", "前夜 "+want+" の米国市場が取れないまま判定")
+	}
+	if !verdict.Trade {
+		fmt.Println("危険信号により今日は取引しません: " + strings.Join(verdict.Reasons, "、"))
+		logInfo("daytrade.skip", "危険信号で見送り", map[string]any{"reason": "regime", "reasons": verdict.Reasons})
+		digest.Note(map[string]any{"regime_skip": strings.Join(verdict.Reasons, "、")})
+		// 見送りの日も「建てていたら」の順位表を残す。無いと evaluate が始値で作り直すので、
+		// 9:01 の気配で何を選んでいたかが消え、dt_missed も欠けと見送りを見分けられない
+		skippedQuotes, _ := execute.RankQuotes(s.quotes, s.placed.Symbols, execute.SweptSymbols(s.carried), s.cfg.Signal.SkipOpened)
+		appendSkippedRanking(s.cfg, s.p, skippedQuotes, s.day)
+		s.finish("regime", nil)
+		return true, nil
+	}
+
+	s.verdict = verdict
+	return false, nil
 }
 
 // startSummary は気配を履歴に残し、この回の要約（open_run）を始める。使える気配が 1 つも無ければ
