@@ -11,7 +11,6 @@ package execute
 import (
 	"errors"
 	"fmt"
-	"sort"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
@@ -108,20 +107,6 @@ type Result struct {
 	RiskRejected map[string]string
 	// Failed はブローカーが受け付けなかった（拒否・未送信）注文の説明。
 	Failed []string
-}
-
-// SellsFirst は売りを買いより先に並べ替えた写しを返す（売り同士・買い同士の順は保つ）。
-//
-// max_orders_per_day は売りにも効き、PlaceOrders は渡された順に審査する。Reconcile の
-// 順（銘柄コード順）のままだと、買いで上限を使い切ったとき損切り・手仕舞いの売りが
-// 見送られる（2026-09-24 の再点検）。売りは余力を使わないので、先に出しても買いの審査は変わらない。
-func SellsFirst(orders []domain.OrderRequest) []domain.OrderRequest {
-	out := make([]domain.OrderRequest, len(orders))
-	copy(out, orders)
-	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].Side == domain.SideSell && out[j].Side != domain.SideSell
-	})
-	return out
 }
 
 // PlaceOrders は注文を順に審査して出す。

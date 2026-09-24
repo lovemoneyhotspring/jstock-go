@@ -284,7 +284,7 @@ func TestSellsFirstKeepsStopLossUnderDailyCap(t *testing.T) {
 	}
 	orders := []domain.OrderRequest{buy(t, "a", "1001", 1000, 100), buy(t, "b", "1002", 1000, 100), sell}
 
-	sorted := SellsFirst(orders)
+	sorted := risk.SellsFirst(orders)
 	if got := []string{sorted[0].ClientOrderID, sorted[1].ClientOrderID, sorted[2].ClientOrderID}; got[0] != "s" || got[1] != "a" || got[2] != "b" {
 		t.Fatalf("並び: %v（売りが先、買い同士は元の順）", got)
 	}

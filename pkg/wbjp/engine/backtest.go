@@ -231,7 +231,7 @@ func RunBacktest(
 
 		// 6. ストップロスの管理と手仕舞い判定
 		//
-		// ライブ（cmd/wbjp/run.go）と同じ順序・同じ設定で処理する。
+		// ライブ（cmd/wbjp/run.go）と同じ順序・同じ設定で処理する（発注の審査も売りを先に: placeReviewed）。
 		// ここが食い違うと、検証結果が実運用を予測しなくなる。
 		// 手仕舞った銘柄のストップを外すのは RetainHeld だけ（模型の建玉は常に確か）
 		stopBook.RetainHeld(posMap)
@@ -331,17 +331,7 @@ func RunBacktest(
 			RealizedPnLToday: realizedToday,
 		}
 
-		for _, res := range plan.Orders {
-			if res.Request == nil {
-				continue
-			}
-			req := *res.Request
-			decision := riskMgr.Check(req, riskCtx, nil)
-			if decision.Approved {
-				_, _ = pb.Place(req)
-				riskCtx.OrdersToday++
-			}
-		}
+		placeReviewed(plan.Orders, riskMgr, &riskCtx, func(req domain.OrderRequest) { _, _ = pb.Place(req) })
 	}
 
 	finalBal, _ := pb.GetBalance()
@@ -455,4 +445,25 @@ func lastFiniteOf(series []float64) float64 {
 		}
 	}
 	return math.NaN()
+}
+
+// placeReviewed は Reconcile の注文をリスク審査に通し、通ったものを place に渡す。
+//
+// ライブ（cmd/wbjp/run.go）と同じく売りを先に審査する（risk.SellsFirst）。Reconcile の順
+// （銘柄コード順）のままだと、max_orders_per_day を買いで使い切った日に損切りの売りが
+// 見送られ、ライブより損切りが遅れる検証になる。
+func placeReviewed(orders []ReconcileResult, riskMgr *risk.RiskManager, riskCtx *risk.RiskContext,
+	place func(domain.OrderRequest)) {
+	var requests []domain.OrderRequest
+	for _, res := range orders {
+		if res.Request != nil {
+			requests = append(requests, *res.Request)
+		}
+	}
+	for _, req := range risk.SellsFirst(requests) {
+		if riskMgr.Check(req, *riskCtx, nil).Approved {
+			place(req)
+			riskCtx.OrdersToday++
+		}
+	}
 }
