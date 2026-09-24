@@ -105,6 +105,9 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 var decimalZero = decimal.Zero
 
 // dailyRun は日次実行 1 回ぶんの状態。runDaily の段（準備・接続・照合・判断・発注）が順に埋める。
+//
+// 各段はフィールドを埋めた段より後で付け替えない（map・slice は中身だけ足す）。decide・reconcileOrders・
+// place は頭でフィールドをローカルに写して使うので、後の段で付け替えると古い値で発注の判断が進む。
 type dailyRun struct {
 	// 準備（prepareDaily）
 	noSync, acceptFlat bool
