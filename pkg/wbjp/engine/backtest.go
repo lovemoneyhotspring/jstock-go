@@ -8,7 +8,6 @@ import (
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/portfolio"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/risk"
@@ -234,6 +233,8 @@ func RunBacktest(
 		//
 		// ライブ（cmd/wbjp/run.go）と同じ順序・同じ設定で処理する。
 		// ここが食い違うと、検証結果が実運用を予測しなくなる。
+		// 手仕舞った銘柄のストップを外すのは RetainHeld だけ（模型の建玉は常に確か）
+		stopBook.RetainHeld(posMap)
 		stopBook.EnsureWithOptions(posMap, atrMap, today,
 			risk.EnsureOptionsFrom(setCfg.Stops, setCfg.Sizing.ATRStopMultiple))
 		stopBook.UpdateTrailing(closePrices, atrMap)
@@ -281,12 +282,17 @@ func RunBacktest(
 		for sym, pos := range posMap {
 			quantities[sym] = pos.Quantity
 		}
-		stopTargets := stopBook.ExitTargets(closePrices)
-		stopTargets = append(stopTargets,
-			stopBook.TimeExitTargets(closePrices, today, setCfg.Stops.StaleExitDays, setCfg.Stops.MaxHoldDays)...)
-		stopTargets = append(stopTargets,
-			stopBook.TakeProfitTargets(closePrices, quantities, lotSizes,
-				setCfg.Stops.TakeProfitR, setCfg.Stops.TakeProfitFraction, marketrules.DefaultLotSize)...)
+		// ストップ由来の目標は本番と同じ risk.ExitPlan を通す（損切り・時間切れ・利確・残り玉）
+		stopTargets := stopBook.ExitPlan(setCfg.Stops, risk.ExitInputs{
+			Closes: closePrices, Quantities: quantities, LotSizes: lotSizes, AsOf: today,
+			Bars: func(sym string) []domain.Bar {
+				v, ok := stratCtx.Bars(sym)
+				if !ok {
+					return nil
+				}
+				return v.Bars()
+			},
+		})
 
 		targets := make(map[string]domain.TargetPosition)
 		for _, t := range risk.ApplyStopPriority(strategyTargets, stopTargets) {

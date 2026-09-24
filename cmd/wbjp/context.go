@@ -6,26 +6,27 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/repo"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/risk"
 	"github.com/shopspring/decimal"
 )
 
-// trendValues は銘柄ごとのトレンド判定値（trend_exit_kind の線）を返す。
-//
-// 残り玉（ランナー）をどこで手仕舞うかの基準。trend_exit_sma が未設定なら
-// 判定しないので空を返す。線の計算は risk.TrendValue（テストあり）。
-func trendValues(barStore *data.BarStore, symbols []string, stops wbjpcfg.StopsConfig) map[string]decimal.Decimal {
-	if stops.TrendExitSMA == nil || *stops.TrendExitSMA <= 0 {
-		return nil
-	}
-	out := make(map[string]decimal.Decimal, len(symbols))
-	for _, sym := range symbols {
-		bars, err := barStore.Read(sym, "", "")
-		if err != nil {
-			continue
-		}
-		if v, ok := risk.TrendValue(bars, stops); ok {
-			out[sym] = v
+// stopRecordsOf は StopBook の中身を台帳の行にする。
+func stopRecordsOf(book *risk.StopBook) map[string]repo.StopRecord {
+	out := make(map[string]repo.StopRecord)
+	for sym, st := range book.All() {
+		out[sym] = repo.StopRecord{
+			Symbol:           sym,
+			StopPrice:        st.StopPrice,
+			EntryPrice:       st.EntryPrice,
+			CreatedOn:        st.CreatedOn,
+			Trailing:         st.Trailing,
+			ATRMultiple:      st.ATRMultiple,
+			TrailingPct:      st.TrailingPct,
+			HighestClose:     st.HighestClose,
+			InitialStopPrice: st.InitialStopPrice,
+			InitialQuantity:  st.InitialQuantity,
+			ScaledOut:        st.ScaledOut,
 		}
 	}
 	return out

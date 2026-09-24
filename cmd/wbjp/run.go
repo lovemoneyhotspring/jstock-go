@@ -12,7 +12,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/indicators"
-	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/marketrules"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/engine"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/execute"
@@ -213,47 +213,18 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 		}
 	}
 	stopBook := risk.NewStopBook(stopObjMap)
-	// 手仕舞った銘柄のストップを外す。建玉を確かに照会できた回（発注する回）だけ——
-	// dry-run はメモリ上の模型（建玉 0）なので、ここで外すと全銘柄のストップを失う
-	if canLive {
-		if removed := stopBook.RetainHeld(posMap); len(removed) > 0 {
-			logger.Info("wbjp.stop_removed", fmt.Sprintf("保有していない銘柄のストップを外しました: %s", strings.Join(removed, ", ")))
-		}
+	// 手仕舞った銘柄のストップを外す（外すのはここ 1 か所）。発注する回は建玉を確かに
+	// 照会できている（照会に失敗したら上で止まる）。dry-run はメモリ上の模型（建玉 0）
+	// なので全部外れるが、dry-run はストップを保存しないので台帳は変わらない
+	if removed := stopBook.RetainHeld(posMap); canLive && len(removed) > 0 {
+		logger.Info("wbjp.stop_removed", fmt.Sprintf("保有していない銘柄のストップを外しました: %s", strings.Join(removed, ", ")))
 	}
 	stopBook.EnsureWithOptions(posMap, atrMap, todayJST,
 		risk.EnsureOptionsFrom(setCfg.Stops, setCfg.Sizing.ATRStopMultiple))
 	stopBook.UpdateTrailing(lastPrices, atrMap)
 	// 建値への引き上げは利確・トレーリングより先に行う。
 	stopBook.UpdateBreakeven(lastPrices, setCfg.Stops.BreakevenAfterR)
-
-	// DB へのストップ保存。発注する回は台帳を StopBook に揃える（外した銘柄の行も消す）
-	stopRecords := make(map[string]repo.StopRecord)
-	for sym, st := range stopBook.All() {
-		stopRecords[sym] = repo.StopRecord{
-			Symbol:           sym,
-			StopPrice:        st.StopPrice,
-			EntryPrice:       st.EntryPrice,
-			CreatedOn:        st.CreatedOn,
-			Trailing:         st.Trailing,
-			ATRMultiple:      st.ATRMultiple,
-			TrailingPct:      st.TrailingPct,
-			HighestClose:     st.HighestClose,
-			InitialStopPrice: st.InitialStopPrice,
-			InitialQuantity:  st.InitialQuantity,
-			ScaledOut:        st.ScaledOut,
-		}
-	}
-	if canLive {
-		if err := rep.SyncStops(stopRecords); err != nil {
-			logger.Warn("wbjp.stop_save_failed", fmt.Sprintf("ストップを保存できません: %v", err))
-		}
-	} else {
-		for sym, rec := range stopRecords {
-			if err := rep.SaveStop(rec); err != nil {
-				logger.Warn("wbjp.stop_save_failed", fmt.Sprintf("%s: ストップを保存できません: %v", sym, err))
-			}
-		}
-	}
+	// ストップの保存は利確（ScaledOut・建値への引き上げ）を決めた後（3-4）
 
 	// 3. 戦略の評価
 	strats, weights, err := buildStrategies(stratCfg)
@@ -333,22 +304,14 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 	}, stratCfg.EntryThreshold, stratCfg.ExitThreshold)
 
 	// 3-4. ストップ由来の手仕舞いを集める。これらは戦略の判断より優先する。
+	// 並べ方・重ね方は backtest と同じ risk.ExitPlan（損切りが残り玉の「維持」に負けない）
 	quantities := quantitiesOf(posMap)
-	stopTargets := stopBook.ExitTargets(lastPrices)
-	stopTargets = append(stopTargets,
-		stopBook.TimeExitTargets(lastPrices, todayJST, setCfg.Stops.StaleExitDays, setCfg.Stops.MaxHoldDays)...)
-	stopTargets = append(stopTargets,
-		stopBook.TakeProfitTargets(lastPrices, quantities, lotSizes,
-			setCfg.Stops.TakeProfitR, setCfg.Stops.TakeProfitFraction, marketrules.DefaultLotSize)...)
-	stopTargets = append(stopTargets,
-		stopBook.RunnerTargets(lastPrices, quantities,
-			trendValues(barStore, setCfg.Universe.Symbols, setCfg.Stops), setCfg.Stops.TrendExitAlways)...)
-
+	stopTargets := decideStopExits(rep, stopBook, setCfg.Stops, risk.ExitInputs{
+		Closes: lastPrices, Quantities: quantities, LotSizes: lotSizes, AsOf: todayJST,
+		Bars: func(sym string) []domain.Bar { return allBars[sym] },
+	}, canLive, logger)
 	for _, t := range risk.ApplyStopPriority(strategyTargets, stopTargets) {
 		targets[t.Symbol] = t
-	}
-	for _, t := range stopTargets {
-		logger.Warn("wbjp.stop_exit", fmt.Sprintf("%s: %s", t.Symbol, t.Reason))
 	}
 
 	if err := rep.RecordSignals(runID, allSignals); err != nil {
@@ -520,3 +483,27 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 }
 
 var decimalZero = decimal.Zero
+
+// decideStopExits はストップ由来の目標を決め（risk.ExitPlan。backtest と同じ）、その後で
+// ストップを保存する。
+//
+// 保存は利確で変えたストップ（建値への引き上げ・ScaledOut）まで含めるため ExitPlan の後
+// （2026-09-24 のレビュー W2: 以前は利確の前に保存していて、変更が次の回に残らなかった）。
+// 発注する回は台帳を StopBook に揃える（外した銘柄の行も消す）。dry-run は保存しない
+// （建玉 0 の模型で決めたストップで本番の台帳を書き換えない）。
+func decideStopExits(rep *repo.Repo, book *risk.StopBook, cfg wbjpcfg.StopsConfig, in risk.ExitInputs,
+	canLive bool, logger *logging.Logger) []domain.TargetPosition {
+	targets := book.ExitPlan(cfg, in)
+	for _, t := range targets {
+		if t.Quantity.LessThan(in.Quantities[t.Symbol]) {
+			logger.Warn("wbjp.stop_exit", fmt.Sprintf("%s: %s", t.Symbol, t.Reason))
+		}
+	}
+	if canLive {
+		if err := rep.SyncStops(stopRecordsOf(book)); err != nil {
+			logger.Warn("wbjp.stop_save_failed", fmt.Sprintf("ストップを保存できません: %v", err))
+			digest.Anomaly("wbjp.stop_save_failed", err.Error())
+		}
+	}
+	return targets
+}

@@ -151,7 +151,7 @@ func EnsureOptionsFrom(stops wbjpcfg.StopsConfig, atrStopMultiple decimal.Decima
 	}
 }
 
-// Ensure は建玉に対してストップを用意し、消えた建玉のぶんを片付ける。
+// Ensure は建玉に対してストップを用意する（手仕舞った銘柄のストップは RetainHeld で外す）。
 //
 // 互換のため残している薄いラッパ。initial_stop_pct や trailing_pct を
 // 効かせるには EnsureWithOptions を使う。
@@ -168,7 +168,7 @@ func (sb *StopBook) Ensure(
 	})
 }
 
-// EnsureWithOptions は建玉に対してストップを用意し、消えた建玉のぶんを片付ける。
+// EnsureWithOptions は建玉に対してストップを用意する（手仕舞った銘柄のストップは RetainHeld で外す）。
 //
 // ストップを持たない建玉があるのは危険な状態なので、取得価格から自動で設定する。
 func (sb *StopBook) EnsureWithOptions(
@@ -231,14 +231,8 @@ func (sb *StopBook) EnsureWithOptions(
 			ScaledOut:        false,
 		}
 	}
-
-	// 建玉がなくなった銘柄のストップは削除
-	for sym := range sb.stops {
-		pos, exists := positions[sym]
-		if !exists || pos.Quantity.LessThanOrEqual(decimal.Zero) {
-			delete(sb.stops, sym)
-		}
-	}
+	// 建玉が無くなった銘柄のストップは外さない。外すのは RetainHeld の 1 か所だけ
+	// （建玉を確かに照会できたときに呼び出し側が決める）。
 }
 
 // UpdateTrailing はトレーリングストップを引き上げる。
@@ -500,16 +494,84 @@ func (sb *StopBook) RunnerTargets(
 	return sortTargets(targets)
 }
 
+// ExitInputs は ExitPlan の材料。
+type ExitInputs struct {
+	// Closes は判断に使う終値（足が古い・読めない銘柄は入れない）。
+	Closes map[string]decimal.Decimal
+	// Quantities は現在の保有株数。
+	Quantities map[string]decimal.Decimal
+	LotSizes   map[string]decimal.Decimal
+	// AsOf は判断日（YYYY-MM-DD）。時間切れの営業日数を数える。
+	AsOf string
+	// Bars は銘柄の判断日までの足。残り玉の手仕舞い線（trend_exit_sma）に使う。
+	// nil なら線は無し（移動平均割れでは手仕舞わない）。
+	Bars func(symbol string) []domain.Bar
+}
+
+// ExitPlan はストップ由来の目標（損切り・時間切れ・利確・残り玉）をまとめて返す。
+//
+// 本番（cmd/wbjp/run.go）と backtest（engine.RunBacktest）は必ずここを通す。
+// 並べ方がずれると検証と本番の結果が食い違う（2026-09-24 のレビュー W1:
+// 本番だけが残り玉の目標を足していた）。
+//
+// 同じ銘柄に複数の目標が出たら、株数の少ないほう（手仕舞いの強いほう）を採る
+// （MergeStopTargets）。後から足した目標が勝つ形だと、同じ回に利確が ScaledOut を
+// 立てたとき、残り玉の「維持（利確前の株数）」が損切り・利確を打ち消していた。
+//
+// TakeProfitTargets は利確と同時にストップを建値へ引き上げ ScaledOut を立てる。
+// 呼び出し側は**この後で**ストップを保存すること（W2）。
+func (sb *StopBook) ExitPlan(cfg wbjpcfg.StopsConfig, in ExitInputs) []domain.TargetPosition {
+	var targets []domain.TargetPosition
+	targets = append(targets, sb.ExitTargets(in.Closes)...)
+	targets = append(targets, sb.TimeExitTargets(in.Closes, in.AsOf, cfg.StaleExitDays, cfg.MaxHoldDays)...)
+	targets = append(targets, sb.TakeProfitTargets(in.Closes, in.Quantities, in.LotSizes,
+		cfg.TakeProfitR, cfg.TakeProfitFraction, marketrules.DefaultLotSize)...)
+	targets = append(targets, sb.RunnerTargets(in.Closes, in.Quantities, sb.trendValues(cfg, in.Bars), cfg.TrendExitAlways)...)
+	return MergeStopTargets(targets)
+}
+
+// trendValues は残り玉の手仕舞い線の直近値。ストップのある銘柄だけ計算する。
+func (sb *StopBook) trendValues(cfg wbjpcfg.StopsConfig, bars func(string) []domain.Bar) map[string]decimal.Decimal {
+	if bars == nil || cfg.TrendExitSMA == nil || *cfg.TrendExitSMA <= 0 {
+		return nil
+	}
+	out := make(map[string]decimal.Decimal, len(sb.stops))
+	for sym := range sb.stops {
+		if v, ok := TrendValue(bars(sym), cfg); ok {
+			out[sym] = v
+		}
+	}
+	return out
+}
+
+// MergeStopTargets は同じ銘柄のストップ由来の目標を 1 つにする。株数の少ないほうが勝つ
+// （手仕舞い 0 株 ＞ 利確の残り ＞ 残り玉の維持）。同数なら先に並んだほう（理由を残す）。
+func MergeStopTargets(targets []domain.TargetPosition) []domain.TargetPosition {
+	merged := make(map[string]domain.TargetPosition, len(targets))
+	for _, t := range targets {
+		if prev, ok := merged[t.Symbol]; ok && !t.Quantity.LessThan(prev.Quantity) {
+			continue
+		}
+		merged[t.Symbol] = t
+	}
+	out := make([]domain.TargetPosition, 0, len(merged))
+	for _, t := range merged {
+		out = append(out, t)
+	}
+	return sortTargets(out)
+}
+
 // ApplyStopPriority はストップによる手仕舞いを戦略の目標より優先して重ねる。
 //
 // 同じ銘柄について戦略が「買い増し」と言っていても、ストップに抵触して
-// いれば手仕舞いが勝つ。
+// いれば手仕舞いが勝つ。ストップ由来の目標どうしは MergeStopTargets で
+// 株数の少ないほうを採る（並べた順で結果が変わらない）。
 func ApplyStopPriority(strategyTargets, stopTargets []domain.TargetPosition) []domain.TargetPosition {
 	merged := make(map[string]domain.TargetPosition, len(strategyTargets)+len(stopTargets))
 	for _, t := range strategyTargets {
 		merged[t.Symbol] = t
 	}
-	for _, t := range stopTargets {
+	for _, t := range MergeStopTargets(stopTargets) {
 		merged[t.Symbol] = t
 	}
 	targets := make([]domain.TargetPosition, 0, len(merged))
