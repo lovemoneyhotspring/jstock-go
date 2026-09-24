@@ -546,6 +546,32 @@ func (r *Repo) BrokerOrderIDs() (map[string]struct{}, error) {
 	return out, rows.Err()
 }
 
+// BrokerOrderIDsPlacedOn はその日（JST）に送って注文番号まで分かっている注文の番号。
+//
+// 送信結果不明の注文を当日の注文一覧で判定するとき、一覧が生きているかの目印に使う
+// （reconcile.Options.Expected）。これらが一覧に 1 つも無ければ、一覧が空で返った・
+// 反映が遅れていると読み、「該当なし」を「届いていない」とはしない。
+func (r *Repo) BrokerOrderIDsPlacedOn(dayJST string) (map[string]struct{}, error) {
+	rows, err := r.db.Query(
+		`SELECT broker_order_id FROM orders
+		 WHERE placed_on = ? AND status != ? AND broker_order_id IS NOT NULL AND broker_order_id != '';`,
+		dayJST, "dry_run",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 // OrdersToday はその日に実際に発注した件数。
 //
 // max_orders_per_day はプロセスをまたいで効かないと意味がない。

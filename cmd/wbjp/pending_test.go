@@ -100,3 +100,48 @@ func TestResolvePendingOrdersFailsClosedWhenHistoryUnavailable(t *testing.T) {
 		t.Error("判定できないときは PENDING のまま（送り直さない）")
 	}
 }
+
+// TestResolvePendingOrdersEmptyListIsNotTrusted は W3 の再現。今日送って注文番号まで分かっている
+// 注文があるのに一覧が空で返ったら、PENDING を UNSENT にしない（送り直すと二重発注）。
+func TestResolvePendingOrdersEmptyListIsNotTrusted(t *testing.T) {
+	rep, req := pendingRepo(t)
+	logger, _ := logging.NewLogger("wbjp", "uat", "r", "test", "")
+	// 同じ日に送って受理された別の注文（注文番号あり）
+	limit := decimal.NewFromInt(2000)
+	other, err := domain.NewOrderRequest("cid-2", "6758", domain.SideBuy, domain.OrderTypeLimit,
+		decimal.NewFromInt(100), &limit, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "77/20260904"
+	if err := rep.RecordOrder("run-1", other, string(domain.OrderStatusSubmitted), &id); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := resolvePendingOrders(rep, &historyBroker{}, logger, time.Now().UTC().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.NotSent != 0 || summary.TooRecent != 1 {
+		t.Errorf("空の一覧を信用して届いていないと決めた: %+v", summary)
+	}
+	if !wasPlaced(t, rep, req.ClientOrderID) {
+		t.Error("PENDING のまま残すべき（送り直さない）")
+	}
+}
+
+// TestResolvePendingOrdersSkipsEarlierDays は、今日より前に送った PENDING を当日分しか返らない
+// 一覧で「届いていない」と決めない（UNSENT にすると翌日以降に送り直してしまう）。
+func TestResolvePendingOrdersSkipsEarlierDays(t *testing.T) {
+	rep, req := pendingRepo(t)
+	logger, _ := logging.NewLogger("wbjp", "uat", "r", "test", "")
+	summary, err := resolvePendingOrders(rep, &historyBroker{}, logger, time.Now().UTC().Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.NotSent != 0 {
+		t.Errorf("前日の PENDING を届いていないと決めた: %+v", summary)
+	}
+	if !wasPlaced(t, rep, req.ClientOrderID) {
+		t.Error("前日の PENDING は PENDING のまま残すべき")
+	}
+}
