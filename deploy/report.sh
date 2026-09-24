@@ -32,17 +32,34 @@ cd "$HOME_DIR" || exit 1
 REPORT_DIR="$HOME_DIR/state/reports"
 mkdir -p "$REPORT_DIR"
 
-# .env の中身（WBJP_DISCORD_BOT_TOKEN・チャンネル ID など）を環境変数に載せる。cron は
-# ログインシェルを通らないので、ここで読まないと通知先が分からない。
-if [ -f "$HOME_DIR/.env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "$HOME_DIR/.env"
-  set +a
-fi
+# 配達係（deploy/build.sh が bin/ に作る）
+POST_BIN="${POST_BIN:-$HOME_DIR/bin/discord-post}"
+
+# with_dotenv は .env を読んだサブシェルでコマンドを 1 つ走らせる（deploy/night-repair.sh と同じ形）。
+# cron はログインシェルを通らないので、Discord の送り先（WBJP_DISCORD_BOT_TOKEN・チャンネル ID）は
+# ここでしか分からない。以前は `set -a; . .env` をこのシェルでやっていて、.env の全部（証券会社の
+# 鍵・J-Quants の鍵を含む）が claude -p に渡り、Bash から見えていた（2026-09-25 のレビュー）。
+# claude が要るのは WBJP_ENV とメモリの上限だけ。claude が叩く bin/* の Go は自分で .env を読む
+with_dotenv() {
+  (
+    if [ -f "$HOME_DIR/.env" ]; then
+      set -a
+      # shellcheck disable=SC1091
+      . "$HOME_DIR/.env"
+      set +a
+    fi
+    "$@"
+  )
+}
+# 送信が固まっても flock（cron の行の /tmp/report.lock）を握ったまま残らないよう時間を区切る
+post() { with_dotenv timeout -k 10 120 "$POST_BIN" "$@"; }
+
 # 口座（prod / uat）は明示させる。Go の既定は uat、以前のこのスクリプトの既定は prod で、
 # 食い違ったまま黙って別の口座のダイジェストを読むのを防ぐ（docs/DEPLOY.md「cron の環境」）。
-# cron の行は WBJP_ENV=prod を渡す。手で回すときも `WBJP_ENV=prod deploy/report.sh …`
+# cron の行は WBJP_ENV=prod を渡す。環境に無ければ .env の値を使う（手で回すときも付けるのがよい）
+if [ -z "${WBJP_ENV:-}" ]; then
+  WBJP_ENV="$(with_dotenv printenv WBJP_ENV || :)"
+fi
 if [ -z "${WBJP_ENV:-}" ]; then
   echo "WBJP_ENV が未設定です。prod か uat を明示してください（例: WBJP_ENV=prod $0 $PERIOD）" >&2
   exit 2
@@ -59,9 +76,6 @@ export WBJP_DUCKDB_MEMORY_LIMIT="${WBJP_DUCKDB_MEMORY_LIMIT:-3GB}"
 # cron の PATH には ~/.local/bin が入っていないので絶対パスで持つ
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 [ -x "$CLAUDE_BIN" ] || CLAUDE_BIN="$(command -v claude || echo "$CLAUDE_BIN")"
-
-# 配達係（deploy/build.sh が bin/ に作る）
-POST_BIN="${POST_BIN:-$HOME_DIR/bin/discord-post}"
 
 jst() { TZ=Asia/Tokyo date "$@"; }
 
@@ -144,7 +158,8 @@ fi
 # --agent でエージェントを選ぶ。モデルと effort は明示する（cron は
 # ~/.claude/settings.json の既定に頼らず、fable 5.1 / medium で固定。2026-09-23 に low から上げた。
 # REPORT_MODEL / REPORT_EFFORT で上書き可）。時間切れで cron が詰まるのを防ぐ。
-# 期間が長いほど読む量が増えるので、上限も伸ばす。
+# 期間が長いほど読む量が増えるので、上限も伸ばす。TERM で終わらなければ 30 秒後に KILL
+# （cron の行の flock を握ったまま残らないように）。
 case "$PERIOD" in
   daily)   TIMEOUT=900 ;;
   weekly)  TIMEOUT=1500 ;;
@@ -164,7 +179,7 @@ trap 'rm -f "$STARTED_MARK"' EXIT
 # モデルは系統名で指定し、版とエフォートは ~/.config/claude-models/models.conf で決める（claude-model）
 MODEL="${REPORT_MODEL:-fable}"
 EFFORT="${REPORT_EFFORT:-$(claude-model effort "$MODEL" 2>/dev/null || true)}"
-printf '%s' "$PROMPT" | timeout "$TIMEOUT" "$CLAUDE_BIN" -p \
+printf '%s' "$PROMPT" | timeout -k 30 "$TIMEOUT" "$CLAUDE_BIN" -p \
   --agent "$AGENT" \
   --model "$MODEL" \
   ${EFFORT:+--effort "$EFFORT"} \
@@ -190,7 +205,7 @@ if [ $STATUS -ne 0 ] || [ ! -s "$REPORT" ]; then
       echo "セッション記録の最後のエラー: ${cause:0:300}"
     fi
     echo "サーバーで確認: \`$HOME_DIR/deploy/report.sh $PERIOD $ARG\`"
-  } | "$POST_BIN"
+  } | post || echo "[error] 生成の失敗を Discord に送れませんでした" >&2
   exit 1
 fi
 
@@ -251,16 +266,21 @@ if [ "$PERIOD" != "daily" ] && [ -d "$VAULT_DIR/.git" ]; then
       echo '```'
       tail -c 500 "${REPORT%.md}.err" 2>/dev/null
       echo '```'
-    } | "$POST_BIN" || echo "vault の失敗を Discord に送れませんでした" >&2
+    } | post || echo "vault の失敗を Discord に送れませんでした" >&2
   fi
 fi
 
 # 日次は本文の 1 行目が見出し（エージェントが書く）。週次・月次は期間が見出しなので
 # ここで付ける——スレッド名にもなる
+# 配達の失敗は終了コードに出す（本文は $REPORT に残っている。掃除は続ける）
+POST_STATUS=0
 if [ "$PERIOD" = "daily" ]; then
-  "$POST_BIN" < "$REPORT"
+  post < "$REPORT" || POST_STATUS=$?
 else
-  "$POST_BIN" --title "$TITLE" < "$REPORT"
+  post --title "$TITLE" < "$REPORT" || POST_STATUS=$?
+fi
+if [ "$POST_STATUS" -ne 0 ]; then
+  echo "[error] Discord への配達に失敗しました（終了コード $POST_STATUS。本文は $REPORT）" >&2
 fi
 
 # 古い控えを消す。日次は 45 日（月次レポートが前月ぶんを読み返せる余裕を持たせる）、
@@ -272,3 +292,4 @@ find "$REPORT_DIR" -maxdepth 1 -type f -mtime +45 \
 find "$REPORT_DIR" -maxdepth 1 -type f -mtime +180 \
   \( -name 'weekly-*.md' -o -name 'weekly-*.err' \) \
   -delete 2>/dev/null || :
+[ "$POST_STATUS" -eq 0 ] || exit 3

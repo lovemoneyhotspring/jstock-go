@@ -6,6 +6,8 @@
 #   QUIET=1 deploy/morning-check.sh    # 問題が**無ければ**投げない
 #   NO_POST=1 deploy/morning-check.sh  # 何があっても投げない（試験用）
 #
+# 終了コード: 0 = 問題なし・1 = 問題あり・2 = WBJP_ENV 未設定・3 = Discord に送れなかった（末尾の説明）
+#
 # 試験は必ず NO_POST=1 で回すこと。QUIET=1 は「問題が 0 件のときだけ黙る」ので、
 # 開発中に問題を出しながら試すと毎回 Discord に飛ぶ（2026-09-11 に 6 通飛ばした）。
 #
@@ -283,11 +285,41 @@ trap 'rm -f "$body"' EXIT
 
 cat "$body"
 
+# --- 終了コード ----------------------------------------------------------------
+# crontab の行は `deploy/ping.sh MORNING $?` でこの終了コードを state/ping/MORNING に残し、
+# deploy/mackerel-alive.sh が alive.morning（0 以外で 1）として Mackerel に投稿する。監視ルールは
+# 「alive.morning > 0 で警報」なので、**0 以外はそのまま Mackerel の警報（メール）になる**。
+#
+#   0 = 問題なし（または休場日）で、送るべきものは送れた
+#   1 = 問題が見つかった（Discord には送れた）
+#   2 = WBJP_ENV が未設定（上で止まる）
+#   3 = Discord に送れなかった（discord-post が無い・失敗・時間切れ）。問題の有無より優先する
+#
+# 以前は最後が必ず exit 0 で、問題があっても・Discord に届かなくても Mackerel は正常のままだった
+# （2026-09-25 のレビュー M1）。problems>0 も警報にする判断: 過去の運用ログでは要確認は 10 営業日に
+# 1 回ほどで、どれも「板は遡れないので今日のうちに」見るべきもの。Discord と Mackerel の二重になるが、
+# Discord の 1 通は流れて見落としうるので、残る側（Mackerel は当日中 1 のまま）にも出す。
+# 警報は翌営業日の期限（9:40）前に 0 へ戻る——alive.morning は「今日の印」しか見ない。
+# 誤報が多すぎると感じたら、ここで rc_problems=0 にすれば送信失敗だけを警報にできる。
+rc_problems=1
+rc=0
+[ "$problems" = "0" ] || rc=$rc_problems
+
+# NO_POST=1 は試験用。送らないので送信失敗は無く、問題の有無だけを返す（cron の行では使わない）
 if [ "${NO_POST:-}" = "1" ]; then
-  exit 0
+  exit "$rc"
 fi
+# QUIET=1 で問題が無ければ送らない。送っていないので rc は 0 のまま
 if [ "${QUIET:-}" = "1" ] && [ "$problems" = "0" ]; then
   exit 0
 fi
-[ -x "$POST_BIN" ] && "$POST_BIN" --title "寄り付きの記録 $TODAY" < "$body"
-exit 0
+if [ ! -x "$POST_BIN" ]; then
+  echo "[error] $POST_BIN が無い（実行できない）ので Discord に送れませんでした" >&2
+  exit 3
+fi
+# 送信が固まっても点検は終える（-k は TERM を無視されたとき）
+if ! timeout -k 10 120 "$POST_BIN" --title "寄り付きの記録 $TODAY" < "$body"; then
+  echo "[error] Discord への送信に失敗しました（$POST_BIN）" >&2
+  exit 3
+fi
+exit "$rc"

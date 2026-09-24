@@ -14,5 +14,5 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$GUARD_LOG"; }
 notify() {
   log "[notify] $1 :: $2"
   [ -x "$POST_BIN" ] || return 0
-  printf '%s\n' "$2" | timeout 60 "$POST_BIN" --title "$1" >> "$GUARD_LOG" 2>&1 || log "[warn] 通知を送れませんでした: $1"
+  printf '%s\n' "$2" | timeout -k 10 60 "$POST_BIN" --title "$1" >> "$GUARD_LOG" 2>&1 || log "[warn] 通知を送れませんでした: $1"
 }
