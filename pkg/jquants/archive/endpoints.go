@@ -257,10 +257,12 @@ var StandardEndpoints = []Endpoint{
 	},
 	{
 		// 週次（金曜日付、第 2 営業日に公開）。API は date か code が必須で from/to
-		// だけでは呼べない（400）ため、毎営業日 date= で叩く。残高の無い日は 0 行
+		// だけでは呼べない（400）ため、毎営業日 date= で叩く。残高の無い日は 0 行。
+		// 取り直す期間は 14 日。7 日だと翌週に祝日が重なった週（公開が翌々週の頭）を取りこぼす
+		// ——2026-09-18 分は公開が 9/25 16:30 なのに、期間が 9/25 16:30 で切れて一度も行を取れなかった
 		Path: "/markets/margin-interest", Key: []string{"Date", "Code"}, DateColumn: "Date",
 		Mode: ModeDate, DateParam: "date", AvailableAt: t1630,
-		SettleDays: 7, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		SettleDays: 14, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
 	},
 	{
 		Path: "/markets/margin-alert", Key: []string{"PubDate", "Code", "AppDate"},

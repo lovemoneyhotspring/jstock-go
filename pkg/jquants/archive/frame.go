@@ -522,6 +522,19 @@ func countChanged(old, new *Frame, key []string) int {
 	return changed
 }
 
+// sameColumns は 2 つの表の列の集合が同じか（並びは問わない）。
+func sameColumns(a, b *Frame) bool {
+	if len(a.Columns) != len(b.Columns) {
+		return false
+	}
+	for _, c := range b.Columns {
+		if !a.HasColumn(c) {
+			return false
+		}
+	}
+	return true
+}
+
 // dedupeLast は鍵で重複を潰し、後に現れた行を残す（後勝ち）。出現順は保つ。
 func dedupeLast(f *Frame, key []string) *Frame {
 	keyPos := f.cols(key)

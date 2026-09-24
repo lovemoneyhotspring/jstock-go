@@ -56,7 +56,11 @@ func newPlanCmd() *cobra.Command {
 			}
 			printPlan(p, cfg)
 			alertHalfDay(calendar.FromArchive(openArchive()), cfg, day)
-			warmUsmarket(cfg, day)
+			// 米国のキャッシュを温めるのは朝の保険の回だけ。20:30 の時点では翌朝の判定に要る
+			// セッション（今夜の米国）がまだ無く、取っても使われないのに /tmp/daytrade.lock を握って待つ
+			if ifMissing {
+				warmUsmarket(cfg, day)
+			}
 			// 保証金は朝 8:53 の `daytrade warm-margin` で取る。前夜の値では代用有価証券の
 			// 評価替え（前営業日終値 × 掛目、夜間更新で確定）を取りこぼす
 			return nil
@@ -98,7 +102,8 @@ func buildPlan(cfg dtconfig.Config, day time.Time) (dtplan.Plan, error) {
 	}
 	// 材料（TOB・MBO など）の印。前夜の時点で分かる分を記録し、ショートから外す。
 	// 効かせる本番は open（朝の記録簿で付け直す）なので、読めなくても plan は作る
-	if cfg.Margin.Enabled && cfg.Margin.ExcludeCorpEvents {
+	// ショートの一時停止中は付けない（open と同じ。記録簿の鮮度の警告も出さない）
+	if cfg.Margin.Enabled && cfg.Margin.ExcludeCorpEvents && !cfg.Margin.Paused {
 		if _, _, err := markPlanCorpEvents(cfg, &p, day, clock.NowUTC(), cal.Closed); err != nil {
 			fmt.Println("ニュースの記録簿を読めず、材料の印を付けていません（open で付け直します）: " + err.Error())
 			logWarn("daytrade.news_stale", "記録簿を読めず plan に材料の印を付けない", map[string]any{"reason": err.Error()})

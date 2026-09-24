@@ -378,8 +378,14 @@ func (a *Archive) upsertPart(ep Endpoint, part string, new *Frame, keep func(Row
 			if err != nil {
 				return 0, err
 			}
-			merged = concatDiagonal(old, new)
 			changed = countChanged(old, new, ep.Key)
+			// 中身が変わらないなら書かない。取引カレンダーは毎日 137 ファイル、日足の月ファイルは
+			// 1 日に数回、同じ中身で書き直されていた。書くと更新時刻が変わり、更新時刻を鍵にする
+			// バックテストのパネルのキャッシュ（230MB）が無効になる。列が増減したときは書く
+			if changed == 0 && sameColumns(old, new) {
+				return 0, nil
+			}
+			merged = concatDiagonal(old, new)
 		}
 		merged = dedupeLast(merged, ep.Key)
 	} else if keep != nil {

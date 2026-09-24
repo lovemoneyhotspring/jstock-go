@@ -2,7 +2,6 @@ package evaluate
 
 import (
 	"slices"
-	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/execution"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/history"
@@ -453,21 +452,4 @@ func floatOrNilIf(ok bool, v float64) any {
 		return nil
 	}
 	return v
-}
-
-// DaysOf は明細に出てくる日付（古い順、重複なし）。
-func DaysOf(trades history.Frame) []time.Time {
-	seen := map[string]bool{}
-	var out []time.Time
-	for _, row := range trades.Rows {
-		day := timeOf(row["day"])
-		key := day.Format("2006-01-02")
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, day)
-	}
-	slices.SortFunc(out, func(a, b time.Time) int { return a.Compare(b) })
-	return out
 }

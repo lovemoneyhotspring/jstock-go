@@ -95,7 +95,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 30 7 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/rate.lock $WBJP_BIN/rate sync --days 5                                               >> state/logs/rate.log        2>&1
 # 平日は open と plan の前にも当日ぶんを取り直す（TOB などの材料をショートから外すため）。
 # 適時開示は配信時刻から 2〜4 分で電文に載る（2026-09-15 の実測。15:30 の 67 件で最大 4.3 分）。
-# 8:52 は 08:30・08:45 の開示を 9:00:03 の open に、20:20 は 15:30〜20:15 の開示を 20:30 の plan に間に合わせる。
+# 8:52 は 08:30・08:45 の開示を 9:00:01.2 の open に、20:20 は 15:30〜20:15 の開示を 20:30 の plan に間に合わせる。
 # 8:52 だけは前日ぶんも取り直す（--days 2 --recent 2）: 前夜 20:20 より後の開示は 06:20 の回でしか入らず、
 # 06:20 が失敗した朝に 8:52 が当日ぶんだけ取ると、記録簿は「新しい」のに前夜遅くの TOB を知らないまま売る。
 # ほかは当日ぶんだけなので --days 1 --recent 1（1 回 4 秒ほど）。ロックは news.lock で daytrade と別
@@ -114,21 +114,22 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # ロックは with-lock.sh で 30 秒待ち、取れずに見送った回・打ち切った回は Discord に知らせる（flock -n は無言で消える）
 30 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 WITH_LOCK_TIMEOUT=300 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-plan.log $WBJP_BIN/daytrade plan --config-dir config/daytrade_margin
 # 朝 6:40 の保険: 前夜の plan を読めない（無い・壊れている）ときだけ作り直して知らせる。在れば何もしない。
-# 無いまま 8:59:45 を迎えると、その日の open は全部の回が落ちる
+# 無いまま 8:59:50 を迎えると、その日の open は全部の回が落ちる
 40 6 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 WITH_LOCK_TIMEOUT=300 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-plan.log $WBJP_BIN/daytrade plan --if-missing --config-dir config/daytrade_margin
-# 17:05・17:20・20:20（日足の取り込み後）: 朝の候補（選んだ銘柄も次点も）に当日の日足を当てて結果を履歴に残す。
+# 17:05・20:20（日足の取り込み後）: 朝の候補（選んだ銘柄も次点も）に当日の日足を当てて結果を履歴に残す。
 # 9:00 の順位表が無い日は plan × 始値で順位を作り直して評価する。妥当性の確認は `daytrade review`
-# 日足は普段 16:43 の jquants sync で入る。17:05 は 17:35 の日次レポートに間に合わせるため、17:20 は
-# 17:13 の sync で入った日のため、20:20 は公開が遅れた日の拾い直し。日足が無ければ何もせず終わり、
-# 同じ日を何度評価しても review / trades は最後の 1 回だけを使う（LatestPerDay）
-5,20 17 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
+# 日足は普段 16:43 の jquants sync で入る。17:05 は 17:35 の日次レポートに間に合わせるため、20:20 は
+# 公開が遅れた日の拾い直し。日足が無ければ何もせず終わり、同じ日を何度評価しても review / trades は
+# 最後の 1 回だけを使う（LatestPerDay）。17:20 の回は 2026-09-24 にやめた——9 月の 12 営業日で日足が
+# 17:13 に入った日は無く（16:43 が 11 日、18:43 が 1 日）、毎回評価し直して履歴を書き足すだけだった
+5 17 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
 20 20 * * 1-5  cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
 
 # --- 板・気配の記録（docs/OPENING_DATA.md）----------------------------------------
 # 発注しない。今の選定はギャップ 1 変数しか見ておらず、「どんな気配なら勝率が上がるか」に
 # 答えるデータが無い。板は過去に遡れない（J-Quants の分足にもティックにも板も無い）ので、
 # 発注経路を開ける前から溜め始める。1 日止めれば 1 日ぶん永久に欠ける。
-# ロックは open / close と**共有**する。時価問合のレート制限（4 回/秒）はプロセス内なので、
+# ロックは open / close と**共有**する。時価問合のレート制限（8 回/秒）はプロセス内なので、
 # 同時に走ると発注側が弾かれうる。取れなければ snap は何もせずに終わる（発注が優先）。
 #
 # **開けるのは .env に TACHIBANA_* を入れてから**（`wbjp credentials check` が通ってから）。
@@ -137,13 +138,13 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 期間がそのまま観測期間になる。1 日遅らせれば 1 日ぶん永久に欠ける
 # snap は待たない（wait 0）。open / close が握っていれば見送る（発注が優先）。snap 自身は
 # book.max_run_seconds（50 秒）で切れる。9:00 台は open の回が 22〜38 秒おきなので、その時間帯の
-# snap（8:59:00・8:59:45・9:00:05）は --max-run と WITH_LOCK_TIMEOUT でさらに短く切る。
+# snap（8:59:00・8:59:35・8:59:55・9:00:05）は --max-run と WITH_LOCK_TIMEOUT でさらに短く切る。
 # snap は open と同じ分に置かない（同時に始まると open が 30 秒待っても取れない日が出る）。
 # 9:02・9:05・9:11 は open（9:00・9:03・9:06・9:09・9:13）の間。取れなかったバッチは snap が
 # 1 度取り直し、取れた分だけでも記録する。
 # 9:00 の回はロックを取る前に 5 秒待つ。9:00:00 に始めると 31 バッチが板寄せの前後に
 # またがり、「板寄せの結果」の点にならない（寄り前は 8:59 の回が持つ）。
-# 2026-09-17 から open が 9:00:03 に先にロックを握るので、この回だけは 30 秒待つ（発注が優先。
+# 2026-09-17 から open が 9:00 の直後（今は 9:00:01.2）に先にロックを握るので、この回だけは 30 秒待つ（発注が優先。
 # open が終わってから 9:00:10〜20 ごろに記録する）。open が 30 秒を超えて握れば見送り、ログに残る。
 # 既定の 50 秒（book.max_run_seconds）のままだと、初回の open がすぐ落ちた朝にこの snap が
 # 9:00:55 までロックを握り、**9:00:25 の再試行を押し出す**。--max-run 15 と打ち切り 18 秒にして、
@@ -192,13 +193,15 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 59 8 * * 1-5          cd $WBJP_HOME && sleep 55 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=4 WITH_LOCK_KILL_AFTER=2 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085955 --max-run 2
 0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=18 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 15
 2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
-0,19 15 * * 1-5       cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+# 15:19 は 15:20 の close（ロック待ち 30 秒）の直前なので、固まっても 15:19:50 で手放すよう打ち切りを詰める
+0 15 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+19 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=45 WITH_LOCK_KILL_AFTER=5 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 40
 
 # 7:30・8:20・8:50: 前夜の米国市場（S&P500・VIX）を data/daytrade/us.json に焼く。open はこれを読むだけになる。
-# 20:30 の plan も温めるが、その時刻には当夜の米国市場がまだ開いていないので朝の判定に要る行は入らない
+# 20:30 の plan は温めない（当夜の米国市場がまだ開いていないので、朝の判定に要る行は入らない。6:40 の --if-missing の回だけ温める）
 # ——2026-09-15〜17 は 3 朝とも初回の open が 9:00 台に Cboe / Yahoo へ取りに行っていた（1〜2 秒。
-# 取得元が詰まれば 1 リクエスト 8 秒 × 取得元 3 × 系列 2）。寄る前の回（8:59:45〜9:00:00）は窓が
-# 14 秒しかないので、外へ取りに行かせない。
+# 取得元が詰まれば 1 リクエスト 8 秒 × 取得元 3 × 系列 2）。寄る前の回（8:59:50〜9:00:00）は窓が
+# 10 秒しかないので、外へ取りに行かせない。
 # 前夜の行が VIX つきで入っていれば何も取りに行かない（冪等）。3 回置くのは、取得元の反映が遅い朝と
 # VIX だけ欠けた朝を後の回で埋めるため。ブローカーに繋がないので /tmp/daytrade.lock は取らない。
 # 3 回とも取れなければ open が従来どおり取りに行く（寄る前の回は合計 5 秒まで。cmd/daytrade/open.go）
@@ -208,7 +211,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # **読むだけ**で確かめ、問題があれば Discord に知らせる。ブローカーには繋がないのでロックは取らない。
 # bin そのものが動かない（無い・実行できない = 終了コード 126 以上）ときは、後ろの discord-post が知らせる
 40 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod $WBJP_BIN/daytrade preflight --config-dir config/daytrade_margin >> state/logs/daytrade-preflight.log 2>&1 || { [ $? -ge 126 ] && echo "bin/daytrade preflight が動きません（state/logs/daytrade-preflight.log）。deploy/build.sh を確認" | WBJP_ENV=prod $WBJP_BIN/discord-post --title "デイトレ: 寄る前の点検を実行できません"; }
-# 8:53: 委託保証金を照会して data/daytrade/margin.json に焼く。9:00:03 からの open はこのファイルを
+# 8:53: 委託保証金を照会して data/daytrade/margin.json に焼く。9:00:01.2 からの open はこのファイルを
 # 読んで建玉の上限を**下げ方向のみ**上書きする——寄付の判断にブローカーの遅さを持ち込まないため、
 # open 自身は保証金を取りに行かない。
 # **前夜ではなく朝に取る**: 代用有価証券の評価は前営業日終値 × 掛目で、受入保証金は夜間更新
@@ -217,7 +220,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # warm-margin 自身は 60 秒の締め切りを持つので 8:54 までに終わる——8:55 の snap は待たない
 # （wait 0）ため、ここが長引くと板の記録がそのぶん欠ける。
 # 取れなかった朝は open が設定の値で建てる（売買は止まらない）
-53 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-margin.log $WBJP_BIN/daytrade warm-margin --config-dir config/daytrade_margin
+53 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=65 WITH_LOCK_KILL_AFTER=5 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-margin.log $WBJP_BIN/daytrade warm-margin --config-dir config/daytrade_margin
 # 8:56 の保険: 8:53 に取れなかった朝（margin.json が今日の日付でない）だけもう一度。取れていれば何もしない。
 # ロック待ち 5 秒・35 秒で打ち切る——TERM は遅くとも 8:56:40、KILL（+10 秒）でも 8:56:50 に手放し、8:57 の snap（wait 0）を塞がない。cron では % を \% と書く
 56 8 * * 1-5          cd $WBJP_HOME && [ "$(date -r data/daytrade/margin.json +\%F 2>/dev/null)" != "$(date +\%F)" ] && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=35 deploy/with-lock.sh /tmp/daytrade.lock 5 state/logs/daytrade-margin.log $WBJP_BIN/daytrade warm-margin --config-dir config/daytrade_margin
@@ -273,8 +276,8 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 1 回の実行は execution.max_run_seconds（150 秒）と時間帯の終わりで切れるので、前の回が
 # 遅くても次の回は始められる。送れなかった分は次の回が「残りの枚数」として建て直す
 #
-# 9:00:03・9:00:25・9:01:03・9:03・9:06・9:09・9:13: 気配で並べてロング N・ショートを寄付で建てる。
-# 窓は 9:15 まで。前の回が全部建てていれば以降は何もしない（冪等）
+# 9:00:01.2・9:00:25・9:01:03・9:03・9:06・9:09・9:13: 気配で並べてロング N・ショートを寄付で建てる。
+# 窓は 9:15 まで。前の回が全部建てていれば以降は何も発注しない（冪等。ショートの余りをロングに回す設定では、気配を取って件数を決め直してから「条件に合う銘柄なし」で終わる）
 # 9:00:25・9:01:03 は初回がすぐ落ちた朝（通信エラー等）の早い再試行。寄った銘柄は遅れるほど高く買い、
 # 9:05 に建てると優位がほぼ消える（vault 2026-09-jp-daytrade-minute-entry）ので 9:03 までは待たない。
 # 初回や 9:00 の snap（最長 15 秒・打ち切り 18 秒）が長引いてロックを握っていれば 30 秒待って見送る
@@ -284,10 +287,10 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 9:00:00 に寄り、10 秒で始値 +14 bp、65 秒で +19 bp）。3 秒待つのは寄付を時価問合に反映させるため
 # （9:00:06 の snap では 9:00:00 台に寄った銘柄の 100% に始値が入っていた。9/16・9/17）。
 # 9:13 は us_stale_wait_until（09:12）の後に 1 回回すために残す
-# 8:59:45: 寄る前の回（execution.preopen_legs = long）。ここで出した注文だけが**寄成**になり、
+# 8:59:50（DT_PREOPEN_AT）: 寄る前の回（execution.preopen_legs = long）。ここで出した注文だけが**寄成**になり、
 # 始値を決める板寄せで建つ。締め切りはコードが 9:00:00（板寄せ）に切る——過ぎてから届く寄成は
 # 既に寄った銘柄に約定しないため。実測 4〜9 秒で終わるので 15 秒あれば足りる。
-# 送れなかった分は下の 9:00:03 からの回が「残りの枚数」を従来のザラ場の成行で埋める。
+# 送れなかった分は下の 9:00:01.2 からの回が「残りの枚数」を従来のザラ場の成行で埋める。
 # 8:59 の snap は 8:59:35（slot 085935）へ前倒しし、この回にロックを明け渡している
 # 2026-09-21 から開始は DT_PREOPEN_AT ちょうど（deploy/wait-until.sh）。それまでは sleep 45 で実際は 8:59:46〜47。
 # **遅いほど気配は始値に近いが、9:00:00 までに 4 本とも届かなければ意味が無い**ので刻んで遅らせている途中。
@@ -325,7 +328,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 保険の手仕舞い（daytrade protect）: 建てた玉に執行条件「引け」の返済・売りをブローカーへ置く。
 # execution.protect_exit = false の間は何もしない（設定で入り切り）。**後場だけ**（execution.protect_window）——
 # 前場に置いた「引け」は前引け（11:30）で約定する（2026-09-24 に実機で確認）。12:31 は後場寄りの後、
-# 13:20・15:10 は取消・拒否・約定の増えた分の置き直し（何度回しても重ならない）。15:20 の close が
+# 13:20・15:10 は約定の増えた分を足す（何度回しても重ならない。拒否・ブローカー側の取消は置き直さない）。15:20 の close が
 # 取り消して成行を出す。cron・マシン・ネットが止まっても、引けで手仕舞われる安全網
 31 12 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-protect.log $WBJP_BIN/daytrade protect --config-dir config/daytrade_margin --live --yes
 20 13 * * 1-5 cd $WBJP_HOME && WBJP_ENV=prod WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-protect.log $WBJP_BIN/daytrade protect --config-dir config/daytrade_margin --live --yes
