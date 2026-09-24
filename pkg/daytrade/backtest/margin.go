@@ -283,20 +283,24 @@ func preScaledBudget(budget decimal.Decimal, v regime.Verdict, longShrink bool, 
 }
 
 // shockTotalCap はショック日のロングの総額の上限。本番は margincap が朝の建可能額 × shock_capacity_ratio
-// を capital.ShockTotalCap に入れ（execute.SizeDay が頭打ち）、保証金が読めない朝は長短の固定合計
-// （capital.max_capital + margin.max_capital）にする（cmd/daytrade の ratioFallbackConfig）。
-// 検証は資金を固定値で回すので、後者と同じ値で頭打ちにする。比を置かない設定は上限なし（本番と同じ）。
+// を capital.ShockTotalCap に入れる（execute.SizeDay が頭打ち）。検証は資金を固定値で回すので、
+// 「長短の固定合計が平日の比（capacity_ratio）にちょうど当たる朝」に置き直して
+// 固定合計 × shock_capacity_ratio ÷ capacity_ratio を上限にする（今の設定で約 813 万。普段の朝の本番と同じく
+// ×1.5 の 750 万は頭打ちしない）。長短の固定合計（700 万）で切ると、保証金が読めない朝
+// （cmd/daytrade の ratioFallbackConfig）にしか当たらない値でショック日を毎回控えめに測ってしまう
+// （2026-09-25 のレビュー）。比を置かない設定は上限なし（本番と同じ）。
 func shockTotalCap(cfg config.Config) decimal.Decimal {
 	limit := cfg.Capital.ShockTotalCap
-	if !cfg.Margin.CapacityRatio.IsPositive() {
+	if !cfg.Margin.CapacityRatio.IsPositive() || !cfg.Margin.ShockCapacityRatio.IsPositive() {
 		return limit
 	}
 	fixed := cfg.Capital.MaxCapital
 	if cfg.Margin.Enabled {
 		fixed = fixed.Add(cfg.Margin.MaxCapital)
 	}
-	if !limit.IsPositive() || limit.GreaterThan(fixed) {
-		limit = fixed
+	normal := fixed.Mul(cfg.Margin.ShockCapacityRatio).Div(cfg.Margin.CapacityRatio).Floor()
+	if !limit.IsPositive() || limit.GreaterThan(normal) {
+		limit = normal
 	}
 	return limit
 }

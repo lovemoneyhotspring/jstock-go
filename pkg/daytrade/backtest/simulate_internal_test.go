@@ -152,7 +152,7 @@ func TestSeesawScalesPausedKeepsShortOffBudget(t *testing.T) {
 
 // 規則 R（capacity_ratio）の検証のショック日は、本番の保証金が読めない朝と同じく長短の固定合計で
 // 頭打ちにする（2026-09-25 のレビュー。従来はロング 500 万 × 1.5 = 750 万で、本番の 700 万を超えていた）
-func TestShockTotalCapMatchesLiveFallback(t *testing.T) {
+func TestShockTotalCapMatchesLiveNormalMorning(t *testing.T) {
 	cfg, err := config.Load("../../../config/daytrade_margin")
 	if err != nil {
 		t.Fatalf("本番の設定を読めない: %v", err)
@@ -162,15 +162,17 @@ func TestShockTotalCapMatchesLiveFallback(t *testing.T) {
 	}
 	fixed := cfg.Capital.MaxCapital.Add(cfg.Margin.MaxCapital)
 	limit := shockTotalCap(cfg)
-	if !limit.Equal(fixed) {
-		t.Fatalf("ショック日の上限 %s, want 長短の固定合計 %s", limit, fixed)
+	// 固定合計が平日の比にちょうど当たる朝の、ショック日の比での上限
+	want := fixed.Mul(cfg.Margin.ShockCapacityRatio).Div(cfg.Margin.CapacityRatio).Floor()
+	if !limit.Equal(want) {
+		t.Fatalf("ショック日の上限 %s, want 固定合計 × ショック比 ÷ 平日比 %s", limit, want)
 	}
 	n := cfg.Capital.Positions()
 	shockLong, _ := cfg.Regime.ShockLongScale.Float64()
 	shock := regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: shockLong}
 	b := preScaledBudget(cfg.Capital.BudgetPerOrder(), shock, cfg.Margin.LongShrink, n, limit)
-	if total := b.Mul(decimal.NewFromInt(int64(n))); total.GreaterThan(fixed) {
-		t.Errorf("ショック日の総額 %s が固定合計 %s を超えた", total, fixed)
+	if total := b.Mul(decimal.NewFromInt(int64(n))); total.GreaterThan(limit) {
+		t.Errorf("ショック日の総額 %s が上限 %s を超えた", total, limit)
 	}
 	// 平日は頭打ちしない
 	normal := regime.Verdict{Trade: true, Scale: 1, ShockLong: 1}
