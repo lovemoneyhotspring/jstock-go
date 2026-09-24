@@ -257,7 +257,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `wbjp.daily_pnl` / `wbjp.daily_pnl_unknown`（warn。ダイジェストの異常にも） | 当日の損益（実現・含み）と `max_daily_loss`／当日の損益を確かめられず新規の買いを止めた | 本文 |
 | `wbjp.regime` / `wbjp.strategy_error`（warn） / `wbjp.margin_missing`（warn） | 相場の状態を評価した／戦略の評価に失敗した／信用残がアーカイブに無い | 本文 |
 | `wbjp.outside_universe`（ダイジェストの `outside_universe` にも） | ユニバース（`universe.symbols`）外の保有（手で買った株など）がある。wbjp は目標を作らず売りも買いも出さない（地合いの手仕舞いも掛けない。`wbjp.reconcile_skip` にも理由が出る）。ユニバースから外した銘柄を自動で手仕舞う仕組みは無いので、外す前に手で売るか、売り切るまでユニバースに残す | 本文に銘柄 |
-| `wbjp.stop_exit`（warn） / `wbjp.stop_removed` / `wbjp.stop_save_failed`（warn） | ストップに掛かった／保有の無い銘柄のストップを外した／ストップを保存できない | 本文 |
+| `wbjp.stop_exit`（warn） / `wbjp.stop_removed` / `wbjp.stop_save_failed`（warn） | ストップに掛かった／保有の無い銘柄のストップを外した／ストップを保存できない（ダイジェストの異常。発注は続ける: 止めても失った変更は戻らず、損切りの売りまで出なくなる。失ったトレーリングの最高値・`ScaledOut` は次の回に立て直る） | 本文 |
 | `wbjp.ledger`（warn / error） | 台帳（実行・建玉・シグナル・未送信・拒否）への書き込みに失敗した | 本文 |
 | `wbjp.crash` | 実行が例外で異常終了した（通知も送る） | `error` |
 

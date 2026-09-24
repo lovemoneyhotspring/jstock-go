@@ -667,6 +667,15 @@ func checkEmptyPositions(rep *repo.Repo, posMap map[string]domain.Position, env,
 // 売りを出しただけの回では立たないので、約定しなかった利確は次の回に出し直される。
 // 発注する回は台帳を StopBook に揃える（外した銘柄の行も消す）。dry-run は保存しない
 // （建玉 0 の模型で決めたストップで本番の台帳を書き換えない）。
+//
+// 保存に失敗しても発注は止めない（警告とダイジェストの異常だけ。2026-09-24 の再点検で
+// 検討した）。この回の判断はメモリ上の StopBook（正しい）で決まっていて、止めても失った
+// 変更（トレーリングの最高値・ScaledOut・外した銘柄）は戻らない。止めて得るものは無く、
+// この回の損切り・手仕舞いの売りまで出なくなる。失ったものは次の回に次のように戻る:
+// 最高値はその回の終値から引き上げ直し（ストップは下がらない）、ScaledOut は保有が
+// 減ったのを見て立て直し（含み益が take_profit_r 以上の回。TakeProfitTargets と同じ遅れ）、
+// 外すはずだったストップは RetainHeld がもう一度外す（その間に同じ銘柄を建て直さない限り）。
+// 台帳そのものが壊れて書けないなら、発注前の記録（PlaceRecorded の PENDING）で止まる。
 func decideStopExits(rep *repo.Repo, book *risk.StopBook, cfg wbjpcfg.StopsConfig, in risk.ExitInputs,
 	canLive bool, logger *logging.Logger) []domain.TargetPosition {
 	targets := book.ExitPlan(cfg, in)
