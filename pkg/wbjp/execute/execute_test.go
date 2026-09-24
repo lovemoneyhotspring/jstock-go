@@ -484,14 +484,39 @@ func TestCancelRecorded(t *testing.T) {
 		}
 	})
 
-	t.Run("照会できなければ取消だけ書き約定は残す", func(t *testing.T) {
+	// W4 の再現。以前は照会できないと確かめずに CANCELLED と書いていた。CANCELLED は終了状態
+	// なので、取消が間に合わず約定していた場合にその約定が二度と取り込まれない
+	t.Run("照会できなければ状態を確定させない", func(t *testing.T) {
 		rep, b := setup(t)
+		b.getOrder = func(string, *string) (*domain.Order, error) { return nil, errors.New("timeout") }
 		res, err := CancelRecorded(rep, b, "a")
-		if err != nil || res.Status != domain.OrderStatusCancelled {
+		if err != nil || !res.Deferred || !res.Unverified || res.QueryErr == nil || res.Status != domain.OrderStatusPartiallyFilled {
 			t.Fatalf("res=%+v err=%v", res, err)
 		}
-		if o := orderOf(t, rep, "a"); o.Status != domain.OrderStatusCancelled || !o.FilledQuantity.Equal(dec("100")) {
-			t.Errorf("取消で約定分が消えた: %+v", o)
+		if o := orderOf(t, rep, "a"); o.Status != domain.OrderStatusPartiallyFilled || !o.FilledQuantity.Equal(dec("100")) {
+			t.Errorf("確かめずに書き換えた: %+v", o)
+		}
+		// 次の約定同期で照会できれば、そこで確定する
+		b.getOrder = func(id string, _ *string) (*domain.Order, error) {
+			return &domain.Order{ClientOrderID: id, Quantity: dec("200"), FilledQuantity: dec("200"), Status: domain.OrderStatusFilled}, nil
+		}
+		if _, err := SyncFills(rep, b); err != nil {
+			t.Fatal(err)
+		}
+		if o := orderOf(t, rep, "a"); o.Status != domain.OrderStatusFilled || !o.FilledQuantity.Equal(dec("200")) {
+			t.Errorf("取消が間に合わなかった約定を取り込めていない: %+v", o)
+		}
+	})
+
+	t.Run("照会の結果が空でも確定させない", func(t *testing.T) {
+		rep, b := setup(t)
+		b.getOrder = func(string, *string) (*domain.Order, error) { return nil, nil }
+		res, err := CancelRecorded(rep, b, "a")
+		if err != nil || !res.Unverified {
+			t.Fatalf("res=%+v err=%v", res, err)
+		}
+		if o := orderOf(t, rep, "a"); o.Status != domain.OrderStatusPartiallyFilled {
+			t.Errorf("確かめずに書き換えた: %+v", o)
 		}
 	})
 

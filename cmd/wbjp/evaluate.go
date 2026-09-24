@@ -43,6 +43,10 @@ func newEvaluateCmd() *cobra.Command {
 				return nil
 			}
 
+			// 評価する判断日。--date が無ければ、まだ評価していない日を古い順に全部。
+			// 以前は「直近 5 判断日」だけを見ていたので、horizon（20 営業日）後の足が揃った
+			// 日は窓から外れて評価されず、窓の中の日は晩ごとに同じ日を積み直していた
+			// （2026-09-24 のレビュー）。評価済みかは同じ horizon で実績の出た行があるかで見る
 			targets := known
 			if date != "" {
 				day, err := cli.ParseDay(date)
@@ -50,8 +54,21 @@ func newEvaluateCmd() *cobra.Command {
 					return err
 				}
 				targets = []time.Time{day}
-			} else if days > 0 && len(known) > days {
-				targets = known[len(known)-days:]
+			} else {
+				past, err := store.Read(evaluate.Kind, corehistory.Range{})
+				if err != nil {
+					return err
+				}
+				done := evaluate.EvaluatedDays(past, horizon)
+				targets = nil
+				for _, day := range known {
+					if !done[day] {
+						targets = append(targets, day)
+					}
+				}
+				if days > 0 && len(targets) > days {
+					targets = targets[len(targets)-days:]
+				}
 			}
 
 			written := []map[string]any{}
@@ -98,7 +115,7 @@ func newEvaluateCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&date, "date", "", "評価する判断日 YYYY-MM-DD")
 	cmd.Flags().IntVar(&horizon, "horizon", 20, "判断から何営業日後の終値で測るか")
-	cmd.Flags().IntVar(&days, "days", 5, "--date を省いたとき、遡って評価する判断日数")
+	cmd.Flags().IntVar(&days, "days", 0, "--date を省いたとき、未評価の判断日のうち新しい何日に絞るか（0 なら全部）")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "表の代わりに JSON を 1 個だけ出す（AI・パイプ用）")
 	return cmd
 }

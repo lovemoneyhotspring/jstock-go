@@ -1,17 +1,23 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/reconcile"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/repo"
 )
+
+// staleFix は前日以前の PENDING の直し方（ログ・ダイジェストに載せる）。
+const staleFix = "約定していれば `wbjp pending resolve <client_order_id> --attribute <注文番号> --status FILLED --filled <株数> --price <単価>`、" +
+	"届いていない・失効なら `wbjp pending resolve <client_order_id> --unsent`（ID に発注日が入るので送り直しは起きない）"
 
 // resolvePendingOrders は送信結果が分からず注文番号の無い PENDING を、当日の注文一覧と
 // 突き合わせて判定し、台帳を直す（wbcore/reconcile）。
@@ -19,31 +25,56 @@ import (
 //   - 届いていた   → 注文番号と状態を書き戻す（未約定なら板に残っている注文として数える）
 //   - 届いていない → UNSENT。WasPlaced が偽になり、差分があれば今回の実行で送り直す
 //   - 決められない → PENDING のまま。発注は止める（同じ銘柄に二重に出さない）
+//   - 送った直後・一覧を信用できない（TooRecent）→ PENDING のまま。発注は止める（pendingBlocksOrders）
 //
 // 一覧を照会できなければエラー（判定できないまま実弾を出さない）。
+//
+// daytrade（pkg/daytrade/execute.ResolvePending）と同じ形で塞ぐ:
+//   - 今日送って注文番号まで分かっている注文が一覧に 1 つも無ければ、一覧が空で返った・
+//     反映が遅れていると読み、「該当なし」を「届いていない」とはしない（reconcile.Options.Expected）。
+//     一覧を信用して UNSENT にすると、届いていた注文を別の ID で送り直す（二重発注）
+//   - 立花の一覧は当日分しか返らないので、今日より前に送った PENDING は判定しない
+//     （一覧に無いのは当然で、「届いていない」の証拠にならない）。PENDING のまま残して警告し
+//     （wbjp.pending_stale）、人が口座の約定履歴を見て `wbjp pending resolve` で確定する。
+//     wbjp の注文 ID は発注日から作るので、前日以前の注文を UNSENT にしても同じ ID で
+//     送り直すことは無い。放っておくと、買いの PENDING は未約定の買いとして比率上限の枠を
+//     押さえ続ける（PendingBuyValue）
 func resolvePendingOrders(rep *repo.Repo, b broker.Broker, logger *logging.Logger, now time.Time) (reconcile.Summary, error) {
 	var summary reconcile.Summary
 	unresolved, err := rep.UnresolvedOrders()
 	if err != nil {
 		return summary, fmt.Errorf("未確定の注文を読めません: %w", err)
 	}
+	jst := clock.ToZone(now, clock.Tokyo)
+	start := time.Date(jst.Year(), jst.Month(), jst.Day(), 0, 0, 0, 0, clock.Tokyo)
+	end := start.AddDate(0, 0, 1)
+
 	var pendings []reconcile.Pending
+	var stale []string
 	for _, o := range unresolved {
 		if o.Status != domain.OrderStatusPending || o.BrokerOrderID != nil {
 			continue
 		}
-		placedAt, _ := time.Parse(time.RFC3339, o.PlacedAt)
+		placedAt, perr := time.Parse(time.RFC3339, o.PlacedAt)
+		if perr != nil || placedAt.Before(start) || !placedAt.Before(end) {
+			stale = append(stale, o.ClientOrderID)
+			continue
+		}
 		pendings = append(pendings, reconcile.Pending{
 			ClientOrderID: o.ClientOrderID, Symbol: o.Symbol, Side: o.Side,
 			Quantity: o.Quantity, PlacedAt: placedAt,
 		})
 	}
+	if len(stale) > 0 {
+		logger.Warn("wbjp.pending_stale", "今日より前に送った送信結果不明の注文は判定しない（一覧は当日分のみ。PENDING のまま）",
+			map[string]any{"pending": len(stale), "client_order_ids": stale, "fix": staleFix})
+		digest.Anomaly("wbjp.pending_stale", fmt.Sprintf("今日より前の送信結果不明の注文 %d 件（口座の約定履歴を見て %s）: %s",
+			len(stale), staleFix, strings.Join(stale, ", ")))
+	}
 	if len(pendings) == 0 {
 		return summary, nil
 	}
-	jst := clock.ToZone(now, clock.Tokyo)
-	start := time.Date(jst.Year(), jst.Month(), jst.Day(), 0, 0, 0, 0, clock.Tokyo)
-	todays, err := b.GetOrderHistory(start, jst)
+	todays, err := b.GetOrderHistory(start, end.Add(-time.Second))
 	if err != nil {
 		return summary, fmt.Errorf("送信結果不明の注文 %d 件を判定できません（当日の注文一覧を照会できない）: %w", len(pendings), err)
 	}
@@ -51,7 +82,12 @@ func resolvePendingOrders(rep *repo.Repo, b broker.Broker, logger *logging.Logge
 	if err != nil {
 		return summary, err
 	}
-	resolutions := reconcile.Resolve(pendings, todays, reconcile.Options{Now: now, Grace: reconcile.DefaultGrace, Known: known})
+	expected, err := rep.BrokerOrderIDsPlacedOn(jst.Format("2006-01-02"))
+	if err != nil {
+		return summary, fmt.Errorf("今日送った注文の番号を読めません: %w", err)
+	}
+	resolutions := reconcile.Resolve(pendings, todays, reconcile.Options{
+		Now: now, Grace: reconcile.DefaultGrace, Known: known, Expected: expected})
 	var ambiguous []string
 	for _, r := range resolutions {
 		fields := r.Fields()
@@ -81,4 +117,27 @@ func resolvePendingOrders(rep *repo.Repo, b broker.Broker, logger *logging.Logge
 			strings.Join(ambiguous, "\n"))
 	}
 	return summary, nil
+}
+
+// pendingBlocksOrders は判定の結果、この回の発注を止めるべきかを返す（止めるならエラー）。
+//
+//   - Ambiguous: 自動で決められない（通知は resolvePendingOrders が送る）
+//   - TooRecent: 一覧を信用できない（Expected の判定）か送った直後で、届いたか分からない。
+//     wbjp の注文 ID は目標株数から作るので、9:31 と 13:31 で株数が変わると別の ID になり、
+//     WasPlaced では二重建てを防げない。分からないまま発注に進まない（2026-09-24 のレビュー）
+//
+// どちらもダイジェストに異常として残し、TooRecent は Discord にも通知する。
+func pendingBlocksOrders(summary reconcile.Summary) error {
+	if summary.Ambiguous > 0 {
+		digest.Anomaly("wbjp.pending_ambiguous", fmt.Sprintf("%d 件の送信結果不明の注文を自動で決められません", summary.Ambiguous))
+		return fmt.Errorf("送信結果不明の注文 %d 件を決められないため発注を中止しました（二重発注を避けます）", summary.Ambiguous)
+	}
+	if summary.TooRecent > 0 {
+		msg := fmt.Sprintf("送信結果不明の注文 %d 件が届いたか分からない（注文一覧が空・反映待ち、または送った直後）ため、この回の発注を中止しました（二重発注を避けます）。次の回で判定し直します",
+			summary.TooRecent)
+		digest.Anomaly("wbjp.pending_too_recent", msg)
+		run.Alert("wbjp: 送信結果不明の注文を判定できないため発注を中止しました", msg)
+		return errors.New(msg)
+	}
+	return nil
 }

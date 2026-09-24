@@ -36,7 +36,7 @@ kill_switch = false
 # 金額は口座通貨建て（JP なら円、US ならドル）。
 max_order_value = "500000"        # 1注文あたりの上限
 max_orders_per_day = 20           # 1日あたりの発注件数
-max_daily_loss = "100000"         # 当日の損失がこれを超えたら新規建てを止める
+max_daily_loss = "100000"         # 当日の損失（約定した売りの実現＋保有の当日の含み）がこれに達したら新規建てを止める。確かめられない日も止める
 max_position_weight = "0.25"      # 1銘柄が総資産に占める上限
 max_gross_exposure = "0.90"       # 建玉合計の上限
 max_preview_deviation = "0.02"    # ブローカー見積りと自前計算の許容乖離

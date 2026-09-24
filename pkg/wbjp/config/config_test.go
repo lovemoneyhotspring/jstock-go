@@ -3,12 +3,27 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/shopspring/decimal"
 )
 
+// writeSettings は settings.toml を書く。必須の risk.max_orders_per_day が無ければ足す
+// （各テストが見たい項目だけを書けるように）。必須項目そのものは writeSettingsRaw で試す。
 func writeSettings(t *testing.T, body string) string {
+	t.Helper()
+	if !strings.Contains(body, "max_orders_per_day") {
+		if strings.Contains(body, "[risk]\n") {
+			body = strings.Replace(body, "[risk]\n", "[risk]\nmax_orders_per_day = 20\n", 1)
+		} else {
+			body += "\n[risk]\nmax_orders_per_day = 20\n"
+		}
+	}
+	return writeSettingsRaw(t, body)
+}
+
+func writeSettingsRaw(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "settings.toml"), []byte(body), 0o644); err != nil {
@@ -211,8 +226,134 @@ func TestLoadSettingsFileUniverseDefaults(t *testing.T) {
 }
 
 func TestLoadSettingsFileRealConfig(t *testing.T) {
-	// リポジトリ同梱の設定が読めなくなっていないか。
-	if _, err := LoadSettingsFile("../../../config"); err != nil {
-		t.Fatalf("config/settings.toml が読めない: %v", err)
+	// リポジトリ同梱の設定（wbjp が読む全ディレクトリ）が厳しい読み込みで通るか。
+	// 本番の cron は config（run・data sync・evaluate）を読む。jp-levels は検証用
+	for _, dir := range []string{"../../../config", "../../../config/jp-levels"} {
+		if _, err := LoadSettingsFile(dir); err != nil {
+			t.Errorf("%s/settings.toml が読めない: %v", dir, err)
+		}
+		if _, err := LoadStrategiesConfig(dir); err != nil {
+			t.Errorf("%s/strategies.toml が読めない: %v", dir, err)
+		}
+	}
+	// 本番の値がそのまま読めているか（厳しくしたことで意味が変わっていない）
+	cfg, err := LoadSettingsFile("../../../config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Risk.KillSwitch || !cfg.Risk.MaxDailyLoss.Equal(decimal.NewFromInt(100000)) ||
+		!cfg.Risk.MaxOrderValue.Equal(decimal.NewFromInt(500000)) || cfg.Risk.MaxOrdersPerDay != 20 {
+		t.Errorf("[risk] の値が変わった: %+v", cfg.Risk)
+	}
+	if cfg.Execution.OrderType != "limit" || cfg.Execution.LimitOffset != "0.005" {
+		t.Errorf("[execution] の値が変わった: %+v", cfg.Execution)
+	}
+}
+
+// TestLoadSettingsFileRejectsUnknownKeys は C1 の再現。綴りを誤ったキーを黙って無視すると、
+// kill_switch を立てたつもりで緊急停止が効かない。
+func TestLoadSettingsFileRejectsUnknownKeys(t *testing.T) {
+	for name, body := range map[string]string{
+		"kil_switch":     "[risk]\nkil_switch = true\n",
+		"未知の節":           "[riks]\nkill_switch = true\n",
+		"stops の綴り":      "[stops]\ntake_proft_r = 2\n",
+		"execution の綴り":  "[execution]\norder_typ = \"market\"\n",
+		"最上位の未知キー":       "kill_switch = true\n",
+		"universe の綴り":   "[universe]\nsymbol = [\"7203\"]\n",
+		"regime の綴り":     "[regime]\nenable = true\n",
+		"sizing の綴り":     "[sizing]\nmax_position = 3\n",
+		"lot_size の型違い":  "[universe.lot_size_overrides]\n\"7203\" = \"100\"\n",
+		"kill_switch の型": "[risk]\nkill_switch = \"true\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadSettingsFile(writeSettings(t, body)); err == nil {
+				t.Error("通ってしまった")
+			}
+		})
+	}
+}
+
+// TestLoadSettingsFileRejectsUnreadableNumbers は、読めない数値を黙って既定値にしない。
+func TestLoadSettingsFileRejectsUnreadableNumbers(t *testing.T) {
+	for name, body := range map[string]string{
+		"max_daily_loss":      "[risk]\nmax_daily_loss = \"10万\"\n",
+		"max_order_value":     "[risk]\nmax_order_value = \"abc\"\n",
+		"max_order_value 型":   "[risk]\nmax_order_value = true\n",
+		"max_position_weight": "[risk]\nmax_position_weight = \"25%\"\n",
+		"risk_per_trade":      "[sizing]\nrisk_per_trade = \"x\"\n",
+		"fixed_notional":      "[sizing]\nfixed_notional = \"30万\"\n",
+		"exposure_bull":       "[regime]\nexposure_bull = \"強気\"\n",
+		"limit_offset":        "[execution]\nlimit_offset = \"0.5%\"\n",
+		"order_type":          "[execution]\norder_type = \"markt\"\n",
+		"tax_account_type":    "[execution]\ntax_account_type = \"specific\"\n",
+		"max_daily_loss 0":    "[risk]\nmax_daily_loss = 0\n",
+		"max_order_value 負":   "[risk]\nmax_order_value = -1\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadSettingsFile(writeSettings(t, body)); err == nil {
+				t.Error("通ってしまった")
+			}
+		})
+	}
+	// 数値でも文字列でも書ける項目は、どちらの表記も読める
+	cfg, err := LoadSettingsFile(writeSettings(t, "[risk]\nmax_daily_loss = 200_000\nmax_order_value = \"1_000_000\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Risk.MaxDailyLoss.Equal(decimal.NewFromInt(200000)) || !cfg.Risk.MaxOrderValue.Equal(decimal.NewFromInt(1000000)) {
+		t.Errorf("読めていない: %+v", cfg.Risk)
+	}
+}
+
+func writeStrategies(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "strategies.toml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestLoadStrategiesConfigStrict は strategies.toml の最上位の綴り誤り・合成方法の誤りを弾く。
+// [[strategies]] の中の固有パラメータは通す（未知のパラメータは strategy.Create が弾く）。
+func TestLoadStrategiesConfigStrict(t *testing.T) {
+	for name, body := range map[string]string{
+		"entry_treshold": "entry_treshold = 0.5\n",
+		"combiner の綴り":   "combiner = \"majoriti\"\n",
+		"name なし":        "[[strategies]]\nweight = 1.0\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadStrategiesConfig(writeStrategies(t, body)); err == nil {
+				t.Error("通ってしまった")
+			}
+		})
+	}
+	cfg, err := LoadStrategiesConfig(writeStrategies(t,
+		"combiner = \"majority\"\n[[strategies]]\nname = \"sma_cross\"\nfast = 5\nslow = 20\nsome_param = 3\n"))
+	if err != nil {
+		t.Fatalf("固有パラメータを弾いた: %v", err)
+	}
+	if cfg.Combiner != "majority" || len(cfg.Strategies) != 1 || cfg.Strategies[0].Fast != 5 {
+		t.Errorf("読めていない: %+v", cfg)
+	}
+}
+
+// TestLoadSettingsFileRequiresMaxOrdersPerDay は 2026-09-24 のレビューの再現。
+// max_orders_per_day が 0（書き忘れも 0 になる）だと損切りも含め全注文が止まるので、読み込みで止める。
+func TestLoadSettingsFileRequiresMaxOrdersPerDay(t *testing.T) {
+	for name, body := range map[string]string{
+		"書き忘れ": "[universe]\nsymbols = [\"7203\"]\n",
+		"0":    "[risk]\nmax_orders_per_day = 0\n",
+		"負":    "[risk]\nmax_orders_per_day = -1\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadSettingsFile(writeSettingsRaw(t, body)); err == nil {
+				t.Error("通ってしまった")
+			}
+		})
+	}
+	cfg, err := LoadSettingsFile(writeSettingsRaw(t, "[risk]\nmax_orders_per_day = 1\n"))
+	if err != nil || cfg.Risk.MaxOrdersPerDay != 1 {
+		t.Errorf("1 は通る: %+v err=%v", cfg, err)
 	}
 }

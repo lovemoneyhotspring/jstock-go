@@ -38,6 +38,9 @@ type ReconcileSettings struct {
 	Topix500 map[string]struct{}
 	// BlocksSameDaySale が真なら当日買付銘柄の売却を止める（現物の差金決済回避）。
 	BlocksSameDaySale bool
+	// Frozen は この回は判断しない銘柄 → 理由（足が古い・読めない等）。目標や保有に
+	// かかわらず売りも買いも出さず、Skipped に理由を残す。backtest は使わない（nil）。
+	Frozen map[string]string
 }
 
 // Reconcile は目標建玉と現在の実効建玉（保有＋未約定残）の差分から注文を作る。
@@ -78,6 +81,10 @@ func Reconcile(
 	plan := &ReconcilePlan{Skipped: make(map[string]string)}
 
 	for _, sym := range sortedKeys(allSymbols) {
+		if why, ok := settings.Frozen[sym]; ok {
+			plan.Skipped[sym] = "この回は判断しない: " + why
+			continue
+		}
 		targetQty := decimal.Zero
 		reason := ""
 		if t, ok := targets[sym]; ok {

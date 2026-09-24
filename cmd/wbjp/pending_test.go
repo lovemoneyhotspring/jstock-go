@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/reconcile"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/repo"
 	"github.com/shopspring/decimal"
 )
@@ -98,5 +100,131 @@ func TestResolvePendingOrdersFailsClosedWhenHistoryUnavailable(t *testing.T) {
 	}
 	if !wasPlaced(t, rep, req.ClientOrderID) {
 		t.Error("判定できないときは PENDING のまま（送り直さない）")
+	}
+}
+
+// TestResolvePendingOrdersEmptyListIsNotTrusted は W3 の再現。今日送って注文番号まで分かっている
+// 注文があるのに一覧が空で返ったら、PENDING を UNSENT にしない（送り直すと二重発注）。
+func TestResolvePendingOrdersEmptyListIsNotTrusted(t *testing.T) {
+	rep, req := pendingRepo(t)
+	logger, _ := logging.NewLogger("wbjp", "uat", "r", "test", "")
+	// 同じ日に送って受理された別の注文（注文番号あり）
+	limit := decimal.NewFromInt(2000)
+	other, err := domain.NewOrderRequest("cid-2", "6758", domain.SideBuy, domain.OrderTypeLimit,
+		decimal.NewFromInt(100), &limit, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "77/20260904"
+	if err := rep.RecordOrder("run-1", other, string(domain.OrderStatusSubmitted), &id); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := resolvePendingOrders(rep, &historyBroker{}, logger, time.Now().UTC().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.NotSent != 0 || summary.TooRecent != 1 {
+		t.Errorf("空の一覧を信用して届いていないと決めた: %+v", summary)
+	}
+	if !wasPlaced(t, rep, req.ClientOrderID) {
+		t.Error("PENDING のまま残すべき（送り直さない）")
+	}
+}
+
+// TestResolvePendingOrdersSkipsEarlierDays は、今日より前に送った PENDING を当日分しか返らない
+// 一覧で「届いていない」と決めない（UNSENT にすると翌日以降に送り直してしまう）。
+func TestResolvePendingOrdersSkipsEarlierDays(t *testing.T) {
+	rep, req := pendingRepo(t)
+	logger, _ := logging.NewLogger("wbjp", "uat", "r", "test", "")
+	summary, err := resolvePendingOrders(rep, &historyBroker{}, logger, time.Now().UTC().Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.NotSent != 0 {
+		t.Errorf("前日の PENDING を届いていないと決めた: %+v", summary)
+	}
+	if !wasPlaced(t, rep, req.ClientOrderID) {
+		t.Error("前日の PENDING は PENDING のまま残すべき")
+	}
+}
+
+// TestPendingBlocksOrdersOnTooRecent は 2026-09-24 のレビューの再現。一覧を信用できず TooRecent に
+// なった PENDING があれば、この回の発注を止める（株数が変わると別の ID で二重に建てうる）。
+func TestPendingBlocksOrdersOnTooRecent(t *testing.T) {
+	rep, _ := pendingRepo(t)
+	logger, _ := logging.NewLogger("wbjp", "uat", "r", "test", "")
+	limit := decimal.NewFromInt(2000)
+	other, err := domain.NewOrderRequest("cid-2", "6758", domain.SideBuy, domain.OrderTypeLimit,
+		decimal.NewFromInt(100), &limit, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "77/20260904"
+	if err := rep.RecordOrder("run-1", other, string(domain.OrderStatusSubmitted), &id); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := resolvePendingOrders(rep, &historyBroker{}, logger, time.Now().UTC().Add(time.Minute))
+	if err != nil || summary.TooRecent != 1 {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+	if pendingBlocksOrders(summary) == nil {
+		t.Error("TooRecent があるのに発注に進む")
+	}
+}
+
+func TestPendingBlocksOrders(t *testing.T) {
+	if err := pendingBlocksOrders(reconcile.Summary{Attributed: 1, NotSent: 2}); err != nil {
+		t.Errorf("決まったものだけなら発注する: %v", err)
+	}
+	if pendingBlocksOrders(reconcile.Summary{Ambiguous: 1}) == nil {
+		t.Error("Ambiguous があるのに発注に進む")
+	}
+	if pendingBlocksOrders(reconcile.Summary{TooRecent: 1}) == nil {
+		t.Error("TooRecent があるのに発注に進む")
+	}
+}
+
+// TestStalePendingResolvedByCommand は前日以前の PENDING を `wbjp pending resolve` で確定できる
+// （run は判定しないので、人が口座の約定履歴を見て直す）。確定すれば未約定の買いの枠を
+// 押さえ続けず、次の run の stale にも出ない。
+func TestStalePendingResolvedByCommand(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "wbjp.db")
+	rep, err := repo.OpenRepo(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rep.Close() })
+	if err := rep.StartRun("run-1", "2026-09-04", "uat", "live"); err != nil {
+		t.Fatal(err)
+	}
+	limit := decimal.NewFromInt(1000)
+	req, err := domain.NewOrderRequest("cid-1", "7203", domain.SideBuy, domain.OrderTypeLimit,
+		decimal.NewFromInt(100), &limit, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rep.RecordOrder("run-1", req, string(domain.OrderStatusPending), nil); err != nil {
+		t.Fatal(err)
+	}
+	logger, _ := logging.NewLogger("wbjp", "uat", "r", "test", "")
+	tomorrow := time.Now().UTC().Add(24 * time.Hour)
+	if _, err := resolvePendingOrders(rep, &historyBroker{}, logger, tomorrow); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := rep.PendingBuyValue(nil); v["7203"].IsZero() {
+		t.Fatal("前提: 前日の PENDING の買いは未約定の枠を押さえている")
+	}
+
+	cmd := cli.NewPendingCmd("wbjp", func() string { return dbPath })
+	cmd.SetArgs([]string{"resolve", req.ClientOrderID, "--unsent"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("wbjp pending resolve が通らない: %v", err)
+	}
+	if v, _ := rep.PendingBuyValue(nil); !v["7203"].IsZero() {
+		t.Errorf("確定した注文が未約定の枠を押さえ続ける: %v", v)
+	}
+	if open, _ := rep.UnresolvedOrders(); len(open) != 0 {
+		t.Errorf("確定した注文が未確定に残る: %+v", open)
 	}
 }
