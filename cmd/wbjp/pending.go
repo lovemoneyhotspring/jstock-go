@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 //   - 届いていた   → 注文番号と状態を書き戻す（未約定なら板に残っている注文として数える）
 //   - 届いていない → UNSENT。WasPlaced が偽になり、差分があれば今回の実行で送り直す
 //   - 決められない → PENDING のまま。発注は止める（同じ銘柄に二重に出さない）
+//   - 送った直後・一覧を信用できない（TooRecent）→ PENDING のまま。発注は止める（pendingBlocksOrders）
 //
 // 一覧を照会できなければエラー（判定できないまま実弾を出さない）。
 //
@@ -107,4 +109,27 @@ func resolvePendingOrders(rep *repo.Repo, b broker.Broker, logger *logging.Logge
 			strings.Join(ambiguous, "\n"))
 	}
 	return summary, nil
+}
+
+// pendingBlocksOrders は判定の結果、この回の発注を止めるべきかを返す（止めるならエラー）。
+//
+//   - Ambiguous: 自動で決められない（通知は resolvePendingOrders が送る）
+//   - TooRecent: 一覧を信用できない（Expected の判定）か送った直後で、届いたか分からない。
+//     wbjp の注文 ID は目標株数から作るので、9:31 と 13:31 で株数が変わると別の ID になり、
+//     WasPlaced では二重建てを防げない。分からないまま発注に進まない（2026-09-24 のレビュー）
+//
+// どちらもダイジェストに異常として残し、TooRecent は Discord にも通知する。
+func pendingBlocksOrders(summary reconcile.Summary) error {
+	if summary.Ambiguous > 0 {
+		digest.Anomaly("wbjp.pending_ambiguous", fmt.Sprintf("%d 件の送信結果不明の注文を自動で決められません", summary.Ambiguous))
+		return fmt.Errorf("送信結果不明の注文 %d 件を決められないため発注を中止しました（二重発注を避けます）", summary.Ambiguous)
+	}
+	if summary.TooRecent > 0 {
+		msg := fmt.Sprintf("送信結果不明の注文 %d 件が届いたか分からない（注文一覧が空・反映待ち、または送った直後）ため、この回の発注を中止しました（二重発注を避けます）。次の回で判定し直します",
+			summary.TooRecent)
+		digest.Anomaly("wbjp.pending_too_recent", msg)
+		run.Alert("wbjp: 送信結果不明の注文を判定できないため発注を中止しました", msg)
+		return errors.New(msg)
+	}
+	return nil
 }

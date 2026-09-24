@@ -394,9 +394,8 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 		if summary.Attributed+summary.NotSent+summary.Ambiguous+summary.TooRecent > 0 {
 			digest.Note(summary.Fields("pending"))
 		}
-		if summary.Ambiguous > 0 {
-			digest.Anomaly("wbjp.pending_ambiguous", fmt.Sprintf("%d 件の送信結果不明の注文を自動で決められません", summary.Ambiguous))
-			return fmt.Errorf("送信結果不明の注文 %d 件を決められないため発注を中止しました（二重発注を避けます）", summary.Ambiguous)
+		if err := pendingBlocksOrders(summary); err != nil {
+			return err
 		}
 
 		// 出した注文の約定・失効を台帳に取り込む。当日買付（差金決済の柵）と

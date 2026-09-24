@@ -241,7 +241,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `code` | いつ | 主な項目 |
 |---|---|---|
 | `wbjp.pending_resolved` / `wbjp.pending_ambiguous` | daytrade と同じ。送信結果不明の注文を当日の注文一覧で判定した／決められなかった。決められないものがあれば `run` は発注せずに止まる（ダイジェスト `wbjp.pending_ambiguous`） | `client_order_id`, `symbol`, `side`, `quantity`, `outcome`, `reason` |
-
+| `wbjp.pending_too_recent`（ダイジェストの異常。通知も送る） | 判定が `too_recent`（注文一覧が空・反映待ちで信用できない、または送った直後）の注文があり、`run` は発注せずに止まった。wbjp の注文 ID は株数から作るので、9:31 と 13:31 で株数が変わると `WasPlaced` では二重建てを防げない。次の回で判定し直す | 本文 |
 | `wbjp.order` / `wbjp.dry_run` / `wbjp.skip` / `wbjp.risk_rejected`（warn） / `wbjp.reconcile_skip` | 発注した／dry-run／既に発注済み（冪等）／リスク判定で見送った／建玉の突き合わせで見送った（1 件ごと） | 本文に銘柄・売買・株数・理由 |
 | `wbjp.order_failed`（error。ダイジェストの異常にも） / `wbjp.unconfirmed`（error） | 発注を拒否された／送信結果が分からない（台帳は `PENDING`） | 本文 |
 | `wbjp.fill` / `wbjp.fill_unresolved`（warn。ダイジェストの異常にも） / `wbjp.fill_sync_failed`（異常） | 約定状況が変わった／注文を照会できず台帳が未確定／約定の同期に失敗 | 本文 |

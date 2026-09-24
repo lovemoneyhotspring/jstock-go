@@ -9,6 +9,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/reconcile"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/repo"
 	"github.com/shopspring/decimal"
 )
@@ -143,5 +144,41 @@ func TestResolvePendingOrdersSkipsEarlierDays(t *testing.T) {
 	}
 	if !wasPlaced(t, rep, req.ClientOrderID) {
 		t.Error("前日の PENDING は PENDING のまま残すべき")
+	}
+}
+
+// TestPendingBlocksOrdersOnTooRecent は 2026-09-24 のレビューの再現。一覧を信用できず TooRecent に
+// なった PENDING があれば、この回の発注を止める（株数が変わると別の ID で二重に建てうる）。
+func TestPendingBlocksOrdersOnTooRecent(t *testing.T) {
+	rep, _ := pendingRepo(t)
+	logger, _ := logging.NewLogger("wbjp", "uat", "r", "test", "")
+	limit := decimal.NewFromInt(2000)
+	other, err := domain.NewOrderRequest("cid-2", "6758", domain.SideBuy, domain.OrderTypeLimit,
+		decimal.NewFromInt(100), &limit, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "77/20260904"
+	if err := rep.RecordOrder("run-1", other, string(domain.OrderStatusSubmitted), &id); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := resolvePendingOrders(rep, &historyBroker{}, logger, time.Now().UTC().Add(time.Minute))
+	if err != nil || summary.TooRecent != 1 {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+	if pendingBlocksOrders(summary) == nil {
+		t.Error("TooRecent があるのに発注に進む")
+	}
+}
+
+func TestPendingBlocksOrders(t *testing.T) {
+	if err := pendingBlocksOrders(reconcile.Summary{Attributed: 1, NotSent: 2}); err != nil {
+		t.Errorf("決まったものだけなら発注する: %v", err)
+	}
+	if pendingBlocksOrders(reconcile.Summary{Ambiguous: 1}) == nil {
+		t.Error("Ambiguous があるのに発注に進む")
+	}
+	if pendingBlocksOrders(reconcile.Summary{TooRecent: 1}) == nil {
+		t.Error("TooRecent があるのに発注に進む")
 	}
 }
