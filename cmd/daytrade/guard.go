@@ -39,6 +39,7 @@ func newGuardCmd() *cobra.Command {
 
 // guardState は runGuard の 1 回の実行で、段（準備・点検の対象・接続・処置）をまたいで持ち回る値。
 type guardState struct {
+	// live は --live、yes は本番の確認を省く（--yes）
 	live, yes bool
 	cfg       dtconfig.Config
 	// now は開始時に 1 回だけ読んだ時刻。判定日・時間帯・締め切り・記録簿の鮮度はこれで見る
@@ -58,103 +59,45 @@ type guardState struct {
 	shorts map[string]bool
 	ev     corpEvents
 	marks  map[string]string
-	// b は live のときだけ繋ぐ（dry-run は nil）
+	// b は実際に送るとき（allowed）だけ繋ぐ（dry-run は nil）
 	b broker.Broker
 }
 
+// runGuard は材料の点検の 1 回。段の順（準備 → 台帳 → 今日の売建 → 材料の印 → 接続 → 処置）は変えない
+// （testdata/guard_flow の流れのテストが見張る）。台帳の Close と実行品質の書き出しの defer はここに置く
+// （どの段で抜けても走る）。
 func runGuard(live, yes, ignoreWindow bool, date string) error {
 	s, done, err := prepareGuard(live, yes, ignoreWindow, date)
 	if done || err != nil {
 		return err
 	}
-	cfg, day := s.cfg, s.day
-	allowed, reason, started, deadline := s.allowed, s.reason, s.started, s.deadline
-
 	led, err := dtledger.Open(appSettings.DaytradeDBPath())
 	if err != nil {
 		return err
 	}
 	defer led.Close()
-	defer flushExecution(day)
+	defer flushExecution(s.day)
 	// with-lock.sh の打ち切り（SIGTERM）でも記録・保留した通知・ダイジェストを残す
-	defer flushOnSignal(day)()
+	defer flushOnSignal(s.day)()
 	// 運用通知は注文を出し切ってから送る（同期の HTTP を発注の前に挟まない。run.DeferAlerts）
-	if live {
+	if s.live {
 		run.DeferAlerts()
 	}
-	env := execute.Env{
-		Cfg: cfg, Ledger: led, Day: day, Report: run, Out: os.Stdout,
-		RetryWait: execute.DefaultRetryWait, Deadline: deadline,
+	s.env = execute.Env{
+		Cfg: s.cfg, Ledger: led, Day: s.day, Report: run, Out: os.Stdout,
+		RetryWait: execute.DefaultRetryWait, Deadline: s.deadline,
 	}
 
-	s.env = env
 	if done, err := s.findShorts(); done || err != nil {
 		return err
 	}
 	if done, err := s.markShorts(); done || err != nil {
 		return err
 	}
-	shorts, ev, marks := s.shorts, s.ev, s.marks
 	if done, err := s.connect(); done || err != nil {
 		return err
 	}
-	b := s.b
-
-	actions, err := execute.GuardCorpEvents(env, b, marks)
-	run.FlushAlerts()
-	if err != nil {
-		return err
-	}
-	var acted, failed []string
-	cancelled, returned := 0, 0
-	for _, a := range actions {
-		m := ev.marks[a.Symbol]
-		line := fmt.Sprintf("%s（%s %s）売建 %s 株: %s", a.Symbol, a.Kind, m.At, a.Quantity, a.Result)
-		fields := map[string]any{
-			"symbol": a.Symbol, "client_order_id": a.ClientOrderID, "kind": a.Kind, "headline": m.Headline,
-			"quantity": a.Quantity.String(), "filled": a.Filled.String(),
-			"cancelled": a.Cancelled, "returned": a.Returned.String(), "result": a.Result,
-		}
-		if a.Err != nil {
-			line = fmt.Sprintf("%s（%s %s）売建 %s 株（約定 %s）: %v", a.Symbol, a.Kind, m.At, a.Quantity, a.Filled, a.Err)
-			fields["error"] = a.Err.Error()
-			failed = append(failed, line)
-			logError("daytrade.corp_guard", "材料の出た売建を処置できない", fields)
-		} else {
-			logWarn("daytrade.corp_guard", "材料の出た売建を処置", fields)
-		}
-		fmt.Println("  " + line)
-		if a.Cancelled {
-			cancelled++
-		}
-		if a.Returned.IsPositive() {
-			returned++
-		}
-		if a.Acted() && a.Err == nil {
-			acted = append(acted, line+"\n  "+m.Headline)
-		}
-	}
-	if allowed && len(acted) > 0 {
-		alert(fmt.Sprintf("デイトレ: 材料（TOB など）の出た売建 %d 件を取消・返済しました", len(acted)),
-			strings.Join(acted, "\n"))
-	}
-	if len(failed) > 0 {
-		digest.Anomaly("daytrade.corp_guard_failed", fmt.Sprintf("材料の出た売建 %d 件を処置できず", len(failed)))
-		if allowed {
-			alert("デイトレ: 材料（TOB など）の出た売建を取消・返済できません。口座を確認してください",
-				strings.Join(failed, "\n"))
-		}
-	}
-	logInfo("daytrade.run", "材料の点検を終了", map[string]any{
-		"phase": "guard", "live": allowed, "reason": reason,
-		"shorts": len(shorts), "marked": len(marks), "cancelled": cancelled, "returned": returned,
-		"failures": len(failed), "elapsed_ms": clock.NowUTC().Sub(started).Milliseconds(),
-		"deadline": deadlineText(deadline),
-	})
-	if len(failed) > 0 {
-		return fmt.Errorf("材料の出た売建 %d 件を処置できませんでした（口座を確認してください）", len(failed))
-	}
-	return nil
+	return s.act()
 }
 
 // prepareGuard は設定を読み、判定日と締め切りを決める。休場日・材料の点検が無効・時間帯の外なら
@@ -296,4 +239,69 @@ func (s *guardState) connect() (done bool, err error) {
 		return false, err
 	}
 	return false, nil
+}
+
+// act は材料の出た売建を処置し（dry-run は示すだけ）、保留した通知を送ってから結果を報告する。
+func (s *guardState) act() error {
+	actions, err := execute.GuardCorpEvents(s.env, s.b, s.marks)
+	run.FlushAlerts()
+	if err != nil {
+		return err
+	}
+	return s.report(actions)
+}
+
+// report は処置の 1 件ずつを表示・ログに残し、取消・返済した分と処置できなかった分を知らせて、
+// 点検の終わりを記録する。処置できなかった売建があればエラー（人が口座を見る）。
+func (s *guardState) report(actions []execute.GuardAction) error {
+	var acted, failed []string
+	cancelled, returned := 0, 0
+	for _, a := range actions {
+		m := s.ev.marks[a.Symbol]
+		line := fmt.Sprintf("%s（%s %s）売建 %s 株: %s", a.Symbol, a.Kind, m.At, a.Quantity, a.Result)
+		fields := map[string]any{
+			"symbol": a.Symbol, "client_order_id": a.ClientOrderID, "kind": a.Kind, "headline": m.Headline,
+			"quantity": a.Quantity.String(), "filled": a.Filled.String(),
+			"cancelled": a.Cancelled, "returned": a.Returned.String(), "result": a.Result,
+		}
+		if a.Err != nil {
+			line = fmt.Sprintf("%s（%s %s）売建 %s 株（約定 %s）: %v", a.Symbol, a.Kind, m.At, a.Quantity, a.Filled, a.Err)
+			fields["error"] = a.Err.Error()
+			failed = append(failed, line)
+			logError("daytrade.corp_guard", "材料の出た売建を処置できない", fields)
+		} else {
+			logWarn("daytrade.corp_guard", "材料の出た売建を処置", fields)
+		}
+		fmt.Println("  " + line)
+		if a.Cancelled {
+			cancelled++
+		}
+		if a.Returned.IsPositive() {
+			returned++
+		}
+		if a.Acted() && a.Err == nil {
+			acted = append(acted, line+"\n  "+m.Headline)
+		}
+	}
+	if s.allowed && len(acted) > 0 {
+		alert(fmt.Sprintf("デイトレ: 材料（TOB など）の出た売建 %d 件を取消・返済しました", len(acted)),
+			strings.Join(acted, "\n"))
+	}
+	if len(failed) > 0 {
+		digest.Anomaly("daytrade.corp_guard_failed", fmt.Sprintf("材料の出た売建 %d 件を処置できず", len(failed)))
+		if s.allowed {
+			alert("デイトレ: 材料（TOB など）の出た売建を取消・返済できません。口座を確認してください",
+				strings.Join(failed, "\n"))
+		}
+	}
+	logInfo("daytrade.run", "材料の点検を終了", map[string]any{
+		"phase": "guard", "live": s.allowed, "reason": s.reason,
+		"shorts": len(s.shorts), "marked": len(s.marks), "cancelled": cancelled, "returned": returned,
+		"failures": len(failed), "elapsed_ms": clock.NowUTC().Sub(s.started).Milliseconds(),
+		"deadline": deadlineText(s.deadline),
+	})
+	if len(failed) > 0 {
+		return fmt.Errorf("材料の出た売建 %d 件を処置できませんでした（口座を確認してください）", len(failed))
+	}
+	return nil
 }
