@@ -50,7 +50,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&brokerVerifyFlag, "broker-verify", false,
 		"発注経路の実機検証（docs/BROKER_VERIFY.md）。ログとダイジェストに印を付ける")
 	cmd.Flags().BoolVar(&acceptFlatFlag, "accept-flat", false,
-		"建玉の照会が 0 件でも台帳の保有を捨てて続ける（口座が本当に空だと確かめたときだけ）")
+		"建玉の照会が 0 件でも台帳の保有を捨てて続ける（口座が本当に空だと確かめたときだけ。1 回で失効。cron の行には書かない）")
 	return cmd
 }
 
@@ -614,6 +614,8 @@ func outsideUniverseHeld(posMap map[string]domain.Position, universe map[string]
 // dry-run は建玉 0 の模型で判断するので警告だけで続ける（ストップは保存しない）。
 // acceptFlat（--accept-flat）は口座が本当に空だと確かめたときの逃げ道: 手で全部売った
 // 後など、台帳の保有を捨てて続ける（ストップは RetainHeld で外れ、成功した回が次の基準になる）。
+// 素通りした回に印を付け、1 回で失効させる（repo.AcceptFlatSpent: 同じ日にもう一度、または
+// 素通りして成功した回の直後の回では使えない）。期待が空なら印は付けない。
 func checkEmptyPositions(rep *repo.Repo, posMap map[string]domain.Position, env, runID string,
 	canLive, acceptFlat bool, logger *logging.Logger) error {
 	for _, pos := range posMap {
@@ -648,10 +650,24 @@ func checkEmptyPositions(rep *repo.Repo, posMap map[string]domain.Position, env,
 		return nil
 	}
 	if acceptFlat {
-		logger.Warn("wbjp.positions_empty",
-			"建玉の照会は 0 件。--accept-flat のため台帳の保有を捨てて続けます:\n"+detail)
-		digest.Note(map[string]any{"phase": "accept_flat", "dropped": len(syms)})
-		return nil
+		// 1 回で失効させる（cron の行に残っても毎回は素通りしない）
+		spent, err := rep.AcceptFlatSpent(env, runID)
+		if err != nil {
+			return fmt.Errorf("建玉が 0 件と返り、--accept-flat を使えるか確かめられないため発注を中止しました: %w", err)
+		}
+		if spent == "" {
+			if err := rep.MarkAcceptFlat(runID); err != nil {
+				return fmt.Errorf("--accept-flat の印を残せないため発注を中止しました（1 回で失効させられない）: %w", err)
+			}
+			logger.Warn("wbjp.positions_empty",
+				"建玉の照会は 0 件。--accept-flat のため台帳の保有を捨てて続けます:\n"+detail)
+			digest.Note(map[string]any{"phase": "accept_flat", "dropped": len(syms)})
+			return nil
+		}
+		digest.Anomaly("wbjp.positions_empty", fmt.Sprintf("%d 銘柄（発注を中止。%s）:\n%s", len(syms), spent, detail))
+		return fmt.Errorf("建玉の照会が 0 件なのに台帳では %d 銘柄を保有中のはずのため発注を中止しました"+
+			"（%s。--accept-flat は 1 回で失効します。cron の行に付けていないか確かめてください）:\n%s",
+			len(syms), spent, detail)
 	}
 	digest.Anomaly("wbjp.positions_empty", fmt.Sprintf("%d 銘柄（発注を中止）:\n%s", len(syms), detail))
 	return fmt.Errorf("建玉の照会が 0 件なのに台帳では %d 銘柄を保有中のはずのため発注を中止しました"+

@@ -187,6 +187,10 @@ func OpenRepo(dbPath string) (*Repo, error) {
 		{Name: "stops.trailing_pct", Up: storage.AddColumns("stops", map[string]string{
 			"trailing_pct": "TEXT",
 		})},
+		// --accept-flat で建玉 0 件の検査を素通りした回の印（1 回で失効させる。AcceptFlatSpent）
+		{Name: "runs.accept_flat", Up: storage.AddColumns("runs", map[string]string{
+			"accept_flat": "INTEGER NOT NULL DEFAULT 0",
+		})},
 	}
 
 	if err := storage.Migrate(db, migrations); err != nil {
@@ -659,7 +663,7 @@ func (r *Repo) ExpectedHoldings(env, currentRunID string) (map[string]string, er
 	err := r.db.QueryRow(
 		`SELECT started_at, run_id FROM runs
 		  WHERE mode = 'live' AND status = 'success' AND env = ? AND run_id != ?
-		  ORDER BY started_at DESC LIMIT 1;`,
+		  ORDER BY started_at DESC, rowid DESC LIMIT 1;`,
 		env, currentRunID,
 	).Scan(&since, &prevRunID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -781,6 +785,52 @@ func (r *Repo) ExpectedHoldings(env, currentRunID string) (map[string]string, er
 		out[sym] = "保存済みのストップがある"
 	}
 	return out, stops.Err()
+}
+
+// MarkAcceptFlat は、その回が --accept-flat で建玉 0 件の検査を素通りしたと印を付ける。
+func (r *Repo) MarkAcceptFlat(runID string) error {
+	res, err := r.db.Exec("UPDATE runs SET accept_flat = 1 WHERE run_id = ?;", runID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n != 1 {
+		return fmt.Errorf("実行 %s が台帳に無い", runID)
+	}
+	return nil
+}
+
+// AcceptFlatSpent は --accept-flat がもう使えないときにその理由を返す（使えるなら ""）。
+//
+// --accept-flat は 1 回で失効させる（cron の行に残ると 0 件の検査を毎回素通りする）。
+// 使えないのは、--accept-flat で素通りして成功した発注する回（env が同じ。currentRunID は
+// 数えない）が
+//
+//   - 実行中の回と同じ日（as_of）にある、または
+//   - 前に成功した発注する回そのもの（その後に通常の検査で成功した回が無い）
+//
+// のとき。素通りした回が成功すれば次の回からはその回の建玉が基準になり、期待は空か
+// その回の買いだけになる。それでも照会が 0 件なら通常どおり止める。
+func (r *Repo) AcceptFlatSpent(env, currentRunID string) (string, error) {
+	var runID, asOf string
+	err := r.db.QueryRow(
+		`SELECT run_id, as_of FROM runs
+		  WHERE mode = 'live' AND status = 'success' AND env = ? AND run_id != ? AND accept_flat = 1
+		    AND (as_of = (SELECT as_of FROM runs WHERE run_id = ?)
+		         OR run_id = (SELECT run_id FROM runs
+		                       WHERE mode = 'live' AND status = 'success' AND env = ? AND run_id != ?
+		                       ORDER BY started_at DESC, rowid DESC LIMIT 1))
+		  ORDER BY started_at DESC, rowid DESC LIMIT 1;`,
+		env, currentRunID, currentRunID, env, currentRunID,
+	).Scan(&runID, &asOf)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("--accept-flat を使った回を読めません: %w", err)
+	}
+	return fmt.Sprintf("--accept-flat は %s の回（%s）で使い済み", asOf, runID), nil
 }
 
 // OrdersToday はその日に実際に発注した件数。
