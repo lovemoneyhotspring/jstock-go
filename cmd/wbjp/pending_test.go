@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/reconcile"
@@ -180,5 +181,50 @@ func TestPendingBlocksOrders(t *testing.T) {
 	}
 	if pendingBlocksOrders(reconcile.Summary{TooRecent: 1}) == nil {
 		t.Error("TooRecent があるのに発注に進む")
+	}
+}
+
+// TestStalePendingResolvedByCommand は前日以前の PENDING を `wbjp pending resolve` で確定できる
+// （run は判定しないので、人が口座の約定履歴を見て直す）。確定すれば未約定の買いの枠を
+// 押さえ続けず、次の run の stale にも出ない。
+func TestStalePendingResolvedByCommand(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "wbjp.db")
+	rep, err := repo.OpenRepo(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rep.Close() })
+	if err := rep.StartRun("run-1", "2026-09-04", "uat", "live"); err != nil {
+		t.Fatal(err)
+	}
+	limit := decimal.NewFromInt(1000)
+	req, err := domain.NewOrderRequest("cid-1", "7203", domain.SideBuy, domain.OrderTypeLimit,
+		decimal.NewFromInt(100), &limit, domain.TaxAccountSpecific, "test", domain.TradeTypeCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rep.RecordOrder("run-1", req, string(domain.OrderStatusPending), nil); err != nil {
+		t.Fatal(err)
+	}
+	logger, _ := logging.NewLogger("wbjp", "uat", "r", "test", "")
+	tomorrow := time.Now().UTC().Add(24 * time.Hour)
+	if _, err := resolvePendingOrders(rep, &historyBroker{}, logger, tomorrow); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := rep.PendingBuyValue(nil); v["7203"].IsZero() {
+		t.Fatal("前提: 前日の PENDING の買いは未約定の枠を押さえている")
+	}
+
+	cmd := cli.NewPendingCmd("wbjp", func() string { return dbPath })
+	cmd.SetArgs([]string{"resolve", req.ClientOrderID, "--unsent"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("wbjp pending resolve が通らない: %v", err)
+	}
+	if v, _ := rep.PendingBuyValue(nil); !v["7203"].IsZero() {
+		t.Errorf("確定した注文が未約定の枠を押さえ続ける: %v", v)
+	}
+	if open, _ := rep.UnresolvedOrders(); len(open) != 0 {
+		t.Errorf("確定した注文が未確定に残る: %+v", open)
 	}
 }

@@ -246,6 +246,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `wbjp.order_failed`（error。ダイジェストの異常にも） / `wbjp.unconfirmed`（error） | 発注を拒否された／送信結果が分からない（台帳は `PENDING`） | 本文 |
 | `wbjp.fill` / `wbjp.fill_unresolved`（warn。ダイジェストの異常にも） / `wbjp.fill_sync_failed`（異常） | 約定状況が変わった／注文を照会できず台帳が未確定／約定の同期に失敗 | 本文 |
 | `wbjp.pending_unresolved`（異常） | 当日の注文一覧を照会できず判定を持ち越した | `error` |
+| `wbjp.pending_stale`（warn。ダイジェストの異常にも） | 今日より前に送った送信結果不明（`PENDING`）の注文がある。立花の一覧は当日分しか返らないので自動では判定しない。放っておくと買いは未約定の枠を押さえ続ける。口座の約定履歴を見て `wbjp pending resolve <id> --attribute <注文番号> --status FILLED --filled <株数> --price <単価>` か `--unsent` で確定する（ID に発注日が入るので `--unsent` でも送り直しは起きない） | `pending`, `client_order_ids`, `fix` |
 | `wbjp.bars_unusable`（warn。ダイジェストの異常にも） / `wbjp.calendar_missing`（warn） / `wbjp.market_closed` | 足が古い・読めない銘柄があり、その銘柄はこの回に売りも買いも出さない／取引カレンダーが読めない（dry-run は平日で代用、発注する回は止まる）／休場日のため判断しない | 本文に銘柄・保有株数・理由 |
 | `wbjp.daily_pnl` / `wbjp.daily_pnl_unknown`（warn。ダイジェストの異常にも） | 当日の損益（実現・含み）と `max_daily_loss`／当日の損益を確かめられず新規の買いを止めた | 本文 |
 | `wbjp.regime` / `wbjp.strategy_error`（warn） / `wbjp.margin_missing`（warn） | 相場の状態を評価した／戦略の評価に失敗した／信用残がアーカイブに無い | 本文 |

@@ -15,6 +15,10 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/repo"
 )
 
+// staleFix は前日以前の PENDING の直し方（ログ・ダイジェストに載せる）。
+const staleFix = "約定していれば `wbjp pending resolve <client_order_id> --attribute <注文番号> --status FILLED --filled <株数> --price <単価>`、" +
+	"届いていない・失効なら `wbjp pending resolve <client_order_id> --unsent`（ID に発注日が入るので送り直しは起きない）"
+
 // resolvePendingOrders は送信結果が分からず注文番号の無い PENDING を、当日の注文一覧と
 // 突き合わせて判定し、台帳を直す（wbcore/reconcile）。
 //
@@ -30,7 +34,11 @@ import (
 //     反映が遅れていると読み、「該当なし」を「届いていない」とはしない（reconcile.Options.Expected）。
 //     一覧を信用して UNSENT にすると、届いていた注文を別の ID で送り直す（二重発注）
 //   - 立花の一覧は当日分しか返らないので、今日より前に送った PENDING は判定しない
-//     （一覧に無いのは当然で、UNSENT にすると送り直してしまう）。PENDING のまま残して警告する
+//     （一覧に無いのは当然で、「届いていない」の証拠にならない）。PENDING のまま残して警告し
+//     （wbjp.pending_stale）、人が口座の約定履歴を見て `wbjp pending resolve` で確定する。
+//     wbjp の注文 ID は発注日から作るので、前日以前の注文を UNSENT にしても同じ ID で
+//     送り直すことは無い。放っておくと、買いの PENDING は未約定の買いとして比率上限の枠を
+//     押さえ続ける（PendingBuyValue）
 func resolvePendingOrders(rep *repo.Repo, b broker.Broker, logger *logging.Logger, now time.Time) (reconcile.Summary, error) {
 	var summary reconcile.Summary
 	unresolved, err := rep.UnresolvedOrders()
@@ -58,10 +66,10 @@ func resolvePendingOrders(rep *repo.Repo, b broker.Broker, logger *logging.Logge
 		})
 	}
 	if len(stale) > 0 {
-		logger.Warn("wbjp.pending_unresolved", "今日より前に送った送信結果不明の注文は判定しない（一覧は当日分のみ。PENDING のまま）",
-			map[string]any{"pending": len(stale), "client_order_ids": stale})
-		digest.Anomaly("wbjp.pending_stale", fmt.Sprintf("今日より前の送信結果不明の注文 %d 件（口座の注文・約定と台帳を確かめてください）: %s",
-			len(stale), strings.Join(stale, ", ")))
+		logger.Warn("wbjp.pending_stale", "今日より前に送った送信結果不明の注文は判定しない（一覧は当日分のみ。PENDING のまま）",
+			map[string]any{"pending": len(stale), "client_order_ids": stale, "fix": staleFix})
+		digest.Anomaly("wbjp.pending_stale", fmt.Sprintf("今日より前の送信結果不明の注文 %d 件（口座の約定履歴を見て %s）: %s",
+			len(stale), staleFix, strings.Join(stale, ", ")))
 	}
 	if len(pendings) == 0 {
 		return summary, nil
