@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -472,9 +474,9 @@ func runGuardCase(t *testing.T, c guardCase) string {
 		for _, a := range alerts {
 			doc.printf("%s\n", normalize(root, a))
 		}
-		doc.printf("--- 端末\n%s", normalize(root, stdout))
+		doc.printf("--- 端末\n%s", strings.Join(sortMarkLines(strings.SplitAfter(normalize(root, stdout), "\n")), ""))
 		doc.printf("--- ログ\n")
-		for _, line := range readLogs(t, s)[logsBefore:] {
+		for _, line := range sortMarkLines(readLogs(t, s)[logsBefore:]) {
 			doc.printf("%s\n", normalize(root, line))
 		}
 		doc.printf("--- ダイジェスト\n")
@@ -573,4 +575,26 @@ func writeGuardNews(t *testing.T, s *settings.AppSettings, n guardNews) {
 	if _, err := store.Save(ctx, flowDay.Format(DateLayout), items, fetched); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// sortMarkLines は「材料の出た売建」の行（端末とログ）が続く区間を並べ替える。runGuard は印を
+// 売建の map の順に出すので、銘柄が 2 つ以上だと実行ごとに順が変わる（処置の順は台帳の順で決まる）。
+func sortMarkLines(lines []string) []string {
+	isMark := func(line string) bool {
+		return strings.HasPrefix(line, "材料の出た売建: ") || strings.Contains(line, `"msg":"材料の出た売建",`)
+	}
+	out := append([]string(nil), lines...)
+	for i := 0; i < len(out); {
+		if !isMark(out[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(out) && isMark(out[j]) {
+			j++
+		}
+		sort.Strings(out[i:j])
+		i = j
+	}
+	return out
 }
