@@ -101,10 +101,17 @@ func checkOpenOrders(cfg *accumcfg.AccumConfig, led *ledger.Ledger) error {
 	for _, change := range synced.Changes {
 		fmt.Println("更新: " + change.Describe())
 	}
-	// 照会できなかった注文は台帳をそのままにしてある。次の run が再判定する。
-	// 決められないもの（ambiguous）はログの候補を見て `accum pending resolve` で直す。
+	// 照会できなかった注文は台帳をそのままにしてある。ふつうは次の run が再判定する。
+	// 前日以前の送信結果不明（NeedsResolve）は次の run でも判定しないので、
+	// 口座の約定履歴で確かめて `accum pending resolve` で直す。
+	needsResolve := 0
 	for _, u := range synced.Unresolved {
-		fmt.Println("保留（照会できず）: " + u.Describe())
+		label := "保留（照会できず）: "
+		if u.NeedsResolve {
+			label = "保留（`accum pending resolve` で確定するまで残る）: "
+			needsResolve++
+		}
+		fmt.Println(label + u.Describe())
 	}
 	if err != nil {
 		return err
@@ -113,7 +120,9 @@ func checkOpenOrders(cfg *accumcfg.AccumConfig, led *ledger.Ledger) error {
 		fmt.Println("変化のあった注文はありません")
 	}
 	if len(synced.Unresolved) > 0 {
-		return fmt.Errorf("%d 件の注文を判定できませんでした（次の run で再判定。決められないものは `accum pending resolve`）", len(synced.Unresolved))
+		return fmt.Errorf("%d 件の注文を判定できませんでした（うち %d 件は前日以前の送信結果不明で、"+
+			"`accum pending resolve` で確定するまで残る。ほかは次の run で再判定、決められないものは `accum pending resolve`）",
+			len(synced.Unresolved), needsResolve)
 	}
 	return nil
 }

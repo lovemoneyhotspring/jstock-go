@@ -56,13 +56,17 @@ func (c StatusChange) Describe() string {
 //
 // 台帳はそのまま（「発注済み」に数えたまま）にする。勝手に失効へ倒すと
 // 板に残っていた注文と二重になり、逆に放置し続けると当月の予算が
-// 埋まらない。次の run がもう一度判定する。それでも決まらないものは
+// 埋まらない。ふつうは次の run がもう一度判定する。それでも決まらないものは
 // ダイジェストの異常として残り、AI が口座の注文一覧と突き合わせる。
+//
+// NeedsResolve の行（前日以前に送った送信結果不明の注文）は次の run でも判定しない。
+// `accum pending resolve` で人（か AI）が確定するまで残り、その銘柄は発注しない。
 type UnresolvedOrder struct {
 	ClientOrderID string
 	Symbol        string
 	Status        string
 	Reason        string
+	NeedsResolve  bool
 }
 
 func (u UnresolvedOrder) Describe() string {
@@ -73,7 +77,8 @@ func (u UnresolvedOrder) Describe() string {
 type SyncResult struct {
 	// Changes は台帳を更新できた注文。
 	Changes []StatusChange
-	// Unresolved は照会できず保留した注文。空でなければ知らせる（次の run で再判定）。
+	// Unresolved は照会できず保留した注文。空でなければ知らせる（ふつうは次の run で再判定。
+	// NeedsResolve の行は `accum pending resolve` まで残る）。
 	Unresolved []UnresolvedOrder
 	// Resolved は送信結果不明（PENDING）の注文を当日の注文一覧で判定した集計。
 	Resolved reconcile.Summary
@@ -218,10 +223,11 @@ func SyncOrderStatus(led *ledger.Ledger, b broker.Broker, now time.Time) (SyncRe
 // 保留した PENDING は台帳に残り、run はその銘柄を発注しない（RunAccumulation）。人（か AI）が
 // 口座の約定履歴で確かめ、`accum pending resolve` で確定する。
 func resolveUnconfirmed(led *ledger.Ledger, b broker.Broker, rows []ledger.LedgerOrder, now time.Time, result *SyncResult) error {
-	hold := func(rows []ledger.LedgerOrder, reason string) {
+	hold := func(rows []ledger.LedgerOrder, reason string, needsResolve bool) {
 		for _, row := range rows {
 			result.Unresolved = append(result.Unresolved, UnresolvedOrder{
 				ClientOrderID: row.ClientOrderID, Symbol: row.Symbol, Status: row.Status, Reason: reason,
+				NeedsResolve: needsResolve,
 			})
 		}
 	}
@@ -240,7 +246,7 @@ func resolveUnconfirmed(led *ledger.Ledger, b broker.Broker, rows []ledger.Ledge
 	}
 	if len(earlier) > 0 {
 		hold(earlier, "今日より前に送った送信結果不明の注文。立花の注文一覧は前日以前を返さないことがあるので、"+
-			"一覧に無くても「届いていない」とは決めない（口座の約定履歴で確かめて `accum pending resolve`）")
+			"一覧に無くても「届いていない」とは決めない（口座の約定履歴で確かめて `accum pending resolve`）", true)
 	}
 	if len(todaysRows) == 0 {
 		return nil
@@ -249,7 +255,7 @@ func resolveUnconfirmed(led *ledger.Ledger, b broker.Broker, rows []ledger.Ledge
 
 	todays, err := b.GetOrderHistory(start, jst)
 	if err != nil {
-		hold(rows, "当日の注文一覧を照会できない: "+err.Error())
+		hold(rows, "当日の注文一覧を照会できない: "+err.Error(), false)
 		return nil
 	}
 	if len(todays) == 0 {
@@ -262,7 +268,7 @@ func resolveUnconfirmed(led *ledger.Ledger, b broker.Broker, rows []ledger.Ledge
 			}
 		}
 		hold(listEmpty, "当日の注文一覧が 0 件（届いていないのか一覧が空で返ったのか区別できない）。"+
-			"口座の注文照会で確かめて `accum pending resolve`")
+			"口座の注文照会で確かめて `accum pending resolve`", false)
 		return nil
 	}
 	known, err := led.BrokerOrderIDs()

@@ -137,15 +137,15 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `accum.order` | 投下を注文にした結果（1 件ごと） | `symbol`, `client_order_id`, `quantity`, `price`, `amount`, `live`（実発注か）, `outcome`（`発注` / `dry-run` / `見送り …` / `失敗 …` / `発注済み（冪等）`）, `note`（見送り・失敗の理由） |
 | `accum.unconfirmed`（error。exit 1） | 発注を送ったが応答が返らず、届いたか分からない。台帳には `PENDING` のまま残し、次の `run` の冒頭で当日の注文一覧と突き合わせて自動で判定する。**前日以前に送ったものは一覧に無くても「届いていない」とは決めず**（一覧が前日以前を返すか未確認）、`accum.unresolved` で保留して通知する。`PENDING` が残る銘柄には発注しない | 本文 |
 | `accum.pending_resolved` | 送信結果不明の注文を当日の注文一覧で判定した（1 件ごと）。`attributed`（届いていた→注文番号を帰属）/ `not_sent`（届いていない→`UNSENT`、次の差額で埋め直す）/ `too_recent`（送った直後。次の run で） | 本文に銘柄・数量・判定 |
-| `accum.pending_ambiguous` | ダイジェストの異常。同じ銘柄で細部の違う未帰属の注文があり自動で決められない。`PENDING` のまま次の run で再判定。続くなら口座の注文一覧を見る | `detail` |
+| `accum.pending_ambiguous` | ダイジェストの異常。送信結果不明（`PENDING`）の注文を決められず保留した。**前日以前に送ったものは次の run でも判定せず、`accum pending resolve` で確定するまで残る**（その銘柄は発注しない。`detail` に件数を分けて書く）。今日のもの（同じ銘柄で細部の違う未帰属の注文・一覧が 0 件）は次の run で再判定。続くなら口座の注文一覧を見る | `detail` |
 | `accum.order` / `accum.dry_run` | 投下を注文にした結果（1 件ごと。実発注／dry-run）。判断そのものは `state/accum/history/decision/` に残る | 本文に銘柄・株数・価格・注文 ID |
-| `accum.order_failed`（error。ダイジェストの失敗・通知・exit 1） | 出すべきなのに出せなかった銘柄（足が無い・古い・判定用の足が読めない・見積り失敗・買付余力不足・拒否・送信結果不明の注文が残る）。1 件ごとの行と、回の最後にまとめた 1 行 | 本文に銘柄と理由 |
-| `accum.order_not_recorded` / `accum.order_aborted`（error。exit 1） | ブローカーは受理したのに台帳を更新できなかった（台帳は `PENDING` のまま。次の run の照合に回る）／送る前の台帳の記録に失敗した。どちらも以降の発注を止める | 本文 |
+| `accum.order_failed`（error。ダイジェストの失敗・通知・exit 1） | 出すべきなのに出せなかった銘柄（足が無い・古い・判定用の足が読めない・売買単位が分からない（`lot_size_overrides` にもブローカーの銘柄情報にも無い。dry-run は銘柄情報を引かない）・売買単位が設定と銘柄情報で違う・見積り失敗・買付余力不足・拒否・送信結果不明の注文が残る）。1 件ごとの行と、回の最後にまとめた 1 行 | 本文に銘柄と理由 |
+| `accum.order_not_recorded` / `accum.order_aborted`（error。exit 1） | ブローカーは受理したのに台帳を更新できなかった・拒否されたのに台帳を `REJECTED` にできなかった（台帳は `PENDING` のまま。次の run の照合に回る）／送る前の台帳の記録に失敗した。どれも以降の発注を止める | 本文 |
 | `accum.plan_failed`（error。exit 1） | 台帳（発注済み額・開始日）が読めず、発注計画を立てなかった | 本文 |
 | `accum.balance_failed`（warn） | 買付余力を照会できず、その回は発注しなかった | 本文 |
 | `accum.unrecorded_fills`（error） / `accum.unrecorded_check_failed` | 台帳に無い当月の約定がある（二重買付の恐れ。発注しない）／その照会ができなかった | 本文 |
 | `accum.stale_signal`（warn） | 判定用の足が古いまま前日以前の値で判定した | 本文 |
-| `accum.unresolved`（warn。ダイジェストの異常にも） | 注文を照会できず保留した | 本文 |
+| `accum.unresolved`（warn。ダイジェストの異常にも） | 注文を照会できず保留した（ログは保留した全件。ダイジェストの異常は `PENDING` 以外＝照会できない・応答に無い注文の件数）。通知は 1 回の run に 1 通で、前日以前の `PENDING` を含めば件名で `accum pending resolve` が要ると言う。今日の注文が立って発注できなかった銘柄（`accum.order_failed`）で知らせた注文は、この通知から外す | 本文 |
 | `accum.sync_failed` / `accum.backup_failed`（ダイジェストの異常） / `accum.history_failed` / `accum.ledger` / `accum.ledger_read_failed` | 足の同期・注文状態の照会の失敗／バックアップの失敗／判断履歴・台帳への書き込み・読み込みの失敗 | 本文 |
 | `accum.import_fill` / `accum.import_no_price` | `accum import-fills` が約定を取り込んだ／単価が取れず取り込めなかった | 本文 |
 | `accum.verify_order` / `accum.verify_dry_run` / `accum.verify_query_failed` / `accum.verify_stop` / `accum.verify_stop_dry_run` / `accum.verify_stop_cancel_failed` | 発注経路の検証（`verify-order`・逆指値の検証。[BROKER_VERIFY.md](BROKER_VERIFY.md)）の結果 | 本文 |

@@ -64,8 +64,12 @@ func BrokerSymbol(symbol string) string { return accumcfg.BrokerSymbol(symbol) }
 // 台帳が読めない・書けないときはエラーを返す。発注済み額を 0 と読むと同じ月の予算を
 // もう一度買うので、計画そのものを立てない。
 //
-// brokerLots はブローカーの銘柄情報から引いた売買単位（発注の表記がキー。nil 可）。
-// 売買単位は lot_size_overrides → brokerLots → 既定の 100 株の順に決める。
+// brokerLots はブローカーの銘柄情報から売買単位を引く関数（発注の表記がキー。nil 可）。
+// 注文を作る段（今日出す差額が立った銘柄）に初めて来たときに 1 回だけ呼ぶ。今月分を
+// 出し終えた日・時間帯の外・持ち越しの日は銘柄マスタを引かない。
+//
+// 売買単位は lot_size_overrides と brokerLots から決める（lotSizeFor）。どちらにも無い、
+// または両方あって値が違う銘柄は既定の 100 株に倒さず、発注できなかった銘柄（Failed）にする。
 func PlanOrders(
 	cfg *accumcfg.AccumConfig,
 	barStore *data.BarStore,
@@ -73,8 +77,19 @@ func PlanOrders(
 	now time.Time,
 	ignoreWindow bool,
 	markStart bool,
-	brokerLots map[string]decimal.Decimal,
+	brokerLots func() map[string]decimal.Decimal,
 ) (orders []PlannedOrder, staleSignals []string, err error) {
+	var lots map[string]decimal.Decimal
+	lotsLoaded := false
+	lotsOnce := func() map[string]decimal.Decimal {
+		if !lotsLoaded {
+			lotsLoaded = true
+			if brokerLots != nil {
+				lots = brokerLots()
+			}
+		}
+		return lots
+	}
 
 	todayJST := clock.ToZone(now, clock.Tokyo).Format("2006-01-02")
 	monthStart := todayJST[:7] + "-01"
@@ -293,16 +308,25 @@ func PlanOrders(
 			lastBar := completed[len(completed)-1]
 			lastPrice := lastBar.Close
 
-			// 単元株数（設定の上書き → ブローカーの銘柄情報 → 既定 100）
-			//
-			// 設定は 2559 のように「ブローカーの銘柄情報から取れるので書かない」銘柄がある。
-			// 銘柄情報を見ずに既定の 100 株で丸めると、1 株単位の ETF は予算が 100 株に届かず
-			// 毎回「単元未満」で見送りになる
-			lotSize := marketrules.DefaultLotSize
-			if ov, ok := cfg.Execution.LotSizeFor(bSym); ok {
-				lotSize = decimal.NewFromInt(int64(ov))
-			} else if lot, ok := brokerLots[bSym]; ok && lot.IsPositive() {
-				lotSize = lot
+			// 単元株数（設定の上書きとブローカーの銘柄情報。どちらも無ければ見送りの失敗）
+			lotSize, lotErr := lotSizeFor(cfg, bSym, lotsOnce())
+			if lotErr != nil {
+				orders = append(orders, PlannedOrder{
+					Symbol:     bSym,
+					Amount:     due,
+					Reason:     reason,
+					Note:       lotErr.Error(),
+					Failed:     true,
+					Market:     entry.MarketResolved(),
+					JudgedOn:   lastRow.Date,
+					Month:      monthStart,
+					Close:      lastRow.Close,
+					Target:     target.Add(carried),
+					Placed:     already,
+					Multiplier: lastRow.Multiplier,
+					Tactic:     entry.Tactic,
+				})
+				continue
 			}
 
 			// 指値価格の計算 (終値 * (1 + offset))
@@ -397,6 +421,37 @@ func PlanOrders(
 	return orders, staleSignals, nil
 }
 
+// lotSizeFor は発注に使う売買単位を決める。
+//
+//   - 設定の上書き（lot_size_overrides）とブローカーの値が両方あって違う → エラー。どちらが
+//     正しいか分からないまま丸めると、10 倍・1/10 の株数で出しうる
+//   - どちらか一方だけ → その値
+//   - どちらも無い → エラー。以前は既定の 100 株で丸め、1 株単位の ETF（2559・1629）が
+//     銘柄マスタを取れなかった回に「単元未満で見送り」になり、失敗として通知されなかった
+//     （2026-09-24 のレビュー）。dry-run（PaperBroker）は与えていない銘柄の値を持たないので、
+//     上書きの無い銘柄は dry-run でもここで失敗になる
+func lotSizeFor(cfg *accumcfg.AccumConfig, symbol string, brokerLots map[string]decimal.Decimal) (decimal.Decimal, error) {
+	ov, hasOverride := cfg.Execution.LotSizeFor(symbol)
+	lot, hasBroker := brokerLots[symbol]
+	hasBroker = hasBroker && lot.IsPositive()
+	switch {
+	case hasOverride && hasBroker:
+		if !lot.Equal(decimal.NewFromInt(int64(ov))) {
+			return decimal.Zero, fmt.Errorf(
+				"売買単位が設定（lot_size_overrides の %d 株）とブローカーの銘柄情報（%s 株）で違うため発注しません"+
+					"（どちらが正しいか確かめて設定を直す）", ov, lot)
+		}
+		return lot, nil
+	case hasOverride:
+		return decimal.NewFromInt(int64(ov)), nil
+	case hasBroker:
+		return lot, nil
+	}
+	return decimal.Zero, errors.New(
+		"売買単位が分からないため発注しません（ブローカーの銘柄情報に無い・取得できない。" +
+			"lot_size_overrides にも無い。既定の 100 株では丸めない）")
+}
+
 // isStale は最終足が maxStaleDays より古いかと、その日数を返す。
 func isStale(bars []domain.Bar, todayJST string, maxStaleDays int) (bool, int) {
 	if len(bars) == 0 || maxStaleDays <= 0 {
@@ -468,25 +523,25 @@ func RunAccumulation(
 		}
 		logger.Info("accum.pending_resolved", "送信結果不明の注文を判定: "+string(r.Outcome), fields)
 	}
-	// 照会できなかった注文は「発注済み」に数えたまま保留してある。次の run が
-	// もう一度判定する。決められないものはダイジェストの異常として残す（AI が読む）。
-	if len(synced.Unresolved) > 0 {
-		digest.Anomaly("accum.pending_ambiguous",
-			fmt.Sprintf("%d 件の注文を判定できず保留（次の run で再判定）", len(synced.Unresolved)))
-	}
+	// 照会できなかった注文は「発注済み」に数えたまま保留してある。ふつうは次の run が
+	// もう一度判定するが、前日以前の送信結果不明（NeedsResolve）は `accum pending resolve` まで
+	// 残る。どちらかを書き分けてダイジェストの異常に残す（AI が読む）。
 	for _, u := range synced.Unresolved {
 		logger.Warn("accum.unresolved", "照会できず保留: "+u.Describe())
 	}
-	if len(synced.Unresolved) > 0 {
-		var lines []string
-		for _, u := range synced.Unresolved {
-			lines = append(lines, u.Describe())
+	if pending, other := describeHeld(synced.Unresolved); pending != "" || other != "" {
+		if pending != "" {
+			digest.Anomaly("accum.pending_ambiguous", pending)
 		}
-		alert("積立: 前回の注文を照会できません（口座を確認してください）",
-			strings.Join(lines, "\n"), logger)
-		digest.Anomaly("accum.unresolved",
-			fmt.Sprintf("%d 件の注文を照会できませんでした", len(synced.Unresolved)))
+		if other != "" {
+			digest.Anomaly("accum.unresolved", other)
+		}
 	}
+	// 通知は最後にまとめて 1 通。保留した PENDING の銘柄に今日の注文が立つと、発注できなかった
+	// 銘柄（OrdersFailedError）として同じ注文を知らせる。以前はそれとは別に「照会できません」を
+	// 送り、1 件の PENDING で 2 通になっていた。失敗の行で知らせた注文はここから外す
+	coveredByFailure := map[string]bool{}
+	defer func() { alertHeld(synced.Unresolved, coveredByFailure, logger) }()
 
 	// 送信結果不明（PENDING）が残る銘柄は発注しない。
 	//
@@ -500,8 +555,9 @@ func RunAccumulation(
 	}
 
 	// 2. 本日の発注計画（本発注の run なら、開始日の無い銘柄に今日を開始日として残す）
+	// 銘柄マスタ（立花は全銘柄が一括で返る）は、今日出す注文が立ったときだけ引く
 	planned, staleSignals, err := PlanOrders(cfg, barStore, led, now, ignoreWindow, isLive,
-		b.LotSizes(orderableSymbols(cfg)))
+		func() map[string]decimal.Decimal { return b.LotSizes(orderableSymbols(cfg)) })
 	if err != nil {
 		logger.Error("accum.plan_failed", err.Error())
 		return fmt.Errorf("発注計画を立てられないため発注を中止しました: %w", err)
@@ -599,6 +655,9 @@ func RunAccumulation(
 
 		req := *po.Request
 		if ids := pendingBySymbol[po.Symbol]; len(ids) > 0 {
+			for _, id := range ids {
+				coveredByFailure[id] = true
+			}
 			fail(po.Symbol, fmt.Sprintf(
 				"送信結果不明の注文 %s が残っているため発注しません（届いていれば二重買付になる。"+
 					"口座の約定履歴で確かめて `accum pending resolve <client_order_id> --attribute … | --unsent` で確定する）",
@@ -650,15 +709,17 @@ func RunAccumulation(
 				continue
 			}
 			// それ以外は止める。送信結果不明（ErrUnconfirmedOrder）・送ったのに台帳を
-			// 書けない（ErrOrderNotRecorded）・送る前の記録に失敗——どれも台帳が実態を
+			// 書けない（ErrOrderNotRecorded・拒否を REJECTED にできない ErrRejectionNotRecorded）・
+			// 送る前の記録に失敗——どれも台帳が実態を
 			// 表していないので、続けて出すと二重発注を否定できない
 			code := "accum.order_aborted"
 			var unconfirmed *ErrUnconfirmedOrder
 			var unrecorded *ErrOrderNotRecorded
+			var rejectionUnrecorded *ErrRejectionNotRecorded
 			switch {
 			case errors.As(err, &unconfirmed):
 				code = "accum.unconfirmed"
-			case errors.As(err, &unrecorded):
+			case errors.As(err, &unrecorded), errors.As(err, &rejectionUnrecorded):
 				code = "accum.order_not_recorded"
 			}
 			logger.Error(code, fmt.Sprintf("%s: %v", po.Symbol, err))
@@ -673,6 +734,62 @@ func RunAccumulation(
 	}
 
 	return failedOrders(failures)
+}
+
+// describeHeld は保留した注文をダイジェストの異常の文にする。
+//
+// pending は送信結果不明（PENDING）のまま残した注文、other はそれ以外（照会できない・
+// ブローカーの応答に無い）。前日以前の PENDING は次の run でも判定しないので、
+// 「次の run で再判定」とは書かない。
+func describeHeld(held []UnresolvedOrder) (pending, other string) {
+	var manual, retryPending, otherCount int
+	for _, u := range held {
+		switch {
+		case u.NeedsResolve:
+			manual++
+		case u.Status == string(domain.OrderStatusPending):
+			retryPending++
+		default:
+			otherCount++
+		}
+	}
+	var parts []string
+	if manual > 0 {
+		parts = append(parts, fmt.Sprintf("%d 件は前日以前の注文で自動では決めない（`accum pending resolve` で確定するまで残り、その銘柄は発注しない）", manual))
+	}
+	if retryPending > 0 {
+		parts = append(parts, fmt.Sprintf("%d 件は次の run で再判定", retryPending))
+	}
+	if len(parts) > 0 {
+		pending = fmt.Sprintf("送信結果不明の注文 %d 件を保留: %s", manual+retryPending, strings.Join(parts, "、"))
+	}
+	if otherCount > 0 {
+		other = fmt.Sprintf("%d 件の注文を照会できず保留（次の run で再照会）", otherCount)
+	}
+	return pending, other
+}
+
+// alertHeld は保留した注文を 1 通で知らせる。covered（発注できなかった銘柄の行で既に
+// 知らせる注文）は外す。前日以前の送信結果不明が 1 件でもあれば、件名で
+// `accum pending resolve` が要ることを言う（次の run を待っても消えない）。
+func alertHeld(held []UnresolvedOrder, covered map[string]bool, logger *logging.Logger) {
+	var lines []string
+	needsResolve := false
+	for _, u := range held {
+		if covered[u.ClientOrderID] {
+			continue
+		}
+		lines = append(lines, u.Describe())
+		needsResolve = needsResolve || u.NeedsResolve
+	}
+	if len(lines) == 0 {
+		return
+	}
+	title := "積立: 前回の注文を照会できません（次の run で再判定。続くなら口座を確認してください）"
+	if needsResolve {
+		title = "積立: 送信結果不明の注文が残っています（口座の約定履歴で確かめて `accum pending resolve` で確定するまで、その銘柄は発注しません）"
+	}
+	alert(title, strings.Join(lines, "\n"), logger)
 }
 
 // orderableSymbols は有効な戦略の発注できる銘柄（発注の表記）。指数（^ で始まる）は除く。
@@ -851,8 +968,10 @@ func placeRecorded(
 		if errors.As(err, &rejected) {
 			// 届いた上で拒否された。次回の差額で埋め直せる。
 			if uerr := led.UpdateStatus(req.ClientOrderID, string(domain.OrderStatusRejected), nil, nil); uerr != nil {
-				// PENDING のまま残ると次回 WasPlaced で弾かれ、差額が埋まらない。拒否は事実なので併記して返す
-				return nil, fmt.Errorf("%w（さらに台帳を REJECTED にできませんでした。%s の行を確かめてください: %v）", err, led.Path(), uerr)
+				// 台帳が書けない状態で次の銘柄へ進むと、送った事実を残せないまま注文を出しうる。
+				// 「発注拒否」（次へ進む）ではなく止める側に返す——拒否を %w で包むと
+				// 呼び出し側の errors.As(OrderRejectedError) が真になり、次へ進んでいた
+				return nil, &ErrRejectionNotRecorded{ClientOrderID: req.ClientOrderID, Path: led.Path(), Rejection: err, Err: uerr}
 			}
 			return nil, err
 		}
@@ -889,6 +1008,25 @@ func (e *ErrOrderNotRecorded) Error() string {
 }
 
 func (e *ErrOrderNotRecorded) Unwrap() error { return e.Err }
+
+// ErrRejectionNotRecorded は拒否された注文を台帳の REJECTED にできなかったもの。
+//
+// 台帳の行は送信前に書いた PENDING のまま残る（次の run の照合か `accum pending resolve` で
+// 確定する）。台帳が書けない状態なので、ErrOrderNotRecorded と同じく以降の発注を止める。
+// Unwrap は台帳のエラーだけを返し、拒否（OrderRejectedError）としては扱わせない。
+type ErrRejectionNotRecorded struct {
+	ClientOrderID string
+	Path          string
+	Rejection     error
+	Err           error
+}
+
+func (e *ErrRejectionNotRecorded) Error() string {
+	return fmt.Sprintf("注文 %s は拒否されました（%v）が、台帳を REJECTED にできません"+
+		"（台帳 %s は PENDING のまま。発注を止めます）: %v", e.ClientOrderID, e.Rejection, e.Path, e.Err)
+}
+
+func (e *ErrRejectionNotRecorded) Unwrap() error { return e.Err }
 
 // recordDecisions はその実行で決まった投下を履歴に追記する。
 //

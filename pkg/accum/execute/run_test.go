@@ -42,10 +42,12 @@ func writeBars(t *testing.T, store *data.BarStore, symbol, from, to string, clos
 	}
 }
 
-// planConfig は 1306.T を定額で積み立てる設定。
+// planConfig は 1306.T を定額で積み立てる設定。売買単位は設定の上書きで 100 株
+// （ブローカーの銘柄情報が無くても発注の経路を通るように）。
 func planConfig(budget int64, w window.TradingWindow) *accumcfg.AccumConfig {
 	return &accumcfg.AccumConfig{
-		Execution: accumcfg.ExecutionConfig{OrderType: "limit"},
+		Execution: accumcfg.ExecutionConfig{OrderType: "limit",
+			LotSizeOverrides: map[string]int{"1306.T": 100}},
 		Tactics: []accumcfg.TacticEntry{{
 			ID: "A", Tactic: "constant", Symbols: []string{"1306.T"},
 			MonthlyBudget: dec(budget), Window: w,
@@ -413,22 +415,31 @@ func TestPlanOrdersStartsFromFirstOrderWhenUnmarked(t *testing.T) {
 	}
 }
 
-// 売買単位は設定の上書き → ブローカーの銘柄情報 → 既定 100 株の順に決める。
+// 売買単位は設定の上書きとブローカーの銘柄情報から決める。
 // 設定に書かない 1 株単位の ETF（2559）を既定の 100 株で丸めると、予算が 100 株に届かず
-// 毎回「単元未満」で見送りになっていた。
+// 毎回「単元未満」で見送りになっていた。銘柄マスタを取れなかった回（どちらにも無い）も
+// 同じ見送りになり、失敗として通知されなかった——今は Failed にする。
+// 両方あって値が違うときも Failed（どちらが正しいか分からないまま丸めない）。
 func TestPlanOrdersLotSizeFromBroker(t *testing.T) {
 	now := time.Date(2026, 9, 14, 14, 30, 0, 0, clock.Tokyo)
 	cases := []struct {
-		name      string
-		overrides map[string]int
-		lots      map[string]decimal.Decimal
-		want      int64
+		name       string
+		overrides  map[string]int
+		lots       map[string]decimal.Decimal
+		want       int64
+		wantFailed string // Failed の Note に含むべき文字列
+		wantSkip   bool   // 単元未満の見送り（失敗ではない）
 	}{
 		// 25000 / 1010 = 24 株
 		{name: "銘柄情報の 1 株単位で丸める", lots: map[string]decimal.Decimal{"1306": dec(1)}, want: 24},
-		{name: "設定の上書きが銘柄情報より先", overrides: map[string]int{"1306.T": 10},
-			lots: map[string]decimal.Decimal{"1306": dec(1)}, want: 20},
-		{name: "どちらも無ければ既定の 100 株（単元未満で見送り）", want: 0},
+		{name: "設定の上書きだけでも丸める", overrides: map[string]int{"1306.T": 10}, want: 20},
+		{name: "設定と銘柄情報が同じなら使う", overrides: map[string]int{"1306.T": 10},
+			lots: map[string]decimal.Decimal{"1306": dec(10)}, want: 20},
+		{name: "設定と銘柄情報が違えば失敗（両方の値を出す）", overrides: map[string]int{"1306.T": 10},
+			lots: map[string]decimal.Decimal{"1306": dec(1)}, wantFailed: "10 株）とブローカーの銘柄情報（1 株"},
+		{name: "どちらも無ければ既定の 100 株に倒さず失敗", wantFailed: "売買単位が分からない"},
+		{name: "分かった単元に予算が届かないのは見送り（失敗ではない）",
+			lots: map[string]decimal.Decimal{"1306": dec(1000)}, wantSkip: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -440,7 +451,8 @@ func TestPlanOrdersLotSizeFromBroker(t *testing.T) {
 			if err := led.MarkStarted("1306", "2025-01-01"); err != nil {
 				t.Fatal(err)
 			}
-			orders, _, err := PlanOrders(cfg, store, led, now, false, false, tc.lots)
+			orders, _, err := PlanOrders(cfg, store, led, now, false, false,
+				func() map[string]decimal.Decimal { return tc.lots })
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -448,16 +460,88 @@ func TestPlanOrdersLotSizeFromBroker(t *testing.T) {
 				t.Fatalf("行数 = %d: %+v", len(orders), orders)
 			}
 			po := orders[0]
-			if tc.want == 0 {
-				if po.Request != nil || !strings.Contains(po.Note, "単元株数") {
-					t.Errorf("見送りになるべき: %+v", po)
+			switch {
+			case tc.wantFailed != "":
+				if po.Request != nil || !po.Failed || !strings.Contains(po.Note, tc.wantFailed) {
+					t.Errorf("失敗（%q）になるべき: %+v", tc.wantFailed, po)
 				}
-				return
-			}
-			if po.Request == nil || !po.Request.Quantity.Equal(dec(tc.want)) {
-				t.Errorf("株数 = %v（%s）, want %d", po.Request, po.Note, tc.want)
+				if po.JudgedOn == "" {
+					t.Error("失敗でも判断の履歴に残す項目（JudgedOn）を埋める")
+				}
+			case tc.wantSkip:
+				if po.Request != nil || po.Failed || !strings.Contains(po.Note, "単元株数") {
+					t.Errorf("単元未満の見送りになるべき: %+v", po)
+				}
+			default:
+				if po.Request == nil || !po.Request.Quantity.Equal(dec(tc.want)) {
+					t.Errorf("株数 = %v（%s）, want %d", po.Request, po.Note, tc.want)
+				}
 			}
 		})
+	}
+}
+
+// 銘柄マスタは今日出す注文が立った銘柄があるときだけ引く（全銘柄を一括で返すので重い）。
+// 今月分を出し終えた・持ち越し・時間帯の外の日は引かない。
+func TestPlanOrdersLooksUpLotsOnlyWhenOrdering(t *testing.T) {
+	now := time.Date(2026, 9, 14, 14, 30, 0, 0, clock.Tokyo)
+	thisMonth := "2026-09-01"
+	cases := []struct {
+		name      string
+		setup     func(t *testing.T, led *ledger.Ledger)
+		window    window.TradingWindow
+		wantCalls int
+	}{
+		{name: "注文が立つ日は 1 回だけ引く", window: window.Unrestricted(), wantCalls: 1},
+		{name: "今月分を出し終えた日は引かない", window: window.Unrestricted(), wantCalls: 0,
+			setup: func(t *testing.T, led *ledger.Ledger) {
+				recordOrder(t, led, "済み", string(domain.OrderStatusFilled), &thisMonth, 200_000)
+			}},
+		{name: "時間帯の外は引かない", wantCalls: 0,
+			window: window.TradingWindow{Start: window.DefaultStart, End: window.DefaultStart, Enabled: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := data.NewBarStore(t.TempDir())
+			writeBars(t, store, "1306.T", "2026-08-25", "2026-09-13", 1000)
+			writeBars(t, store, "1321.T", "2026-08-25", "2026-09-13", 1000)
+			cfg := planConfig(200_000, tc.window)
+			// 2 銘柄とも注文が立っても、引くのは 1 回
+			cfg.Tactics[0].Symbols = []string{"1306.T", "1321.T"}
+			cfg.Execution.LotSizeOverrides = nil
+			led := newLedger(t)
+			for _, sym := range []string{"1306", "1321"} {
+				if err := led.MarkStarted(sym, "2025-01-01"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.setup != nil {
+				tc.setup(t, led)
+				recordOrderFor(t, led, "済み2", "1321", &thisMonth, 200_000)
+			}
+			calls := 0
+			_, _, err := PlanOrders(cfg, store, led, now, false, false, func() map[string]decimal.Decimal {
+				calls++
+				return map[string]decimal.Decimal{"1306": dec(100), "1321": dec(100)}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != tc.wantCalls {
+				t.Errorf("銘柄マスタを引いた回数 = %d, want %d", calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// recordOrderFor は銘柄を指定して約定済みの注文を 1 件入れる。
+func recordOrderFor(t *testing.T, led *ledger.Ledger, id, symbol string, planMonth *string, amount int64) {
+	t.Helper()
+	req := newRequest(t, id, symbol, 100)
+	amt := dec(amount)
+	mkt := domain.MarketJP
+	if err := led.Record(req, string(domain.OrderStatusFilled), nil, planMonth, &amt, &mkt); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -538,12 +622,13 @@ type runBroker struct {
 	cost        decimal.Decimal // 見積りの金額
 	balanceErr  error
 	placeErr    error
-	onPlace     func()                     // 受理を返す直前に呼ぶ（台帳を壊すなど）
+	onPlace     func()                     // 受理・拒否を返す直前に呼ぶ（台帳を壊すなど）
 	lots        map[string]decimal.Decimal // 銘柄情報の売買単位
 
-	balances int
-	previews int
-	placed   []domain.OrderRequest
+	lotLookups int
+	balances   int
+	previews   int
+	placed     []domain.OrderRequest
 }
 
 func (r *runBroker) GetOrder(clientOrderID string, _ *string) (*domain.Order, error) {
@@ -556,6 +641,7 @@ func (r *runBroker) GetOrderHistory(time.Time, time.Time) ([]domain.Order, error
 
 // LotSizes は銘柄情報の売買単位（lots に無い銘柄は返さない）。
 func (r *runBroker) LotSizes(symbols []string) map[string]decimal.Decimal {
+	r.lotLookups++
 	out := map[string]decimal.Decimal{}
 	for _, s := range symbols {
 		if lot, ok := r.lots[s]; ok {
@@ -581,6 +667,9 @@ func (r *runBroker) Preview(domain.OrderRequest) (*domain.OrderPreview, error) {
 func (r *runBroker) Place(req domain.OrderRequest) (*domain.OrderAck, error) {
 	r.placed = append(r.placed, req)
 	if r.placeErr != nil {
+		if r.onPlace != nil {
+			r.onPlace()
+		}
 		return nil, r.placeErr
 	}
 	if r.orders == nil {

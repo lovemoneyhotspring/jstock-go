@@ -26,9 +26,9 @@ type ExecutionConfig struct {
 	LimitOffset     string `toml:"limit_offset"`
 	FallbackToLimit bool   `toml:"fallback_to_limit"`
 	TaxAccountType  string `toml:"tax_account_type"`
-	// LotSizeOverrides は売買単位が既定と異なる銘柄の例外 {銘柄コード: 単元株数}。
-	// ETF には 1 株や 10 株単位のものがある。既定の 100 株だと月の予算が
-	// 1単元に届かず、発注が丸ごと見送りになる。
+	// LotSizeOverrides はブローカーの銘柄情報で分からない銘柄の売買単位 {銘柄コード: 単元株数}。
+	// ETF には 1 株や 10 株単位のものがある。発注はこれとブローカーの値を突き合わせ、
+	// どちらにも無い・両方あって違う銘柄は発注しない（execute.lotSizeFor）。
 	LotSizeOverrides map[string]int `toml:"lot_size_overrides"`
 	// MaxStaleDays は最終足がこの日数より古い銘柄を判定しないための上限。
 	// 取得元の障害で古い足のまま増額判定するのを防ぐ。既定の 6 日は
