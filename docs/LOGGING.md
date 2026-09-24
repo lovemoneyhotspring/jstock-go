@@ -149,7 +149,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `accum.sync_failed` / `accum.backup_failed`（ダイジェストの異常） / `accum.history_failed` / `accum.ledger` / `accum.ledger_read_failed` | 足の同期・注文状態の照会の失敗／バックアップの失敗／判断履歴・台帳への書き込み・読み込みの失敗 | 本文 |
 | `accum.import_fill` / `accum.import_no_price` | `accum import-fills` が約定を取り込んだ／単価が取れず取り込めなかった | 本文 |
 | `accum.verify_order` / `accum.verify_dry_run` / `accum.verify_query_failed` / `accum.verify_stop` / `accum.verify_stop_dry_run` / `accum.verify_stop_cancel_failed` | 発注経路の検証（`verify-order`・逆指値の検証。[BROKER_VERIFY.md](BROKER_VERIFY.md)）の結果 | 本文 |
-| `accum.timezone`（warn） | `WBJP_TIMEZONE` を解釈できず表示は UTC | 本文 |
+| `accum.timezone`（warn） | `WBJP_TIMEZONE` を解釈できず、表示は既定の日本時間のまま（ファイルの `ts_utc` は常に UTC） | 本文 |
 | `accum.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`。panic は `<app>.panic`（`error`, `stack`） |
 
 金額・数量・価格は **文字列**（`"25000"`）で入っている。JSON の数値にすると Decimal の精度が失われるため。

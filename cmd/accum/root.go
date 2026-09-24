@@ -103,7 +103,7 @@ func newRunLogger(command string) (*logging.Logger, error) {
 	logger.SetOutput(&terminalWriter{out: os.Stderr, threshold: threshold, asJSON: jsonLogsFlag})
 	if err := logger.SetTimezone(appSettings.Timezone); err != nil {
 		// 時間帯が読めなくてもログは出す（表示の時刻がずれるだけ）
-		logger.Warn("accum.timezone", fmt.Sprintf("WBJP_TIMEZONE=%q を解釈できません（表示は UTC）: %v", appSettings.Timezone, err))
+		logger.Warn("accum.timezone", fmt.Sprintf("WBJP_TIMEZONE=%q を解釈できません（表示は日本時間のまま）: %v", appSettings.Timezone, err))
 	}
 	return logger, nil
 }
