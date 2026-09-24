@@ -189,11 +189,18 @@ func (s *Store) Save(ctx context.Context, day string, items []broker.NewsItem, a
 
 // RecordFailure は取れなかった日を残す。
 // 「取れなかった日」と「1 件も無かった日」を混ぜると、後から穴を埋められない。
+//
+// **ok の行は失敗で上書きしない。** 取れていた日を取り直して一時的に失敗した（平日にも
+// aCLMMfdsNews の無い応答が返る。2026-09-18・09-24）だけで ok を消すと、Fresh がその日を
+// 「取れていない」と見て、open が丸 1 日ショートを見送る（2026-09-24 のレビュー）。
+// 残った ok の行の fetched_at はそのままなので、日が明ける前にしか取れていない日は
+// DoneDays で済みにならず、次回また取りに行く。失敗の理由は sync の出力とログに残る。
 func (s *Store) RecordFailure(ctx context.Context, day string, at time.Time, cause string) error {
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO news_days (feed_date, items, new_items, status, fetched_at)
         VALUES (?, 0, 0, ?, ?)
-        ON CONFLICT(feed_date) DO UPDATE SET status = excluded.status, fetched_at = excluded.fetched_at`,
+        ON CONFLICT(feed_date) DO UPDATE SET status = excluded.status, fetched_at = excluded.fetched_at
+        WHERE news_days.status != 'ok'`,
 		day, cause, at.Format(time.RFC3339))
 	return err
 }

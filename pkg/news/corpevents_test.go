@@ -158,6 +158,9 @@ func TestFreshChecksEachDay(t *testing.T) {
 	})
 	t.Run("前日が失敗なら取れていない", func(t *testing.T) {
 		s := fill(t)
+		if _, err := s.DB().Exec(`DELETE FROM news_days WHERE feed_date = '2026-09-14'`); err != nil {
+			t.Fatal(err)
+		}
 		if err := s.RecordFailure(ctx, "2026-09-14", time.Date(2026, 9, 15, 8, 52, 0, 0, jst), "timeout"); err != nil {
 			t.Fatal(err)
 		}
@@ -187,6 +190,40 @@ func TestFreshChecksEachDay(t *testing.T) {
 		at, day, err := s.Fresh(ctx, now, FreshDays)
 		if err != nil || day != "2026-09-15" || !at.Equal(time.Date(2026, 9, 15, 8, 52, 0, 0, jst)) {
 			t.Fatalf("Fresh = %v %s %v, want 9/15 8:52", at, day, err)
+		}
+	})
+	t.Run("取れていた日の取り直しの失敗で ok を消さない", func(t *testing.T) {
+		// 平日にも aCLMMfdsNews の無い応答が一時的に返る（2026-09-18・09-24）。ok の行を失敗で
+		// 上書きすると、その日が「取れていない」になって open が丸 1 日ショートを見送る
+		s := fill(t)
+		if err := s.RecordFailure(ctx, "2026-09-14", time.Date(2026, 9, 15, 8, 55, 0, 0, jst), "応答に aCLMMfdsNews がありません"); err != nil {
+			t.Fatal(err)
+		}
+		at, day, err := s.Fresh(ctx, now, FreshDays)
+		if err != nil || day != "2026-09-15" || !at.Equal(time.Date(2026, 9, 15, 8, 52, 0, 0, jst)) {
+			t.Fatalf("Fresh = %v %s %v, want 9/15 8:52", at, day, err)
+		}
+		done, err := s.DoneDays(ctx)
+		if err != nil || !done["2026-09-14"] {
+			t.Fatalf("取れていた日が済みでなくなった: %v %v", done, err)
+		}
+	})
+	t.Run("日が明ける前の ok は失敗のあとも時刻を保ち、次回また取りに行く", func(t *testing.T) {
+		s := fill(t)
+		evening := time.Date(2026, 9, 14, 20, 20, 0, 0, jst)
+		if _, err := s.Save(ctx, "2026-09-14", nil, evening); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RecordFailure(ctx, "2026-09-14", time.Date(2026, 9, 15, 6, 20, 0, 0, jst), "timeout"); err != nil {
+			t.Fatal(err)
+		}
+		at, day, err := s.Fresh(ctx, now, FreshDays)
+		if err != nil || day != "2026-09-14" || !at.Equal(evening) {
+			t.Fatalf("Fresh = %v %s %v, want %v", at, day, err, evening)
+		}
+		done, err := s.DoneDays(ctx)
+		if err != nil || done["2026-09-14"] {
+			t.Fatalf("日が明ける前にしか取れていない日を済みにした: %v %v", done, err)
 		}
 	})
 	t.Run("窓の外の日は見ない", func(t *testing.T) {
