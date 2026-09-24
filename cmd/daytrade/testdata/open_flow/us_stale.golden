@@ -1,0 +1,76 @@
+=== 実行 1: 09:00:01.200 JST live=true env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 1 回
+--- 出した注文
+--- 取消
+--- 通知
+--- 端末
+口座: 本番口座（WBJP_ENV=prod）  発注: する（本番発注を行います）
+判定日 2026-09-24（前営業日 2026-09-22）  候補 6 / 9 銘柄  N=3  1 注文 666,666 円
+除外: prime 3  決算(前日引け後) 0  決算(当日予定) 0  日々公表 0
+ショート: 対象 3 銘柄（prime・貸借・ギャップ ≥ 5%）  売り禁 0  N=3  1 注文 666,666 円
+保存先 <root>/state/daytrade
+前夜（2026-09-23）の米国市場がまだ取れていません。09:12 までは判定せず次の回を待ちます
+--- ログ
+{"app":"daytrade","code":"daytrade.margin_cap","command":"open","env":"prod","extra":{"day":"2026-09-24"},"level":"warn","msg":"保証金のキャッシュが無い（設定の値で建てる）","schema":1}
+{"app":"daytrade","code":"daytrade.config","command":"open","env":"prod","extra":{"allow_delayed":false,"broker_verify":false,"budget_per_order":"666666","data_dir":"<root>/data","day":"2026-09-24","deadline":"09:02:31","enabled":true,"entry_window":["08:59","09:15"],"env":"prod","equity_curve_days":0,"equity_curve_scale":"0.5","exclude_cap_terciles":1,"exit_window":["15:20","15:30"],"iv_gate":"0","kill_switch":false,"live":true,"max_capital":"2000000","max_gap":"0","max_quote_age":90,"max_run_seconds":150,"min_gap":"-1","min_turnover":"100000000","order_budget":"670000","phase":"open","positions":3,"preopen":false,"preopen_legs":"long","preopen_limit_pct":"0","preopen_limit_pct_us_low":"1.5","quote_override":"csv","quote_source":"tachibana","rank_by_us_low":"","segments":["prime"],"skip_months":[12],"state_dir":"<root>/state","strategy":"jp_gap_fade_margin","us_skip":["0","0.01"],"us_skip_legs":"short","us_vix_override":"24","watch_only":false,"weighting":"inverse_vol"},"level":"info","msg":"実行時の設定","schema":1}
+{"app":"daytrade","code":"daytrade.quotes","command":"open","env":"prod","extra":{"elapsed_ms":7,"from_book":0,"missing":0,"missing_sample":null,"received":6,"requested":6,"source":"csv"},"level":"info","msg":"気配を取得","schema":1}
+{"app":"daytrade","code":"daytrade.quotes","command":"open","env":"prod","extra":{"book_kept":0,"book_kept_sample":[],"delayed":0,"delayed_sample":null,"future":0,"future_sample":[],"max_age_sec":90,"received":6,"stale":0,"stale_sample":[],"usable":6},"level":"info","msg":"気配の内訳（除外なし）","schema":1}
+{"app":"daytrade","code":"daytrade.us_missing","command":"open","env":"prod","extra":{"error":"Cboe _SPX: Get \"https://cdn.cboe.com/api/global/delayed_quotes/charts/historical/_SPX.json\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused\nYahoo SP500: Get \"https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?period1=1788998400\u0026period2=1790294400\u0026interval=1d\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused\nfailed to fetch FRED data for SP500: Get \"https://fred.stlouisfed.org/graph/fredgraph.csv?id=SP500\u0026cosd=2026-09-10\u0026coed=2026-09-23\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused","source":"cache_fallback"},"level":"warn","msg":"米国市場の取得に失敗","schema":1}
+{"app":"daytrade","code":"daytrade.us_session","command":"open","env":"prod","extra":{"session":"2026-09-22 S\u0026P500 +0.00% VIX 15.0","source":"cache_fallback"},"level":"info","msg":"前夜の米国市場","schema":1}
+{"app":"daytrade","code":"daytrade.regime","command":"open","env":"prod","extra":{"day":"2026-09-24","drift_bp":null,"iv_prev":null,"market_gap_bp":-110,"month":9,"reasons":null,"recent_pnl":null,"scale":1,"shock":false,"short_off":true,"trade":true,"us_ret_bp":0,"us_stale":true,"vix":15},"level":"info","msg":"危険信号","schema":1}
+{"app":"daytrade","code":"daytrade.skip","command":"open","env":"prod","extra":{"reason":"us_stale","until":"09:12","want":"2026-09-23"},"level":"info","msg":"前夜の米国市場を待って見送り","schema":1}
+--- ダイジェスト
+{"app":"daytrade","command":"open","env":"prod","outcome":"skip","reason":"us_stale","schema":"wbjp.digest.v1"}
+=== 実行 2: 09:13:00.000 JST live=true env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 1 回
+--- 出した注文
+--- 取消
+--- 通知
+--- 端末
+口座: 本番口座（WBJP_ENV=prod）  発注: する（本番発注を行います）
+判定日 2026-09-24（前営業日 2026-09-22）  候補 6 / 9 銘柄  N=3  1 注文 666,666 円
+除外: prime 3  決算(前日引け後) 0  決算(当日予定) 0  日々公表 0
+ショート: 対象 3 銘柄（prime・貸借・ギャップ ≥ 5%）  売り禁 0  N=3  1 注文 666,666 円
+保存先 <root>/state/daytrade
+危険信号により今日は取引しません: 前夜の S&P500 +0.00% が小幅高（+0.0%〜+1.0%）、VIX 15.0 → ショートだけ休む、ロングは寄る前の寄指だけ（9:00 以降の回は建てない）
+見送りの日の順位表（建てていたら）を履歴に追記 <root>/state/daytrade/history/ranking/2026-09-24T001300Z-<id>.parquet
+--- ログ
+{"app":"daytrade","code":"daytrade.margin_cap","command":"open","env":"prod","extra":{"day":"2026-09-24"},"level":"warn","msg":"保証金のキャッシュが無い（設定の値で建てる）","schema":1}
+{"app":"daytrade","code":"daytrade.config","command":"open","env":"prod","extra":{"allow_delayed":false,"broker_verify":false,"budget_per_order":"666666","data_dir":"<root>/data","day":"2026-09-24","deadline":"09:15:00","enabled":true,"entry_window":["08:59","09:15"],"env":"prod","equity_curve_days":0,"equity_curve_scale":"0.5","exclude_cap_terciles":1,"exit_window":["15:20","15:30"],"iv_gate":"0","kill_switch":false,"live":true,"max_capital":"2000000","max_gap":"0","max_quote_age":90,"max_run_seconds":150,"min_gap":"-1","min_turnover":"100000000","order_budget":"670000","phase":"open","positions":3,"preopen":false,"preopen_legs":"long","preopen_limit_pct":"0","preopen_limit_pct_us_low":"1.5","quote_override":"csv","quote_source":"tachibana","rank_by_us_low":"","segments":["prime"],"skip_months":[12],"state_dir":"<root>/state","strategy":"jp_gap_fade_margin","us_skip":["0","0.01"],"us_skip_legs":"short","us_vix_override":"24","watch_only":false,"weighting":"inverse_vol"},"level":"info","msg":"実行時の設定","schema":1}
+{"app":"daytrade","code":"daytrade.quotes","command":"open","env":"prod","extra":{"elapsed_ms":7,"from_book":0,"missing":0,"missing_sample":null,"received":6,"requested":6,"source":"csv"},"level":"info","msg":"気配を取得","schema":1}
+{"app":"daytrade","code":"daytrade.quotes","command":"open","env":"prod","extra":{"book_kept":0,"book_kept_sample":[],"delayed":0,"delayed_sample":null,"future":0,"future_sample":[],"max_age_sec":90,"received":6,"stale":0,"stale_sample":[],"usable":6},"level":"info","msg":"気配の内訳（除外なし）","schema":1}
+{"app":"daytrade","code":"daytrade.us_missing","command":"open","env":"prod","extra":{"error":"Cboe _SPX: Get \"https://cdn.cboe.com/api/global/delayed_quotes/charts/historical/_SPX.json\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused\nYahoo SP500: Get \"https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?period1=1788998400\u0026period2=1790294400\u0026interval=1d\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused\nfailed to fetch FRED data for SP500: Get \"https://fred.stlouisfed.org/graph/fredgraph.csv?id=SP500\u0026cosd=2026-09-10\u0026coed=2026-09-23\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused","source":"cache_fallback"},"level":"warn","msg":"米国市場の取得に失敗","schema":1}
+{"app":"daytrade","code":"daytrade.us_session","command":"open","env":"prod","extra":{"session":"2026-09-22 S\u0026P500 +0.00% VIX 15.0","source":"cache_fallback"},"level":"info","msg":"前夜の米国市場","schema":1}
+{"app":"daytrade","code":"daytrade.regime","command":"open","env":"prod","extra":{"day":"2026-09-24","drift_bp":null,"iv_prev":null,"market_gap_bp":-110,"month":9,"reasons":null,"recent_pnl":null,"scale":1,"shock":false,"short_off":true,"trade":true,"us_ret_bp":0,"us_stale":true,"vix":15},"level":"info","msg":"危険信号","schema":1}
+{"app":"daytrade","code":"daytrade.us_stale","command":"open","env":"prod","extra":{"want":"2026-09-23"},"level":"warn","msg":"前夜の米国市場が取れないまま判定","schema":1}
+{"app":"daytrade","code":"daytrade.skip","command":"open","env":"prod","extra":{"reason":"regime","reasons":["前夜の S\u0026P500 +0.00% が小幅高（+0.0%〜+1.0%）、VIX 15.0 → ショートだけ休む、ロングは寄る前の寄指だけ（9:00 以降の回は建てない）"]},"level":"info","msg":"危険信号で見送り","schema":1}
+--- ダイジェスト
+{"anomalies":["daytrade.us_stale: 前夜 2026-09-23 の米国市場が取れないまま判定"],"app":"daytrade","command":"open","env":"prod","outcome":"ok","regime_skip":"前夜の S\u0026P500 +0.00% が小幅高（+0.0%〜+1.0%）、VIX 15.0 → ショートだけ休む、ロングは寄る前の寄指だけ（9:00 以降の回は建てない）","schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳
+--- 履歴 open_run
+{"already_long":0,"already_short":0,"broker_verify":false,"budget":null,"corp_excluded":"","day":"2026-09-24T00:00:00Z","deadline":"09:02:31","drift_bp":null,"elapsed_ms":22,"failures":null,"iv_prev":null,"long_picks":null,"market_gap_bp":-110,"mode":"live","n":null,"news_stale":"","opening_limit_dropped":null,"orders":null,"outcome":"us_stale","preopen_limit_pct":1.5,"quotes_opened":null,"quotes_received":6,"quotes_requested":6,"quotes_usable":6,"rank_by":"gap_vol","reasons":"前夜 2026-09-23 の米国市場を待つ","recent_pnl":null,"recorded_at":"2026-09-24T00:00:01.224Z","rule_off":null,"scale":1,"shock":false,"short_budget":null,"short_multiplier":null,"short_n":null,"short_paused":null,"short_picks":null,"spill":null,"trade":false,"us_low":true,"us_ret_bp":0,"vix":15,"weak":null,"weighting":null}
+{"already_long":0,"already_short":0,"broker_verify":false,"budget":null,"corp_excluded":"","day":"2026-09-24T00:00:00Z","deadline":"09:15:00","drift_bp":null,"elapsed_ms":24,"failures":null,"iv_prev":null,"long_picks":null,"market_gap_bp":-110,"mode":"live","n":null,"news_stale":"","opening_limit_dropped":null,"orders":null,"outcome":"regime","preopen_limit_pct":1.5,"quotes_opened":null,"quotes_received":6,"quotes_requested":6,"quotes_usable":6,"rank_by":"gap_vol","reasons":"前夜の S\u0026P500 +0.00% が小幅高（+0.0%〜+1.0%）、VIX 15.0 → ショートだけ休む、ロングは寄る前の寄指だけ（9:00 以降の回は建てない）","recent_pnl":null,"recorded_at":"2026-09-24T00:13:00.026Z","rule_off":null,"scale":1,"shock":false,"short_budget":null,"short_multiplier":null,"short_n":null,"short_paused":null,"short_picks":null,"spill":null,"trade":false,"us_low":true,"us_ret_bp":0,"vix":15,"weak":null,"weighting":null}
+--- 履歴 ranking
+{"amount":980000,"budget":666666,"code":"10010","day":"2026-09-24T00:00:00Z","gap":-0.02,"n":6,"name":"銘柄1001","over_budget":false,"picked":true,"prev_close":1000,"price":980,"quantity":1000,"rank":1,"reason":"picked","recorded_at":"2026-09-24T00:13:00.024Z","rule_off":false,"rule_picked":true,"rule_rank":1,"score":null,"side":"BUY","skipped":true,"symbol":"1001","vol20":0.02}
+{"amount":788000,"budget":666666,"code":"10020","day":"2026-09-24T00:00:00Z","gap":-0.015,"n":6,"name":"銘柄1002","over_budget":false,"picked":true,"prev_close":2000,"price":1970,"quantity":400,"rank":2,"reason":"picked","recorded_at":"2026-09-24T00:13:00.024Z","rule_off":false,"rule_picked":true,"rule_rank":2,"score":null,"side":"BUY","skipped":true,"symbol":"1002","vol20":0.025}
+{"amount":950400,"budget":666666,"code":"10040","day":"2026-09-24T00:00:00Z","gap":-0.01,"n":6,"name":"銘柄1004","over_budget":false,"picked":true,"prev_close":800,"price":792,"quantity":1200,"rank":3,"reason":"picked","recorded_at":"2026-09-24T00:13:00.024Z","rule_off":false,"rule_picked":true,"rule_rank":3,"score":null,"side":"BUY","skipped":true,"symbol":"1004","vol20":0.015}
+{"amount":null,"budget":666666,"code":"10030","day":"2026-09-24T00:00:00Z","gap":-0.012,"n":6,"name":"銘柄1003","over_budget":false,"picked":false,"prev_close":1500,"price":1482,"quantity":null,"rank":4,"reason":"sector_cap","recorded_at":"2026-09-24T00:13:00.024Z","rule_off":false,"rule_picked":false,"rule_rank":4,"score":null,"side":"BUY","skipped":true,"symbol":"1003","vol20":0.03}
+{"amount":895500,"budget":666666,"code":"10050","day":"2026-09-24T00:00:00Z","gap":-0.005,"n":6,"name":"銘柄1005","over_budget":false,"picked":true,"prev_close":3000,"price":2985,"quantity":300,"rank":5,"reason":"picked","recorded_at":"2026-09-24T00:13:00.024Z","rule_off":false,"rule_picked":true,"rule_rank":5,"score":null,"side":"BUY","skipped":true,"symbol":"1005","vol20":0.022}
+--- 履歴 quotes
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":-0.020000000000000018,"has_book":false,"opened":false,"prev_close":1000,"price":980,"quote_at":"2026-09-24T00:00:01.207Z","recorded_at":"2026-09-24T00:00:01.216Z","source":"csv","symbol":"1001","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":-0.015000000000000013,"has_book":false,"opened":false,"prev_close":2000,"price":1970,"quote_at":"2026-09-24T00:00:01.208Z","recorded_at":"2026-09-24T00:00:01.216Z","source":"csv","symbol":"1002","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":-0.01200000000000001,"has_book":false,"opened":false,"prev_close":1500,"price":1482,"quote_at":"2026-09-24T00:00:01.209Z","recorded_at":"2026-09-24T00:00:01.216Z","source":"csv","symbol":"1003","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":-0.010000000000000009,"has_book":false,"opened":false,"prev_close":800,"price":792,"quote_at":"2026-09-24T00:00:01.21Z","recorded_at":"2026-09-24T00:00:01.216Z","source":"csv","symbol":"1004","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":-0.0050000000000000044,"has_book":false,"opened":false,"prev_close":3000,"price":2985,"quote_at":"2026-09-24T00:00:01.211Z","recorded_at":"2026-09-24T00:00:01.216Z","source":"csv","symbol":"1005","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":0.0020000000000000018,"has_book":false,"opened":false,"prev_close":500,"price":501,"quote_at":"2026-09-24T00:00:01.212Z","recorded_at":"2026-09-24T00:00:01.216Z","source":"csv","symbol":"1006","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":-0.020000000000000018,"has_book":false,"opened":false,"prev_close":1000,"price":980,"quote_at":"2026-09-24T00:13:00.007Z","recorded_at":"2026-09-24T00:13:00.016Z","source":"csv","symbol":"1001","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":-0.015000000000000013,"has_book":false,"opened":false,"prev_close":2000,"price":1970,"quote_at":"2026-09-24T00:13:00.008Z","recorded_at":"2026-09-24T00:13:00.016Z","source":"csv","symbol":"1002","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":-0.01200000000000001,"has_book":false,"opened":false,"prev_close":1500,"price":1482,"quote_at":"2026-09-24T00:13:00.009Z","recorded_at":"2026-09-24T00:13:00.016Z","source":"csv","symbol":"1003","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":-0.010000000000000009,"has_book":false,"opened":false,"prev_close":800,"price":792,"quote_at":"2026-09-24T00:13:00.01Z","recorded_at":"2026-09-24T00:13:00.016Z","source":"csv","symbol":"1004","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":-0.0050000000000000044,"has_book":false,"opened":false,"prev_close":3000,"price":2985,"quote_at":"2026-09-24T00:13:00.011Z","recorded_at":"2026-09-24T00:13:00.016Z","source":"csv","symbol":"1005","usable":true}
+{"day":"2026-09-24T00:00:00Z","delayed":false,"from_book":false,"gap":0.0020000000000000018,"has_book":false,"opened":false,"prev_close":500,"price":501,"quote_at":"2026-09-24T00:13:00.012Z","recorded_at":"2026-09-24T00:13:00.016Z","source":"csv","symbol":"1006","usable":true}

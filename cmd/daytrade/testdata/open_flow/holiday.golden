@@ -1,0 +1,22 @@
+=== 実行 1: 09:00:01.200 JST live=true env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 0 回
+--- 出した注文
+--- 取消
+--- 通知
+--- 端末
+口座: 本番口座（WBJP_ENV=prod）  発注: する（本番発注を行います）
+2026-09-24 は休場日。何もしません
+--- ログ
+{"app":"daytrade","code":"daytrade.margin_cap","command":"open","env":"prod","extra":{"day":"2026-09-24"},"level":"warn","msg":"保証金のキャッシュが無い（設定の値で建てる）","schema":1}
+{"app":"daytrade","code":"daytrade.config","command":"open","env":"prod","extra":{"allow_delayed":false,"broker_verify":false,"budget_per_order":"666666","data_dir":"<root>/data","day":"2026-09-24","deadline":"09:02:31","enabled":true,"entry_window":["08:59","09:15"],"env":"prod","equity_curve_days":0,"equity_curve_scale":"0.5","exclude_cap_terciles":1,"exit_window":["15:20","15:30"],"iv_gate":"0","kill_switch":false,"live":true,"max_capital":"2000000","max_gap":"0","max_quote_age":90,"max_run_seconds":150,"min_gap":"-1","min_turnover":"100000000","order_budget":"670000","phase":"open","positions":3,"preopen":false,"preopen_legs":"long","preopen_limit_pct":"0","preopen_limit_pct_us_low":"1.5","quote_override":"csv","quote_source":"tachibana","rank_by_us_low":"","segments":["prime"],"skip_months":[12],"state_dir":"<root>/state","strategy":"jp_gap_fade_margin","us_skip":["0","0.01"],"us_skip_legs":"short","us_vix_override":"24","watch_only":false,"weighting":"inverse_vol"},"level":"info","msg":"実行時の設定","schema":1}
+{"app":"daytrade","code":"daytrade.skip","command":"open","env":"prod","extra":{"day":"2026-09-24","phase":"open","reason":"holiday"},"level":"info","msg":"休場日","schema":1}
+--- ダイジェスト
+{"app":"daytrade","command":"open","env":"prod","outcome":"skip","reason":"holiday","schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳
+<台帳なし>
+--- 履歴 open_run
+--- 履歴 ranking
+--- 履歴 quotes

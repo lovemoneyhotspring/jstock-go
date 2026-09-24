@@ -192,7 +192,7 @@ func runOpen(opts openOptions) error {
 	var carried []execute.Carried
 	var held broker.LegPositions
 	if allowed {
-		if b, err = connectBroker(cfg); err != nil {
+		if b, err = openBroker(cfg); err != nil {
 			return err
 		}
 		broker.SetDeadline(b, deadline)
