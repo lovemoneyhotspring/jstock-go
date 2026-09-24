@@ -1,0 +1,20 @@
+=== 実行 1: 10:00:00.000 JST live=true yes=true ignore_window=false date="" env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 0 回
+--- 照会
+--- 出した注文
+--- 取消
+--- 通知
+--- 端末
+口座: 本番口座（WBJP_ENV=prod）  発注: する（本番発注を行います）
+信用売りの脚か margin.cancel_on_corp_event が無効。何もしません
+--- ログ
+{"app":"daytrade","code":"daytrade.skip","command":"guard","env":"prod","extra":{"phase":"guard","reason":"disabled"},"level":"info","msg":"材料の点検は無効","schema":1}
+--- ダイジェスト
+{"app":"daytrade","command":"guard","env":"prod","outcome":"ok","schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳
+{"ClientOrderID":"E-1001","BrokerOrderID":"N/1001","Day":"2026-09-24T00:00:00Z","Symbol":"1001","Side":"BUY","Quantity":"600","FilledQuantity":"600","Status":"FILLED","Price":null,"AvgFillPrice":"980","RefPrice":null,"RefBid":null,"RefAsk":null,"RefAt":null,"PlacedAt":"2026-09-24T00:00:01Z","UpdatedAt":"2026-09-24T00:00:01Z","Reason":"seed","Trade":"MARGIN_OPEN","Condition":"","Verify":false}
+{"ClientOrderID":"E-2001","BrokerOrderID":"N/2001","Day":"2026-09-24T00:00:00Z","Symbol":"2001","Side":"SELL","Quantity":"500","FilledQuantity":"500","Status":"FILLED","Price":null,"AvgFillPrice":"1300","RefPrice":null,"RefBid":null,"RefAsk":null,"RefAt":null,"PlacedAt":"2026-09-24T00:00:01Z","UpdatedAt":"2026-09-24T00:00:01Z","Reason":"seed","Trade":"MARGIN_OPEN","Condition":"","Verify":false}
+{"ClientOrderID":"E-2002","BrokerOrderID":"N/2002","Day":"2026-09-24T00:00:00Z","Symbol":"2002","Side":"SELL","Quantity":"700","FilledQuantity":"700","Status":"FILLED","Price":null,"AvgFillPrice":"1300","RefPrice":null,"RefBid":null,"RefAsk":null,"RefAt":null,"PlacedAt":"2026-09-24T00:00:01Z","UpdatedAt":"2026-09-24T00:00:01Z","Reason":"seed","Trade":"MARGIN_OPEN","Condition":"","Verify":false}
