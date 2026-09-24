@@ -147,10 +147,13 @@ trap 'rm -f "$STARTED_MARK"' EXIT
 
 # プロンプトは**標準入力から渡す**。--disallowedTools は可変長引数なので、
 # 後ろに置いたプロンプトまでツール名として飲み込んでしまう。
+# モデルは系統名で指定し、版とエフォートは ~/.config/claude-models/models.conf で決める（claude-model）
+MODEL="${REPORT_MODEL:-fable}"
+EFFORT="${REPORT_EFFORT:-$(claude-model effort "$MODEL" 2>/dev/null || true)}"
 printf '%s' "$PROMPT" | timeout "$TIMEOUT" "$CLAUDE_BIN" -p \
   --agent "$AGENT" \
-  --model "${REPORT_MODEL:-fable}" \
-  --effort "${REPORT_EFFORT:-medium}" \
+  --model "$MODEL" \
+  ${EFFORT:+--effort "$EFFORT"} \
   --permission-mode bypassPermissions \
   --disallowedTools "Edit,Write,NotebookEdit" \
   > "$REPORT" 2> "${REPORT%.md}.err"

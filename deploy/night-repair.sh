@@ -157,10 +157,13 @@ STATUS_BEFORE="$(git status --porcelain)"
 
 # --agent で night-repair を使う。1800 秒（30 分）で打ち切る。
 # プロンプトは標準入力から渡す（--disallowedTools は可変長引数で、後ろの引数を飲み込む）
+# モデルは系統名で指定し、版とエフォートは ~/.config/claude-models/models.conf で決める（claude-model）
+MODEL="${NIGHT_REPAIR_MODEL:-fable}"
+EFFORT="${NIGHT_REPAIR_EFFORT:-$(claude-model effort "$MODEL" 2>/dev/null || true)}"
 printf '%s' "$PROMPT" | timeout 1800 "$CLAUDE_BIN" -p \
   --agent night-repair \
-  --model "${NIGHT_REPAIR_MODEL:-fable}" \
-  --effort "${NIGHT_REPAIR_EFFORT:-medium}" \
+  --model "$MODEL" \
+  ${EFFORT:+--effort "$EFFORT"} \
   --permission-mode bypassPermissions \
   --disallowedTools "${DISALLOWED[@]}" \
   > "$REPORT" 2> "$REPORT_DIR/night-repair-$TODAY.err"
