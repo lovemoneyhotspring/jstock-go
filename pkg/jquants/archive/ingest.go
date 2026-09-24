@@ -732,7 +732,7 @@ func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]tim
 }
 
 // DefaultStaleDays は日付モード以外の端点を「古い」とみなす既定の日数。
-// 取引カレンダーのように週 1 回しか取らない端点は、取得間隔の 2 倍の方を使う。
+// 取得間隔（MinIntervalHours）の 2 倍の方が長い端点は、そちらを使う（今は全件・範囲の端点がみな日に 1 回なので 7 日）。
 const DefaultStaleDays = 7
 
 // Stale は最終取得が古すぎる端点 1 つぶん。LastFetched がゼロ値なら一度も取っていない。

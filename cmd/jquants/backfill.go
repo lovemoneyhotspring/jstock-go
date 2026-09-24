@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/spf13/cobra"
@@ -48,10 +47,9 @@ func newBackfillCmd() *cobra.Command {
 				}
 			})
 			printIngests(result.Ingests, "一括取り込み")
+			noteIngests(result.Ingests, result.Failures)
 			if printFailures(result.Failures, "再実行すればそこだけ取り直します") {
-				// os.Exit は defer を飛ばすので、ダイジェストとログを先に畳む
-				s.close()
-				os.Exit(1)
+				return exitWith(1, "%s", failureSummary(result.Failures))
 			}
 			return nil
 		},
