@@ -566,7 +566,7 @@ def max_dd(x):
     return float(np.max(np.maximum.accumulate(np.concatenate([[0.0], cum]))[1:] - cum))
 
 
-def part_k(i0s, seeds, slot, caps):
+def part_k(i0s, seeds, slot, caps, ks=(3, 5, 6, 9)):
     """規則 R の 1 銘柄の上限を資金 ÷ k（k = 3, 5, 6, 9）にしたときの利益・最悪日・最大 DD（シードごとに測って平均）。"""
     from dt_preopen_sim import error_pools
     te = pd.read_parquet("test/out/dt_candidates_wide.parquet")
@@ -575,7 +575,7 @@ def part_k(i0s, seeds, slot, caps):
     rules = day_rules(te)
     alld = pd.DatetimeIndex(sorted(te["d"].unique()))
     fns = [("N=3", lambda x, c: alloc_fixed_iv(x, 3, c))] + \
-          [(f"R÷{k}", (lambda k: lambda x, c: alloc_rule(x, 0.002, 20, c, k=k))(k)) for k in (3, 5, 6, 9)]
+          [(f"R÷{k}", (lambda k: lambda x, c: alloc_rule(x, 0.002, 20, c, k=k))(k)) for k in ks]
     acc = {}
     for seed in range(seeds):
         g = seen_ranked(te, pools, seed)
@@ -701,7 +701,8 @@ def main():
     ap.add_argument("--part", default="all")
     ap.add_argument("--i0", type=float, nargs="+", default=[10.0])
     ap.add_argument("--seeds", type=int, default=3)
-    ap.add_argument("--caps", type=float, nargs="*", default=None, help="資金（円）。--part fixed だけ")
+    ap.add_argument("--caps", type=float, nargs="*", default=None, help="資金（円）。--part fixed / k")
+    ap.add_argument("--ks", type=int, nargs="*", default=[3, 5, 6, 9], help="資金 ÷ k の k。--part k だけ（3 は必ず含める）")
     ap.add_argument("--slot", default="0859")
     a = ap.parse_args()
     c = load()
@@ -717,7 +718,7 @@ def main():
         part_fixed(a.i0, a.seeds, a.slot, a.caps or [5e6, 7e6, 1e7, 3e7])
         return
     if a.part == "k":
-        part_k(a.i0, a.seeds, a.slot, [5e6, 7e6, 1e7, 3e7, 5e7])
+        part_k(a.i0, a.seeds, a.slot, a.caps or [5e6, 7e6, 1e7, 3e7, 5e7], tuple(a.ks))
         return
     if a.part == "r200":
         part_r200(a.i0, a.seeds, a.slot, [7e6, 1e7, 3e7, 5e7])
