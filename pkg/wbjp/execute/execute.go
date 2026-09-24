@@ -267,15 +267,19 @@ type CancelResult struct {
 	Status domain.OrderStatus
 	// Deferred は取消がまだ反映されておらず、台帳を書き換えずに残したか（次の約定同期で反映）。
 	Deferred bool
+	// Unverified は取消の後に注文を照会できず、取り消せたかを確かめられなかったか。
+	// Deferred と同じく台帳は書き換えない。QueryErr はそのときの照会のエラー。
+	Unverified bool
+	QueryErr   error
 }
 
 // CancelRecorded は取消を送り、台帳に残す。
 //
 // 取消を送ったら注文を照会し、終了状態ならその状態と約定数量を書く（部分約定の
-// 取消で約定分を 0 に戻さない）。照会できなければ CANCELLED だけを書き、約定の
-// 記録は触らない。取消がまだ反映されていない（板に残っている）なら台帳は
-// 書き換えず、次の run の約定同期に任せる——先に CANCELLED と書くと、その間の
-// 約定が二度と取り込まれない。
+// 取消で約定分を 0 に戻さない）。取消がまだ反映されていない（板に残っている）か、
+// 照会できず確かめられないなら台帳は書き換えず、次の run の約定同期に任せる——
+// 先に CANCELLED と書くと、取消が間に合わず約定していた場合にその約定が二度と
+// 取り込まれない（CANCELLED は終了状態なので約定同期の対象から外れる）。
 func CancelRecorded(rep *repo.Repo, b broker.Broker, clientOrderID string) (CancelResult, error) {
 	var result CancelResult
 	rec, err := rep.GetOrder(clientOrderID)
@@ -304,10 +308,14 @@ func CancelRecorded(rep *repo.Repo, b broker.Broker, clientOrderID string) (Canc
 	got, qerr := b.GetOrder(clientOrderID, brokerID)
 	switch {
 	case qerr != nil || got == nil:
-		if err := rep.UpdateOrderStatus(clientOrderID, domain.OrderStatusCancelled); err != nil {
-			return result, fmt.Errorf("取消は送りましたが台帳に書けません: %w", err)
+		// 取り消せたかを確かめられない。状態を確定させない（約定同期が照会し直す）
+		if qerr == nil {
+			qerr = fmt.Errorf("注文 %s の照会結果が空です", clientOrderID)
 		}
-		result.Status = domain.OrderStatusCancelled
+		result.Status = rec.Status
+		result.Deferred = true
+		result.Unverified = true
+		result.QueryErr = qerr
 	case got.Status.IsTerminal():
 		filled := decimal.Max(got.FilledQuantity, rec.FilledQuantity)
 		if err := rep.UpdateOrder(clientOrderID, got.Status, filled, got.AvgFillPrice, got.BrokerOrderID); err != nil {

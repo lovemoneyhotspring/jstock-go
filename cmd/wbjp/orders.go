@@ -97,6 +97,9 @@ func newCancelCmd() *cobra.Command {
 			switch {
 			case !res.Recorded:
 				fmt.Println("台帳に記録の無い注文です（台帳は書き換えていません）")
+			case res.Unverified:
+				fmt.Printf("取消の後に注文を照会できず、取り消せたかを確かめられません（台帳は %s のまま。次の run の約定同期で反映します）: %v\n",
+					res.Status, res.QueryErr)
 			case res.Deferred:
 				fmt.Printf("まだ取消が反映されていません（%s）。次の run の約定同期で台帳に反映します\n", res.Status)
 			default:
