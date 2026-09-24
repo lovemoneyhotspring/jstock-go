@@ -262,6 +262,11 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 新しいブランチに push して PR を作るところまで——マージは人が判断する。
 0 6 * * *       cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/night-repair.lock $WBJP_HOME/deploy/night-repair.sh >> state/logs/night-repair.log 2>&1
 
+# --- 置き場の掃除（日曜 4:30。場中・夜の jquants・plan と重ならない）---------------------
+# 素のログ（*.log）の退避・state/digest・crontab の控えを保持の決まりで片付ける。data/jquants/_raw は消さない。
+# 決まりと理由は deploy/prune-state.sh の先頭。何が消えるかは deploy/prune-state.sh --dry-run で見られる
+30 4 * * 0      cd $WBJP_HOME && WITH_LOCK_TIMEOUT=600 deploy/with-lock.sh /tmp/prune-state.lock 0 state/logs/prune-state.log deploy/prune-state.sh
+
 # --- 発注経路（立花証券の認証情報を入れたら有効化。まず --live 無しで数日回す）-------------
 # ロックは deploy/with-lock.sh で取る（取れずに見送った回もログに残る。flock -n は無言で消える）。
 # open / close は 30 秒までロックを待つ——snap が握っていても少し待てば取れる。

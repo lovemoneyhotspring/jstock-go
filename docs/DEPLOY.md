@@ -128,7 +128,7 @@ deploy/install-crontab.sh             # バックアップを取り、構文を�
 
 バックアップは `state/backup/crontab/`、差し替えた全体の控えは `state/crontab.good`
 （下の「cron とは別系統の実行役」が、crontab が消えたときにここから戻す）。戻すときは
-`crontab state/backup/crontab/<バックアップ>.txt`。
+`crontab state/backup/crontab/<バックアップ>.txt`。控えは日曜 4:30 の `deploy/prune-state.sh` が、90 日を過ぎて新しい方から 20 世代に入らないものを消す（下の「置き場の掃除」）。
 
 ### cron とは別系統の実行役（人が気づく前提にしない）
 
@@ -149,6 +149,7 @@ systemctl --user list-timers 'jstock-*'
 deploy/tests/guards_test.sh         # スクリプトの試験（スタブの隔離環境。本物には触れない）
 deploy/tests/wait_rollback_test.sh  # wait-until.sh・rollback-bin.sh と、morning-check.sh が時刻待ちの見送りを拾うことの試験
 deploy/tests/with_lock_test.sh      # with-lock.sh の終了コード（打ち切り 124・SIGKILL 137・見送り 75）とログの試験
+deploy/tests/prune_state_test.sh    # prune-state.sh（置き場の掃除）の保持の決まりと --dry-run の試験
 ```
 
 - ログは `state/logs/systemd-guard.log`。**通知は「自動で対応した／できなかった」の結果**を 1 通（何も問題が
@@ -328,6 +329,22 @@ Discord（`WBJP_ALERT_CHANNEL_ID` / レポートの送り先）にも短く流�
 - `.env` は丸ごと export しない。claude の子に渡すのは `WBJP_ENV` とメモリの上限だけで、
   Discord の送信だけがサブシェルで `.env` を読む。`bin/*` の Go は自分で `.env` を読むので、
   エージェントが叩く `review` などは困らない。
+
+### 置き場の掃除（prune-state）
+
+`deploy/prune-state.sh`（日曜 4:30）は、それまで掃除の仕組みが無かった置き場を保持の決まりで片付ける。
+何が消えるかは `deploy/prune-state.sh --dry-run` で見られる（何も書き換えない）。結果は `state/logs/prune-state.log`。
+
+| 置き場 | 決まり |
+|---|---|
+| `state/logs/*.log`（cron の `>>` が書く素のログ） | 10MB を超えたら `<name>.log.1` へ退避（前の `.1` は上書き）。rename なので書きかけの行を失わない。JSONL（`*.jsonl`）は Go 側が日次で退避し 90 日で消すので触らない |
+| `state/digest/<env>-<日付>.jsonl` | 日付が 400 日より前なら消す |
+| `state/backup/crontab/crontab-*.txt`・`state/logs/crontab.backup.*`（以前の置き場） | 90 日より前で、新しい方から 20 世代に入らないものを消す |
+| `data/jquants/_raw/` | **消さない。** 一括ダウンロードの原本で、J-Quants は 10 年より前を返さなくなるので再取得できない（`docs/JQUANTS_ARCHIVE.md`「冪等性・安全」） |
+
+名前から日付を読めないファイルは触らない。日数・世代数・上限は `PRUNE_DIGEST_DAYS`・`PRUNE_CRONTAB_DAYS`・
+`PRUNE_CRONTAB_KEEP`・`PRUNE_LOG_MAX_MB` で変えられる。state の SQLite の複製（`state/backup/*.db`）は
+`accum backup` が世代を管理する（既定 30 世代）ので対象にしない。
 
 ### cron を入れる前の検証
 
