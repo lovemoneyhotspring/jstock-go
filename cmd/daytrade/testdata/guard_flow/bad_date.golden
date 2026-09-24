@@ -1,0 +1,20 @@
+=== 実行 1: 10:00:00.000 JST live=true yes=true ignore_window=false date="2026/09/24" env=prod
+--- 戻り値
+日付の形式が不正です: 2026/09/24（YYYY-MM-DD）
+--- ブローカーへの接続: 0 回
+--- 照会
+--- 出した注文
+--- 取消
+--- 通知
+daytrade: 材料の出た売建の処置が異常終了 | 日付の形式が不正です: 2026/09/24（YYYY-MM-DD）
+--- 端末
+口座: 本番口座（WBJP_ENV=prod）  発注: する（本番発注を行います）
+--- ログ
+{"app":"daytrade","code":"daytrade.crash","command":"guard","env":"prod","extra":{"error":"日付の形式が不正です: 2026/09/24（YYYY-MM-DD）"},"level":"error","msg":"材料の出た売建の処置が異常終了","schema":1}
+--- ダイジェスト
+{"anomalies":["daytrade.crash: 日付の形式が不正です: 2026/09/24（YYYY-MM-DD）","daytrade.command_failed: 日付の形式が不正です: 2026/09/24（YYYY-MM-DD）"],"app":"daytrade","command":"guard","env":"prod","outcome":"error","schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳
+{"ClientOrderID":"E-1001","BrokerOrderID":"N/1001","Day":"2026-09-24T00:00:00Z","Symbol":"1001","Side":"BUY","Quantity":"600","FilledQuantity":"600","Status":"FILLED","Price":null,"AvgFillPrice":"980","RefPrice":null,"RefBid":null,"RefAsk":null,"RefAt":null,"PlacedAt":"2026-09-24T00:00:01Z","UpdatedAt":"2026-09-24T00:00:01Z","Reason":"seed","Trade":"MARGIN_OPEN","Condition":"","Verify":false}
+{"ClientOrderID":"E-2001","BrokerOrderID":"N/2001","Day":"2026-09-24T00:00:00Z","Symbol":"2001","Side":"SELL","Quantity":"500","FilledQuantity":"500","Status":"FILLED","Price":null,"AvgFillPrice":"1300","RefPrice":null,"RefBid":null,"RefAsk":null,"RefAt":null,"PlacedAt":"2026-09-24T00:00:01Z","UpdatedAt":"2026-09-24T00:00:01Z","Reason":"seed","Trade":"MARGIN_OPEN","Condition":"","Verify":false}
+{"ClientOrderID":"E-2002","BrokerOrderID":"N/2002","Day":"2026-09-24T00:00:00Z","Symbol":"2002","Side":"SELL","Quantity":"700","FilledQuantity":"700","Status":"FILLED","Price":null,"AvgFillPrice":"1300","RefPrice":null,"RefBid":null,"RefAsk":null,"RefAt":null,"PlacedAt":"2026-09-24T00:00:01Z","UpdatedAt":"2026-09-24T00:00:01Z","Reason":"seed","Trade":"MARGIN_OPEN","Condition":"","Verify":false}

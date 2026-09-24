@@ -1,0 +1,20 @@
+=== 実行 1: 10:00:00.000 JST live=true yes=true ignore_window=false date="" env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 0 回
+--- 照会
+--- 出した注文
+--- 取消
+--- 通知
+--- 端末
+口座: 本番口座（WBJP_ENV=prod）  発注: する（本番発注を行います）
+今日の売建はありません
+--- ログ
+{"app":"daytrade","code":"daytrade.config","command":"guard","env":"prod","extra":{"budget_per_order":"666666","data_dir":"<root>/data","day":"2026-09-24","deadline":"10:02:30","enabled":true,"entry_window":["08:59","09:15"],"env":"prod","equity_curve_days":0,"equity_curve_scale":"0.5","exclude_cap_terciles":1,"exit_window":["15:20","15:30"],"iv_gate":"0","kill_switch":false,"live":true,"max_capital":"2000000","max_gap":"0","max_quote_age":90,"max_run_seconds":150,"min_gap":"-1","min_turnover":"100000000","order_budget":"670000","phase":"guard","positions":3,"quote_source":"tachibana","segments":["prime"],"skip_months":null,"state_dir":"<root>/state","strategy":"jp_gap_fade_margin","us_vix_override":"24","weighting":"inverse_vol"},"level":"info","msg":"実行時の設定","schema":1}
+{"app":"daytrade","code":"daytrade.skip","command":"guard","env":"prod","extra":{"phase":"guard","reason":"no_shorts"},"level":"info","msg":"材料の点検の対象なし","schema":1}
+--- ダイジェスト
+{"app":"daytrade","command":"guard","env":"prod","outcome":"ok","schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳
+{"ClientOrderID":"E-1001","BrokerOrderID":"N/1001","Day":"2026-09-24T00:00:00Z","Symbol":"1001","Side":"BUY","Quantity":"600","FilledQuantity":"600","Status":"FILLED","Price":null,"AvgFillPrice":"980","RefPrice":null,"RefBid":null,"RefAsk":null,"RefAt":null,"PlacedAt":"2026-09-24T00:00:01Z","UpdatedAt":"2026-09-24T00:00:01Z","Reason":"seed","Trade":"MARGIN_OPEN","Condition":"","Verify":false}
+{"ClientOrderID":"E-2001","BrokerOrderID":"N/2001","Day":"2026-09-24T00:00:00Z","Symbol":"2001","Side":"SELL","Quantity":"500","FilledQuantity":"0","Status":"REJECTED","Price":null,"AvgFillPrice":null,"RefPrice":null,"RefBid":null,"RefAsk":null,"RefAt":null,"PlacedAt":"2026-09-24T00:00:01Z","UpdatedAt":"2026-09-24T00:00:01Z","Reason":"seed","Trade":"MARGIN_OPEN","Condition":"","Verify":false}

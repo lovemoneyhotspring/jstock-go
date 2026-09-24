@@ -153,7 +153,7 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 
 	var b broker.Broker
 	if allowed {
-		if b, err = connectBroker(cfg); err != nil {
+		if b, err = openBroker(cfg); err != nil {
 			alert("デイトレ: 材料（TOB など）の出た売建があるのに証券会社に接続できません。口座を確認してください",
 				strings.Join(sortedKeys(marks), "、")+": "+err.Error())
 			return err
