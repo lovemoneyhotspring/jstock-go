@@ -3,8 +3,8 @@ module github.com/lovemoneyhotspring/jstock-go
 go 1.27.1
 
 require (
+	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/joho/godotenv v1.5.1
-	github.com/marcboeker/go-duckdb v1.8.5
 	github.com/parquet-go/parquet-go v0.32.0
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/shopspring/decimal v1.4.0
@@ -20,6 +20,12 @@ require (
 	github.com/andybalholm/brotli v1.2.3 // indirect
 	github.com/apache/arrow-go/v18 v18.7.0 // indirect
 	github.com/danieljoos/wincred v1.2.3 // indirect
+	github.com/duckdb/duckdb-go-bindings v0.10505.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.10505.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.10505.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.10505.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.10505.0 // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10505.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
