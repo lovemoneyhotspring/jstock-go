@@ -35,12 +35,14 @@ func TestExpectedHoldings(t *testing.T) {
 	}
 	// 前の回の建玉の記録（ストップも前の回で作った）
 	var snap []domain.Position
+	stops := map[string]StopRecord{}
 	for sym, qty := range map[string]string{"1001": "100", "1002": "100", "1003": "100", "1010": "200", "1011": "200", "1012": "200"} {
 		snap = append(snap, domain.Position{Symbol: sym, Quantity: dec(qty), CostPrice: dec("1000"), LastPrice: dec("1000")})
-		if err := r.SaveStop(StopRecord{Symbol: sym, StopPrice: dec("900"), EntryPrice: dec("1000"),
-			CreatedOn: "2026-09-10", ATRMultiple: dec("2")}); err != nil {
-			t.Fatal(err)
-		}
+		stops[sym] = StopRecord{Symbol: sym, StopPrice: dec("900"), EntryPrice: dec("1000"),
+			CreatedOn: "2026-09-10", ATRMultiple: dec("2")}
+	}
+	if err := r.SyncStops(stops); err != nil {
+		t.Fatal(err)
 	}
 	if err := r.RecordSnapshot("prev", "2026-09-22", snap); err != nil {
 		t.Fatal(err)
@@ -99,8 +101,8 @@ func TestExpectedHoldingsStopWithoutSnapshot(t *testing.T) {
 		('now', '2026-09-24T00:00:00Z', '2026-09-24', 'prod', 'live', 'running');`); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.SaveStop(StopRecord{Symbol: "2001", StopPrice: dec("900"), EntryPrice: dec("1000"),
-		CreatedOn: "2026-09-10", ATRMultiple: dec("2")}); err != nil {
+	if err := r.SyncStops(map[string]StopRecord{"2001": {Symbol: "2001", StopPrice: dec("900"), EntryPrice: dec("1000"),
+		CreatedOn: "2026-09-10", ATRMultiple: dec("2")}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.recordOrderAt("prev", newRequest(t, "s", "2001", domain.SideSell, 100), string(domain.OrderStatusFilled), nil,

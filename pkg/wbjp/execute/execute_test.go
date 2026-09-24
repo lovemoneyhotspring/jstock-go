@@ -597,7 +597,7 @@ func TestCancelRecorded(t *testing.T) {
 		if err := rep.RecordOrder("run-1", buy(t, "dry", "6758", 1000, 100), DryRunStatus, nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := rep.UpdateOrderStatus("a", domain.OrderStatusFilled); err != nil {
+		if err := rep.UpdateOrder("a", domain.OrderStatusFilled, dec("200"), nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		for _, id := range []string{"dry", "a"} {

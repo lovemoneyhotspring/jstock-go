@@ -188,14 +188,6 @@ func (f Frame) ToMaps() []map[string]any {
 	return out
 }
 
-// Get は行から値を取り出す（無ければ nil）。
-func Get(row map[string]any, name string) any {
-	if row == nil {
-		return nil
-	}
-	return row[name]
-}
-
 // compareValues は履歴に載る型どうしを比べる。
 func compareValues(a, b any) int {
 	if a == nil && b == nil {

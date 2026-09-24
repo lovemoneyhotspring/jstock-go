@@ -511,7 +511,7 @@ daytrade backtest --grid config/daytrade_margin --grid config/試作A --since 20
 ### 格子（`--grid`）
 
 `--grid <dir>` を並べると、複数の設定を 1 プロセスで順に回す。パネルと危険信号の材料は
-設定に依存しないので**読み込みは 1 回**、2 本目からは母集団の当て直し（`UniverseView`）と
+設定に依存しないので**読み込みは 1 回**、2 本目からは母集団の当て直し（`universeViewWith`）と
 `Simulate` だけになる。`extends` が使えるので、各 `<dir>` は既定の上に差分だけ書いた小さな
 toml でよい。
 

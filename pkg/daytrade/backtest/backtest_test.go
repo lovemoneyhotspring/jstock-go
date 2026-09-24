@@ -546,7 +546,7 @@ func TestSimulateMarginSpillsUnusedShortBudgetToLong(t *testing.T) {
 
 // 格子（--grid）は設定ごとにパネルを読み直さない。1 本だけ渡したときの数字が
 // 単独で回したときと一致することを押さえる——一致しなければ母集団の当て直し
-// （UniverseView）が単独の経路とずれている。
+// （universeViewWith）が単独の経路とずれている。
 func TestRunGridMatchesSingleRun(t *testing.T) {
 	days := fixture.BusinessDays(start, 60)
 	arch := buildArchive(t, days)

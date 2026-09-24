@@ -86,20 +86,8 @@ func parseDec(v any) decimal.Decimal {
 // defaultSyncStart は保存済みが無い銘柄を初めて取るときの開始日（過去 5 年分）。
 const defaultSyncStart = "2020-01-01"
 
-// SyncSymbolBars は指定された銘柄の日足を適切なプロバイダから取得して BarStore に保存する。
-//
-// 保存済みがあれば最終日以降だけを取り、Upsert で重ねる（全部取り直さない）。
-func SyncSymbolBars(
-	symbol string,
-	barStore *BarStore,
-	jqClient *JQuantsClient,
-	fredClient *FREDProvider,
-	logger *logging.Logger,
-) error {
-	return SyncSymbolBarsSince(symbol, barStore, jqClient, fredClient, logger, defaultSyncStart, false)
-}
-
-// SyncSymbolBarsSince は取得の開始日を指定できる SyncSymbolBars。
+// SyncSymbolBarsSince は指定された銘柄の日足を適切なプロバイダから since 以降取得して
+// BarStore に保存する（Upsert で重ねる。since が空なら defaultSyncStart から）。
 //
 // force が false なら、保存済みの最終日が since より後のときはそこから取り直す
 // （当日の足は取引所側で後から訂正されうるので、最終日そのものも取り直して

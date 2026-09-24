@@ -36,9 +36,6 @@ func New[T any](label string) *Registry[T] {
 	return &Registry[T]{label: label, items: make(map[string]entry[T])}
 }
 
-// Label は登録簿の呼び名。
-func (r *Registry[T]) Label() string { return r.label }
-
 // Register は生成関数を登録する。summary は一覧表示用の 1 行説明（省略可）。
 //
 // 同名の二重登録はエラーにする。設定の名前が衝突していると、意図しない実体が

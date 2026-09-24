@@ -114,19 +114,6 @@ func (i *Ingestor) IngestDate(ep Endpoint, day time.Time) (Ingest, error) {
 	return i.Ingest(ep, iso, map[string]string{ep.DateParam: iso})
 }
 
-// IngestRange は from / to の範囲を 1 リクエストで取る。対象は終端日。
-func (i *Ingestor) IngestRange(ep Endpoint, start, end time.Time) (Ingest, error) {
-	return i.Ingest(ep, end.Format(dateLayout), map[string]string{
-		"from": start.Format(dateLayout),
-		"to":   end.Format(dateLayout),
-	})
-}
-
-// IngestAll は引数無しで全件取る。対象は取得日。
-func (i *Ingestor) IngestAll(ep Endpoint, today time.Time) (Ingest, error) {
-	return i.Ingest(ep, today.Format(dateLayout), map[string]string{})
-}
-
 func (i *Ingestor) store(ep Endpoint, target string, frame *Frame, source string) (Ingest, error) {
 	windows, err := ep.Windows()
 	if err != nil {

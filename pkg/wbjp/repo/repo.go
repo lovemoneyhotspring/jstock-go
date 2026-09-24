@@ -419,10 +419,6 @@ type execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
-func (r *Repo) SaveStop(rec StopRecord) error {
-	return saveStop(r.db, rec)
-}
-
 func saveStop(db execer, rec StopRecord) error {
 	now := clock.NowUTC().Format(time.RFC3339)
 	var pctStr, hcStr, initStopStr, initQtyStr *string
@@ -461,11 +457,6 @@ func saveStop(db execer, rec StopRecord) error {
 		rec.Symbol, rec.StopPrice.String(), rec.EntryPrice.String(), rec.CreatedOn,
 		trailingInt, rec.ATRMultiple.String(), pctStr, hcStr, initStopStr, initQtyStr, scaledOutInt, now,
 	)
-	return err
-}
-
-func (r *Repo) DeleteStop(symbol string) error {
-	_, err := r.db.Exec("DELETE FROM stops WHERE symbol = ?;", symbol)
 	return err
 }
 
@@ -991,18 +982,6 @@ func scanOrder(src scanner) (*OrderRecord, error) {
 		return nil, fmt.Errorf("注文 %s の avg_fill_price が数値ではありません: %w", rec.ClientOrderID, err)
 	}
 	return &rec, nil
-}
-
-// UpdateOrderStatus は状態だけを書き換える。約定の記録（filled_quantity 等）は触らない。
-//
-// 取消の記録に使う。UpdateOrder は約定数量を必ず受けるので、部分約定した注文を
-// 取り消したときに約定分を 0 に戻してしまう。
-func (r *Repo) UpdateOrderStatus(clientOrderID string, status domain.OrderStatus) error {
-	_, err := r.db.Exec(
-		`UPDATE orders SET status = ?, updated_at = ? WHERE client_order_id = ?;`,
-		string(status), clock.NowUTC().Format(time.RFC3339), clientOrderID,
-	)
-	return err
 }
 
 // UpdateOrder は注文の約定状況を書き戻す。

@@ -101,10 +101,6 @@ func (sb *StopBook) Set(stop Stop) {
 	sb.stops[stop.Symbol] = &copied
 }
 
-func (sb *StopBook) Remove(symbol string) {
-	delete(sb.stops, symbol)
-}
-
 func (sb *StopBook) Len() int { return len(sb.stops) }
 
 // RetainHeld は保有していない銘柄のストップを外し、外した銘柄を昇順で返す。

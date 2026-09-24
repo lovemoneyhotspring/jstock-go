@@ -96,9 +96,6 @@ func (s *flowStrategy) OnBars(ctx *strategy.Context) ([]domain.Signal, error) {
 	return out, nil
 }
 
-// runFlowDay は判定日（木曜）。前日 2026-09-23 は祝日（秋分の日）で、前営業日は 09-22。
-var runFlowDay = time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
-
 func runFlowAt(day, hour, minute int) time.Time {
 	return time.Date(2026, 9, day, hour, minute, 0, 0, clock.Tokyo)
 }
@@ -399,11 +396,13 @@ func TestRunFlow(t *testing.T) {
 			knobs: runFlowKnobs{buy: []string{"7203", "6758"}, sell: []string{"9984"}, maxOrdersPerDay: 3},
 			seed: func(t *testing.T, rep *repo.Repo) {
 				seedRun(t, rep, "seed-1", "2026-09-22", "prod", "live")
+				stops := map[string]repo.StopRecord{}
 				for _, sym := range []string{"9984", "8306"} {
-					if err := rep.SaveStop(repo.StopRecord{Symbol: sym, StopPrice: dec("500"), EntryPrice: dec("900"),
-						CreatedOn: "2026-09-01", ATRMultiple: dec("2")}); err != nil {
-						t.Fatal(err)
-					}
+					stops[sym] = repo.StopRecord{Symbol: sym, StopPrice: dec("500"), EntryPrice: dec("900"),
+						CreatedOn: "2026-09-01", ATRMultiple: dec("2")}
+				}
+				if err := rep.SyncStops(stops); err != nil {
+					t.Fatal(err)
 				}
 			},
 			broker: func() *runFlowBroker {
@@ -420,14 +419,14 @@ func TestRunFlow(t *testing.T) {
 			knobs: runFlowKnobs{buy: []string{"7203", "6758", "8306"}},
 			seed: func(t *testing.T, rep *repo.Repo) {
 				seedRun(t, rep, "seed-1", "2026-09-22", "prod", "live")
-				// 8306 は終値（約 700 円）がストップ 800 円を割っている
-				if err := rep.SaveStop(repo.StopRecord{Symbol: "8306", StopPrice: dec("800"), EntryPrice: dec("900"),
-					CreatedOn: "2026-09-01", ATRMultiple: dec("2")}); err != nil {
-					t.Fatal(err)
-				}
-				// 9984 は手仕舞い済み（建玉に無い）
-				if err := rep.SaveStop(repo.StopRecord{Symbol: "9984", StopPrice: dec("900"), EntryPrice: dec("1000"),
-					CreatedOn: "2026-09-01", ATRMultiple: dec("2")}); err != nil {
+				if err := rep.SyncStops(map[string]repo.StopRecord{
+					// 8306 は終値（約 700 円）がストップ 800 円を割っている
+					"8306": {Symbol: "8306", StopPrice: dec("800"), EntryPrice: dec("900"),
+						CreatedOn: "2026-09-01", ATRMultiple: dec("2")},
+					// 9984 は手仕舞い済み（建玉に無い）
+					"9984": {Symbol: "9984", StopPrice: dec("900"), EntryPrice: dec("1000"),
+						CreatedOn: "2026-09-01", ATRMultiple: dec("2")},
+				}); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -442,8 +441,8 @@ func TestRunFlow(t *testing.T) {
 			// 建玉の照会が 0 件なのに台帳ではストップがある: 発注する回は止める
 			name: "positions_empty", knobs: buys, env: prod, calendar: runFlowCalendar(),
 			seed: func(t *testing.T, rep *repo.Repo) {
-				if err := rep.SaveStop(repo.StopRecord{Symbol: "7203", StopPrice: dec("900"), EntryPrice: dec("1000"),
-					CreatedOn: "2026-09-01", ATRMultiple: dec("2")}); err != nil {
+				if err := rep.SyncStops(map[string]repo.StopRecord{"7203": {Symbol: "7203", StopPrice: dec("900"), EntryPrice: dec("1000"),
+					CreatedOn: "2026-09-01", ATRMultiple: dec("2")}}); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -467,8 +466,8 @@ func TestRunFlow(t *testing.T) {
 				if err := rep.FinishRun("seed-flat", "success", nil, nil, nil); err != nil {
 					t.Fatal(err)
 				}
-				if err := rep.SaveStop(repo.StopRecord{Symbol: "7203", StopPrice: dec("900"), EntryPrice: dec("1000"),
-					CreatedOn: "2026-09-01", ATRMultiple: dec("2")}); err != nil {
+				if err := rep.SyncStops(map[string]repo.StopRecord{"7203": {Symbol: "7203", StopPrice: dec("900"), EntryPrice: dec("1000"),
+					CreatedOn: "2026-09-01", ATRMultiple: dec("2")}}); err != nil {
 					t.Fatal(err)
 				}
 			},

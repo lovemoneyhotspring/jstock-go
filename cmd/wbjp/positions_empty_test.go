@@ -34,8 +34,8 @@ func TestCheckEmptyPositionsStopsLiveRun(t *testing.T) {
 		t.Fatalf("台帳が空なのに止まった: %v", err)
 	}
 
-	if err := rep.SaveStop(repo.StopRecord{Symbol: "7203", StopPrice: d("900"), EntryPrice: d("1000"),
-		CreatedOn: "2026-09-01", ATRMultiple: d("2")}); err != nil {
+	if err := rep.SyncStops(map[string]repo.StopRecord{"7203": {Symbol: "7203", StopPrice: d("900"), EntryPrice: d("1000"),
+		CreatedOn: "2026-09-01", ATRMultiple: d("2")}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,8 +81,8 @@ func TestAcceptFlatExpiresAfterOneUse(t *testing.T) {
 	empty := map[string]domain.Position{}
 	saveStop := func() {
 		t.Helper()
-		if err := rep.SaveStop(repo.StopRecord{Symbol: "7203", StopPrice: d("900"), EntryPrice: d("1000"),
-			CreatedOn: "2026-09-01", ATRMultiple: d("2")}); err != nil {
+		if err := rep.SyncStops(map[string]repo.StopRecord{"7203": {Symbol: "7203", StopPrice: d("900"), EntryPrice: d("1000"),
+			CreatedOn: "2026-09-01", ATRMultiple: d("2")}}); err != nil {
 			t.Fatal(err)
 		}
 	}

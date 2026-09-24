@@ -40,7 +40,7 @@ func TestStopsRoundTripKeepsTrailingPct(t *testing.T) {
 		HighestClose: ptr(dec("2100")), InitialStopPrice: ptr(dec("1900")), InitialQuantity: ptr(dec("100")),
 		ScaledOut: true,
 	}
-	if err := r.SaveStop(rec); err != nil {
+	if err := r.SyncStops(map[string]StopRecord{rec.Symbol: rec}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := r.GetStops()
@@ -63,7 +63,7 @@ func TestStopsRoundTripKeepsTrailingPct(t *testing.T) {
 
 	// nil の trailing_pct も往復する（ATR 追従に戻る）
 	rec.TrailingPct = nil
-	if err := r.SaveStop(rec); err != nil {
+	if err := r.SyncStops(map[string]StopRecord{rec.Symbol: rec}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = r.GetStops()
@@ -71,7 +71,7 @@ func TestStopsRoundTripKeepsTrailingPct(t *testing.T) {
 		t.Errorf("nil が残らない: %v", got["7203"].TrailingPct)
 	}
 
-	if err := r.DeleteStop("7203"); err != nil {
+	if err := r.SyncStops(nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ = r.GetStops(); len(got) != 0 {
@@ -83,11 +83,13 @@ func TestStopsRoundTripKeepsTrailingPct(t *testing.T) {
 // 残ると次に同じ銘柄を建てたとき古い建値・作成日を引き継ぐ。
 func TestSyncStopsRemovesClosedPositions(t *testing.T) {
 	r := openTemp(t)
+	stops := map[string]StopRecord{}
 	for _, sym := range []string{"7203", "6758"} {
-		if err := r.SaveStop(StopRecord{Symbol: sym, StopPrice: dec("100"), EntryPrice: dec("110"),
-			CreatedOn: "2026-08-01", ATRMultiple: dec("2")}); err != nil {
-			t.Fatal(err)
-		}
+		stops[sym] = StopRecord{Symbol: sym, StopPrice: dec("100"), EntryPrice: dec("110"),
+			CreatedOn: "2026-08-01", ATRMultiple: dec("2")}
+	}
+	if err := r.SyncStops(stops); err != nil {
+		t.Fatal(err)
 	}
 	// 6758 は手仕舞い済み、9984 は新規、7203 はストップが上がった
 	if err := r.SyncStops(map[string]StopRecord{
@@ -290,7 +292,9 @@ func TestUnresolvedOrdersRejectsCorruptQuantity(t *testing.T) {
 	}
 }
 
-func TestUpdateOrderStatusKeepsFills(t *testing.T) {
+// TestCancelledAfterPartialFillKeepsFills は、部分約定の後に取り消された注文。本番の同期は
+// 取消でも証券会社の約定数量ごと UpdateOrder で書くので、約定分が残り未確定にも出ない。
+func TestCancelledAfterPartialFillKeepsFills(t *testing.T) {
 	r := openTemp(t)
 	startRun(t, r, "run-1")
 	req := newRequest(t, "cid-1", "7203", domain.SideBuy, 200)
@@ -301,7 +305,7 @@ func TestUpdateOrderStatusKeepsFills(t *testing.T) {
 	if err := r.UpdateOrder(req.ClientOrderID, domain.OrderStatusPartiallyFilled, dec("100"), &price, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.UpdateOrderStatus(req.ClientOrderID, domain.OrderStatusCancelled); err != nil {
+	if err := r.UpdateOrder(req.ClientOrderID, domain.OrderStatusCancelled, dec("100"), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := r.GetOrder(req.ClientOrderID)

@@ -84,8 +84,6 @@ func NewSizer(cfg wbjpcfg.SizingConfig) (*Sizer, error) {
 	return &Sizer{cfg: cfg}, nil
 }
 
-func (s *Sizer) Method() string { return s.cfg.Method }
-
 // Size は目標建玉を決める。
 //
 // 保有中だがシグナルが届かなかった銘柄も、手仕舞い判断のために必ず
@@ -273,60 +271,4 @@ func exitReason(hasSignal bool, direction float64, exitThreshold float64) string
 		return "シグナルが消滅したため手仕舞い"
 	}
 	return fmt.Sprintf("強さ %.2f が手仕舞い閾値 %.2f を下回った", direction, exitThreshold)
-}
-
-// SizePosition は 1 銘柄ぶんの目標株数を計算する。
-//
-// Deprecated: 保有銘柄数の上限（sizing.max_positions）・手仕舞い閾値
-// （strategies.exit_threshold）・保有中の再サイジング抑制は、
-// ポートフォリオ全体を見ないと判断できない。新しい呼び出しは
-// Sizer.Size を使うこと。
-func SizePosition(
-	sig domain.CombinedSignal,
-	equity decimal.Decimal,
-	price decimal.Decimal,
-	atr decimal.Decimal,
-	lotSize decimal.Decimal,
-	cfg wbjpcfg.SizingConfig,
-) (domain.TargetPosition, error) {
-	if sig.Direction <= 0 {
-		return domain.TargetPosition{Symbol: sig.Symbol, Quantity: decimal.Zero, Reason: "シグナルなしまたは売り"}, nil
-	}
-
-	var targetQty decimal.Decimal
-	var reason string
-
-	switch cfg.Method {
-	case "fixed_notional":
-		rawQty := cfg.FixedNotional.Div(price).Floor()
-		targetQty, _ = marketrules.RoundToLot(rawQty, lotSize)
-		reason = fmt.Sprintf("fixed_notional (%s円)", cfg.FixedNotional)
-
-	case "equal_weight":
-		maxPos := decimal.NewFromInt(int64(cfg.MaxPositions))
-		alloc := equity.Div(maxPos)
-		rawQty := alloc.Div(price).Floor()
-		targetQty, _ = marketrules.RoundToLot(rawQty, lotSize)
-		reason = fmt.Sprintf("equal_weight (%d銘柄等分, 割当 %s円)", cfg.MaxPositions, alloc.Round(0))
-
-	case "atr_risk":
-		fallthrough
-	default:
-		// 許容損失 = equity * risk_per_trade
-		allowedLoss := equity.Mul(cfg.RiskPerTrade)
-		// 1株あたり損切り幅 = atr * atr_stop_multiple
-		stopWidth := atr.Mul(cfg.ATRStopMultiple)
-		if stopWidth.LessThanOrEqual(decimal.Zero) {
-			stopWidth = price.Mul(decimal.RequireFromString("0.05")) // フォールバック 5%
-		}
-		rawQty := allowedLoss.Div(stopWidth).Floor()
-		targetQty, _ = marketrules.RoundToLot(rawQty, lotSize)
-		reason = fmt.Sprintf("atr_risk (許容損失 %s円 / 損切り幅 %s円)", allowedLoss.Round(0), stopWidth.Round(0))
-	}
-
-	return domain.TargetPosition{
-		Symbol:   sig.Symbol,
-		Quantity: targetQty,
-		Reason:   reason,
-	}, nil
 }

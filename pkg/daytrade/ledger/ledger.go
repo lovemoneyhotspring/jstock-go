@@ -380,11 +380,6 @@ func (l *Ledger) PlacedBetween(start, end time.Time) ([]Order, error) {
 		start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339))
 }
 
-// Recent は新しい順の注文。
-func (l *Ledger) Recent(limit int) ([]Order, error) {
-	return l.query("SELECT "+orderColumns+" FROM orders ORDER BY placed_at DESC LIMIT ?", limit)
-}
-
 func filter(orders []Order, keep func(Order) bool) []Order {
 	out := make([]Order, 0, len(orders))
 	for _, o := range orders {
