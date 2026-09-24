@@ -2,10 +2,14 @@ package main
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 )
 
 // tradingDayGate は今日 run してよいかを決める。休場日なら理由を返す（発注せずに正常終了）。
@@ -58,4 +62,34 @@ func barsUnusable(bars []domain.Bar, readErr error, today time.Time,
 		return fmt.Sprintf("足が古い（最終 %s、%s の足が無い）", last, want.Format("2006-01-02"))
 	}
 	return ""
+}
+
+// reportUnusableBars は足が古い・読めない銘柄をログとダイジェストに残す。保有中の銘柄が
+// あれば Discord にも通知する（その銘柄は損切り・利確・時間切れも止まる。足の取り込みが
+// 止まったまま気づかないと、下げても売らない）。通知した保有銘柄の行を返す（テスト用）。
+func reportUnusableBars(unusable map[string]string, positions map[string]domain.Position, logger *logging.Logger) []string {
+	if len(unusable) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(unusable))
+	var held []string
+	for sym, why := range unusable {
+		if pos, ok := positions[sym]; ok && pos.Quantity.IsPositive() {
+			line := fmt.Sprintf("%s（保有 %s 株）: %s", sym, pos.Quantity, why)
+			lines = append(lines, line)
+			held = append(held, line)
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s", sym, why))
+	}
+	sort.Strings(lines)
+	sort.Strings(held)
+	logger.Warn("wbjp.bars_unusable", "足が古い・読めないため、この回は判断しません（売りも買いも出さない）:\n"+strings.Join(lines, "\n"))
+	digest.Anomaly("wbjp.bars_unusable", fmt.Sprintf("%d 銘柄の足が古い・読めない（その銘柄は判断しない。保有 %d 銘柄は損切りも止まる）",
+		len(unusable), len(held)))
+	if len(held) > 0 {
+		run.Alert(fmt.Sprintf("wbjp: 足が古い保有銘柄 %d 件は損切りも止まっています（足の取り込みを確かめてください）", len(held)),
+			strings.Join(held, "\n"))
+	}
+	return held
 }

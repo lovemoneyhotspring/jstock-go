@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -222,19 +221,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 			decisionCloses[sym] = px
 		}
 	}
-	if len(unusable) > 0 {
-		lines := make([]string, 0, len(unusable))
-		for sym, why := range unusable {
-			held := ""
-			if pos, ok := posMap[sym]; ok && pos.Quantity.IsPositive() {
-				held = fmt.Sprintf("（保有 %s 株）", pos.Quantity)
-			}
-			lines = append(lines, fmt.Sprintf("%s%s: %s", sym, held, why))
-		}
-		sort.Strings(lines)
-		logger.Warn("wbjp.bars_unusable", "足が古い・読めないため、この回は判断しません（売りも買いも出さない）:\n"+strings.Join(lines, "\n"))
-		digest.Anomaly("wbjp.bars_unusable", fmt.Sprintf("%d 銘柄の足が古い・読めない（その銘柄は判断しない）", len(unusable)))
-	}
+	reportUnusableBars(unusable, posMap, logger)
 
 	// 2. ストップロスの管理と更新
 	// 保存済みのストップが読めないと、全銘柄のストップが現値から作り直される（建値・

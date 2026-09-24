@@ -8,6 +8,8 @@ import (
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
+	"github.com/shopspring/decimal"
 )
 
 func day(s string) time.Time {
@@ -67,5 +69,26 @@ func TestTradingDayGate(t *testing.T) {
 	}
 	if skip, err := tradingDayGate(empty, day("2026-09-24"), false); err != nil || skip != "" {
 		t.Errorf("dry-run はカレンダーが無くても続けるはず: %q %v", skip, err)
+	}
+}
+
+// TestReportUnusableBarsAlertsHeld は、足が古い銘柄のうち保有中のもの（損切りも止まる）を
+// 通知の対象として拾う。保有していない銘柄は通知しない（ログとダイジェストだけ）。
+func TestReportUnusableBarsAlertsHeld(t *testing.T) {
+	logger, _ := logging.NewLogger("wbjp", "uat", "r", "test", "")
+	unusable := map[string]string{"7203": "最後の足 2026-09-18", "6758": "足を読めない"}
+	positions := map[string]domain.Position{
+		"7203": {Symbol: "7203", Quantity: decimal.NewFromInt(100)},
+		"6758": {Symbol: "6758", Quantity: decimal.Zero},
+	}
+	held := reportUnusableBars(unusable, positions, logger)
+	if len(held) != 1 || !strings.HasPrefix(held[0], "7203（保有 100 株）") {
+		t.Errorf("通知する保有銘柄: %v", held)
+	}
+	if got := reportUnusableBars(map[string]string{"6758": "x"}, positions, logger); len(got) != 0 {
+		t.Errorf("保有していない銘柄だけなら通知しない: %v", got)
+	}
+	if got := reportUnusableBars(nil, positions, logger); got != nil {
+		t.Errorf("古い足が無ければ何もしない: %v", got)
 	}
 }
