@@ -397,6 +397,9 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	stopTargets := decideStopExits(rep, stopBook, setCfg.Stops, risk.ExitInputs{
 		Closes: decisionCloses, Quantities: quantities, LotSizes: lotSizes, AsOf: todayJST,
 		Bars: func(sym string) []domain.Bar { return allBars[sym] },
+		// 時間切れの営業日数は東証のカレンダーで数える（祝日を数えない。読めなければ平日で代用するが、
+		// 発注する回はその前の tradingDayGate で止まっている）
+		TradingDay: cal.IsTradingDay,
 	}, canLive, logger)
 	for _, t := range risk.ApplyStopPriority(strategyTargets, stopTargets) {
 		if _, ng := unusable[t.Symbol]; ng {

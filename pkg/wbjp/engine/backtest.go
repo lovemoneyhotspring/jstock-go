@@ -45,6 +45,10 @@ type BacktestOptions struct {
 	CashYield []domain.Bar
 	// Margin は信用残（週次）。nil なら信用残を使う戦略は黙る。
 	Margin *strategy.MarginBook
+	// TradingDay は営業日の判定（東証のカレンダー。calendar.Calendar.IsTradingDay）。
+	// 時間切れ（stale_exit_days・max_hold_days）の営業日数を本番と同じく数える。
+	// nil なら土日だけを除く（祝日も数える。米国株やカレンダーが無いとき）。
+	TradingDay func(time.Time) bool
 }
 
 // FillModels は選べる約定モデル。
@@ -287,7 +291,7 @@ func RunBacktest(
 		// 本番は保有が減ったのを見てから確定する（約定しなかった利確を出し直すため）
 		stopTargets := stopBook.ExitPlan(setCfg.Stops, risk.ExitInputs{
 			Closes: closePrices, Quantities: quantities, LotSizes: lotSizes, AsOf: today,
-			AssumeFilled: true,
+			AssumeFilled: true, TradingDay: opts.TradingDay,
 			Bars: func(sym string) []domain.Bar {
 				v, ok := stratCtx.Bars(sym)
 				if !ok {

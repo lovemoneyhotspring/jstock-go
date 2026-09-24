@@ -59,13 +59,14 @@ func (s *Stop) InitialRisk() decimal.Decimal {
 	return s.EntryPrice.Sub(base)
 }
 
-// TradingDaysHeld は建ててからの営業日数。
-func (s *Stop) TradingDaysHeld(asOf time.Time) int {
+// TradingDaysHeld は建ててからの営業日数。isTradingDay は東証の営業日の判定
+// （nil なら土日だけを除く。tradingDaysHeld）。
+func (s *Stop) TradingDaysHeld(asOf time.Time, isTradingDay func(time.Time) bool) int {
 	created, err := time.Parse("2006-01-02", s.CreatedOn)
 	if err != nil {
 		return 0
 	}
-	return tradingDaysHeld(created, asOf)
+	return tradingDaysHeld(created, asOf, isTradingDay)
 }
 
 type StopBook struct {
@@ -343,12 +344,13 @@ func (sb *StopBook) ExitTargets(closes map[string]decimal.Decimal) []domain.Targ
 //   - staleDays 営業日たっても含み益ゼロ以下 → 前提が崩れている
 //   - maxDays 営業日 → 資金効率のため強制決済
 //
-// どちらも nil で無効。
+// どちらも nil で無効。営業日は isTradingDay で数える（nil なら土日だけを除く）。
 func (sb *StopBook) TimeExitTargets(
 	closes map[string]decimal.Decimal,
 	asOf string,
 	staleDays *int,
 	maxDays *int,
+	isTradingDay func(time.Time) bool,
 ) []domain.TargetPosition {
 	if staleDays == nil && maxDays == nil {
 		return nil
@@ -365,7 +367,7 @@ func (sb *StopBook) TimeExitTargets(
 		if !ok {
 			continue
 		}
-		held := stop.TradingDaysHeld(asOfTime)
+		held := stop.TradingDaysHeld(asOfTime, isTradingDay)
 
 		var reason string
 		switch {
@@ -538,6 +540,10 @@ type ExitInputs struct {
 	LotSizes   map[string]decimal.Decimal
 	// AsOf は判断日（YYYY-MM-DD）。時間切れの営業日数を数える。
 	AsOf string
+	// TradingDay は東証の営業日の判定（calendar.Calendar.IsTradingDay。範囲外は平日で代用）。
+	// 時間切れの営業日数から平日の祝日を除く。nil なら土日だけを除く（祝日も数えるので
+	// 時間切れが早まる側。本番はカレンダーが読めないと発注しない: tradingDayGate）。
+	TradingDay func(time.Time) bool
 	// Bars は銘柄の判断日までの足。残り玉の手仕舞い線（trend_exit_sma）に使う。
 	// nil なら線は無し（移動平均割れでは手仕舞わない）。
 	Bars func(symbol string) []domain.Bar
@@ -563,7 +569,7 @@ type ExitInputs struct {
 func (sb *StopBook) ExitPlan(cfg wbjpcfg.StopsConfig, in ExitInputs) []domain.TargetPosition {
 	var targets []domain.TargetPosition
 	targets = append(targets, sb.ExitTargets(in.Closes)...)
-	targets = append(targets, sb.TimeExitTargets(in.Closes, in.AsOf, cfg.StaleExitDays, cfg.MaxHoldDays)...)
+	targets = append(targets, sb.TimeExitTargets(in.Closes, in.AsOf, cfg.StaleExitDays, cfg.MaxHoldDays, in.TradingDay)...)
 	targets = append(targets, sb.TakeProfitTargets(in.Closes, in.Quantities, in.LotSizes,
 		cfg.TakeProfitR, cfg.TakeProfitFraction, marketrules.DefaultLotSize, in.AssumeFilled)...)
 	targets = append(targets, sb.RunnerTargets(in.Closes, in.Quantities, sb.trendValues(cfg, in.Bars), cfg.TrendExitAlways)...)
@@ -628,20 +634,31 @@ func sortTargets(targets []domain.TargetPosition) []domain.TargetPosition {
 	return targets
 }
 
-// tradingDaysHeld は建ててからの営業日数（土日を除く。祝日は数える）。
+// tradingDaysHeld は建ててからの営業日数（createdOn の翌日から asOf までの営業日）。
 //
 // 暦日で数えると連休を挟んだときに時間切れが早まる。「何日持ったか」は
-// 市場が開いた日数で数えるのが判断の意図に合う。
-func tradingDaysHeld(createdOn, asOf time.Time) int {
+// 市場が開いた日数で数えるのが判断の意図に合う。営業日は isTradingDay（東証のカレンダー）で
+// 決め、平日の祝日・年末年始は数えない。nil なら土日だけを除く（祝日を数えるぶん時間切れが
+// 早まる側。カレンダーが読めないときの代用で、本番の発注する回はその前に止まる）。
+func tradingDaysHeld(createdOn, asOf time.Time, isTradingDay func(time.Time) bool) int {
 	if !asOf.After(createdOn) {
 		return 0
+	}
+	if isTradingDay == nil {
+		isTradingDay = weekday
 	}
 	days := 0
 	for current := createdOn; current.Before(asOf); {
 		current = current.AddDate(0, 0, 1)
-		if wd := current.Weekday(); wd != time.Saturday && wd != time.Sunday {
+		if isTradingDay(current) {
 			days++
 		}
 	}
 	return days
+}
+
+// weekday は土日でないか。取引カレンダーが無いときの営業日の代わり。
+func weekday(day time.Time) bool {
+	wd := day.Weekday()
+	return wd != time.Saturday && wd != time.Sunday
 }
