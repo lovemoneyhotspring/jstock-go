@@ -282,9 +282,12 @@ func RunBacktest(
 		for sym, pos := range posMap {
 			quantities[sym] = pos.Quantity
 		}
-		// ストップ由来の目標は本番と同じ risk.ExitPlan を通す（損切り・時間切れ・利確・残り玉）
+		// ストップ由来の目標は本番と同じ risk.ExitPlan を通す（損切り・時間切れ・利確・残り玉）。
+		// 出した売りは翌寄りで必ず約定するので、利確は決めた時点で確定する（AssumeFilled）。
+		// 本番は保有が減ったのを見てから確定する（約定しなかった利確を出し直すため）
 		stopTargets := stopBook.ExitPlan(setCfg.Stops, risk.ExitInputs{
 			Closes: closePrices, Quantities: quantities, LotSizes: lotSizes, AsOf: today,
+			AssumeFilled: true,
 			Bars: func(sym string) []domain.Bar {
 				v, ok := stratCtx.Bars(sym)
 				if !ok {

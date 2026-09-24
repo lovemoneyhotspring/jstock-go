@@ -183,7 +183,7 @@ func TestTakeProfitTargetsScalesOut(t *testing.T) {
 	qty := map[string]decimal.Decimal{"7203": dec("300")}
 	lots := map[string]decimal.Decimal{"7203": dec("100")}
 
-	targets := sb.TakeProfitTargets(closes, qty, lots, decPtr("2"), dec("0.5"), dec("100"))
+	targets := sb.TakeProfitTargets(closes, qty, lots, decPtr("2"), dec("0.5"), dec("100"), true)
 	if len(targets) != 1 {
 		t.Fatalf("利確目標が作られていない: %+v", targets)
 	}
@@ -201,7 +201,7 @@ func TestTakeProfitTargetsScalesOut(t *testing.T) {
 	}
 
 	// 二度目は発動しない
-	if got := sb.TakeProfitTargets(closes, qty, lots, decPtr("2"), dec("0.5"), dec("100")); len(got) != 0 {
+	if got := sb.TakeProfitTargets(closes, qty, lots, decPtr("2"), dec("0.5"), dec("100"), true); len(got) != 0 {
 		t.Errorf("利確は一度きり: %+v", got)
 	}
 }
@@ -211,7 +211,7 @@ func TestTakeProfitTargetsBelowTarget(t *testing.T) {
 	sb.Set(Stop{Symbol: "7203", StopPrice: dec("960"), EntryPrice: dec("1000"),
 		InitialStopPrice: decPtr("960"), InitialQuantity: decPtr("300")})
 	got := sb.TakeProfitTargets(map[string]decimal.Decimal{"7203": dec("1040")},
-		map[string]decimal.Decimal{"7203": dec("300")}, nil, decPtr("2"), dec("0.5"), dec("100"))
+		map[string]decimal.Decimal{"7203": dec("300")}, nil, decPtr("2"), dec("0.5"), dec("100"), true)
 	if len(got) != 0 {
 		t.Errorf("1R では利確しない: %+v", got)
 	}
@@ -225,7 +225,7 @@ func TestTakeProfitTargetsDisabled(t *testing.T) {
 	sb.Set(Stop{Symbol: "7203", StopPrice: dec("960"), EntryPrice: dec("1000"),
 		InitialStopPrice: decPtr("960"), InitialQuantity: decPtr("300")})
 	if got := sb.TakeProfitTargets(map[string]decimal.Decimal{"7203": dec("2000")},
-		map[string]decimal.Decimal{"7203": dec("300")}, nil, nil, dec("0.5"), dec("100")); got != nil {
+		map[string]decimal.Decimal{"7203": dec("300")}, nil, nil, dec("0.5"), dec("100"), true); got != nil {
 		t.Errorf("take_profit_r 未設定なら何もしない: %+v", got)
 	}
 }

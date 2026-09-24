@@ -215,8 +215,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 	}
 
 	// 足が古い・読めない銘柄は、この回は判断しない（売りも買いも出さない）。
-	// ストップの判定（損切り・利確）にも使わない。利確を決めると ScaledOut が保存され、
-	// 売りを出さないまま「利確済み」になるため
+	// ストップの判定（損切り・利確）にも使わない（古い足で損切り・利確を決めない）
 	decisionCloses := make(map[string]decimal.Decimal, len(lastPrices))
 	for sym, px := range lastPrices {
 		if _, ng := unusable[sym]; !ng {
@@ -590,6 +589,8 @@ func dailyPnL(rep *repo.Repo, todayJST string, positions map[string]domain.Posit
 //
 // 保存は利確で変えたストップ（建値への引き上げ・ScaledOut）まで含めるため ExitPlan の後
 // （2026-09-24 のレビュー W2: 以前は利確の前に保存していて、変更が次の回に残らなかった）。
+// 利確の ScaledOut は、保有が利確後の株数まで減ったのを見た回に立つ（AssumeFilled は偽）。
+// 売りを出しただけの回では立たないので、約定しなかった利確は次の回に出し直される。
 // 発注する回は台帳を StopBook に揃える（外した銘柄の行も消す）。dry-run は保存しない
 // （建玉 0 の模型で決めたストップで本番の台帳を書き換えない）。
 func decideStopExits(rep *repo.Repo, book *risk.StopBook, cfg wbjpcfg.StopsConfig, in risk.ExitInputs,

@@ -380,9 +380,23 @@ func (sb *StopBook) TimeExitTargets(
 // TakeProfitTargets は 2 段階利確の 1 段目。含み益が targetR に達した
 // 建玉の一部を利確する。
 //
-// まだ利確していない建玉だけが対象（ScaledOut で一度きり）。利確と同時に
+// まだ利確していない建玉だけが対象（ScaledOut で一度きり）。利確が済んだら
 // ストップを建値へ引き上げる（下げることはしない）。残りの手仕舞いは
 // RunnerTargets に委ねる。
+//
+// **利確が「済んだ」とみなす時点**（ScaledOut と建値への引き上げを確定する時点）
+//
+//	assumeFilled（backtest。出した売りは翌寄りで必ず約定する）なら、利確を決めた時点。
+//	そうでなければ（本番）、保有が実際に利確後の株数（InitialQuantity 基準の残り）まで
+//	減ったのを見た時点。売りの約定を待たずに確定すると、指値が届かず失効した・当日買付の柵・
+//	max_orders_per_day・発注失敗で売れなかったとき、利確が二度と出ず、RunnerTargets が
+//	全株を維持に固定する（2026-09-24 のレビュー）。確定するまでは毎回同じ残り株数の
+//	目標を出し直す（InitialQuantity 基準なので冪等）。
+//
+//	本番の確定にも含み益が targetR 以上であることを求める。株数だけで決めると、地合いや
+//	サイジングで減らした建玉まで「利確済み」になり、含み損のままストップが建値へ上がって
+//	即座に全株を手仕舞いうる。売りが約定した後、次の回までに含み益が targetR を割ると
+//	確定が遅れる（その間は利確前の扱い）。
 func (sb *StopBook) TakeProfitTargets(
 	closes map[string]decimal.Decimal,
 	quantities map[string]decimal.Decimal,
@@ -390,6 +404,7 @@ func (sb *StopBook) TakeProfitTargets(
 	targetR *decimal.Decimal,
 	fraction decimal.Decimal,
 	defaultLotSize decimal.Decimal,
+	assumeFilled bool,
 ) []domain.TargetPosition {
 	if targetR == nil {
 		return nil
@@ -425,14 +440,16 @@ func (sb *StopBook) TakeProfitTargets(
 		if err != nil {
 			continue
 		}
+		if !assumeFilled && !currentQty.GreaterThan(remaining) {
+			// 保有が利確後の株数まで減っている（売りが約定した）→ 利確済みとして確定する
+			stop.markScaledOut()
+			continue
+		}
 		if remaining.GreaterThan(currentQty) {
 			remaining = currentQty
 		}
-
-		// 利確できた建玉は「もう負けにしない」。建値より下のストップは引き上げる。
-		stop.ScaledOut = true
-		if stop.StopPrice.LessThan(stop.EntryPrice) {
-			stop.StopPrice = stop.EntryPrice
+		if assumeFilled {
+			stop.markScaledOut()
 		}
 
 		if remaining.LessThan(currentQty) {
@@ -446,6 +463,15 @@ func (sb *StopBook) TakeProfitTargets(
 	}
 
 	return sortTargets(targets)
+}
+
+// markScaledOut は利確を確定する。利確できた建玉は「もう負けにしない」ので、
+// 建値より下のストップは建値へ引き上げる。
+func (s *Stop) markScaledOut() {
+	s.ScaledOut = true
+	if s.StopPrice.LessThan(s.EntryPrice) {
+		s.StopPrice = s.EntryPrice
+	}
 }
 
 // RunnerTargets は 2 段階利確の 2 段目。利確済みの建玉をトレンド追従で
@@ -506,6 +532,10 @@ type ExitInputs struct {
 	// Bars は銘柄の判断日までの足。残り玉の手仕舞い線（trend_exit_sma）に使う。
 	// nil なら線は無し（移動平均割れでは手仕舞わない）。
 	Bars func(symbol string) []domain.Bar
+	// AssumeFilled は出した売りが必ず約定する前提（backtest。翌寄りで約定させる）。
+	// true なら利確を決めた時点で ScaledOut と建値への引き上げを確定する。本番は false
+	// （保有が減ったのを見てから確定する。TakeProfitTargets）。
+	AssumeFilled bool
 }
 
 // ExitPlan はストップ由来の目標（損切り・時間切れ・利確・残り玉）をまとめて返す。
@@ -518,14 +548,15 @@ type ExitInputs struct {
 // （MergeStopTargets）。後から足した目標が勝つ形だと、同じ回に利確が ScaledOut を
 // 立てたとき、残り玉の「維持（利確前の株数）」が損切り・利確を打ち消していた。
 //
-// TakeProfitTargets は利確と同時にストップを建値へ引き上げ ScaledOut を立てる。
-// 呼び出し側は**この後で**ストップを保存すること（W2）。
+// TakeProfitTargets は利確が済んだ建玉（本番は保有が減ったのを見てから、backtest は
+// 決めた時点）のストップを建値へ引き上げ ScaledOut を立てる。呼び出し側は**この後で**
+// ストップを保存すること（W2）。
 func (sb *StopBook) ExitPlan(cfg wbjpcfg.StopsConfig, in ExitInputs) []domain.TargetPosition {
 	var targets []domain.TargetPosition
 	targets = append(targets, sb.ExitTargets(in.Closes)...)
 	targets = append(targets, sb.TimeExitTargets(in.Closes, in.AsOf, cfg.StaleExitDays, cfg.MaxHoldDays)...)
 	targets = append(targets, sb.TakeProfitTargets(in.Closes, in.Quantities, in.LotSizes,
-		cfg.TakeProfitR, cfg.TakeProfitFraction, marketrules.DefaultLotSize)...)
+		cfg.TakeProfitR, cfg.TakeProfitFraction, marketrules.DefaultLotSize, in.AssumeFilled)...)
 	targets = append(targets, sb.RunnerTargets(in.Closes, in.Quantities, sb.trendValues(cfg, in.Bars), cfg.TrendExitAlways)...)
 	return MergeStopTargets(targets)
 }

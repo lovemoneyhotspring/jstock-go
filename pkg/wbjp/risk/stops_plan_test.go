@@ -61,9 +61,91 @@ func TestExitPlanTakeProfitKeepsReducedQuantity(t *testing.T) {
 	if got := planOf(t, targets, "7203"); !got.Quantity.Equal(dec("50")) {
 		t.Errorf("利確後の株数になっていない: %+v", got)
 	}
-	st, _ := sb.Get("7203")
-	if !st.ScaledOut || !st.StopPrice.Equal(dec("1000")) {
-		t.Errorf("利確で ScaledOut と建値への引き上げが立っていない: %+v", st)
+	// 本番（AssumeFilled 偽）は売りを出しただけでは確定しない
+	if st, _ := sb.Get("7203"); st.ScaledOut || !st.StopPrice.Equal(dec("900")) {
+		t.Errorf("約定を見る前に利確を確定した: %+v", st)
+	}
+
+	// backtest（AssumeFilled）は決めた時点で確定し、同じ回の残り玉の「維持」（100 株）が
+	// 利確を打ち消さない
+	sb2 := NewStopBook(nil)
+	sb2.Set(Stop{Symbol: "7203", EntryPrice: dec("1000"), StopPrice: dec("900"),
+		InitialStopPrice: decPtr("900"), InitialQuantity: &qty0})
+	targets = sb2.ExitPlan(cfg, ExitInputs{
+		Closes:       map[string]decimal.Decimal{"7203": dec("1250")},
+		Quantities:   map[string]decimal.Decimal{"7203": dec("100")},
+		LotSizes:     map[string]decimal.Decimal{"7203": dec("1")},
+		AsOf:         "2026-09-24",
+		AssumeFilled: true,
+	})
+	if got := planOf(t, targets, "7203"); !got.Quantity.Equal(dec("50")) {
+		t.Errorf("backtest: 利確後の株数になっていない: %+v", got)
+	}
+	if st, _ := sb2.Get("7203"); !st.ScaledOut || !st.StopPrice.Equal(dec("1000")) {
+		t.Errorf("backtest: 利確で ScaledOut と建値への引き上げが立っていない: %+v", st)
+	}
+}
+
+// TestExitPlanTakeProfitRetriesUntilFilled は 2026-09-24 のレビューの再現。本番で利確の売りが
+// 約定しなかった（指値の失効・当日買付の柵・発注の上限・発注失敗）とき、次の回にも同じ残り株数の
+// 利確が出る。以前は売りを出した回に ScaledOut が保存され、二度と利確が出ずに残り玉の「維持」が
+// 全株を固定していた。保有が減ったのを見た回に ScaledOut と建値への引き上げを確定する。
+func TestExitPlanTakeProfitRetriesUntilFilled(t *testing.T) {
+	qty0 := dec("100")
+	sb := NewStopBook(nil)
+	sb.Set(Stop{Symbol: "7203", EntryPrice: dec("1000"), StopPrice: dec("900"),
+		InitialStopPrice: decPtr("900"), InitialQuantity: &qty0})
+	cfg := wbjpcfg.StopsConfig{TakeProfitR: decPtr("2"), TakeProfitFraction: dec("0.5"), TrendExitKind: "sma"}
+	in := func(held string) ExitInputs {
+		return ExitInputs{
+			Closes:     map[string]decimal.Decimal{"7203": dec("1250")},
+			Quantities: map[string]decimal.Decimal{"7203": dec(held)},
+			LotSizes:   map[string]decimal.Decimal{"7203": dec("1")},
+			AsOf:       "2026-09-24",
+		}
+	}
+
+	// 1 回目・2 回目（売れなかった）とも同じ 50 株の目標
+	for i := 1; i <= 2; i++ {
+		if got := planOf(t, sb.ExitPlan(cfg, in("100")), "7203"); !got.Quantity.Equal(dec("50")) {
+			t.Fatalf("%d 回目: 利確の目標（残り 50 株）が出ない: %+v", i, got)
+		}
+		if st, _ := sb.Get("7203"); st.ScaledOut {
+			t.Fatalf("%d 回目: 約定前に ScaledOut が立った", i)
+		}
+	}
+
+	// 一部だけ約定（70 株）→ まだ確定しない。目標は同じ 50 株（InitialQuantity 基準で冪等）
+	if got := planOf(t, sb.ExitPlan(cfg, in("70")), "7203"); !got.Quantity.Equal(dec("50")) {
+		t.Fatalf("一部約定: 残り 50 株の目標: %+v", got)
+	}
+
+	// 50 株まで減った → 確定（建値へ引き上げ）。利確は出さず、残り玉を維持
+	got := planOf(t, sb.ExitPlan(cfg, in("50")), "7203")
+	if !got.Quantity.Equal(dec("50")) || got.Reason != "利確後の残り玉を維持（トレンド追従中）" {
+		t.Errorf("約定後は残り玉の維持: %+v", got)
+	}
+	if st, _ := sb.Get("7203"); !st.ScaledOut || !st.StopPrice.Equal(dec("1000")) {
+		t.Errorf("約定を見て ScaledOut と建値への引き上げを確定していない: %+v", st)
+	}
+}
+
+// TestExitPlanTakeProfitNoConfirmBelowTarget は、含み益が target に届いていない建玉を株数が
+// 減っただけで利確済みにしない（地合いで減らした含み損の建玉のストップを建値へ上げない）。
+func TestExitPlanTakeProfitNoConfirmBelowTarget(t *testing.T) {
+	qty0 := dec("100")
+	sb := NewStopBook(nil)
+	sb.Set(Stop{Symbol: "7203", EntryPrice: dec("1000"), StopPrice: dec("900"),
+		InitialStopPrice: decPtr("900"), InitialQuantity: &qty0})
+	cfg := wbjpcfg.StopsConfig{TakeProfitR: decPtr("2"), TakeProfitFraction: dec("0.5"), TrendExitKind: "sma"}
+	sb.ExitPlan(cfg, ExitInputs{
+		Closes:     map[string]decimal.Decimal{"7203": dec("950")},
+		Quantities: map[string]decimal.Decimal{"7203": dec("50")},
+		LotSizes:   map[string]decimal.Decimal{"7203": dec("1")},
+		AsOf:       "2026-09-24",
+	})
+	if st, _ := sb.Get("7203"); st.ScaledOut || !st.StopPrice.Equal(dec("900")) {
+		t.Errorf("含み損の建玉を利確済みにした: %+v", st)
 	}
 }
 
