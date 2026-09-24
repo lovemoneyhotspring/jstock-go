@@ -94,6 +94,17 @@ type openState struct {
 	// corpDropped は材料でショートの対象から外した銘柄
 	corpStale   string
 	corpDropped []string
+
+	// allowed は実際に発注するか（live かつ本番口座かつ kill_switch でない）。reason はその理由
+	allowed bool
+	reason  string
+	led     *dtledger.Ledger
+	env     execute.Env
+	// b は live のときだけ繋ぐ（dry-run は nil）
+	b broker.Broker
+	// carried は寄付で手仕舞った持ち越し、held はブローカーの建玉（台帳外の検査に使う）
+	carried []execute.Carried
+	held    broker.LegPositions
 }
 
 func runOpen(opts openOptions) error {
@@ -106,12 +117,13 @@ func runOpen(opts openOptions) error {
 		return err
 	}
 
-	allowed, reason := appSettings.CanExecuteLive(s.opts.live, s.cfg.Execution.KillSwitch)
+	s.allowed, s.reason = appSettings.CanExecuteLive(s.opts.live, s.cfg.Execution.KillSwitch)
 	led, err := dtledger.Open(appSettings.DaytradeDBPath())
 	if err != nil {
 		return err
 	}
 	led.Verify = s.opts.brokerVerify
+	s.led = led
 	defer led.Close()
 	// 実行品質の記録は最後にまとめて書き出す（1 発注 1 ファイルにしない）
 	defer flushExecution(s.day)
@@ -119,43 +131,12 @@ func runOpen(opts openOptions) error {
 	// 消えるので、受け取った時点で貯めた分だけ書き出してから終える（Flush は mutex 付き）
 	defer flushOnSignal(s.day)()
 
-	env := execute.Env{
-		Cfg: s.cfg, Ledger: led, Day: s.day, Report: run, Out: os.Stdout,
-		RetryWait: execute.DefaultRetryWait, Deadline: s.deadline,
-		// 寄る前の回か（9:00 より前）。真なら preopen_legs の脚を寄成で出す
-		Preopen: s.cfg.Execution.PreopenAt(s.now, jst),
-	}
-	var b broker.Broker
-	var carried []execute.Carried
-	var held broker.LegPositions
-	if allowed {
-		if b, err = openBroker(s.cfg); err != nil {
-			return err
-		}
-		broker.SetDeadline(b, s.deadline)
-		// 前回の実行で送信結果が分からなかった注文があれば、ここで判定して台帳を直す。
-		// 届いていなければ UNSENT になり、下の「発注済み」には数えない（種を変えて送り直す）
-		if err := resolvePending(env, b); err != nil {
-			return err
-		}
-		// 前営業日以前の建玉が残っていれば（引けで返済できなかった持ち越し）、新規に建てる前に
-		// 寄付の成行で手仕舞う。検証は margin.carry_penalty で「翌寄りで返済」としているので同じにする。
-		// 判定できなければ止める——持ち越しを知らずに建てると二重になりうる
-		settled, err := execute.SettleCarried(env, b, execute.SettleAtOpen)
-		noteSettlement(settled)
-		if err != nil {
-			return err
-		}
-		carried, held = settled.Carried, settled.Held
-	} else {
-		// dry-run は確認のたびに増える。その日の古い dry-run は消して最新だけ残す
-		if _, err := led.ClearDryRun(s.day); err != nil {
-			return err
-		}
+	if err := s.connect(); err != nil {
+		return err
 	}
 	// 生きている／約定した建玉の数。再実行は「N − これ」だけを建てる——1 回目が途中で
 	// 落ちても（通信エラー・締め切り）、次の cron が残りを埋める。拒否・失効は数えない
-	placed, err := execute.PlacedToday(env)
+	placed, err := execute.PlacedToday(s.env)
 	if err != nil {
 		return err
 	}
@@ -163,7 +144,7 @@ func runOpen(opts openOptions) error {
 	// 持ち越しが拘束している資金（残り株数 × 建値）。返済注文は出したが、寄っていない銘柄は
 	// まだ約定しておらず資金は戻っていない。件数と予算への反映は、倍率を掛けた後の予算が
 	// 決まったところで行う（execute.SizeDay）
-	tiedLong, tiedShort := execute.TiedCapital(carried)
+	tiedLong, tiedShort := execute.TiedCapital(s.carried)
 	if placed.Total() > 0 {
 		// 余りをロングに回す設定では件数だけで「済み」と言わない（execute.DoneForToday）
 		if execute.DoneForToday(s.cfg, placed, s.watchOnly) {
@@ -193,7 +174,7 @@ func runOpen(opts openOptions) error {
 	}
 
 	quotesStarted := clock.NowUTC()
-	received, err := fetchQuotes(s.cfg, b, symbols, s.opts.quoteSource, s.opts.quoteFile, s.deadline)
+	received, err := fetchQuotes(s.cfg, s.b, symbols, s.opts.quoteSource, s.opts.quoteFile, s.deadline)
 	if err != nil {
 		fmt.Println(err)
 		logError("daytrade.skip", "気配が取れず寄付の買いを見送り", map[string]any{"reason": "no_quotes", "error": err.Error()})
@@ -229,7 +210,7 @@ func runOpen(opts openOptions) error {
 	appendHistory(dthistory.KindQuotes, dthistory.QuotesFrame(received, quotes, prevAll), s.day)
 
 	summary := map[string]any{
-		"mode":             modeOf(s.watchOnly, allowed),
+		"mode":             modeOf(s.watchOnly, s.allowed),
 		"quotes_requested": len(symbols),
 		"quotes_received":  len(received),
 		"quotes_usable":    len(quotes),
@@ -280,7 +261,7 @@ func runOpen(opts openOptions) error {
 	// ロングの並べ方を寄付の判定より先に決める: LightGBM で並べられない日は gap_vol で取引し、
 	// 米国小幅高の日は両脚とも休む（us_skip_legs を all に戻す。config.FallbackToGapVol）
 	s.cfg = resolveRankBy(s.cfg, s.p, eligible, quotes)
-	verdict, usStale, err := evaluateRegime(s.cfg, s.p, s.day, regime.MarketGapOf(gaps), led, env.Preopen, s.deadline)
+	verdict, usStale, err := evaluateRegime(s.cfg, s.p, s.day, regime.MarketGapOf(gaps), s.led, s.env.Preopen, s.deadline)
 	if err != nil {
 		return err
 	}
@@ -288,8 +269,8 @@ func runOpen(opts openOptions) error {
 	// 決まらないので、summary への記録もここまで待つ
 	// 寄指の位置も米国小幅高の日だけ替わる（execution.preopen_limit_pct_us_low）。この設定の日のロングは
 	// 寄る前の回の寄指でしか建てない——9:00 以降の回は見送りにする
-	s.cfg = applyDayConfig(s.cfg, &env, verdict.UsLow)
-	verdict = usLowPreopenOnly(s.cfg, verdict, env.Preopen)
+	s.cfg = applyDayConfig(s.cfg, &s.env, verdict.UsLow)
+	verdict = usLowPreopenOnly(s.cfg, verdict, s.env.Preopen)
 	summary["rank_by"] = s.cfg.Signal.RankBy
 	summary["us_low"] = verdict.UsLow
 	summary["preopen_limit_pct"] = s.cfg.Execution.PreopenLimitPct
@@ -321,7 +302,7 @@ func runOpen(opts openOptions) error {
 		digest.Note(map[string]any{"regime_skip": strings.Join(verdict.Reasons, "、")})
 		// 見送りの日も「建てていたら」の順位表を残す。無いと evaluate が始値で作り直すので、
 		// 9:01 の気配で何を選んでいたかが消え、dt_missed も欠けと見送りを見分けられない
-		skippedQuotes, _ := execute.RankQuotes(quotes, placed.Symbols, execute.SweptSymbols(carried), s.cfg.Signal.SkipOpened)
+		skippedQuotes, _ := execute.RankQuotes(quotes, placed.Symbols, execute.SweptSymbols(s.carried), s.cfg.Signal.SkipOpened)
 		appendSkippedRanking(s.cfg, s.p, skippedQuotes, s.day)
 		finish("regime", nil)
 		return nil
@@ -333,7 +314,7 @@ func runOpen(opts openOptions) error {
 		Cfg: s.cfg, Verdict: verdict, Placed: placed, TiedLong: tiedLong, TiedShort: tiedShort,
 		WatchOnly: s.watchOnly, WatchRows: watchRows,
 	})
-	execute.EmitNotes(env, sizing.Notes)
+	execute.EmitNotes(s.env, sizing.Notes)
 	weak := sizing.Weak
 	weighting := sizing.Long.Weighting
 
@@ -341,7 +322,7 @@ func runOpen(opts openOptions) error {
 	// 9:01 の時点で既に寄っている銘柄も落とす。順位付けの直前に気配そのものを落とすので、
 	// ロング・ショートの両方に効く（市場ギャップと危険信号は落とす前の気配で見る——候補全体の
 	// 分布が変わるため）
-	swept := execute.SweptSymbols(carried)
+	swept := execute.SweptSymbols(s.carried)
 	if len(swept) > 0 {
 		logWarn("daytrade.sweep", "台帳外の返済に回した銘柄を今日の候補から外す",
 			map[string]any{"symbols": sortedKeys(swept)})
@@ -417,7 +398,7 @@ func runOpen(opts openOptions) error {
 	}
 	// 余りをロングに回す通知は、並べ替えの失敗で見送る日を除いてから出す
 	if spill.IsPositive() {
-		execute.EmitNotes(env, spillNotes)
+		execute.EmitNotes(s.env, spillNotes)
 		summary["spill"] = spill
 	}
 	// 今日すでに建てた銘柄・返済に回した銘柄（と signal.skip_opened なら寄った銘柄）を、
@@ -520,15 +501,15 @@ func runOpen(opts openOptions) error {
 		finish("no_capital", nil)
 		return nil
 	}
-	if err := confirmLive(allowed, s.opts.yes); err != nil {
+	if err := confirmLive(s.allowed, s.opts.yes); err != nil {
 		return err
 	}
 
-	if allowed {
+	if s.allowed {
 		// 台帳に無い建玉がブローカーにあれば、この実行は二重に建てることになる。
 		// 冪等性は台帳の client_order_id で担保しているので、台帳を失う・別ホストへ
 		// 移す・復元した直後は効かない。発注の直前にブローカーと突き合わせる
-		if err := execute.EnsureNoUnrecordedPositions(env, held, picks, carried); err != nil {
+		if err := execute.EnsureNoUnrecordedPositions(s.env, s.held, picks, s.carried); err != nil {
 			var unrecorded *execute.ErrUnrecordedPositions
 			if errors.As(err, &unrecorded) {
 				digest.Anomaly("daytrade.unrecorded_positions",
@@ -549,12 +530,12 @@ func runOpen(opts openOptions) error {
 	// 台帳に残す「送る直前の時価」は、取ったばかりの気配があればそれを使う（取り直すと順位表と
 	// 1 本目の注文の間に往復が 1 つ挟まる）。年齢は**取り始め**から測る——120 銘柄ずつの直列なので
 	// 先頭のバッチがいちばん古い。古ければ渡さず、PlacePicks が従来どおり取り直す
-	if age := clock.NowUTC().Sub(quotesStarted); allowed && age <= refReuseMaxAge {
-		env.RefPrices = execute.RefPricesFromQuotes(received, picks)
+	if age := clock.NowUTC().Sub(quotesStarted); s.allowed && age <= refReuseMaxAge {
+		s.env.RefPrices = execute.RefPricesFromQuotes(received, picks)
 		logInfo("daytrade.ref_price", "執行時の時価に選定の気配を使う", map[string]any{
-			"age_ms": age.Milliseconds(), "reused": env.RefPrices != nil, "picks": len(picks)})
+			"age_ms": age.Milliseconds(), "reused": s.env.RefPrices != nil, "picks": len(picks)})
 	}
-	orders, failures, err := execute.PlacePicks(env, b, picks)
+	orders, failures, err := execute.PlacePicks(s.env, s.b, picks)
 	run.FlushAlerts()
 	if err != nil {
 		return err
@@ -565,15 +546,53 @@ func runOpen(opts openOptions) error {
 	}
 	finish("picked", map[string]any{"orders": orders, "failures": len(failures)})
 	logInfo("daytrade.run", "寄付の買いを終了", map[string]any{
-		"phase": "open", "live": allowed, "reason": reason,
+		"phase": "open", "live": s.allowed, "reason": s.reason,
 		"n": n, "budget": budget.String(), "scale": verdict.Scale,
 		"picks": len(picks), "failures": len(failures),
 		"already_long": placed.Long, "already_short": placed.Short,
 		"elapsed_ms": clock.NowUTC().Sub(s.started).Milliseconds(), "deadline": deadlineText(s.deadline),
 	})
 	digest.Note(map[string]any{
-		"phase": "open", "live": allowed, "picks": len(picks), "failures": len(failures),
+		"phase": "open", "live": s.allowed, "picks": len(picks), "failures": len(failures),
 	})
+	return nil
+}
+
+// connect は発注の環境を作り、live ならブローカーに繋いで送信結果不明の注文を判定し、
+// 前営業日以前の持ち越しを手仕舞う。dry-run はその日の古い dry-run を台帳から消す。
+func (s *openState) connect() error {
+	s.env = execute.Env{
+		Cfg: s.cfg, Ledger: s.led, Day: s.day, Report: run, Out: os.Stdout,
+		RetryWait: execute.DefaultRetryWait, Deadline: s.deadline,
+		// 寄る前の回か（9:00 より前）。真なら preopen_legs の脚を寄成で出す
+		Preopen: s.cfg.Execution.PreopenAt(s.now, jst),
+	}
+	if s.allowed {
+		var err error
+		if s.b, err = openBroker(s.cfg); err != nil {
+			return err
+		}
+		broker.SetDeadline(s.b, s.deadline)
+		// 前回の実行で送信結果が分からなかった注文があれば、ここで判定して台帳を直す。
+		// 届いていなければ UNSENT になり、下の「発注済み」には数えない（種を変えて送り直す）
+		if err := resolvePending(s.env, s.b); err != nil {
+			return err
+		}
+		// 前営業日以前の建玉が残っていれば（引けで返済できなかった持ち越し）、新規に建てる前に
+		// 寄付の成行で手仕舞う。検証は margin.carry_penalty で「翌寄りで返済」としているので同じにする。
+		// 判定できなければ止める——持ち越しを知らずに建てると二重になりうる
+		settled, err := execute.SettleCarried(s.env, s.b, execute.SettleAtOpen)
+		noteSettlement(settled)
+		if err != nil {
+			return err
+		}
+		s.carried, s.held = settled.Carried, settled.Held
+	} else {
+		// dry-run は確認のたびに増える。その日の古い dry-run は消して最新だけ残す
+		if _, err := s.led.ClearDryRun(s.day); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
