@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -200,33 +201,41 @@ type StrategiesConfig struct {
 	Strategies     []StrategyEntryRaw `toml:"strategies"`
 }
 
-func parseDec(v any, defaultVal decimal.Decimal) decimal.Decimal {
-	switch val := v.(type) {
-	case int64:
-		return decimal.NewFromInt(val)
-	case int:
-		return decimal.NewFromInt(int64(val))
-	case float64:
-		return decimal.NewFromFloat(val)
-	case string:
-		cleaned := strings.ReplaceAll(val, "_", "")
-		d, err := decimal.NewFromString(cleaned)
-		if err == nil {
-			return d
-		}
+// parseDec は数値（整数・小数・文字列表記）の項目を読む。書いていなければ既定値。
+//
+// 読めない値を黙って既定値にすると、「max_daily_loss = "10万"」が 100000 のまま
+// 効いているつもりになる。書式不正はエラーにする（daytrade の設定と同じ厳しさ）。
+func parseDec(name string, v any, defaultVal decimal.Decimal) (decimal.Decimal, error) {
+	d, err := parseOptDec(name, v)
+	if err != nil {
+		return decimal.Zero, err
 	}
-	return defaultVal
+	if d == nil {
+		return defaultVal, nil
+	}
+	return *d, nil
 }
 
-func parseStrDec(s string, defaultVal decimal.Decimal) decimal.Decimal {
+// parseStrDec は文字列で書く数値の項目を読む。空（未記入）なら既定値、読めなければエラー。
+func parseStrDec(name, s string, defaultVal decimal.Decimal) (decimal.Decimal, error) {
 	if s == "" {
-		return defaultVal
+		return defaultVal, nil
 	}
-	d, err := decimal.NewFromString(s)
+	d, err := decimal.NewFromString(strings.ReplaceAll(s, "_", ""))
 	if err != nil {
-		return defaultVal
+		return decimal.Zero, fmt.Errorf("%s は数値として読めません: %q", name, s)
 	}
-	return d
+	return d, nil
+}
+
+// decodeStrict は未知のキーを弾いて TOML を読む。
+//
+// 未知のキーを黙って無視すると、「kil_switch = true」のような綴りの誤りで緊急停止が
+// 効かないまま本番に乗る。daytrade の設定（pkg/daytrade/config）と同じく読んだ時点で止める。
+func decodeStrict(data []byte, dst any) error {
+	decoder := toml.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(dst)
 }
 
 // parseOptDec は任意項目の decimal を読む。TOML に無ければ nil。
@@ -373,10 +382,23 @@ func buildRegime(raw RegimeConfigRaw) (RegimeConfig, error) {
 		SMALong:         raw.SMALong,
 		SMAMid:          raw.SMAMid,
 		SlopeLookback:   raw.SlopeLookback,
-		ExposureBull:    parseDec(raw.ExposureBull, decimal.NewFromInt(1)),
-		ExposureCaution: parseDec(raw.ExposureCaution, decimal.RequireFromString("0.5")),
-		ExposureBear:    parseDec(raw.ExposureBear, decimal.Zero),
 		CashYieldSymbol: raw.CashYieldSymbol,
+	}
+	for _, item := range []struct {
+		name string
+		raw  any
+		def  decimal.Decimal
+		dst  *decimal.Decimal
+	}{
+		{"regime.exposure_bull", raw.ExposureBull, decimal.NewFromInt(1), &cfg.ExposureBull},
+		{"regime.exposure_caution", raw.ExposureCaution, decimal.RequireFromString("0.5"), &cfg.ExposureCaution},
+		{"regime.exposure_bear", raw.ExposureBear, decimal.Zero, &cfg.ExposureBear},
+	} {
+		v, err := parseDec(item.name, item.raw, item.def)
+		if err != nil {
+			return cfg, err
+		}
+		*item.dst = v
 	}
 	if cfg.Benchmark == "" {
 		cfg.Benchmark = "SPY"
@@ -411,7 +433,57 @@ func buildRegime(raw RegimeConfigRaw) (RegimeConfig, error) {
 	return cfg, nil
 }
 
+// validateRisk は [risk] の範囲を確かめる。0 や負の上限は「上限なし」ではなく書き誤り。
+func validateRisk(r RiskConfig) error {
+	for name, v := range map[string]decimal.Decimal{
+		"max_order_value":     r.MaxOrderValue,
+		"max_daily_loss":      r.MaxDailyLoss,
+		"max_position_weight": r.MaxPositionWeight,
+		"max_gross_exposure":  r.MaxGrossExposure,
+	} {
+		if v.LessThanOrEqual(decimal.Zero) {
+			return fmt.Errorf("risk.%s は正の数: %s", name, v)
+		}
+	}
+	if r.MaxPreviewDeviation.IsNegative() {
+		return fmt.Errorf("risk.max_preview_deviation は 0 以上: %s", r.MaxPreviewDeviation)
+	}
+	if r.MaxOrdersPerDay < 0 {
+		return fmt.Errorf("risk.max_orders_per_day は 0 以上: %d", r.MaxOrdersPerDay)
+	}
+	return nil
+}
+
+// validateExecution は [execution] の値を確かめる。
+//
+// order_type の綴りを誤ると黙って指値になり、limit_offset が読めないと黙って 0.005 に
+// なっていた。どちらも「設定したつもりで効いていない」なので止める。
+func validateExecution(e ExecutionConfig) error {
+	switch e.OrderType {
+	case "", "limit", "market":
+	default:
+		return fmt.Errorf("execution.order_type は limit / market: %q", e.OrderType)
+	}
+	if e.LimitOffset != "" {
+		d, err := parseStrDec("execution.limit_offset", e.LimitOffset, decimal.Zero)
+		if err != nil {
+			return err
+		}
+		if d.IsNegative() || d.GreaterThanOrEqual(decimal.NewFromInt(1)) {
+			return fmt.Errorf("execution.limit_offset は 0 以上 1 未満: %s", d)
+		}
+	}
+	switch e.TaxAccountType {
+	case "", "GENERAL", "SPECIFIC", "NISA":
+	default:
+		return fmt.Errorf("execution.tax_account_type は GENERAL / SPECIFIC / NISA: %q", e.TaxAccountType)
+	}
+	return nil
+}
+
 // LoadSettingsFile は settings.toml を読み込む。
+//
+// 未知のキー・読めない数値はエラーにする（decodeStrict・parseDec）。
 func LoadSettingsFile(configDir string) (*SettingsFile, error) {
 	path := filepath.Join(configDir, "settings.toml")
 	data, err := os.ReadFile(path)
@@ -420,32 +492,53 @@ func LoadSettingsFile(configDir string) (*SettingsFile, error) {
 	}
 
 	var raw SettingsFileRaw
-	if err := toml.Unmarshal(data, &raw); err != nil {
+	if err := decodeStrict(data, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse TOML %s: %w", path, err)
 	}
 
 	risk := RiskConfig{
-		KillSwitch:          raw.Risk.KillSwitch,
-		MaxOrderValue:       parseDec(raw.Risk.MaxOrderValue, decimal.NewFromInt(500000)),
-		MaxOrdersPerDay:     raw.Risk.MaxOrdersPerDay,
-		MaxDailyLoss:        parseDec(raw.Risk.MaxDailyLoss, decimal.NewFromInt(100000)),
-		MaxPositionWeight:   parseStrDec(raw.Risk.MaxPositionWeight, decimal.RequireFromString("0.25")),
-		MaxGrossExposure:    parseStrDec(raw.Risk.MaxGrossExposure, decimal.RequireFromString("0.90")),
-		MaxPreviewDeviation: parseStrDec(raw.Risk.MaxPreviewDeviation, decimal.RequireFromString("0.02")),
+		KillSwitch:      raw.Risk.KillSwitch,
+		MaxOrdersPerDay: raw.Risk.MaxOrdersPerDay,
 	}
-
 	sizing := SizingConfig{
-		Method:          raw.Sizing.Method,
-		RiskPerTrade:    parseStrDec(raw.Sizing.RiskPerTrade, decimal.RequireFromString("0.01")),
-		ATRStopMultiple: parseStrDec(raw.Sizing.ATRStopMultiple, decimal.RequireFromString("2.0")),
-		FixedNotional:   parseDec(raw.Sizing.FixedNotional, decimal.NewFromInt(300000)),
-		MaxPositions:    raw.Sizing.MaxPositions,
+		Method:       raw.Sizing.Method,
+		MaxPositions: raw.Sizing.MaxPositions,
+	}
+	var numErr error
+	num := func(name string, v any, def string, dst *decimal.Decimal) {
+		if numErr != nil {
+			return
+		}
+		*dst, numErr = parseDec(name, v, decimal.RequireFromString(def))
+	}
+	str := func(name, v, def string, dst *decimal.Decimal) {
+		if numErr != nil {
+			return
+		}
+		*dst, numErr = parseStrDec(name, v, decimal.RequireFromString(def))
+	}
+	num("risk.max_order_value", raw.Risk.MaxOrderValue, "500000", &risk.MaxOrderValue)
+	num("risk.max_daily_loss", raw.Risk.MaxDailyLoss, "100000", &risk.MaxDailyLoss)
+	str("risk.max_position_weight", raw.Risk.MaxPositionWeight, "0.25", &risk.MaxPositionWeight)
+	str("risk.max_gross_exposure", raw.Risk.MaxGrossExposure, "0.90", &risk.MaxGrossExposure)
+	str("risk.max_preview_deviation", raw.Risk.MaxPreviewDeviation, "0.02", &risk.MaxPreviewDeviation)
+	str("sizing.risk_per_trade", raw.Sizing.RiskPerTrade, "0.01", &sizing.RiskPerTrade)
+	str("sizing.atr_stop_multiple", raw.Sizing.ATRStopMultiple, "2.0", &sizing.ATRStopMultiple)
+	num("sizing.fixed_notional", raw.Sizing.FixedNotional, "300000", &sizing.FixedNotional)
+	if numErr != nil {
+		return nil, fmt.Errorf("%s: %w", path, numErr)
+	}
+	if err := validateRisk(risk); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if sizing.Method == "" {
 		sizing.Method = "atr_risk"
 	}
 	if sizing.MaxPositions <= 0 {
 		sizing.MaxPositions = 5
+	}
+	if err := validateExecution(raw.Execution); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 
 	stops, err := buildStops(raw.Stops)
@@ -503,13 +596,34 @@ func LoadStrategiesConfig(configDir string) (*StrategiesConfig, error) {
 		return nil, fmt.Errorf("failed to read %s: %w", path, err)
 	}
 
+	// 最上位のキーは厳しく読む。[[strategies]] の中は戦略ごとにパラメータが違うので
+	// ここでは map で受け、未知のパラメータは戦略の登録簿（strategy.Create）が弾く
+	var top struct {
+		Combiner       string           `toml:"combiner"`
+		EntryThreshold float64          `toml:"entry_threshold"`
+		ExitThreshold  float64          `toml:"exit_threshold"`
+		Strategies     []map[string]any `toml:"strategies"`
+	}
+	if err := decodeStrict(data, &top); err != nil {
+		return nil, fmt.Errorf("failed to parse TOML %s: %w", path, err)
+	}
 	var cfg StrategiesConfig
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse TOML %s: %w", path, err)
 	}
+	for i, s := range cfg.Strategies {
+		if s.Name == "" {
+			return nil, fmt.Errorf("%s: strategies[%d] に name がありません", path, i)
+		}
+	}
 
-	if cfg.Combiner == "" {
+	switch cfg.Combiner {
+	case "":
 		cfg.Combiner = "weighted_vote"
+	case "weighted_vote", "majority", "veto", "priority":
+	default:
+		// 綴りを誤ると黙って weighted_vote になっていた（strategy.GetCombinerByName）
+		return nil, fmt.Errorf("%s: combiner は weighted_vote / majority / veto / priority: %q", path, cfg.Combiner)
 	}
 	if cfg.EntryThreshold == 0 {
 		cfg.EntryThreshold = 0.3
