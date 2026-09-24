@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,7 +53,50 @@ func (e *ExecutionConfig) Validate() error {
 	if e.MaxStaleDays < 1 {
 		return fmt.Errorf("max_stale_days は 1 以上: %d", e.MaxStaleDays)
 	}
+	switch domain.TaxAccountType(e.TaxAccountType) {
+	case "", domain.TaxAccountGeneral, domain.TaxAccountSpecific, domain.TaxAccountNISA:
+	default:
+		return fmt.Errorf("tax_account_type は GENERAL / SPECIFIC / NISA: %q", e.TaxAccountType)
+	}
+	// 同じ銘柄を "452A.T" と "452A" の両方で書くと、どちらが効くかが map の順で決まる
+	seen := map[string]string{}
+	for key, lot := range e.LotSizeOverrides {
+		if lot <= 0 {
+			return fmt.Errorf("lot_size_overrides の %s は正の株数: %d", key, lot)
+		}
+		code := BrokerSymbol(key)
+		if code == "" {
+			return fmt.Errorf("lot_size_overrides に空の銘柄コードがあります: %q", key)
+		}
+		if other, dup := seen[code]; dup {
+			return fmt.Errorf("lot_size_overrides に同じ銘柄が 2 回あります: %q と %q", other, key)
+		}
+		seen[code] = key
+	}
 	return nil
+}
+
+// LotSizeFor は銘柄の売買単位の上書き。
+//
+// 設定のキーは足の表記（"452A.T"）でも発注の表記（"452A"）でもよい。
+// 引く側（発注）は "452A" で来るので、両側を BrokerSymbol に揃えて比べる。
+// 揃えないと上書きが一度も効かず、10 口単位の ETF を既定の 100 株で丸めて
+// 発注が丸ごと見送りになる（2026-09-24 のレビュー A5）。
+func (e *ExecutionConfig) LotSizeFor(symbol string) (int, bool) {
+	code := BrokerSymbol(symbol)
+	for key, lot := range e.LotSizeOverrides {
+		if BrokerSymbol(key) == code && lot > 0 {
+			return lot, true
+		}
+	}
+	return 0, false
+}
+
+// BrokerSymbol は足の表記（"452A.T"・"^N225"）を発注の表記（"452A"・"N225"）にする。
+// 台帳もこの表記で持つ。
+func BrokerSymbol(symbol string) string {
+	s := strings.TrimPrefix(strings.TrimSpace(symbol), "^")
+	return strings.TrimSuffix(s, ".T")
 }
 
 type TacticEntryRaw struct {
@@ -271,22 +316,66 @@ type AccumConfig struct {
 	Baskets       []BasketEntry
 }
 
-func parseDecimal(v any) decimal.Decimal {
+// parseBudget は予算の値を読む。書かれていなければ ok=false（呼び出し側が既定を使う）。
+//
+// 読めない値を既定に倒すと、打ち間違えた予算が「効いているつもり」で 25,000 円に
+// 化ける。書かれていて読めない・正でない値はエラーにする。
+func parseBudget(v any, field string) (d decimal.Decimal, ok bool, err error) {
 	switch val := v.(type) {
+	case nil:
+		return decimal.Zero, false, nil
 	case int64:
-		return decimal.NewFromInt(val)
+		d = decimal.NewFromInt(val)
 	case int:
-		return decimal.NewFromInt(int64(val))
+		d = decimal.NewFromInt(int64(val))
 	case float64:
-		return decimal.NewFromFloat(val)
+		d = decimal.NewFromFloat(val)
 	case string:
-		cleaned := strings.ReplaceAll(val, "_", "")
-		d, err := decimal.NewFromString(cleaned)
-		if err == nil {
-			return d
+		cleaned := strings.ReplaceAll(strings.TrimSpace(val), "_", "")
+		d, err = decimal.NewFromString(cleaned)
+		if err != nil {
+			return decimal.Zero, false, fmt.Errorf("%s を数値として解釈できません: %q", field, val)
 		}
+	default:
+		return decimal.Zero, false, fmt.Errorf("%s は数値で指定してください: %v", field, v)
 	}
-	return decimal.Zero
+	if !d.IsPositive() {
+		return decimal.Zero, false, fmt.Errorf("%s は正の値: %s", field, d)
+	}
+	return d, true, nil
+}
+
+// validMarket は market / signal_market に書ける値か（空は既定の日本株）。
+//
+// 綴りを誤ると判定用の足を 1 日遅らせるか（SignalLags）の判定が黙って偽になり、
+// 買う時点でまだ無いはずの米国の足で判定してしまう。
+func validMarket(m string) bool {
+	switch domain.Market(m) {
+	case "", domain.MarketJP, domain.MarketUS:
+		return true
+	}
+	return false
+}
+
+// decodeStrict は未知の項目を弾いて読む（daytrade の設定と同じ厳格さ）。
+//
+// 未知の項目を黙って無視すると、kill_switch の綴りを間違えた設定が
+// 「緊急停止したつもり」で発注を続ける。読めた時点で弾く。
+func decodeStrict(data []byte, raw *AccumConfigRaw) error {
+	decoder := toml.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(raw)
+	var strict *toml.StrictMissingError
+	if errors.As(err, &strict) {
+		// 既定の文言は「どれが」を言わない。人が直せるように項目名と行を並べる
+		var keys []string
+		for _, e := range strict.Errors {
+			row, _ := e.Position()
+			keys = append(keys, fmt.Sprintf("%s（%d 行目）", strings.Join(e.Key(), "."), row))
+		}
+		return fmt.Errorf("未知の項目があります（綴りを確かめてください）: %s", strings.Join(keys, "、"))
+	}
+	return err
 }
 
 func LoadAccumConfig(configDir string) (*AccumConfig, error) {
@@ -301,23 +390,30 @@ func LoadAccumConfig(configDir string) (*AccumConfig, error) {
 	}
 
 	var raw AccumConfigRaw
-	if err := toml.Unmarshal(data, &raw); err != nil {
+	if err := decodeStrict(data, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse TOML %s: %w", path, err)
 	}
 
-	defaultBudget := parseDecimal(raw.MonthlyBudget)
-	if defaultBudget.IsZero() {
+	defaultBudget, ok, err := parseBudget(raw.MonthlyBudget, "monthly_budget")
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if !ok {
 		defaultBudget = decimal.NewFromInt(25000)
 	}
 
 	var entries []TacticEntry
 	for _, tr := range raw.Tactics {
-		budget := parseDecimal(tr.MonthlyBudget)
-		if budget.IsZero() {
+		budget, ok, err := parseBudget(tr.MonthlyBudget, "monthly_budget")
+		if err != nil {
+			return nil, fmt.Errorf("%s: [%s] %w", path, tr.ID, err)
+		}
+		if !ok {
 			budget = defaultBudget
 		}
-		if !budget.IsPositive() {
-			return nil, fmt.Errorf("[%s] monthly_budget は正の値: %s", tr.ID, budget)
+		if !validMarket(tr.Market) || !validMarket(tr.SignalMarket) {
+			return nil, fmt.Errorf("%s: [%s] market / signal_market は JP か US: %q / %q",
+				path, tr.ID, tr.Market, tr.SignalMarket)
 		}
 
 		symbols, err := cleanSymbols(tr.Symbols)
@@ -456,12 +552,15 @@ func (c *AccumConfig) ActiveBaskets() []BasketEntry {
 func parseBaskets(raws []BasketEntryRaw, defaultBudget decimal.Decimal) ([]BasketEntry, error) {
 	var out []BasketEntry
 	for _, br := range raws {
-		budget := parseDecimal(br.MonthlyBudget)
-		if budget.IsZero() {
+		budget, ok, err := parseBudget(br.MonthlyBudget, "monthly_budget")
+		if err != nil {
+			return nil, fmt.Errorf("[%s] %w", br.ID, err)
+		}
+		if !ok {
 			budget = defaultBudget
 		}
-		if !budget.IsPositive() {
-			return nil, fmt.Errorf("[%s] monthly_budget は正の値: %s", br.ID, budget)
+		if !validMarket(br.Market) {
+			return nil, fmt.Errorf("[%s] market は JP か US: %q", br.ID, br.Market)
 		}
 		for symbol, weight := range br.Weights {
 			if weight <= 0 {
@@ -486,7 +585,6 @@ func parseBaskets(raws []BasketEntryRaw, defaultBudget decimal.Decimal) ([]Baske
 
 		var mults map[int]float64
 		var values []float64
-		var err error
 		switch tacticName {
 		case "stack_ladder":
 			mults, err = toIntFloatMap(br.Multipliers, "multipliers")
