@@ -50,3 +50,22 @@ func TestBarsUnusable(t *testing.T) {
 		}
 	}
 }
+
+// TestTradingDayGate は W7 に伴う休場日の扱い。cron を平日で回すので、祝日は run 自身が見送る。
+// カレンダーが読めないときは発注する回だけ止める。
+func TestTradingDayGate(t *testing.T) {
+	cal := calendar.New([]time.Time{day("2026-09-18"), day("2026-09-24")})
+	if skip, err := tradingDayGate(cal, day("2026-09-22"), true); err != nil || skip == "" {
+		t.Errorf("平日の休場日は見送るはず: %q %v", skip, err)
+	}
+	if skip, err := tradingDayGate(cal, day("2026-09-24"), true); err != nil || skip != "" {
+		t.Errorf("営業日は回すはず: %q %v", skip, err)
+	}
+	empty := calendar.New(nil)
+	if _, err := tradingDayGate(empty, day("2026-09-24"), true); err == nil {
+		t.Error("カレンダーが無いのに発注する回を止めなかった")
+	}
+	if skip, err := tradingDayGate(empty, day("2026-09-24"), false); err != nil || skip != "" {
+		t.Errorf("dry-run はカレンダーが無くても続けるはず: %q %v", skip, err)
+	}
+}

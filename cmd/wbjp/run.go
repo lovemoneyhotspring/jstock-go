@@ -91,6 +91,22 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 	defer rep.Close()
 
 	todayJST := clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006-01-02")
+	today, err := time.Parse("2006-01-02", todayJST)
+	if err != nil {
+		return fmt.Errorf("今日の日付を読めません: %w", err)
+	}
+	// 営業日と「あるべき最後の足」は東証のカレンダーで決める
+	cal := calendar.FromArchive(archive.NewArchive(appSettings.JQuantsArchiveDir()))
+	if skip, err := tradingDayGate(cal, today, canLive); err != nil {
+		return err
+	} else if skip != "" {
+		logger.Info("wbjp.market_closed", skip)
+		fmt.Println(skip)
+		return nil
+	}
+	if cal.Empty() {
+		logger.Warn("wbjp.calendar_missing", "取引カレンダーが読めないので平日を営業日とみなします（祝日明けは足が古いとみなして止まる）")
+	}
 	mode := "dry_run"
 	if canLive {
 		mode = "live"
@@ -163,14 +179,6 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 	allBars := make(map[string][]domain.Bar)
 	// 足が古い・読めない銘柄（銘柄 → 理由）。この回は売りも買いも出さない（W6）
 	unusable := make(map[string]string)
-	today, err := time.Parse("2006-01-02", todayJST)
-	if err != nil {
-		return fmt.Errorf("今日の日付を読めません: %w", err)
-	}
-	cal := calendar.FromArchive(archive.NewArchive(appSettings.JQuantsArchiveDir()))
-	if cal.Empty() {
-		logger.Warn("wbjp.calendar_missing", "取引カレンダーが読めないので平日を営業日とみなします（祝日明けは足が古いとみなして止まる）")
-	}
 
 	for _, sym := range setCfg.Universe.Symbols {
 		lotSizes[sym] = decimal.NewFromInt(100)

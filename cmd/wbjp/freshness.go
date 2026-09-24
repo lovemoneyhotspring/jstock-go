@@ -4,8 +4,27 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 )
+
+// tradingDayGate は今日 run してよいかを決める。休場日なら理由を返す（発注せずに正常終了）。
+//
+// 休場日（平日の祝日を含む）に発注する回を回すと、前営業日の足で判断した注文が翌営業日に
+// 回り、当日限りの前提（placed_on・差金決済の柵）が崩れる。カレンダーが読めないと祝日が
+// 分からないので、発注する回は止める（dry-run は平日として続ける）。
+func tradingDayGate(cal *calendar.Calendar, today time.Time, canLive bool) (skip string, err error) {
+	if cal.Empty() {
+		if canLive {
+			return "", fmt.Errorf("取引カレンダーが読めないため発注を中止しました（祝日に発注しないため。jquants sync で取り込む）")
+		}
+		return "", nil
+	}
+	if !cal.IsTradingDay(today) {
+		return fmt.Sprintf("%s は休場日のため判断も発注もしません", today.Format("2006-01-02")), nil
+	}
+	return "", nil
+}
 
 // barsUnusable は、その銘柄の足で今回の判断をしてよいかを調べ、してはいけなければ理由を返す
 // （してよければ空文字）。
