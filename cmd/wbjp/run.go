@@ -60,7 +60,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	if err != nil {
 		return err
 	}
-	setCfg, stratCfg, canLive, runID, logger := d.setCfg, d.stratCfg, d.canLive, d.runID, d.logger
+	setCfg, canLive, runID, logger := d.setCfg, d.canLive, d.runID, d.logger
 
 	rep, err := repo.OpenRepo(appSettings.DBPath())
 	if err != nil {
@@ -72,7 +72,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	if done, err := d.openDay(); done || err != nil {
 		return err
 	}
-	todayJST, cal := d.todayJST, d.cal
+	todayJST := d.todayJST
 	if err := rep.StartRun(runID, todayJST, string(appSettings.Env), d.mode()); err != nil {
 		return fmt.Errorf("実行の記録を始められません: %w", err)
 	}
@@ -82,7 +82,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	if err := d.connect(); err != nil {
 		return err
 	}
-	barStore, b, bal, equity, posMap := d.barStore, d.b, d.bal, d.equity, d.posMap
+	b, bal, equity, posMap := d.b, d.bal, d.equity, d.posMap
 
 	if err := d.checkLedger(); err != nil {
 		return err
@@ -92,126 +92,12 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	if err := d.updateStops(); err != nil {
 		return err
 	}
-	lastPrices, atrMap, lotSizes, allBars, unusable := d.lastPrices, d.atrMap, d.lotSizes, d.allBars, d.unusable
-	decisionCloses, stopBook := d.decisionCloses, d.stopBook
+	lastPrices, lotSizes, unusable := d.lastPrices, d.lotSizes, d.unusable
 
-	// 3. 戦略の評価
-	strats, weights, err := buildStrategies(stratCfg)
-	if err != nil {
+	if err := d.decide(); err != nil {
 		return err
 	}
-	combineFunc := strategy.GetCombinerByName(stratCfg.Combiner)
-
-	var allSignals []domain.Signal
-	var combinedSignals []domain.CombinedSignal
-	targets := make(map[string]domain.TargetPosition)
-	// wbjp が売買する銘柄。ユニバース外の保有（手で買った株など）には手を出さない
-	universe := symbolSet(setCfg.Universe.Symbols)
-
-	// 3-1. 全銘柄のシグナルを出す。
-	//
-	// 戦略には銘柄ごとではなく全銘柄をまとめて渡す。モメンタムの
-	// 順位付けやベンチマークとの比較は、1 銘柄ずつ呼ぶ形では書けない。
-	stratUniverse := strategy.NewUniverse(allBars)
-	if needsMargin(stratCfg) {
-		book, err := loadMarginBook(setCfg.Universe.Symbols)
-		if err != nil {
-			return err
-		}
-		if book == nil {
-			logger.Warn("wbjp.margin_missing", "信用残がアーカイブにありません。margin_balance は黙ります")
-		}
-		stratUniverse.SetMargin(book)
-	}
-	stratCtx := stratUniverse.At(todayJST, posMap, equity)
-
-	signalsBySymbol := make(map[string][]domain.Signal)
-	for _, s := range strats {
-		sigs, err := s.OnBars(stratCtx)
-		if err != nil {
-			logger.Warn("wbjp.strategy_error", fmt.Sprintf("%s の評価に失敗: %v", s.Name(), err))
-			continue
-		}
-		for _, sig := range sigs {
-			signalsBySymbol[sig.Symbol] = append(signalsBySymbol[sig.Symbol], sig)
-			allSignals = append(allSignals, sig)
-		}
-	}
-
-	signalMap := make(map[string]domain.CombinedSignal)
-	for _, sym := range setCfg.Universe.Symbols {
-		// 足の無い銘柄は判断材料が無い。合成すると「中立」を主張した
-		// ことになり、保有中なら手仕舞い扱いになってしまう。
-		if !stratCtx.HasBars(sym, 1) {
-			continue
-		}
-		// 足が古い銘柄も同じ（古い足での「シグナル消滅」で全株を売らない。W6）
-		if _, ng := unusable[sym]; ng {
-			continue
-		}
-		combined := combineFunc(sym, signalsBySymbol[sym], weights)
-		combinedSignals = append(combinedSignals, combined)
-		signalMap[sym] = combined
-	}
-
-	// 3-2. 地合いに応じて露出を絞る。弱気なら新規を止めて全て手仕舞う。
-	sizingEquity := equity
-	if setCfg.Regime.Enabled {
-		regimeName, exposure := risk.RegimeExposure(setCfg.Regime, regimeInput(barStore, setCfg.Regime))
-		signalMap, sizingEquity = risk.ApplyRegime(regimeName, exposure, signalMap, posMap, equity)
-		logger.Info("wbjp.regime",
-			fmt.Sprintf("地合い %s: 露出 %s（サイジング基準 %s円）", regimeName, exposure, sizingEquity.Round(0)))
-	}
-
-	// 3-3. 保有銘柄数の上限・手仕舞い閾値・再サイジング抑制は
-	// ポートフォリオ全体を見ないと決まらないので一括で計算する。
-	sizer, err := portfolio.NewSizer(setCfg.Sizing)
-	if err != nil {
-		return err
-	}
-	strategyTargets := sizer.Size(signalMap, portfolio.SizingContext{
-		Equity:      sizingEquity,
-		BuyingPower: bal.BuyingPower,
-		Prices:      lastPrices,
-		ATR:         atrMap,
-		LotSizes:    lotSizes,
-		Positions:   posMap,
-	}, stratCfg.EntryThreshold, stratCfg.ExitThreshold)
-
-	// 3-4. ストップ由来の手仕舞いを集める。これらは戦略の判断より優先する。
-	// 並べ方・重ね方は backtest と同じ risk.ExitPlan（損切りが残り玉の「維持」に負けない）
-	quantities := quantitiesOf(posMap)
-	stopTargets := decideStopExits(rep, stopBook, setCfg.Stops, risk.ExitInputs{
-		Closes: decisionCloses, Quantities: quantities, LotSizes: lotSizes, AsOf: todayJST,
-		Bars: func(sym string) []domain.Bar { return allBars[sym] },
-		// 時間切れの営業日数は東証のカレンダーで数える（祝日を数えない。読めなければ平日で代用するが、
-		// 発注する回はその前の tradingDayGate で止まっている）
-		TradingDay: cal.IsTradingDay,
-	}, canLive, logger)
-	for _, t := range risk.ApplyStopPriority(strategyTargets, stopTargets) {
-		if _, ng := unusable[t.Symbol]; ng {
-			continue // 判断しない銘柄の目標（シグナルが無いための手仕舞い）を台帳に残さない
-		}
-		if _, ok := universe[t.Symbol]; !ok {
-			continue // ユニバース外の保有（手で買った株など）には手を出さない（地合いの手仕舞いも）
-		}
-		targets[t.Symbol] = t
-	}
-
-	if err := rep.RecordSignals(runID, allSignals); err != nil {
-		logger.Warn("wbjp.ledger", fmt.Sprintf("シグナルを記録できません: %v", err))
-	}
-	if err := rep.RecordCombinedSignals(runID, combinedSignals); err != nil {
-		logger.Warn("wbjp.ledger", fmt.Sprintf("合成シグナルを記録できません: %v", err))
-	}
-
-	var targetList []domain.TargetPosition
-	for _, t := range targets {
-		targetList = append(targetList, t)
-	}
-	if err := rep.RecordTargets(runID, targetList); err != nil {
-		logger.Warn("wbjp.ledger", fmt.Sprintf("目標を記録できません: %v", err))
-	}
+	targets, targetList, universe := d.targets, d.targetList, d.universe
 
 	// 4. リコンサイル
 	//
@@ -390,6 +276,12 @@ type dailyRun struct {
 
 	// ストップ（updateStops）
 	stopBook *risk.StopBook
+
+	// 判断（decide）
+	targets    map[string]domain.TargetPosition
+	targetList []domain.TargetPosition
+	// wbjp が売買する銘柄。ユニバース外の保有（手で買った株など）には手を出さない
+	universe map[string]struct{}
 }
 
 // prepareDaily は設定を読み、発注するかを決めて口座を表示し、本番発注なら確認を取る。
@@ -651,6 +543,135 @@ func (d *dailyRun) updateStops() error {
 	// 建値への引き上げは利確・トレーリングより先に行う。
 	stopBook.UpdateBreakeven(d.decisionCloses, d.setCfg.Stops.BreakevenAfterR)
 	// ストップの保存は利確（ScaledOut・建値への引き上げ）を決めた後（3-4）
+	return nil
+}
+
+// decide は戦略の評価（全銘柄のシグナル・合成・地合い・サイジング）とストップ由来の手仕舞いから
+// 銘柄ごとの目標を決め、シグナル・目標を台帳に残す。ストップの保存もここ（decideStopExits）。
+func (d *dailyRun) decide() error {
+	setCfg, stratCfg, canLive, runID, logger, rep := d.setCfg, d.stratCfg, d.canLive, d.runID, d.logger, d.rep
+	barStore, bal, equity, posMap := d.barStore, d.bal, d.equity, d.posMap
+	lastPrices, atrMap, lotSizes, allBars, unusable := d.lastPrices, d.atrMap, d.lotSizes, d.allBars, d.unusable
+	decisionCloses, stopBook, todayJST, cal := d.decisionCloses, d.stopBook, d.todayJST, d.cal
+
+	strats, weights, err := buildStrategies(stratCfg)
+	if err != nil {
+		return err
+	}
+	combineFunc := strategy.GetCombinerByName(stratCfg.Combiner)
+
+	var allSignals []domain.Signal
+	var combinedSignals []domain.CombinedSignal
+	targets := make(map[string]domain.TargetPosition)
+	// wbjp が売買する銘柄。ユニバース外の保有（手で買った株など）には手を出さない
+	universe := symbolSet(setCfg.Universe.Symbols)
+	d.targets, d.universe = targets, universe
+
+	// 3-1. 全銘柄のシグナルを出す。
+	//
+	// 戦略には銘柄ごとではなく全銘柄をまとめて渡す。モメンタムの
+	// 順位付けやベンチマークとの比較は、1 銘柄ずつ呼ぶ形では書けない。
+	stratUniverse := strategy.NewUniverse(allBars)
+	if needsMargin(stratCfg) {
+		book, err := loadMarginBook(setCfg.Universe.Symbols)
+		if err != nil {
+			return err
+		}
+		if book == nil {
+			logger.Warn("wbjp.margin_missing", "信用残がアーカイブにありません。margin_balance は黙ります")
+		}
+		stratUniverse.SetMargin(book)
+	}
+	stratCtx := stratUniverse.At(todayJST, posMap, equity)
+
+	signalsBySymbol := make(map[string][]domain.Signal)
+	for _, s := range strats {
+		sigs, err := s.OnBars(stratCtx)
+		if err != nil {
+			logger.Warn("wbjp.strategy_error", fmt.Sprintf("%s の評価に失敗: %v", s.Name(), err))
+			continue
+		}
+		for _, sig := range sigs {
+			signalsBySymbol[sig.Symbol] = append(signalsBySymbol[sig.Symbol], sig)
+			allSignals = append(allSignals, sig)
+		}
+	}
+
+	signalMap := make(map[string]domain.CombinedSignal)
+	for _, sym := range setCfg.Universe.Symbols {
+		// 足の無い銘柄は判断材料が無い。合成すると「中立」を主張した
+		// ことになり、保有中なら手仕舞い扱いになってしまう。
+		if !stratCtx.HasBars(sym, 1) {
+			continue
+		}
+		// 足が古い銘柄も同じ（古い足での「シグナル消滅」で全株を売らない。W6）
+		if _, ng := unusable[sym]; ng {
+			continue
+		}
+		combined := combineFunc(sym, signalsBySymbol[sym], weights)
+		combinedSignals = append(combinedSignals, combined)
+		signalMap[sym] = combined
+	}
+
+	// 3-2. 地合いに応じて露出を絞る。弱気なら新規を止めて全て手仕舞う。
+	sizingEquity := equity
+	if setCfg.Regime.Enabled {
+		regimeName, exposure := risk.RegimeExposure(setCfg.Regime, regimeInput(barStore, setCfg.Regime))
+		signalMap, sizingEquity = risk.ApplyRegime(regimeName, exposure, signalMap, posMap, equity)
+		logger.Info("wbjp.regime",
+			fmt.Sprintf("地合い %s: 露出 %s（サイジング基準 %s円）", regimeName, exposure, sizingEquity.Round(0)))
+	}
+
+	// 3-3. 保有銘柄数の上限・手仕舞い閾値・再サイジング抑制は
+	// ポートフォリオ全体を見ないと決まらないので一括で計算する。
+	sizer, err := portfolio.NewSizer(setCfg.Sizing)
+	if err != nil {
+		return err
+	}
+	strategyTargets := sizer.Size(signalMap, portfolio.SizingContext{
+		Equity:      sizingEquity,
+		BuyingPower: bal.BuyingPower,
+		Prices:      lastPrices,
+		ATR:         atrMap,
+		LotSizes:    lotSizes,
+		Positions:   posMap,
+	}, stratCfg.EntryThreshold, stratCfg.ExitThreshold)
+
+	// 3-4. ストップ由来の手仕舞いを集める。これらは戦略の判断より優先する。
+	// 並べ方・重ね方は backtest と同じ risk.ExitPlan（損切りが残り玉の「維持」に負けない）
+	quantities := quantitiesOf(posMap)
+	stopTargets := decideStopExits(rep, stopBook, setCfg.Stops, risk.ExitInputs{
+		Closes: decisionCloses, Quantities: quantities, LotSizes: lotSizes, AsOf: todayJST,
+		Bars: func(sym string) []domain.Bar { return allBars[sym] },
+		// 時間切れの営業日数は東証のカレンダーで数える（祝日を数えない。読めなければ平日で代用するが、
+		// 発注する回はその前の tradingDayGate で止まっている）
+		TradingDay: cal.IsTradingDay,
+	}, canLive, logger)
+	for _, t := range risk.ApplyStopPriority(strategyTargets, stopTargets) {
+		if _, ng := unusable[t.Symbol]; ng {
+			continue // 判断しない銘柄の目標（シグナルが無いための手仕舞い）を台帳に残さない
+		}
+		if _, ok := universe[t.Symbol]; !ok {
+			continue // ユニバース外の保有（手で買った株など）には手を出さない（地合いの手仕舞いも）
+		}
+		targets[t.Symbol] = t
+	}
+
+	if err := rep.RecordSignals(runID, allSignals); err != nil {
+		logger.Warn("wbjp.ledger", fmt.Sprintf("シグナルを記録できません: %v", err))
+	}
+	if err := rep.RecordCombinedSignals(runID, combinedSignals); err != nil {
+		logger.Warn("wbjp.ledger", fmt.Sprintf("合成シグナルを記録できません: %v", err))
+	}
+
+	var targetList []domain.TargetPosition
+	for _, t := range targets {
+		targetList = append(targetList, t)
+	}
+	d.targetList = targetList
+	if err := rep.RecordTargets(runID, targetList); err != nil {
+		logger.Warn("wbjp.ledger", fmt.Sprintf("目標を記録できません: %v", err))
+	}
 	return nil
 }
 
