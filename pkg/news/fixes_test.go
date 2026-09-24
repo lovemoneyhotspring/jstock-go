@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +115,28 @@ func TestDoneDaysIncludesEmptyOKDays(t *testing.T) {
 	}
 }
 
+// 日が明ける前にしか取れていない日は済みにしない（夜の配信が抜けたままになる）。
+// 明けてから取れば済み。
+func TestDoneDaysRequiresFetchAfterDayEnd(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	jst := time.FixedZone("JST", 9*3600)
+	if _, err := s.Save(ctx, "2026-09-14", items(), time.Date(2026, 9, 14, 20, 20, 0, 0, jst)); err != nil {
+		t.Fatal(err)
+	}
+	// UTC で書いた、日が明けた後（9/15 0:10 JST）の取り込み
+	if _, err := s.Save(ctx, "2026-09-13", nil, time.Date(2026, 9, 14, 15, 10, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	done, err := s.DoneDays(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done["2026-09-14"] || !done["2026-09-13"] {
+		t.Errorf("DoneDays = %v, want 9/13 だけ済み", done)
+	}
+}
+
 type stubSource struct {
 	byDay map[string][]broker.NewsItem
 	fail  map[string]bool
@@ -149,6 +172,10 @@ func TestSync(t *testing.T) {
 	if res.Imported != 4 || res.Failed != 1 || res.Skipped != 0 || len(src.calls) != 5 {
 		t.Fatalf("1 回目 res = %+v calls = %v", res, src.calls)
 	}
+	// 日単位の失敗は news sync の終了コードに出す
+	if err := res.FailureError(); err == nil || !strings.Contains(err.Error(), "2026-09-12") {
+		t.Errorf("FailureError = %v, want 9/12 の失敗", err)
+	}
 	var status string
 	if err := s.DB().QueryRow(`SELECT status FROM news_days WHERE feed_date = '2026-09-12'`).Scan(&status); err != nil || status != "電文の失敗" {
 		t.Errorf("失敗の記録 = %q %v", status, err)
@@ -163,6 +190,9 @@ func TestSync(t *testing.T) {
 	want := []string{"20260915", "20260914", "20260913", "20260912"}
 	if !reflect.DeepEqual(src.calls, want) || res.Skipped != 1 || res.Failed != 0 {
 		t.Fatalf("2 回目 calls = %v res = %+v", src.calls, res)
+	}
+	if err := res.FailureError(); err != nil {
+		t.Errorf("失敗の無い回の FailureError = %v", err)
 	}
 	if res.Days[3].Day != "2026-09-12" || res.Days[3].New != 2 {
 		t.Errorf("取り直した 9/12 = %+v", res.Days[3])

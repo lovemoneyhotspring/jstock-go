@@ -49,7 +49,11 @@ func newSyncCmd() *cobra.Command {
 			}
 			fmt.Printf("取り込み %d 日 / 新しい記事 %d 件（済み %d 日をとばした、失敗 %d 日）\n",
 				res.Imported, res.Added, res.Skipped, res.Failed)
-			return err
+			if err != nil {
+				return err
+			}
+			// 日単位の失敗も終了コードで知らせる（台帳には失敗として残り、次回また取りに行く）
+			return res.FailureError()
 		},
 	}
 	cmd.Flags().IntVar(&days, "days", 90, "さかのぼる日数（API の上限は 90）")

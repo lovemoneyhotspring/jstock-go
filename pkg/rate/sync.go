@@ -3,15 +3,15 @@ package rate
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/news"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 )
 
-// NewsSource はニュースを日付（YYYYMMDD）で引く口。立花証券のブローカーが満たす。
-type NewsSource interface {
-	News(day string) ([]broker.NewsItem, error)
-}
+// NewsSource はニュースを日付（YYYYMMDD）で引く口。立花証券のブローカーが満たす（news.Source と同じ）。
+type NewsSource = news.Source
 
 // SyncNewsDay は取り込んだ 1 日ぶん。
 type SyncNewsDay struct {
@@ -45,27 +45,22 @@ func SyncNews(ctx context.Context, store *Store, source NewsSource, days, recent
 	if err != nil {
 		return res, err
 	}
-	now := clock.NowJST()
-	for i := 0; i < days; i++ {
-		day := now.AddDate(0, 0, -i)
-		key := day.Format("2006-01-02")
-		if done[key] && !force && i >= recent {
-			res.Skipped++
-			continue
-		}
-		items, err := source.News(day.Format("20060102"))
-		if err != nil {
-			res.Failed++
-			res.Days = append(res.Days, SyncNewsDay{Day: key, Err: fmt.Errorf("%s のニュース取得に失敗: %w", key, err)})
-			continue
-		}
-		events := EventsFromNews(day, items)
-		if err := store.SaveEvents(ctx, key, events, len(items)); err != nil {
-			return res, err
-		}
-		res.Imported++
-		res.Events += len(events)
-		res.Days = append(res.Days, SyncNewsDay{Day: key, News: len(items), Events: len(events)})
-	}
-	return res, nil
+	// 日のめぐり方（済みの飛ばし・直近の取り直し・1 日の失敗で止めない）は news.Sync と共通（news.Walk）
+	res.Skipped, err = news.Walk(clock.NowJST(), source, days, recent, force, done,
+		func(day time.Time, key string, items []broker.NewsItem, fetchErr error) error {
+			if fetchErr != nil {
+				res.Failed++
+				res.Days = append(res.Days, SyncNewsDay{Day: key, Err: fmt.Errorf("%s のニュース取得に失敗: %w", key, fetchErr)})
+				return nil
+			}
+			events := EventsFromNews(day, items)
+			if err := store.SaveEvents(ctx, key, events, len(items)); err != nil {
+				return err
+			}
+			res.Imported++
+			res.Events += len(events)
+			res.Days = append(res.Days, SyncNewsDay{Day: key, News: len(items), Events: len(events)})
+			return nil
+		})
+	return res, err
 }
