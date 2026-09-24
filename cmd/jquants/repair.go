@@ -22,7 +22,7 @@ func newRepairCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "repair",
-		Short: "check と同じ判定で欠けを探し、その日だけ取り直す（埋まらない・古い端点があれば終了コード 2）",
+		Short: "check と同じ判定で欠けを探し、その日だけ取り直す（埋まらない・古い端点があれば終了コード 3）",
 		Long: "check が欠けを報告したときの修復用。API のある端点は 1 日ずつ date= で取り直す\n" +
 			"（0 行でも台帳に残るので、週次のように行の無い日は次から欠けと数えない。\n" +
 			"日足のように毎営業日行があるはずの端点は、0 行なら欠けのまま残る）。\n" +
@@ -124,7 +124,7 @@ func newRepairCmd() *cobra.Command {
 				if doNotify {
 					notify.Alert(title, strings.Join(lines, "\n"), s.logger)
 				}
-				return exitWith(2, "欠けが埋まらない %d 件、古い端点 %d（%s）", total, len(stale), strings.Join(lines, " / "))
+				return exitWith(exitGaps, "欠けが埋まらない %d 件、古い端点 %d（%s）", total, len(stale), strings.Join(lines, " / "))
 			}
 			if failed {
 				return exitWith(1, "%s", failureSummary(result.Failures))

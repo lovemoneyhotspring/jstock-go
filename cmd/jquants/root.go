@@ -51,6 +51,11 @@ type exitError struct {
 func (e *exitError) Error() string { return e.err.Error() }
 func (e *exitError) Unwrap() error { return e.err }
 
+// exitGaps は check・repair が「欠け・古い端点」を見つけたときの終了コード。
+// ふつうの失敗は 1、panic は 2（cli.ExitPanic）。以前は 2 で panic と区別できなかった
+// （2026-09-24 のレビュー）。crontab・deploy/*.sh は jquants の終了コードの値で分岐していない。
+const exitGaps = 3
+
 // exitWith は終了コード code の失敗を返す。os.Exit を RunE の中で呼ぶと defer と
 // ダイジェストの書き出しを飛ばすので、終了は main に任せる。
 func exitWith(code int, format string, args ...any) error {

@@ -20,7 +20,7 @@ func newCheckCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "check",
-		Short: "営業日ごとの欠けと、古くなった端点を探す（あれば終了コード 2）",
+		Short: "営業日ごとの欠けと、古くなった端点を探す（あれば終了コード 3）",
 		Long: "監視用。cron から回すときは --notify を付けると、ログを開かなくても気づける。\n" +
 			"確認そのものに失敗したときも通知する（監視役が黙って死ぬのを防ぐ）。\n" +
 			"日付で取る端点は営業日の欠けを、全件・範囲で取る端点（取引カレンダー・TOPIX・\n" +
@@ -91,7 +91,7 @@ func newCheckCmd() *cobra.Command {
 				notify.Alert(fmt.Sprintf("J-Quants の蓄積に欠け（%d 件、古い端点 %d）", missingTotal, len(stale)),
 					strings.Join(lines, "\n"), s.logger)
 			}
-			return exitWith(2, "欠け %d 件、古い端点 %d（%s）", missingTotal, len(stale), strings.Join(lines, " / "))
+			return exitWith(exitGaps, "欠け %d 件、古い端点 %d（%s）", missingTotal, len(stale), strings.Join(lines, " / "))
 		},
 	}
 	cmd.Flags().StringVar(&date, "date", "", "確認する日（YYYY-MM-DD、JST）。既定は JST の今日")

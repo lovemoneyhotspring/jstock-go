@@ -98,12 +98,12 @@ func TestStatusIsOK(t *testing.T) {
 	}
 }
 
-// repair は終わりに全件・範囲で取る端点の鮮度も見る。古ければ終了コード 2 で、ダイジェストも error。
+// repair は終わりに全件・範囲で取る端点の鮮度も見る。古ければ終了コード 3（exitGaps。panic の 2 と分ける）で、ダイジェストも error。
 // 以前は 20:00 の cron を check から repair に替えたとき（0134076）に鮮度の監視が抜けていた（レビュー N4）。
 func TestRepairReportsStaleEndpoints(t *testing.T) {
 	stateDir := sandbox(t, failingClient{})
-	if code := execute([]string{"repair", "--only", "markets_calendar"}); code != 2 {
-		t.Fatalf("終了コード = %d, want 2（一度も取っていない取引カレンダーは古い）", code)
+	if code := execute([]string{"repair", "--only", "markets_calendar"}); code != exitGaps {
+		t.Fatalf("終了コード = %d, want 3（一度も取っていない取引カレンダーは古い）", code)
 	}
 	rec := readDigest(t, stateDir)
 	anomalies, _ := rec["anomalies"].([]any)
