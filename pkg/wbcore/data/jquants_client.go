@@ -3,6 +3,7 @@ package data
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -222,12 +223,12 @@ func (c *JQuantsClient) download(signedURL string) ([]byte, error) {
 	for attempt := 0; attempt < downloadRetries; attempt++ {
 		req, err := http.NewRequest(http.MethodGet, signedURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("ダウンロード要求を作れません: %w", err)
+			return nil, fmt.Errorf("ダウンロード要求を作れません: %w", redactURL(err))
 		}
 		client := &http.Client{Timeout: 5 * time.Minute}
 		resp, err := client.Do(req)
 		if err != nil {
-			lastErr = err
+			lastErr = redactURL(err)
 			retrySleep(time.Duration(1<<attempt) * time.Second)
 			continue
 		}
@@ -251,6 +252,21 @@ func (c *JQuantsClient) download(signedURL string) ([]byte, error) {
 		return payload, nil
 	}
 	return nil, fmt.Errorf("一括ファイルのダウンロードに失敗しました: %w", lastErr)
+}
+
+// redactURL は *url.Error から URL を落とす。署名付き URL はクエリに署名（一時的な資格情報）を
+// 持つので、エラー文に入るとログ・ダイジェストの command_failed・通知に載る（2026-09-24 のレビュー）。
+// 残すのは操作（Get など）とホスト、元の理由（.Err。errors.Is/As はそのまま効く）だけ。
+func redactURL(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	host := "?"
+	if u, perr := url.Parse(ue.URL); perr == nil && u.Host != "" {
+		host = u.Host
+	}
+	return fmt.Errorf("%s %s: %w", ue.Op, host, ue.Err)
 }
 
 func truncate(s string, n int) string {

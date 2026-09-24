@@ -174,3 +174,46 @@ func TestBulkDownloadWithoutURL(t *testing.T) {
 		t.Error("URL が無ければエラーにすべき")
 	}
 }
+
+// 署名付き URL（クエリに署名）はダウンロードの失敗のエラー文に出さない。*url.Error は URL を
+// 丸ごと文にするので、そのままだとダイジェストの command_failed や通知に載る（2026-09-24 のレビュー）。
+func TestDownloadErrorHidesSignedURL(t *testing.T) {
+	retrySleep = func(time.Duration) {}
+	t.Cleanup(func() { retrySleep = time.Sleep })
+
+	// 繋いですぐ切るサーバ（client.Do が *url.Error を返す）
+	files := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("Hijacker が無い")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.Close()
+	}))
+	defer files.Close()
+
+	client := &JQuantsClient{}
+	signed := files.URL + "/bulk/file.csv.gz?X-Amz-Signature=deadbeefsecret&X-Amz-Credential=AKIAEXAMPLE"
+	_, err := client.download(signed)
+	if err == nil {
+		t.Fatal("切れた接続でエラーにならない")
+	}
+	msg := err.Error()
+	for _, leak := range []string{"deadbeefsecret", "AKIAEXAMPLE", "X-Amz", "/bulk/file.csv.gz"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("エラー文に署名付き URL が残る（%s）: %s", leak, msg)
+		}
+	}
+	if !strings.Contains(msg, "一括ファイルのダウンロードに失敗しました") || !strings.Contains(msg, strings.TrimPrefix(files.URL, "http://")) {
+		t.Errorf("エラー文に操作とホストが無い: %s", msg)
+	}
+
+	// 要求を作れない URL（url.Parse の *url.Error）も同じ
+	_, err = client.download("http://[::1]:namedport/x?X-Amz-Signature=deadbeefsecret")
+	if err == nil || strings.Contains(err.Error(), "deadbeefsecret") {
+		t.Errorf("作れない要求のエラー文に URL が残る: %v", err)
+	}
+}
