@@ -52,6 +52,9 @@ def main():
     ap.add_argument("--panel", default="")
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--max-gap", type=float, default=0.0)
+    # 容量を足す候補の測定用（vault 20-research/2026-09-jp-daytrade-nscale.md 次の検証 4）。既定は本番の規則のまま
+    ap.add_argument("--segments", default="prime", help="残す市場区分（カンマ区切り、例 prime,standard,growth）")
+    ap.add_argument("--keep-small", action="store_true", help="時価総額の下 3 分位も残す")
     a = ap.parse_args()
     # キャッシュの名前は鍵のハッシュなので、名前順ではなく更新時刻の新しいものを使う
     panel = a.panel or max(glob.glob("data/jquants/_panel_cache/panel-*.parquet"), key=os.path.getmtime)
@@ -65,7 +68,8 @@ def main():
     base = df[df["turnover_med"] >= MIN_TURNOVER].copy()
     base["cap_tercile"] = base.groupby("d", group_keys=False)[["code", "mkt_cap"]].apply(cap_tercile)
 
-    c = base[(base["prev_close"] > 0) & (base["segment"] == "prime") & (base["cap_tercile"] > 1)
+    c = base[(base["prev_close"] > 0) & base["segment"].isin(a.segments.split(","))
+             & ((base["cap_tercile"] > 1) | a.keep_small)
              & ~base["earn_prev"].fillna(False) & ~base["disc_today"].fillna(False)
              & ~base["alert"].fillna(False) & ~base["is_loss"].fillna(False)].copy()
     c["gap"] = c["o"] / c["prev_close"] - 1
@@ -77,7 +81,8 @@ def main():
     # 既存規則の鍵。vol20 が無い銘柄は末尾（selection.RankKey）
     c["key_sort"] = np.where(c["vol20"].notna(),
                              np.round(c["gap"], 4) / np.maximum(c["vol20"].fillna(VOL_FLOOR), VOL_FLOOR), np.inf)
-    cols = ["d", "code", "o", "c", "prev_close", "gap", "y_raw", "key_sort", "vol20", "ret1", "ret5", "ret20", "pos20",
+    cols = ["d", "code", "segment", "cap_tercile", "o", "c", "prev_close", "gap", "y_raw", "key_sort", "vol20",
+            "ret1", "ret5", "ret20", "pos20",
             "prev_intraday", "turn_cap", "turnover_med", "mkt_cap", "short_interest", "earn_yield", "sector"]
     c[cols].to_parquet(out, index=False)
     per_day = c.groupby("d").size()
