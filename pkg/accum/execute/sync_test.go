@@ -3,11 +3,13 @@ package execute
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/shopspring/decimal"
 )
@@ -26,6 +28,18 @@ func (l *lookupBroker) GetOrder(clientOrderID string, brokerOrderID *string) (*d
 
 func (l *lookupBroker) GetOrderHistory(start, end time.Time) ([]domain.Order, error) {
 	return l.history, nil
+}
+
+// sameDayLater は今から d 後の時刻。台帳の placed_at は実時計で入るので、
+// 東京の日付をまたぐ（前日の注文の扱いになる）ならテストを飛ばす。
+func sameDayLater(t *testing.T, d time.Duration) time.Time {
+	t.Helper()
+	now := time.Now().UTC()
+	later := now.Add(d)
+	if clock.ToZone(now, clock.Tokyo).Format("2006-01-02") != clock.ToZone(later, clock.Tokyo).Format("2006-01-02") {
+		t.Skip("東京の日付の変わり目をまたぐ")
+	}
+	return later
 }
 
 func openTestLedger(t *testing.T) *ledger.Ledger {
@@ -63,8 +77,13 @@ func TestSyncOrderStatusRejectsStalePending(t *testing.T) {
 	led := openTestLedger(t)
 	recordPending(t, led, "order-1", "1306.T", 100, 250_000)
 
-	b := &lookupBroker{orders: map[string]*domain.Order{}} // 一覧にも無い
-	later := time.Now().UTC().Add(UnconfirmedGrace + time.Hour)
+	// 一覧は生きている（別の銘柄の注文が載っている）が、この注文は無い
+	other := "999/20260904"
+	b := &lookupBroker{orders: map[string]*domain.Order{}, history: []domain.Order{{
+		ClientOrderID: other, BrokerOrderID: &other, Symbol: "2559", Side: domain.SideBuy,
+		Trade: domain.TradeTypeCash, Quantity: decimal.NewFromInt(1), Status: domain.OrderStatusFilled,
+	}}}
+	later := sameDayLater(t, UnconfirmedGrace+time.Minute)
 
 	synced, err := SyncOrderStatus(led, b, later)
 	if err != nil {
@@ -261,7 +280,7 @@ func TestSyncOrderStatusAttributesPendingFromHistory(t *testing.T) {
 		Trade: domain.TradeTypeCash, Quantity: req.Quantity, FilledQuantity: req.Quantity,
 		Status: domain.OrderStatusFilled, AvgFillPrice: &avg, CreatedAt: &created,
 	}}}
-	later := time.Now().UTC().Add(UnconfirmedGrace + time.Minute)
+	later := sameDayLater(t, UnconfirmedGrace+time.Minute)
 
 	synced, err := SyncOrderStatus(led, b, later)
 	if err != nil {
@@ -284,5 +303,92 @@ func TestSyncOrderStatusAttributesPendingFromHistory(t *testing.T) {
 	synced, _ = SyncOrderStatus(led, b, later)
 	if synced.Resolved.NotSent != 1 {
 		t.Errorf("既知の注文番号が二重に帰属された: %+v", synced.Resolved)
+	}
+}
+
+// 前日以前に送った送信結果不明の注文は、今日の一覧に無くても UNSENT にしない（A1）。
+// 立花の注文一覧が当日分しか返さなければ、前日に約定した注文も「無い」と見える。
+// UNSENT にすると次の run が同じ額をもう一度買う。
+func TestSyncOrderStatusHoldsPendingFromEarlierDay(t *testing.T) {
+	led := openTestLedger(t)
+	recordPending(t, led, "order-1", "1306.T", 100, 250_000)
+
+	other := "999/20260905"
+	b := &lookupBroker{orders: map[string]*domain.Order{}, history: []domain.Order{{
+		ClientOrderID: other, BrokerOrderID: &other, Symbol: "2559", Side: domain.SideBuy,
+		Trade: domain.TradeTypeCash, Quantity: decimal.NewFromInt(1), Status: domain.OrderStatusSubmitted,
+	}}}
+	nextDay := time.Now().UTC().Add(24 * time.Hour)
+
+	synced, err := SyncOrderStatus(led, b, nextDay)
+	if err != nil {
+		t.Fatalf("照会に失敗: %v", err)
+	}
+	if len(synced.Changes) != 0 || synced.Resolved.NotSent != 0 {
+		t.Fatalf("前日の注文を一覧に無いだけで確定した: %+v / %+v", synced.Changes, synced.Resolved)
+	}
+	if len(synced.Unresolved) != 1 || !strings.Contains(synced.Unresolved[0].Reason, "今日より前") {
+		t.Fatalf("保留として知らせていない: %+v", synced.Unresolved)
+	}
+	open, err := led.OpenOrders()
+	if err != nil || len(open) != 1 || open[0].Status != string(domain.OrderStatusPending) {
+		t.Errorf("PENDING のまま残っていない: %+v (err: %v)", open, err)
+	}
+	pending, err := led.PendingSymbols()
+	if err != nil || len(pending["1306.T"]) != 1 {
+		t.Errorf("発注を止める銘柄に数えられていない: %+v (err: %v)", pending, err)
+	}
+}
+
+// 当日の一覧が 0 件なら判定しない。一覧が空で返ったのか届いていないのか区別できない。
+func TestSyncOrderStatusHoldsWhenListEmpty(t *testing.T) {
+	led := openTestLedger(t)
+	recordPending(t, led, "order-1", "1306.T", 100, 250_000)
+
+	b := &lookupBroker{orders: map[string]*domain.Order{}}
+	synced, err := SyncOrderStatus(led, b, sameDayLater(t, UnconfirmedGrace+time.Minute))
+	if err != nil {
+		t.Fatalf("照会に失敗: %v", err)
+	}
+	if len(synced.Changes) != 0 {
+		t.Fatalf("空の一覧で確定した: %+v", synced.Changes)
+	}
+	if len(synced.Unresolved) != 1 || !strings.Contains(synced.Unresolved[0].Reason, "0 件") {
+		t.Fatalf("保留として知らせていない: %+v", synced.Unresolved)
+	}
+}
+
+// 今日送って注文番号の分かっている注文が一覧に無ければ、一覧を信用せず判定を先送りする
+// （Expected。以前は渡しておらず、欠けた一覧で UNSENT にしていた）。
+func TestSyncOrderStatusDefersWhenExpectedOrderMissing(t *testing.T) {
+	led := openTestLedger(t)
+	recordPending(t, led, "order-1", "1306.T", 100, 250_000)
+	known := "555/20260905"
+	req := newRequest(t, "order-0", "2559", 1)
+	month, amount, market := "2026-09-01", decimal.NewFromInt(3000), domain.MarketJP
+	if err := led.Record(req, string(domain.OrderStatusSubmitted), &known, &month, &amount, &market); err != nil {
+		t.Fatal(err)
+	}
+
+	// 一覧には関係の無い注文だけ（今日の 555 が載っていない＝欠けた一覧）
+	other := "999/20260905"
+	b := &lookupBroker{
+		orders: map[string]*domain.Order{"order-0": {ClientOrderID: "order-0", BrokerOrderID: &known,
+			Symbol: "2559", Side: domain.SideBuy, Quantity: decimal.NewFromInt(1), Status: domain.OrderStatusSubmitted}},
+		history: []domain.Order{{
+			ClientOrderID: other, BrokerOrderID: &other, Symbol: "1629", Side: domain.SideBuy,
+			Trade: domain.TradeTypeCash, Quantity: decimal.NewFromInt(10), Status: domain.OrderStatusSubmitted,
+		}},
+	}
+	synced, err := SyncOrderStatus(led, b, sameDayLater(t, UnconfirmedGrace+time.Minute))
+	if err != nil {
+		t.Fatalf("照会に失敗: %v", err)
+	}
+	if synced.Resolved.NotSent != 0 || synced.Resolved.TooRecent != 1 {
+		t.Fatalf("欠けた一覧で判定した: %+v", synced.Resolved)
+	}
+	pending, _ := led.PendingSymbols()
+	if len(pending["1306.T"]) != 1 {
+		t.Errorf("PENDING のまま残っていない: %+v", pending)
 	}
 }

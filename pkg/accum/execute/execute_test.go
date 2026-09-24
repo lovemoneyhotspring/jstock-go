@@ -286,6 +286,34 @@ func TestPlaceRecordedMarksRejected(t *testing.T) {
 	}
 }
 
+// 受理されたのに台帳を書けなければ ErrOrderNotRecorded（A2）。以前は「発注拒否」と
+// 同じ扱いで次の銘柄へ進んでいた。送信前に書いた PENDING は残り、次の run の照合に回る。
+func TestPlaceRecordedStopsWhenLedgerUpdateFails(t *testing.T) {
+	led := newLedger(t)
+	req := newRequest(t, "注文4", "1306", 100)
+	b := &inspectingBroker{onPlace: func() { _ = led.Close() }}
+
+	_, err := placeRecorded(b, led, req, "2026-09-01", dec(100000), domain.MarketJP)
+	var unrecorded *ErrOrderNotRecorded
+	if !errors.As(err, &unrecorded) {
+		t.Fatalf("ErrOrderNotRecorded を返すべき: %v", err)
+	}
+	var rejected *broker.OrderRejectedError
+	if errors.As(err, &rejected) {
+		t.Error("受理された注文を「拒否」に混ぜてはいけない（次の銘柄へ進んでしまう）")
+	}
+
+	reopened, err := ledger.OpenLedger(led.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	pending, err := reopened.PendingSymbols()
+	if err != nil || len(pending["1306"]) != 1 {
+		t.Errorf("送った事実が PENDING で残っていない: %+v (err: %v)", pending, err)
+	}
+}
+
 // --- 発注時間帯 --------------------------------------------------------
 
 func TestWindowState(t *testing.T) {

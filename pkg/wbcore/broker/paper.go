@@ -46,11 +46,12 @@ type PaperBroker struct {
 	boughtToday map[string]struct{}
 	// cashTradedToday はその日の現物約定代金の合計（定額コースの段階の基準）。
 	cashTradedToday decimal.Decimal
-	// lotSizes は銘柄ごとの売買単位（SetLotSizes で与える）。無い銘柄は既定の 100 株。
+	// lotSizes は銘柄ごとの売買単位（SetLotSizes で与える）。無い銘柄は LotSizes に出さず、
+	// 空売り価格規制の判定だけ既定の 100 株で見る。
 	lotSizes map[string]decimal.Decimal
 }
 
-// SetLotSizes は銘柄ごとの売買単位を与える（無い銘柄は既定の 100 株のまま）。
+// SetLotSizes は銘柄ごとの売買単位を与える（無い銘柄は LotSizes では「分からない」）。
 //
 // 実機は CLMStkGetIssueMstKabu から引く。ペーパーでも単元が分かっていないと、
 // 空売り価格規制（50 単元を超える信用新規売りは成行で出せない）を再現できない。
@@ -232,17 +233,22 @@ func (p *PaperBroker) GetOrderHistory(start, end time.Time) ([]domain.Order, err
 	return history, nil
 }
 
-// LotSizes は売買単位。実機（立花証券）と同じく銘柄ごとに返す。与えられていない
-// 銘柄は既定の 100 株——以前は常に空で、呼び出し側の既定に黙って落ちていた。
+// LotSizes は売買単位。実機（立花証券）と同じく、分かった銘柄だけを返す——
+// SetLotSizes で与えていない銘柄はキーごと省く（実機でマスタに無い・取れなかった銘柄と同じ形）。
+//
+// 以前は与えていない銘柄にも既定の 100 株を返していた。accum の dry-run はこれを
+// 「ブローカーの値」と読み、1 株単位の ETF（2559 など）を 100 株で丸めて「単元未満で見送り」と
+// 計画し、本発注（マスタの 1 株）と食い違っていた（2026-09-24 のレビュー）。分からない銘柄の
+// 扱いは呼び出し側が決める（accum は発注できなかった銘柄として知らせる）。
+// 空売り価格規制の判定（lotSizeLocked）は従来どおり既定の 100 株で見る。
 func (p *PaperBroker) LotSizes(symbols []string) map[string]decimal.Decimal {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make(map[string]decimal.Decimal, len(symbols))
 	for _, symbol := range symbols {
-		if symbol == "" {
-			continue
+		if lot, ok := p.lotSizes[symbol]; ok && lot.IsPositive() {
+			out[symbol] = lot
 		}
-		out[symbol] = p.lotSizeLocked(symbol)
 	}
 	return out
 }

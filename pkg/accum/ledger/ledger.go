@@ -182,56 +182,125 @@ func (l *Ledger) RecordedIDs() (map[string]struct{}, error) {
 	return ids, rows.Err()
 }
 
+// PlacedAmount はその銘柄・計画月に「発注済み」として数える額の合計。
+//
+// 読めない行が 1 つでもあればエラーにする。行を飛ばして小さな額を返すと、
+// 当月の差額が大きく出て同じ月の予算をもう一度買う（2026-09-24 のレビュー A3）。
 func (l *Ledger) PlacedAmount(symbol string, month time.Time) (decimal.Decimal, error) {
 	planMonth := fmt.Sprintf("%04d-%02d-01", month.Year(), month.Month())
-	query := "SELECT client_order_id, broker_order_id, symbol, market, quantity, filled_quantity, status, amount, plan_month, placed_at, updated_at, avg_fill_price FROM orders WHERE symbol = ? AND plan_month = ?;"
+	query := "SELECT " + orderColumns + " FROM orders WHERE symbol = ? AND plan_month = ?;"
 	rows, err := l.db.Query(query, symbol, planMonth)
 	if err != nil {
-		return decimal.Zero, err
+		return decimal.Zero, fmt.Errorf("%s の %s の発注済み額を読めません: %w", symbol, planMonth, err)
 	}
 	defer rows.Close()
 
 	total := decimal.Zero
 	for rows.Next() {
 		order, err := l.scanOrder(rows)
-		if err == nil {
-			total = total.Add(order.EffectiveAmount())
+		if err != nil {
+			return decimal.Zero, fmt.Errorf("%s の %s の発注済み額を読めません: %w", symbol, planMonth, err)
 		}
+		total = total.Add(order.EffectiveAmount())
+	}
+	if err := rows.Err(); err != nil {
+		return decimal.Zero, fmt.Errorf("%s の %s の発注済み額を読めません: %w", symbol, planMonth, err)
 	}
 	return total, nil
 }
 
-func (l *Ledger) HasOrders(symbol string, month time.Time) bool {
+// HasOrders はその銘柄・計画月に dry-run 以外の注文記録があるか（前月からの繰り越しの条件）。
+// 読めないときはエラー（「無い」と読むと繰り越しの有無が黙って変わる）。
+func (l *Ledger) HasOrders(symbol string, month time.Time) (bool, error) {
 	planMonth := fmt.Sprintf("%04d-%02d-01", month.Year(), month.Month())
 	var dummy int
 	query := "SELECT 1 FROM orders WHERE symbol = ? AND plan_month = ? AND status != ? LIMIT 1;"
 	err := l.db.QueryRow(query, symbol, planMonth, DryRunStatus).Scan(&dummy)
-	return err == nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("%s の %s の注文記録を読めません: %w", symbol, planMonth, err)
+	}
+	return true, nil
 }
 
+// OpenOrders は結果の確定していない注文（dry-run を除く）。
+// 読めない行はエラーにする——黙って飛ばすと、その注文は照会も判定もされないまま残る。
 func (l *Ledger) OpenOrders() ([]LedgerOrder, error) {
-	query := "SELECT client_order_id, broker_order_id, symbol, market, quantity, filled_quantity, status, amount, plan_month, placed_at, updated_at, avg_fill_price FROM orders WHERE status != ? ORDER BY placed_at;"
+	query := "SELECT " + orderColumns + " FROM orders WHERE status != ? ORDER BY placed_at;"
 	rows, err := l.db.Query(query, DryRunStatus)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("台帳の未確定の注文を読めません: %w", err)
 	}
 	defer rows.Close()
 
 	var orders []LedgerOrder
 	for rows.Next() {
 		order, err := l.scanOrder(rows)
-		if err == nil && order.IsOpen() {
+		if err != nil {
+			return nil, fmt.Errorf("台帳の未確定の注文を読めません: %w", err)
+		}
+		if order.IsOpen() {
 			orders = append(orders, order)
 		}
 	}
-	return orders, nil
+	return orders, rows.Err()
+}
+
+// PendingSymbols は送信結果不明（PENDING）の注文が残っている銘柄。
+//
+// 届いたかどうか分からない注文がある銘柄に次の注文を出すと、届いていたとき二重買付になる。
+// run はこの銘柄を発注せず、人（か AI）が `accum pending resolve` で確定するのを待つ。
+func (l *Ledger) PendingSymbols() (map[string][]string, error) {
+	rows, err := l.db.Query("SELECT symbol, client_order_id FROM orders WHERE status = ? ORDER BY placed_at;",
+		string(domain.OrderStatusPending))
+	if err != nil {
+		return nil, fmt.Errorf("台帳の送信結果不明の注文を読めません: %w", err)
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var symbol, id string
+		if err := rows.Scan(&symbol, &id); err != nil {
+			return nil, fmt.Errorf("台帳の送信結果不明の注文を読めません: %w", err)
+		}
+		out[symbol] = append(out[symbol], id)
+	}
+	return out, rows.Err()
+}
+
+// BrokerOrderIDsPlacedBetween は [start, end) に送って注文番号まで分かっている注文の番号。
+//
+// 送信結果不明の注文を当日の注文一覧で判定するとき、一覧が生きているかの目印にする
+// （reconcile.Options.Expected）。dry-run は送っていないので除く。
+func (l *Ledger) BrokerOrderIDsPlacedBetween(start, end time.Time) (map[string]struct{}, error) {
+	rows, err := l.db.Query(`SELECT broker_order_id, placed_at FROM orders
+		WHERE broker_order_id IS NOT NULL AND broker_order_id != '' AND status != ?;`, DryRunStatus)
+	if err != nil {
+		return nil, fmt.Errorf("台帳の注文番号を読めません: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var id, placedAt string
+		if err := rows.Scan(&id, &placedAt); err != nil {
+			return nil, fmt.Errorf("台帳の注文番号を読めません: %w", err)
+		}
+		at, err := time.Parse(time.RFC3339, placedAt)
+		if err != nil || at.Before(start) || !at.Before(end) {
+			continue
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 func (l *Ledger) Recent(limit int) ([]LedgerOrder, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	query := "SELECT client_order_id, broker_order_id, symbol, market, quantity, filled_quantity, status, amount, plan_month, placed_at, updated_at, avg_fill_price FROM orders ORDER BY placed_at DESC LIMIT ?;"
+	query := "SELECT " + orderColumns + " FROM orders ORDER BY placed_at DESC LIMIT ?;"
 	rows, err := l.db.Query(query, limit)
 	if err != nil {
 		return nil, err
@@ -241,22 +310,53 @@ func (l *Ledger) Recent(limit int) ([]LedgerOrder, error) {
 	var orders []LedgerOrder
 	for rows.Next() {
 		order, err := l.scanOrder(rows)
-		if err == nil {
-			orders = append(orders, order)
+		if err != nil {
+			return nil, err
 		}
+		orders = append(orders, order)
 	}
-	return orders, nil
+	return orders, rows.Err()
 }
 
-func (l *Ledger) StartedOn(symbol string) *string {
+// StartedOn は積立の開始日（YYYY-MM-DD）。記録が無ければ nil。
+// 読めないときはエラー（「無い」と読むと開始月の日割りが黙って外れる）。
+func (l *Ledger) StartedOn(symbol string) (*string, error) {
 	var started string
 	err := l.db.QueryRow("SELECT started_on FROM accumulation WHERE symbol = ?;", symbol).Scan(&started)
-	if err != nil {
-		return nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	return &started
+	if err != nil {
+		return nil, fmt.Errorf("%s の積立の開始日を読めません: %w", symbol, err)
+	}
+	return &started, nil
 }
 
+// FirstOrderDay はその銘柄で最初に dry-run 以外の注文を記録した日（loc の暦日、YYYY-MM-DD）。
+// 注文が無ければ nil。
+//
+// 開始日の記録（accumulation）が無いまま注文だけある台帳の開始日に使う。MarkStarted を
+// 呼ぶ経路が無かった間（dbd3040 から 2026-09-24 まで）に発注・取り込みした銘柄は、
+// 今日を開始日とすると既に積み立てている月を日割りしてしまう。
+func (l *Ledger) FirstOrderDay(symbol string, loc *time.Location) (*string, error) {
+	var first sql.NullString
+	err := l.db.QueryRow("SELECT MIN(placed_at) FROM orders WHERE symbol = ? AND status != ?;",
+		symbol, DryRunStatus).Scan(&first)
+	if err != nil {
+		return nil, fmt.Errorf("%s の最初の注文日を読めません: %w", symbol, err)
+	}
+	if !first.Valid || first.String == "" {
+		return nil, nil
+	}
+	at, err := time.Parse(time.RFC3339, first.String)
+	if err != nil {
+		return nil, fmt.Errorf("%s の最初の注文日 %q を読めません: %w", symbol, first.String, err)
+	}
+	day := at.In(loc).Format("2006-01-02")
+	return &day, nil
+}
+
+// MarkStarted は積立の開始日を記録する。すでにあれば変えない（最初の日が開始日）。
 func (l *Ledger) MarkStarted(symbol, day string) error {
 	query := "INSERT OR IGNORE INTO accumulation (symbol, started_on) VALUES (?, ?);"
 	_, err := l.db.Exec(query, symbol, day)
@@ -364,6 +464,9 @@ func (l *Ledger) UpdateStatusDetail(
 	return err
 }
 
+// orderColumns は scanOrder が読む列の並び。
+const orderColumns = "client_order_id, broker_order_id, symbol, market, quantity, filled_quantity, status, amount, plan_month, placed_at, updated_at, avg_fill_price"
+
 func (l *Ledger) scanOrder(rows *sql.Rows) (LedgerOrder, error) {
 	var clientID, symbol, qtyStr, status, placedAt string
 	var brokerID, marketStr, filledStr, amtStr, planMonth, updatedAt, avgStr *string
@@ -376,10 +479,18 @@ func (l *Ledger) scanOrder(rows *sql.Rows) (LedgerOrder, error) {
 		return LedgerOrder{}, err
 	}
 
-	qty, _ := decimal.NewFromString(strings.TrimSpace(qtyStr))
+	// 数値の列が読めない行は 0 や nil に倒さずエラーにする。額が nil なら「発注済み」は 0 と
+	// 数えられ、同じ月の予算をもう一度買う
+	qty, err := decimal.NewFromString(strings.TrimSpace(qtyStr))
+	if err != nil {
+		return LedgerOrder{}, fmt.Errorf("注文 %s の quantity %q を読めません: %w", clientID, qtyStr, err)
+	}
 	filled := decimal.Zero
 	if filledStr != nil {
-		filled, _ = decimal.NewFromString(strings.TrimSpace(*filledStr))
+		filled, err = decimal.NewFromString(strings.TrimSpace(*filledStr))
+		if err != nil {
+			return LedgerOrder{}, fmt.Errorf("注文 %s の filled_quantity %q を読めません: %w", clientID, *filledStr, err)
+		}
 	}
 
 	var mkt *domain.Market
@@ -391,17 +502,19 @@ func (l *Ledger) scanOrder(rows *sql.Rows) (LedgerOrder, error) {
 	var amt *decimal.Decimal
 	if amtStr != nil {
 		a, err := decimal.NewFromString(strings.TrimSpace(*amtStr))
-		if err == nil {
-			amt = &a
+		if err != nil {
+			return LedgerOrder{}, fmt.Errorf("注文 %s の amount %q を読めません: %w", clientID, *amtStr, err)
 		}
+		amt = &a
 	}
 
 	var avgPrice *decimal.Decimal
 	if avgStr != nil {
 		ap, err := decimal.NewFromString(strings.TrimSpace(*avgStr))
-		if err == nil {
-			avgPrice = &ap
+		if err != nil {
+			return LedgerOrder{}, fmt.Errorf("注文 %s の avg_fill_price %q を読めません: %w", clientID, *avgStr, err)
 		}
+		avgPrice = &ap
 	}
 
 	return LedgerOrder{

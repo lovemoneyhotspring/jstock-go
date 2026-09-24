@@ -1,6 +1,7 @@
 package execute
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -117,11 +118,14 @@ func TestCarryOverRequiresPriorOrders(t *testing.T) {
 	rows := []plan.PlanRow{row("2026-08-01", 25000, 0), row("2026-09-01", 25000, 0)}
 	budget := decimal.NewFromInt(25000)
 
-	noOrders := func(string, time.Time) bool { return false }
-	placed := func(string, time.Time) decimal.Decimal { return decimal.Zero }
+	noOrders := func(string, time.Time) (bool, error) { return false, nil }
+	placed := func(string, time.Time) (decimal.Decimal, error) { return decimal.Zero, nil }
 
 	// 前月に発注が無ければ繰り越さない（動いていなかった月のぶんまで買わない）。
-	got := CarryOver(rows, "1306", month("2026-09-01"), budget, nil, noOrders, placed)
+	got, err := CarryOver(rows, "1306", month("2026-09-01"), budget, nil, noOrders, placed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !got.IsZero() {
 		t.Errorf("前月に発注が無ければ 0: %s", got)
 	}
@@ -131,16 +135,19 @@ func TestCarryOverRemainder(t *testing.T) {
 	rows := []plan.PlanRow{row("2026-08-01", 25000, 0), row("2026-09-01", 25000, 0)}
 	budget := decimal.NewFromInt(25000)
 
-	hadOrders := func(string, time.Time) bool { return true }
+	hadOrders := func(string, time.Time) (bool, error) { return true, nil }
 	// 前月は 20000 円しか買えなかった（単元に届かず端数が残った）。
-	placed := func(_ string, m time.Time) decimal.Decimal {
+	placed := func(_ string, m time.Time) (decimal.Decimal, error) {
 		if m.Month() == time.August {
-			return decimal.NewFromInt(20000)
+			return decimal.NewFromInt(20000), nil
 		}
-		return decimal.Zero
+		return decimal.Zero, nil
 	}
 
-	got := CarryOver(rows, "1306", month("2026-09-01"), budget, nil, hadOrders, placed)
+	got, err := CarryOver(rows, "1306", month("2026-09-01"), budget, nil, hadOrders, placed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !got.Equal(decimal.NewFromInt(5000)) {
 		t.Errorf("繰り越し = %s, want 5000", got)
 	}
@@ -148,11 +155,14 @@ func TestCarryOverRemainder(t *testing.T) {
 
 func TestCarryOverNeverNegative(t *testing.T) {
 	rows := []plan.PlanRow{row("2026-08-01", 25000, 0)}
-	hadOrders := func(string, time.Time) bool { return true }
+	hadOrders := func(string, time.Time) (bool, error) { return true, nil }
 	// 前月に多く買っていても、当月にマイナスを持ち込まない。
-	placed := func(string, time.Time) decimal.Decimal { return decimal.NewFromInt(40000) }
+	placed := func(string, time.Time) (decimal.Decimal, error) { return decimal.NewFromInt(40000), nil }
 
-	got := CarryOver(rows, "1306", month("2026-09-01"), decimal.NewFromInt(25000), nil, hadOrders, placed)
+	got, err := CarryOver(rows, "1306", month("2026-09-01"), decimal.NewFromInt(25000), nil, hadOrders, placed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !got.IsZero() {
 		t.Errorf("買い過ぎた月の繰り越しは 0: %s", got)
 	}
@@ -164,15 +174,18 @@ func TestCarryOverUsesProratedTargetForStartMonth(t *testing.T) {
 	rows := []plan.PlanRow{row("2026-08-01", 25000, 0), row("2026-09-01", 25000, 0)}
 	started := month("2026-08-16") // 8月は31日 → 残り16/31 → 12903
 
-	hadOrders := func(string, time.Time) bool { return true }
-	placed := func(_ string, m time.Time) decimal.Decimal {
+	hadOrders := func(string, time.Time) (bool, error) { return true, nil }
+	placed := func(_ string, m time.Time) (decimal.Decimal, error) {
 		if m.Month() == time.August {
-			return decimal.NewFromInt(12903)
+			return decimal.NewFromInt(12903), nil
 		}
-		return decimal.Zero
+		return decimal.Zero, nil
 	}
 
-	got := CarryOver(rows, "1306", month("2026-09-01"), decimal.NewFromInt(25000), &started, hadOrders, placed)
+	got, err := CarryOver(rows, "1306", month("2026-09-01"), decimal.NewFromInt(25000), &started, hadOrders, placed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !got.IsZero() {
 		t.Errorf("日割りぶんを買い切っていれば繰り越しは 0: %s", got)
 	}
@@ -210,5 +223,24 @@ func TestShouldPlaceTodayBeforePayday(t *testing.T) {
 	quietDay := []plan.PlanRow{row("2026-09-02", 0, 0)}
 	if ShouldPlaceToday(quietDay, decimal.NewFromInt(1000), decimal.Zero) {
 		t.Error("基本目標が 0 のときに端数を出してはいけない")
+	}
+}
+
+// 台帳が読めないときは繰り越しを 0 に倒さずエラーを返す（A3）。
+// 0 に倒すと前月の買い残しが黙って消え、読めた額との食い違いに気付けない。
+func TestCarryOverPropagatesLedgerErrors(t *testing.T) {
+	rows := []plan.PlanRow{row("2026-08-01", 25000, 0), row("2026-09-01", 25000, 0)}
+	budget := decimal.NewFromInt(25000)
+	broken := errors.New("台帳が壊れている")
+	ok := func(string, time.Time) (bool, error) { return true, nil }
+	zero := func(string, time.Time) (decimal.Decimal, error) { return decimal.Zero, nil }
+
+	if _, err := CarryOver(rows, "1306", month("2026-09-01"), budget, nil,
+		func(string, time.Time) (bool, error) { return false, broken }, zero); !errors.Is(err, broken) {
+		t.Errorf("前月の注文記録が読めないのにエラーにならない: %v", err)
+	}
+	if _, err := CarryOver(rows, "1306", month("2026-09-01"), budget, nil, ok,
+		func(string, time.Time) (decimal.Decimal, error) { return decimal.Zero, broken }); !errors.Is(err, broken) {
+		t.Errorf("前月の発注済み額が読めないのにエラーにならない: %v", err)
 	}
 }

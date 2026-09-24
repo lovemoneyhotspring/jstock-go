@@ -456,6 +456,7 @@ flock /tmp/accum-run.lock deploy/build.sh      # 実行ファイルを作り直�
   忘れ、次の営業日（9/24）の朝が丸ごと止まる状態で数時間置いた。**確かめ方**:
   `./bin/daytrade preflight --config-dir config/daytrade_margin` が「問題なし」を出すこと
   （設定・今日の plan・台帳・ディスクを読むだけ。cron でも 8:40 に回り、問題があれば通知する）
+  `accum` の設定（`config/accum/accum.toml`）も 2026-09-24 から同じ strict で、加えて予算・`market`・`tax_account_type`・`lot_size_overrides` の読めない値はエラーになる（以前は既定に倒していた）。止まるのは `accum sync` `evaluate` `run` など設定を読むコマンド。確かめ方は `go test ./pkg/accum/config/`（`TestRepositoryConfigLoadsStrictly` がリポジトリの設定を読む）
 - `build.sh` は `bin/` へ直接ビルドしない。別名に作って**全部できてから** `mv` で差し替えるので、
   場中に回しても cron が書きかけの実行ファイルを掴まない（途中で失敗したら古い一式のまま）
 - `data/`（足・アーカイブ）と `state/`（台帳・ログ・バックアップ）は git 管理外なので pull で消えない

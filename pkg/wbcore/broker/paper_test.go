@@ -269,17 +269,18 @@ func TestPaperBrokerCancelTerminalOrderIsAnError(t *testing.T) {
 	}
 }
 
-// 売買単位は既定 100 株、与えれば銘柄ごと。空売り価格規制（50 単元超の成行売建）を再現できる。
+// 売買単位は与えた銘柄だけ返す。空売り価格規制（50 単元超の成行売建）は与えていない銘柄を既定 100 株で見る。
 func TestPaperBrokerLotSizesAndShortSaleRule(t *testing.T) {
 	pb := NewPaperBroker(decimal.NewFromInt(10_000_000), "open")
+	// 与えていない銘柄は「分からない」としてキーごと省く（既定の 100 株を埋めない）
 	got := pb.LotSizes([]string{"7203", "1629", ""})
-	if len(got) != 2 || !got["7203"].Equal(decimal.NewFromInt(100)) || !got["1629"].Equal(decimal.NewFromInt(100)) {
-		t.Errorf("既定の売買単位 = %v", got)
+	if len(got) != 0 {
+		t.Errorf("与えていない売買単位 = %v, want 空", got)
 	}
 	pb.SetLotSizes(map[string]decimal.Decimal{"1629": decimal.NewFromInt(10), "bad": decimal.Zero})
 	got = pb.LotSizes([]string{"7203", "1629", "bad"})
-	if !got["7203"].Equal(decimal.NewFromInt(100)) || !got["1629"].Equal(decimal.NewFromInt(10)) || !got["bad"].Equal(decimal.NewFromInt(100)) {
-		t.Errorf("与えた売買単位 = %v", got)
+	if len(got) != 1 || !got["1629"].Equal(decimal.NewFromInt(10)) {
+		t.Errorf("与えた売買単位 = %v, want 1629 だけ 10", got)
 	}
 
 	pb.Mark(map[string]decimal.Decimal{"7203": decimal.NewFromInt(2000), "1629": decimal.NewFromInt(2000)})
