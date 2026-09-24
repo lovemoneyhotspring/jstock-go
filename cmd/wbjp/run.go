@@ -55,12 +55,16 @@ func newRunCmd() *cobra.Command {
 }
 
 // runDaily は本体。RunE から切り出してあるのは、異常終了を run.Crash で記録・通知するため。
+//
+// 段を順に呼ぶだけ: 準備（設定・発注の可否・確認）→ 判定日（休場なら終わる）→ 実行の記録 →
+// 接続（足の更新・残高・建玉）→ 台帳の照合（送信結果不明・約定・建玉 0 件）→ 足 → ストップ →
+// 判断（戦略・サイジング・ストップ由来の手仕舞い）→ 注文の照合 → 発注。
+// 状態は dailyRun が持ち、各段が埋める。
 func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bool) (err error) {
 	d, err := prepareDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag)
 	if err != nil {
 		return err
 	}
-	setCfg, canLive, runID, logger := d.setCfg, d.canLive, d.runID, d.logger
 
 	rep, err := repo.OpenRepo(appSettings.DBPath())
 	if err != nil {
@@ -72,8 +76,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	if done, err := d.openDay(); done || err != nil {
 		return err
 	}
-	todayJST := d.todayJST
-	if err := rep.StartRun(runID, todayJST, string(appSettings.Env), d.mode()); err != nil {
+	if err := rep.StartRun(d.runID, d.todayJST, string(appSettings.Env), d.mode()); err != nil {
 		return fmt.Errorf("実行の記録を始められません: %w", err)
 	}
 	// 途中で返っても実行の終わりを残す（runs.status が running のまま残らないように）
@@ -82,105 +85,21 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	if err := d.connect(); err != nil {
 		return err
 	}
-	b, bal, equity, posMap := d.b, d.bal, d.equity, d.posMap
-
 	if err := d.checkLedger(); err != nil {
 		return err
 	}
-
 	d.loadBars()
 	if err := d.updateStops(); err != nil {
 		return err
 	}
-	lastPrices := d.lastPrices
-
 	if err := d.decide(); err != nil {
 		return err
 	}
-	targetList := d.targetList
-
 	plan, err := d.reconcileOrders()
 	if err != nil {
 		return err
 	}
-	boughtToday := d.boughtToday
-
-	// 5. リスク管理チェック (RiskManager)
-	riskMgr := risk.NewRiskManager(setCfg.Risk, setCfg.Universe.Symbols)
-
-	// 未約定の買い注文が押さえている金額と、当日の発注件数は
-	// プロセスをまたいで数える。実行ごとに 0 から数え直すと
-	// 1日に何度 run しても上限が効かない。
-	pendingValue, err := rep.PendingBuyValue(lastPrices)
-	if err != nil {
-		return fmt.Errorf("未約定注文を読めません: %w", err)
-	}
-	ordersToday, err := rep.OrdersToday(todayJST)
-	if err != nil {
-		return fmt.Errorf("当日の発注件数を読めません: %w", err)
-	}
-
-	// 当日の損益（max_daily_loss）。以前は 0 固定で、本番では上限が効いていなかった
-	// （2026-09-24 のレビュー W5）。確かめられなければ新規の買いを止める
-	realized, unrealized, unpriced, err := dailyPnL(rep, todayJST, posMap, lastPrices, boughtToday)
-	if err != nil {
-		unpriced = append(unpriced, err.Error())
-	}
-	if len(unpriced) > 0 {
-		logger.Warn("wbjp.daily_pnl_unknown", "当日の損益を確かめられないため新規の買いを止めます:\n"+strings.Join(unpriced, "\n"))
-		digest.Anomaly("wbjp.daily_pnl_unknown", fmt.Sprintf("%d 件（新規の買いを止めた）", len(unpriced)))
-	}
-	logger.Info("wbjp.daily_pnl", fmt.Sprintf("当日の損益: 実現 %s 円・含み %s 円（上限 %s 円）",
-		realized.Round(0), unrealized.Round(0), setCfg.Risk.MaxDailyLoss))
-
-	riskCtx := &risk.RiskContext{
-		Equity:             equity,
-		Balance:            *bal,
-		Positions:          posMap,
-		BasePrices:         lastPrices,
-		PendingValue:       pendingValue,
-		OrdersToday:        ordersToday,
-		RealizedPnLToday:   realized,
-		UnrealizedPnLToday: unrealized,
-		DailyPnLUnknown:    len(unpriced) > 0,
-	}
-
-	var requests []domain.OrderRequest
-	for _, res := range plan.Orders {
-		if res.Request != nil {
-			requests = append(requests, *res.Request)
-		}
-	}
-	// 発注済みの確認・リスク審査・送信・台帳の更新と、受理したぶんの余力の差し引きは
-	// execute.PlaceOrders（テストあり）。売りを先に並べる（max_orders_per_day を買いで
-	// 使い切って損切りを見送らない。risk.SellsFirst。backtest も同じ関数を通す）
-	result, err := execute.PlaceOrders(rep, b, risk.SellsFirst(requests), riskCtx, execute.Options{
-		RunID: runID, Live: canLive, Risk: riskMgr, Report: logger,
-	})
-	// 見送りの理由は発注が途中で止まっても残す（explain で引く）
-	if rerr := rep.RecordRiskEvents(runID, result.RiskRejected); rerr != nil {
-		logger.Warn("wbjp.ledger", fmt.Sprintf("リスクの見送りを記録できません: %v", rerr))
-	}
-	if err != nil {
-		var unconfirmed *execute.ErrUnconfirmedOrder
-		if errors.As(err, &unconfirmed) {
-			return fmt.Errorf("注文 %s の結果を確認できないため発注を中止しました（口座と台帳 %s を確かめてください）: %w",
-				unconfirmed.ClientOrderID, appSettings.DBPath(), err)
-		}
-		return err
-	}
-	if len(result.Failed) > 0 {
-		digest.Anomaly("wbjp.order_failed", fmt.Sprintf("%d 件の注文を受け付けられませんでした:\n%s",
-			len(result.Failed), strings.Join(result.Failed, "\n")))
-	}
-
-	liveOrders, dryRunOrders := result.Placed, 0
-	if !canLive {
-		liveOrders, dryRunOrders = 0, result.Placed
-	}
-	digest.Note(map[string]any{"phase": "run", "live": canLive, "orders": liveOrders, "dry_run_orders": dryRunOrders,
-		"risk_rejected": len(result.RiskRejected), "targets": len(targetList)})
-	return nil
+	return d.place(plan)
 }
 
 var decimalZero = decimal.Zero
@@ -690,6 +609,90 @@ func (d *dailyRun) reconcileOrders() (*engine.ReconcilePlan, error) {
 		digest.Note(map[string]any{"outside_universe": outside})
 	}
 	return plan, nil
+}
+
+// place はリスク管理の前提（未約定の買い・当日の発注件数・当日の損益）をそろえ、売りを先に
+// 並べて注文を審査・送信し（execute.PlaceOrders）、見送りの理由と結果を残す。
+func (d *dailyRun) place(plan *engine.ReconcilePlan) error {
+	setCfg, canLive, runID, logger, rep, b := d.setCfg, d.canLive, d.runID, d.logger, d.rep, d.b
+	bal, equity, posMap, lastPrices, todayJST := d.bal, d.equity, d.posMap, d.lastPrices, d.todayJST
+	boughtToday, targetList := d.boughtToday, d.targetList
+
+	riskMgr := risk.NewRiskManager(setCfg.Risk, setCfg.Universe.Symbols)
+
+	// 未約定の買い注文が押さえている金額と、当日の発注件数は
+	// プロセスをまたいで数える。実行ごとに 0 から数え直すと
+	// 1日に何度 run しても上限が効かない。
+	pendingValue, err := rep.PendingBuyValue(lastPrices)
+	if err != nil {
+		return fmt.Errorf("未約定注文を読めません: %w", err)
+	}
+	ordersToday, err := rep.OrdersToday(todayJST)
+	if err != nil {
+		return fmt.Errorf("当日の発注件数を読めません: %w", err)
+	}
+
+	// 当日の損益（max_daily_loss）。以前は 0 固定で、本番では上限が効いていなかった
+	// （2026-09-24 のレビュー W5）。確かめられなければ新規の買いを止める
+	realized, unrealized, unpriced, err := dailyPnL(rep, todayJST, posMap, lastPrices, boughtToday)
+	if err != nil {
+		unpriced = append(unpriced, err.Error())
+	}
+	if len(unpriced) > 0 {
+		logger.Warn("wbjp.daily_pnl_unknown", "当日の損益を確かめられないため新規の買いを止めます:\n"+strings.Join(unpriced, "\n"))
+		digest.Anomaly("wbjp.daily_pnl_unknown", fmt.Sprintf("%d 件（新規の買いを止めた）", len(unpriced)))
+	}
+	logger.Info("wbjp.daily_pnl", fmt.Sprintf("当日の損益: 実現 %s 円・含み %s 円（上限 %s 円）",
+		realized.Round(0), unrealized.Round(0), setCfg.Risk.MaxDailyLoss))
+
+	riskCtx := &risk.RiskContext{
+		Equity:             equity,
+		Balance:            *bal,
+		Positions:          posMap,
+		BasePrices:         lastPrices,
+		PendingValue:       pendingValue,
+		OrdersToday:        ordersToday,
+		RealizedPnLToday:   realized,
+		UnrealizedPnLToday: unrealized,
+		DailyPnLUnknown:    len(unpriced) > 0,
+	}
+
+	var requests []domain.OrderRequest
+	for _, res := range plan.Orders {
+		if res.Request != nil {
+			requests = append(requests, *res.Request)
+		}
+	}
+	// 発注済みの確認・リスク審査・送信・台帳の更新と、受理したぶんの余力の差し引きは
+	// execute.PlaceOrders（テストあり）。売りを先に並べる（max_orders_per_day を買いで
+	// 使い切って損切りを見送らない。risk.SellsFirst。backtest も同じ関数を通す）
+	result, err := execute.PlaceOrders(rep, b, risk.SellsFirst(requests), riskCtx, execute.Options{
+		RunID: runID, Live: canLive, Risk: riskMgr, Report: logger,
+	})
+	// 見送りの理由は発注が途中で止まっても残す（explain で引く）
+	if rerr := rep.RecordRiskEvents(runID, result.RiskRejected); rerr != nil {
+		logger.Warn("wbjp.ledger", fmt.Sprintf("リスクの見送りを記録できません: %v", rerr))
+	}
+	if err != nil {
+		var unconfirmed *execute.ErrUnconfirmedOrder
+		if errors.As(err, &unconfirmed) {
+			return fmt.Errorf("注文 %s の結果を確認できないため発注を中止しました（口座と台帳 %s を確かめてください）: %w",
+				unconfirmed.ClientOrderID, appSettings.DBPath(), err)
+		}
+		return err
+	}
+	if len(result.Failed) > 0 {
+		digest.Anomaly("wbjp.order_failed", fmt.Sprintf("%d 件の注文を受け付けられませんでした:\n%s",
+			len(result.Failed), strings.Join(result.Failed, "\n")))
+	}
+
+	liveOrders, dryRunOrders := result.Placed, 0
+	if !canLive {
+		liveOrders, dryRunOrders = 0, result.Placed
+	}
+	digest.Note(map[string]any{"phase": "run", "live": canLive, "orders": liveOrders, "dry_run_orders": dryRunOrders,
+		"risk_rejected": len(result.RiskRejected), "targets": len(targetList)})
+	return nil
 }
 
 // finishRun は実行の終わりを台帳に残す（err があれば failed）。評価額・現金は照会できた時点で
