@@ -138,6 +138,10 @@ const DefaultGrace = 5 * time.Second
 // 0 件、一覧の照会は手動の 6 回だけ）ので、発注の往復（p90 0.14 秒）より十分長く、cron の
 // 次の回（daytrade は 1〜3 分おき、accum は 20 分おき）より短い 60 秒にする。
 // 送り直しは次の回に回るだけで、その日の建て漏れにはならない。
+//
+// 効く範囲は「Expected が空」かつ「一覧が 0 件」のときだけ。2 本目以降の結果不明の注文
+// （Expected に今日の番号がある）や、一覧に何か載っている朝は、これまでどおり Grace で判定する。
+// close・protect は朝の建玉の番号が Expected に入るので、この待ちで引けに遅れることはない。
 const EmptyListGrace = 60 * time.Second
 
 // earliestCreatedBefore は発注時刻よりどれだけ前の注文まで候補にするか
