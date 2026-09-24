@@ -26,8 +26,13 @@ func TestLoadRealConfigs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", dir, err)
 		}
-		if cfg.Capital.Positions() != 3 {
-			t.Errorf("%s: N = %d, want 3", dir, cfg.Capital.Positions())
+		// 信用版は規則 R（weighting = turnover）で N = max_positions = 10（2026-09-25〜）
+		wantN := 3
+		if cfg.Capital.Weighting == WeightingTurnover {
+			wantN = 10
+		}
+		if cfg.Capital.Positions() != wantN {
+			t.Errorf("%s: N = %d, want %d", dir, cfg.Capital.Positions(), wantN)
 		}
 		if len(cfg.Regime.SkipMonths) != 1 || cfg.Regime.SkipMonths[0] != 12 {
 			t.Errorf("%s: skip_months = %v, want [12]", dir, cfg.Regime.SkipMonths)
@@ -344,5 +349,56 @@ func TestProtectExitDefaultAndConfigFiles(t *testing.T) {
 		if _, err := Load(dir); err != nil {
 			t.Fatalf("%s: %v", dir, err)
 		}
+	}
+}
+
+// 規則 R と保証金の比（margin.capacity_ratio）の組み合わせの検証。
+func TestValidateTurnoverAndCapacity(t *testing.T) {
+	ok, err := Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("本番の設定が通らない: %v", err)
+	}
+	for _, c := range []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"比は turnover だけ", func(c *Config) { c.Capital.Weighting = "inverse_vol" }},
+		{"比が 1 を超える", func(c *Config) { c.Margin.CapacityRatio = decimal.RequireFromString("1.1") }},
+		{"ショック日が平日より小さい", func(c *Config) { c.Margin.ShockCapacityRatio = decimal.RequireFromString("0.5") }},
+		{"ショック日が 1 を超える", func(c *Config) { c.Margin.ShockCapacityRatio = decimal.RequireFromString("1.2") }},
+		{"天井が負", func(c *Config) { c.Margin.CapacityCeiling = decimal.NewFromInt(-1) }},
+		{"ショック日にショートを建てる", func(c *Config) { c.Regime.ShockShortScale = decimal.NewFromInt(1) }},
+		{"比が無いのにショック日の比", func(c *Config) { c.Margin.CapacityRatio = decimal.Zero }},
+		{"turnover_ratio が 0", func(c *Config) { c.Capital.TurnoverRatio = decimal.Zero }},
+		{"turnover_ratio が大きすぎる", func(c *Config) { c.Capital.TurnoverRatio = decimal.RequireFromString("0.1") }},
+		{"name_divisor が 0", func(c *Config) { c.Capital.NameDivisor = 0 }},
+		{"max_positions が name_divisor より小さい", func(c *Config) { c.Capital.MaxPositions = 5 }},
+		{"ショートに turnover", func(c *Config) { c.Margin.Weighting = WeightingTurnover }},
+		{"ショートの倍率が 1 を超える", func(c *Config) { c.Margin.MultiplierNormal = decimal.RequireFromString("1.5") }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := ok
+			c.edit(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Errorf("検証が通ってしまった")
+			}
+		})
+	}
+}
+
+// 寄成は 9:00 までに送り切らないと寄付に参加できない。注文の送信は 2 回/秒（broker.orderLimiter）で、
+// 8:59:53 開始・注文は約 1 秒後から送り、締め切りの 1 秒前（execute.EntrySendMargin）で止まるので、
+// n 本目は 54.0 + (n−2) × 0.5 秒 ≤ 59.0 → 12 本が境目。1 秒の余裕を取って 10 本まで。
+// 規則 R は 1 日に max_positions 本まで出すので、これを上げるなら開始時刻か送信の上限を先に見直す。
+func TestTurnoverMaxPositionsFitsPreopenWindow(t *testing.T) {
+	cfg, err := Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Capital.Weighting == WeightingTurnover && cfg.Capital.MaxPositions > 10 {
+		t.Errorf("capital.max_positions = %d: 寄成を 9:00 の 1 秒前までに余裕を持って送れるのは 10 本まで", cfg.Capital.MaxPositions)
 	}
 }

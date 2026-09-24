@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/margincap"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/regime"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/selection"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
@@ -247,12 +248,14 @@ func TestSizeDayLiveConfigPaused(t *testing.T) {
 		wantBudget, wantSpill int64
 		wantTotalAtMost       int64
 	}{
-		// 枠 200 万がロングに回って N=4・1 注文 175 万（長短合計 700 万は停止前と同じ）
-		{name: "通常の日", verdict: normal, wantN: 4, wantBudget: 1_749_999, wantSpill: 1_999_998, wantTotalAtMost: 6_999_996},
+		// 規則 R（weighting = turnover）: N = max_positions = 10 で、N × 1 注文が総額。
+		// 枠 200 万がロングに回って総額 700 万（長短合計は停止前と同じ）。保証金の比
+		// （margin.capacity_ratio）は open の applyMarginCap が当てるので、ここは設定の値のまま
+		{name: "通常の日", verdict: normal, wantN: 10, wantBudget: 699_999, wantSpill: 1_999_998, wantTotalAtMost: 6_999_990},
 		// 米国小幅高の日もショートは停止のまま倍率を残すので、通常日と同じ形
-		{name: "米国小幅高の日", verdict: shortOff, wantN: 4, wantBudget: 1_749_999, wantSpill: 1_999_998, wantTotalAtMost: 6_999_996},
-		// ショック日はショート ×0 なので回す枠が無い（ロング 1.5 倍のまま 3 銘柄）
-		{name: "ショック日", verdict: shock, wantN: 3, wantBudget: 2_499_999, wantSpill: 0, wantTotalAtMost: 7_499_997},
+		{name: "米国小幅高の日", verdict: shortOff, wantN: 10, wantBudget: 699_999, wantSpill: 1_999_998, wantTotalAtMost: 6_999_990},
+		// ショック日はショート ×0 なので回す枠が無い（ロング 500 万 × 1.5 = 750 万を 10 位まで）
+		{name: "ショック日", verdict: shock, wantN: 10, wantBudget: 750_000, wantSpill: 0, wantTotalAtMost: 7_500_000},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			d := SizeDay(SizingInput{Cfg: cfg, Verdict: c.verdict})
@@ -269,5 +272,76 @@ func TestSizeDayLiveConfigPaused(t *testing.T) {
 				t.Errorf("建玉の合計 %s が %d を超えた", total, c.wantTotalAtMost)
 			}
 		})
+	}
+}
+
+// 規則 R ＋ margin.capacity_ratio: 朝の保証金で決め直した設定から、平日（ショートの枠を回した後）も
+// ショック日（×1.5 の後）も、ロングの総額が保証金から導いた上限を超えない。2026-09-24 朝の建可能額で確かめる。
+func TestSizeDayRatioStaysWithinCapacity(t *testing.T) {
+	base, err := config.Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	if !base.Margin.CapacityRatio.IsPositive() || !base.Margin.Paused {
+		t.Skip("capacity_ratio が無いか、ショートの停止を解除した設定（通常日の形に書き替える）")
+	}
+	for _, c := range []struct {
+		name      string
+		sinkidate int64
+		verdict   regime.Verdict
+		wantTotal int64 // ロングの総額（N × 1 注文）
+		atMost    int64
+	}{
+		// 平日: ロング 558 万 + 回したショート 200 万 = 758 万（上限 7,582,401）
+		{name: "平日", sinkidate: 11_150_590, verdict: regime.Verdict{Trade: true, Scale: 1},
+			wantTotal: 7_582_390, atMost: 7_582_401},
+		// ショック日: ロング 558 万 × 1.5 = 837 万 < 上限 858 万（ショートは ×0 で回す枠なし）
+		{name: "ショック日", sinkidate: 11_150_590, verdict: regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: 1.5},
+			wantTotal: 8_373_600, atMost: 8_585_954},
+		// 天井に達した口座のショック日: ロング 800 万 × 1.5 = 1,200 万 → 天井 1,000 万で頭打ち
+		{name: "天井のショック日", sinkidate: 20_000_000, verdict: regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: 1.5},
+			wantTotal: 10_000_000, atMost: 10_000_000},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, res := margincap.Apply(base, margincap.Snapshot{Day: "2026-09-24", SinyouSinkidate: yenOf(c.sinkidate)})
+			if !res.Ratio {
+				t.Fatalf("比で決め直していない: %+v", res)
+			}
+			d := SizeDay(SizingInput{Cfg: cfg, Verdict: c.verdict})
+			long, _, _ := d.WithSpill(nil)
+			total := long.Budget.Mul(decimal.NewFromInt(int64(long.N)))
+			if long.N != base.Capital.MaxPositions {
+				t.Errorf("N = %d, want max_positions %d", long.N, base.Capital.MaxPositions)
+			}
+			if !total.Equal(yenOf(c.wantTotal)) {
+				t.Errorf("ロングの総額 %s（N %d × %s）, want %d", total, long.N, long.Budget, c.wantTotal)
+			}
+			if total.GreaterThan(yenOf(c.atMost)) {
+				t.Errorf("ロングの総額 %s が保証金の上限 %d を超えた", total, c.atMost)
+			}
+		})
+	}
+}
+
+// 規則 R の再実行: 1 件でも建てた日は余り（上限で頭打ち・載らない銘柄を飛ばした残り）で買い足さない。
+// 寄る前の回が丸ごと失敗した日（建てた分 0）は満額で建てる。
+func TestSizeDayTurnoverRerunDoesNotTopUp(t *testing.T) {
+	cfg, err := config.Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	if cfg.Capital.Weighting != config.WeightingTurnover {
+		t.Skip("規則 R でない設定")
+	}
+	normal := regime.Verdict{Trade: true, Scale: 1}
+	after := SizeDay(SizingInput{Cfg: cfg, Verdict: normal, Placed: Placed{Long: 10, LongAmount: yenOf(6_860_000)}})
+	long, _, _ := after.WithSpill(nil)
+	if long.N != 0 || after.Long.N != 0 {
+		t.Errorf("建てた後の回が N=%d（余り回し後 %d）, want 0", after.Long.N, long.N)
+	}
+	first := SizeDay(SizingInput{Cfg: cfg, Verdict: normal})
+	long, _, _ = first.WithSpill(nil)
+	if long.N != cfg.Capital.MaxPositions {
+		t.Errorf("建てていない回が N=%d, want %d", long.N, cfg.Capital.MaxPositions)
 	}
 }

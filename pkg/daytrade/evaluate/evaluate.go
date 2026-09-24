@@ -369,11 +369,11 @@ func NominalLegs(p plan.Plan, quotes map[string]selection.Quote, cfg config.Conf
 		// 並べ替えが失敗した日は open と同じく gap_vol で並べる（作り直しを止めない）
 		longRanking = selection.Rank(p.Eligible(), quotes, cfg.FallbackToGapVol().Signal)
 	}
-	longOpts := selection.PickOptions{
+	longOpts := selection.TurnoverOptions(selection.PickOptions{
 		N: n, Budget: budget, Weighting: cfg.Capital.Weighting, Side: domain.SideBuy,
 		MaxAmount: cfg.Capital.MaxOrder,
 		ValuePool: cfg.Signal.ValuePool, MaxPerSector: cfg.Signal.MaxPerSector,
-	}
+	}, cfg.Capital)
 	longPicks := selection.PickFrom(longRanking, longOpts)
 	legs := []Leg{{Side: "BUY", Ranking: longRanking, Picks: longPicks, N: n, Budget: budget,
 		RulePicks: selection.RulePicks(longRanking, longOpts, longPicks),

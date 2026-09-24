@@ -41,9 +41,19 @@ type Capital struct {
 	// 67 万円は「20〜100 万円は一律」の手数料段階と分散のバランス（研究の結論）。
 	OrderBudget decimal.Decimal `toml:"order_budget"`
 	// MaxPositions は N の上限。研究では N10 を超えると Sharpe が下がった。
+	// weighting = "turnover"（規則 R）では N そのもの（順位の何位まで割り当てるか）。
 	MaxPositions int `toml:"max_positions"`
-	// Weighting は N 銘柄への配分。equal（等金額）か inverse_vol（20 日ボラの逆数）。
+	// Weighting は N 銘柄への配分。equal（等金額）か inverse_vol（20 日ボラの逆数）か
+	// turnover（規則 R: 順位順に 1 銘柄 min(売買代金 20 日中央値 × TurnoverRatio, 総額 ÷ NameDivisor)
+	// を割り当て、総額を使い切るか max_positions 位で止める。研究ノート 2026-09-jp-daytrade-nscale）。
 	Weighting string `toml:"weighting"`
+	// TurnoverRatio は規則 R の 1 銘柄の上限（売買代金 20 日中央値に対する比）。weighting = "turnover" のときだけ。
+	TurnoverRatio decimal.Decimal `toml:"turnover_ratio"`
+	// NameDivisor は規則 R の 1 銘柄の上限（総額 ÷ NameDivisor）。weighting = "turnover" のときだけ。
+	NameDivisor int `toml:"name_divisor"`
+	// ShockTotalCap はショック日のロングの総額の上限（円）。設定ファイルには書かない——朝の保証金
+	// （margin.shock_capacity_ratio）から margincap が入れる実行時の値。0 なら上限なし。
+	ShockTotalCap decimal.Decimal `toml:"-"`
 	// MaxOrder は 1 銘柄の金額の上限（円）。候補が N に満たない日に総予算を 1 銘柄に寄せない
 	// （margin.max_order のロング版）。0 なら上限なし＝総予算 OrderBudget × N を残った銘柄で按分する。
 	MaxOrder decimal.Decimal `toml:"max_order"`
@@ -129,6 +139,15 @@ type Margin struct {
 	// 1 銘柄に乗る。10 年の最悪 20 取引のうち 13 件がこの「全額 1 銘柄」の日で、
 	// ショートの尻尾の実体はこれ（研究ノート 2026-09-jp-shock-days）。
 	MaxOrder decimal.Decimal `toml:"max_order"`
+	// CapacityRatio が正なら、長短合計の上限を朝の信用新規建可能額 × CapacityRatio で**上げ下げ両方に**
+	// 決め直す（capital.max_capital = 合計 − ショートの枠。ショートは margin.max_capital が上限のまま）。
+	// 0 なら従来どおり設定の額を上限にし、保証金では下げるだけ（margincap.Apply）。
+	// capital.weighting = "turnover" のときだけ使える（N を資金で動かさないため）。
+	CapacityRatio decimal.Decimal `toml:"capacity_ratio"`
+	// ShockCapacityRatio はショック日の長短合計の上限（建可能額に対する比）。CapacityRatio を使うときは必須。
+	ShockCapacityRatio decimal.Decimal `toml:"shock_capacity_ratio"`
+	// CapacityCeiling は長短合計の天井（円）。保証金が増えてもこれ以上は建てない。0 なら天井なし。
+	CapacityCeiling decimal.Decimal `toml:"capacity_ceiling"`
 	// SpillToLong が真なら、ショートで使わなかった資金（候補が無い日の全額、MaxOrder で
 	// 頭打ちにした残り）をその日のロングに回す。ロングの銘柄数はその分だけ増え
 	// （総予算 ÷ order_budget、capital.max_positions が上限）、長短の合計は変わらない
@@ -643,9 +662,20 @@ func Default() Config {
 }
 
 // Positions はこの資金で持つ銘柄数 N。資金 0 なら 0。
+//
+// 規則 R（weighting = "turnover"）では N = max_positions（順位の何位まで割り当てるか）で、
+// 資金では動かさない。1 注文の予算（BudgetPerOrder）は総額 ÷ N になり、N × 予算が
+// その日の総額を表す——再実行の差し引き・持ち越しの拘束・ショートの余り（SpillInto）は
+// どれも「件数 × 予算」で総額を扱うので、そのまま規則 R の総額として働く。
 func (c Capital) Positions() int {
 	if c.MaxCapital.IsZero() {
 		return 0
+	}
+	if c.Weighting == WeightingTurnover {
+		if !c.MaxCapital.IsPositive() {
+			return 0
+		}
+		return c.MaxPositions
 	}
 	n, err := fees.PositionsFor(c.MaxCapital, c.OrderBudget, c.MaxPositions)
 	if err != nil {
@@ -821,7 +851,10 @@ func load(configDir string, visited []string) (Config, error) {
 
 // Validate は範囲と整合を確かめる。
 func (c Config) Validate() error {
-	if err := validateWeighting(c.Capital.Weighting); err != nil {
+	if err := validateLongWeighting(c.Capital); err != nil {
+		return err
+	}
+	if err := validateCapacity(c); err != nil {
 		return err
 	}
 	if c.Capital.OrderBudget.LessThanOrEqual(decimal.Zero) {
@@ -1028,6 +1061,61 @@ func (c Config) StrategyName() string {
 		return "jp_gap_fade_margin"
 	}
 	return "jp_gap_fade"
+}
+
+// WeightingTurnover は規則 R（capital.weighting = "turnover"）。
+const WeightingTurnover = "turnover"
+
+// validateLongWeighting はロングの配分。turnover（規則 R）はロングだけに置ける。
+func validateLongWeighting(c Capital) error {
+	if c.Weighting != WeightingTurnover {
+		return validateWeighting(c.Weighting)
+	}
+	if !c.TurnoverRatio.IsPositive() || c.TurnoverRatio.GreaterThan(decimal.RequireFromString("0.05")) {
+		return fmt.Errorf("capital.turnover_ratio は 0 より大きく 0.05 以下（weighting = turnover）")
+	}
+	if c.NameDivisor < 1 {
+		return fmt.Errorf("capital.name_divisor は 1 以上（weighting = turnover）")
+	}
+	if c.MaxPositions < c.NameDivisor {
+		return fmt.Errorf("capital.max_positions（%d）は name_divisor（%d）以上（weighting = turnover）",
+			c.MaxPositions, c.NameDivisor)
+	}
+	return nil
+}
+
+// validateCapacity は保証金の比で上限を決める設定（margin.capacity_ratio）。
+func validateCapacity(c Config) error {
+	m := c.Margin
+	if m.CapacityRatio.IsZero() {
+		if m.ShockCapacityRatio.IsPositive() || m.CapacityCeiling.IsPositive() {
+			return fmt.Errorf("margin.shock_capacity_ratio / capacity_ceiling は capacity_ratio と組で置く")
+		}
+		return nil
+	}
+	one := decimal.NewFromInt(1)
+	if !m.CapacityRatio.IsPositive() || m.CapacityRatio.GreaterThan(one) {
+		return fmt.Errorf("margin.capacity_ratio は 0 より大きく 1 以下")
+	}
+	if m.ShockCapacityRatio.LessThan(m.CapacityRatio) || m.ShockCapacityRatio.GreaterThan(one) {
+		return fmt.Errorf("margin.shock_capacity_ratio は capacity_ratio 以上 1 以下")
+	}
+	if m.CapacityCeiling.IsNegative() {
+		return fmt.Errorf("margin.capacity_ceiling は 0 以上（0 は天井なし）")
+	}
+	if c.Capital.Weighting != WeightingTurnover {
+		return fmt.Errorf("margin.capacity_ratio は capital.weighting = turnover のときだけ使える")
+	}
+	// ショートの倍率が 1 を超えると、一時停止中はその総額がまるごとロングに回り、長短合計が上限を超える
+	one = decimal.NewFromInt(1)
+	if m.MultiplierNormal.GreaterThan(one) || m.MultiplierLongWeak.GreaterThan(one) {
+		return fmt.Errorf("margin.capacity_ratio は margin.multiplier_normal / multiplier_long_weak が 1 以下のときだけ使える")
+	}
+	// ショック日にショートを建てると、長短合計の上限（shock_capacity_ratio）をロングだけで判定できない
+	if c.Regime.ShockShortScale.IsPositive() {
+		return fmt.Errorf("margin.capacity_ratio は regime.shock_short_scale = 0 のときだけ使える")
+	}
+	return nil
 }
 
 func validateWeighting(v string) error {

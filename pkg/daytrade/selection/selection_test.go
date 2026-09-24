@@ -431,3 +431,84 @@ func TestKeepPreservesRanks(t *testing.T) {
 		t.Errorf("予測値が消えた: %+v", kept[0])
 	}
 }
+
+// 規則 R（weighting = turnover）: 順位順に min(売買代金 × 比, 総額 ÷ NameDivisor) を載せ、総額を使い切ったら止める。
+// 1 単元が上限に収まらない銘柄・売買代金の無い銘柄は飛ばして次点を繰り上げる。
+func TestPickFromTurnoverAllocatesInRankOrder(t *testing.T) {
+	row := func(rank int, symbol string, price, turnover float64) Ranked {
+		return Ranked{Rank: rank, Symbol: symbol, Code: symbol + "0", Price: decimal.NewFromFloat(price),
+			PrevClose: decimal.NewFromFloat(price * 1.03), Turnover: turnover}
+	}
+	ranked := []Ranked{
+		row(1, "1001", 1000, 3e8),  // 0.2% = 60 万 → 600 株
+		row(2, "1002", 2000, 1e10), // 0.2% = 2,000 万 → 上限 100 万 → 500 株
+		row(3, "1003", 5000, 1e8),  // 0.2% = 20 万 < 1 単元 50 万 → 飛ばす
+		row(4, "1004", 100, 0),     // 売買代金が無い → 飛ばす
+	}
+	for i := 5; i <= 12; i++ {
+		ranked = append(ranked, row(i, "20"+string(rune('0'+i/10))+string(rune('0'+i%10)), 1000, 1e10))
+	}
+	opts := TurnoverOptions(PickOptions{
+		N: 20, Budget: decimal.NewFromInt(350_000), Weighting: config.WeightingTurnover, Side: domain.SideBuy,
+	}, config.Capital{TurnoverRatio: decimal.RequireFromString("0.002"), NameDivisor: 7})
+	picks := PickFrom(ranked, opts)
+	// 総額 700 万、上限 100 万: 60 万 + 100 万 × 6 + 残り 40 万 = 700 万で 8 銘柄
+	total := decimal.Zero
+	for _, p := range picks {
+		total = total.Add(p.Amount())
+		if p.Amount().GreaterThan(decimal.NewFromInt(1_000_000)) {
+			t.Errorf("%s に %s 円（上限 100 万を超えた）", p.Symbol, p.Amount())
+		}
+	}
+	if !total.Equal(decimal.NewFromInt(7_000_000)) {
+		t.Errorf("総額 %s, want 7000000", total)
+	}
+	if len(picks) != 8 {
+		t.Fatalf("選定 %d 件, want 8: %+v", len(picks), picks)
+	}
+	if picks[0].Symbol != "1001" || !picks[0].Quantity.Equal(decimal.NewFromInt(600)) {
+		t.Errorf("1 位 %s %s 株, want 1001 600 株", picks[0].Symbol, picks[0].Quantity)
+	}
+	if picks[1].Symbol != "1002" || !picks[1].Quantity.Equal(decimal.NewFromInt(500)) {
+		t.Errorf("2 位 %s %s 株, want 1002 500 株", picks[1].Symbol, picks[1].Quantity)
+	}
+	for _, p := range picks {
+		if p.Symbol == "1003" || p.Symbol == "1004" {
+			t.Errorf("%s は飛ばすはず", p.Symbol)
+		}
+	}
+	if last := picks[len(picks)-1]; !last.Amount().Equal(decimal.NewFromInt(400_000)) {
+		t.Errorf("最後の銘柄 %s 円, want 残りの 40 万", last.Amount())
+	}
+	reasons := PickReasons(ranked, opts, picks)
+	if reasons["1003"] != ReasonOverBudget || reasons["1004"] != ReasonOverBudget {
+		t.Errorf("理由 1003=%s 1004=%s, want over_budget", reasons["1003"], reasons["1004"])
+	}
+	for _, p := range picks {
+		if reasons[p.Symbol] != ReasonPicked {
+			t.Errorf("%s の理由 %s, want picked", p.Symbol, reasons[p.Symbol])
+		}
+	}
+}
+
+// 規則 R でも業種の上限と 1 銘柄の上限（max_order）は効く。
+func TestPickFromTurnoverKeepsSectorCapAndMaxAmount(t *testing.T) {
+	ranked := []Ranked{
+		{Rank: 1, Symbol: "1001", Price: decimal.NewFromInt(1000), Turnover: 1e10, Sector: "3050"},
+		{Rank: 2, Symbol: "1002", Price: decimal.NewFromInt(1000), Turnover: 1e10, Sector: "3050"},
+		{Rank: 3, Symbol: "1003", Price: decimal.NewFromInt(1000), Turnover: 1e10, Sector: "3100"},
+	}
+	opts := TurnoverOptions(PickOptions{
+		N: 20, Budget: decimal.NewFromInt(350_000), Weighting: config.WeightingTurnover, Side: domain.SideBuy,
+		MaxPerSector: 1, MaxAmount: decimal.NewFromInt(800_000),
+	}, config.Capital{TurnoverRatio: decimal.RequireFromString("0.002"), NameDivisor: 7})
+	picks := PickFrom(ranked, opts)
+	if len(picks) != 2 || picks[0].Symbol != "1001" || picks[1].Symbol != "1003" {
+		t.Fatalf("選定 %+v, want 1001 と 1003（同業の 1002 は落ちる）", picks)
+	}
+	for _, p := range picks {
+		if !p.Amount().Equal(decimal.NewFromInt(800_000)) {
+			t.Errorf("%s に %s 円, want max_order の 80 万", p.Symbol, p.Amount())
+		}
+	}
+}

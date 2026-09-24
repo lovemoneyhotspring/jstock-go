@@ -54,13 +54,13 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 	longParams := legParams{
 		n: nLong, budget: cfg.Capital.BudgetPerOrder(), sign: 1, fill: fill,
 		side: domain.SideBuy, signal: cfg.Signal, margin: cfg.Margin,
-		pick: selection.PickOptions{
+		pick: selection.TurnoverOptions(selection.PickOptions{
 			Weighting:    cfg.Capital.Weighting,
 			Side:         domain.SideBuy,
 			MaxAmount:    cfg.Capital.MaxOrder,
 			ValuePool:    cfg.Signal.ValuePool,
 			MaxPerSector: cfg.Signal.MaxPerSector,
-		},
+		}, cfg.Capital),
 		// 信用買い（日計り）なら手数料 0 円。金利・滑りは long_extra_cost_bp で見る
 		commission: !cfg.Margin.LongViaMargin,
 	}

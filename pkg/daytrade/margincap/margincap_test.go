@@ -282,3 +282,68 @@ func TestApplyFlagsWatchOnlyCollapse(t *testing.T) {
 		t.Error("N が 0 に落ちたのに印が付いていない")
 	}
 }
+
+// margin.capacity_ratio（規則 R）: 長短合計 = min(建可能額 × 68%, 天井 1,000 万) を上げ下げ両方に当てる。
+// 本番の設定と 2026-09-24 朝の実際の建可能額で確かめる。
+func TestApplyRatioLiveConfig(t *testing.T) {
+	cfg, err := config.Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	if !cfg.Margin.CapacityRatio.IsPositive() {
+		t.Skip("margin.capacity_ratio が無い設定")
+	}
+	for _, c := range []struct {
+		name                         string
+		sinkidate, fusoku            string
+		wantLong, wantShort          string
+		wantNormal, wantShock        string
+		wantRatio, wantWatch, change bool
+	}{
+		// 1,115 万 × 68% = 758 万。ショートは長短比 2:7 で 216 万 → 上限 200 万、残り 558 万がロング
+		{name: "今朝の値", sinkidate: "11150590", wantLong: "5582401", wantShort: "2000000",
+			wantNormal: "7582401", wantShock: "8585954", wantRatio: true, change: true},
+		// 天井 1,000 万で止まる（ショック日も天井を超えない）
+		{name: "保証金が増えた", sinkidate: "20000000", wantLong: "8000000", wantShort: "2000000",
+			wantNormal: "10000000", wantShock: "10000000", wantRatio: true, change: true},
+		// 小さい朝はショートを長短比で割る（ロングが 0 にならない）
+		{name: "保証金が小さい", sinkidate: "2000000", wantLong: "971428", wantShort: "388572",
+			wantNormal: "1360000", wantShock: "1540000", wantRatio: true, change: true},
+		// 追証の日は建てない
+		{name: "追証", sinkidate: "11150590", fusoku: "1000", wantLong: "0", wantShort: "0",
+			wantNormal: "0", wantShock: "0", wantRatio: true, wantWatch: true, change: true},
+		// 当日ぶんのキャッシュで建可能額が 0 なら建てない（取れない朝は applyMarginCap が設定の値に落とす）
+		{name: "建可能額 0", sinkidate: "0", wantLong: "0", wantShort: "0",
+			wantNormal: "0", wantShock: "0", wantRatio: true, wantWatch: true, change: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := Snapshot{Day: "2026-09-24", SinyouSinkidate: dec(c.sinkidate)}
+			if c.fusoku != "" {
+				s.Fusokugaku = dec(c.fusoku)
+			}
+			got, res := Apply(cfg, s)
+			if got.Capital.MaxCapital.String() != c.wantLong || got.Margin.MaxCapital.String() != c.wantShort {
+				t.Errorf("ロング %s ショート %s, want %s / %s", got.Capital.MaxCapital, got.Margin.MaxCapital, c.wantLong, c.wantShort)
+			}
+			if res.NormalTotal.String() != c.wantNormal || res.ShockTotal.String() != c.wantShock {
+				t.Errorf("合計 平日 %s ショック %s, want %s / %s", res.NormalTotal, res.ShockTotal, c.wantNormal, c.wantShock)
+			}
+			if !got.Capital.ShockTotalCap.Equal(res.ShockTotal) {
+				t.Errorf("ShockTotalCap %s, want %s", got.Capital.ShockTotalCap, res.ShockTotal)
+			}
+			if res.Ratio != c.wantRatio || res.WatchOnly != c.wantWatch || res.Applied != c.change {
+				t.Errorf("ratio %v watch %v applied %v, want %v / %v / %v", res.Ratio, res.WatchOnly, res.Applied, c.wantRatio, c.wantWatch, c.change)
+			}
+			// 長短の合計は平日の上限を超えない
+			if c.wantRatio && got.Capital.MaxCapital.Add(got.Margin.MaxCapital).GreaterThan(res.NormalTotal) {
+				t.Errorf("長短合計 %s が上限 %s を超えた", got.Capital.MaxCapital.Add(got.Margin.MaxCapital), res.NormalTotal)
+			}
+			if err := got.Validate(); err != nil {
+				t.Errorf("適用後の設定が検証を通らない: %v", err)
+			}
+			if !c.wantWatch && got.Capital.Positions() != cfg.Capital.MaxPositions {
+				t.Errorf("ロング N = %d, want max_positions %d", got.Capital.Positions(), cfg.Capital.MaxPositions)
+			}
+		})
+	}
+}

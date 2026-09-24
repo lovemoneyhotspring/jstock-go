@@ -99,6 +99,8 @@ type Ranked struct {
 	RuleRank int
 	// Score は機械学習の予測値（rank_by = "lgbm" のときだけ。高いほど先）。
 	Score *float64
+	// Turnover は売買代金の 20 日中央値（円）。規則 R（PickOptions.TurnoverRatio）の 1 銘柄の上限に使う。
+	Turnover float64
 }
 
 // LimitDownPrice は前日終値を基準値段とするストップ安の値段。
@@ -241,6 +243,7 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 			Vol:       c.Vol20,
 			EarnYield: c.EarnYield,
 			Sector:    c.Sector,
+			Turnover:  c.TurnoverMed,
 		}
 		key, ok := RankKey(f.rankBy, row.Gap.InexactFloat64(), row.Vol)
 		sr := scoredRow{row: row, key: key, ok: ok}
@@ -377,6 +380,52 @@ type PickOptions struct {
 	// MaxPerSector は同じ 33 業種から建ててよい銘柄数の上限（config.Signal.MaxPerSector）。
 	// 0 で無制限。上限を超えた銘柄は落ち、次点が繰り上がる。
 	MaxPerSector int
+	// TurnoverRatio / NameDivisor は規則 R（Weighting = "turnover"）の 1 銘柄の上限:
+	// min(売買代金 20 日中央値 × TurnoverRatio, 総額 Budget × N ÷ NameDivisor)。
+	TurnoverRatio decimal.Decimal
+	NameDivisor   int
+}
+
+// TurnoverOptions は規則 R の設定を PickOptions に写す（open・evaluate・backtest で同じ値にするため）。
+func TurnoverOptions(opts PickOptions, c config.Capital) PickOptions {
+	opts.TurnoverRatio, opts.NameDivisor = c.TurnoverRatio, c.NameDivisor
+	return opts
+}
+
+// byTurnover は規則 R で割り当てるか。
+func (o PickOptions) byTurnover() bool {
+	return o.Weighting == config.WeightingTurnover
+}
+
+// nameCap は規則 R の 1 銘柄の上限（総額 ÷ NameDivisor）。
+//
+// 総額は Budget × N（今回の回の総額）。再実行で残りを建てる回は総額が残りの額になるので、
+// 上限も小さくなる——1 回目より厚く載せることはない（安全側）。
+func (o PickOptions) nameCap() decimal.Decimal {
+	total := o.Budget.Mul(decimal.NewFromInt(int64(o.N)))
+	if o.NameDivisor < 1 {
+		return total
+	}
+	return total.Div(decimal.NewFromInt(int64(o.NameDivisor))).Floor()
+}
+
+// turnoverAmount は規則 R でこの銘柄に載せてよい金額（残りの総額はまだ見ない）。
+// 売買代金が取れない（0）銘柄は 0——板の厚みが分からない銘柄に載せない。
+func (o PickOptions) turnoverAmount(r Ranked) decimal.Decimal {
+	if r.Turnover <= 0 || !o.TurnoverRatio.IsPositive() {
+		return decimal.Zero
+	}
+	byTurnover := decimal.NewFromFloat(r.Turnover).Mul(o.TurnoverRatio).Floor()
+	return decimal.Min(byTurnover, o.nameCap())
+}
+
+// affordable は 1 単元が載せてよい金額に収まるか。規則 R では銘柄ごとの上限、それ以外は Budget。
+func (o PickOptions) affordable(r Ranked) bool {
+	amount := o.Budget
+	if o.byTurnover() {
+		amount = o.turnoverAmount(r)
+	}
+	return SharesFor(amount, r.Price, lotOf(o.LotSizes, r.Symbol)).GreaterThan(decimal.Zero)
 }
 
 // Pick は順位表の上位 N 銘柄を選び、株数を決める。
@@ -400,10 +449,15 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 	chosen := ByEarnYield(affordable, opts.N, opts.ValuePool)
 	total := opts.Budget.Mul(decimal.NewFromInt(int64(opts.N)))
 	weights := Weights(chosen, opts.Weighting)
+	// 規則 R: 順位順に銘柄ごとの上限を載せ、総額を使い切ったら止める（余りは現金のまま）
+	left := total
 	var picks []Pick
 	for i, r := range chosen {
 		lot := lotOf(opts.LotSizes, r.Symbol)
 		amount := total.Mul(decimal.NewFromFloat(weights[i]))
+		if opts.byTurnover() {
+			amount = decimal.Min(opts.turnoverAmount(r), left)
+		}
 		if opts.MaxAmount.GreaterThan(decimal.Zero) && amount.GreaterThan(opts.MaxAmount) {
 			amount = opts.MaxAmount
 		}
@@ -414,6 +468,7 @@ func PickFrom(ranked []Ranked, opts PickOptions) []Pick {
 		if limit := broker.ShortSaleMarketShares(lot); side == domain.SideSell && quantity.GreaterThan(limit) {
 			quantity = limit
 		}
+		left = left.Sub(r.Price.Mul(quantity))
 		picks = append(picks, Pick{
 			Symbol:    r.Symbol,
 			Code:      r.Code,
@@ -494,7 +549,7 @@ func candidatePool(ranked []Ranked, opts PickOptions, reasons map[string]string)
 			reasons[r.Symbol] = ReasonBeyondN
 			continue
 		}
-		if SharesFor(opts.Budget, r.Price, lotOf(opts.LotSizes, r.Symbol)).LessThanOrEqual(decimal.Zero) {
+		if !opts.affordable(r) {
 			if reasons != nil {
 				reasons[r.Symbol] = ReasonOverBudget
 			}
