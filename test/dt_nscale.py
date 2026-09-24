@@ -607,9 +607,10 @@ def part_k(i0s, seeds, slot, caps):
                 print(f"    {lab:4s} 銘柄数 {acc[(C, lab, 'n')]:4.1f} 最大の1銘柄 {acc[(C, lab, 'top')]:.0%}: " + " | ".join(row))
 
 
-def alloc_prod(g, cap_total, base=1.67e6):
-    """本番の形の近似: N = floor(資金 ÷ 1 注文の基準 167 万)（3 以上）、逆ボラ（spill_to_long と同じ式）。"""
-    n = max(3, int(cap_total // base))
+def alloc_prod(g, cap_total, base=1.67e6, max_n=20):
+    """本番の形の近似: N = floor(資金 ÷ 1 注文の基準 167 万)（3 以上 max_n まで）、逆ボラ（spill_to_long と同じ式）。
+    本番の capital.max_positions は 10 だが、規則 R の 20 位に揃えて 20 で測る。"""
+    n = min(max(3, int(cap_total // base)), max_n)
     return alloc_fixed_iv(g, n, cap_total)
 
 
@@ -700,6 +701,7 @@ def main():
     ap.add_argument("--part", default="all")
     ap.add_argument("--i0", type=float, nargs="+", default=[10.0])
     ap.add_argument("--seeds", type=int, default=3)
+    ap.add_argument("--caps", type=float, nargs="*", default=None, help="資金（円）。--part fixed だけ")
     ap.add_argument("--slot", default="0859")
     a = ap.parse_args()
     c = load()
@@ -712,7 +714,7 @@ def main():
         part_rvc(a.i0, a.seeds, a.slot, [5e6, 7e6, 1e7, 3e7])
         return
     if a.part == "fixed":
-        part_fixed(a.i0, a.seeds, a.slot, [5e6, 7e6, 1e7, 3e7])
+        part_fixed(a.i0, a.seeds, a.slot, a.caps or [5e6, 7e6, 1e7, 3e7])
         return
     if a.part == "k":
         part_k(a.i0, a.seeds, a.slot, [5e6, 7e6, 1e7, 3e7, 5e7])
