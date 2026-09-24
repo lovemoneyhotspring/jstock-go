@@ -59,9 +59,18 @@ live フラグに触れるときは「live フラグ」と書く。PR の本文�
    ```bash
    TODAY=$(TZ=Asia/Tokyo date +%F)
    YESTERDAY=$(TZ=Asia/Tokyo date -d yesterday +%F)
-   # verify が付いた実行と backtest は検証なので外す
-   jq -c 'select((.anomalies or .outcome == "error") and (.verify | not) and .command != "backtest")' state/digest/prod-$YESTERDAY.jsonl state/digest/prod-$TODAY.jsonl 2>/dev/null
+   # verify が付いた実行と backtest は検証なので外す。
+   # 1 行ずつ文字列で読み（-R）、try fromjson で包む（deploy/night-repair.sh の数え方と同じ）。
+   # 壊れた行があってもそこで止まらず、その行は {"broken": 行番号, "line": 先頭 200 字} で出す
+   jq -R -c '
+     select(test("\\S"))
+     | (try fromjson catch null) as $r
+     | if ($r | type) != "object" then {broken: input_line_number, line: .[0:200]}
+       elif ($r | (.anomalies or .outcome == "error") and (.verify | not) and .command != "backtest") then $r
+       else empty end' state/digest/prod-$YESTERDAY.jsonl state/digest/prod-$TODAY.jsonl
    ```
+   **プロンプトに JUDGE_NOTE（読めない行・jq の失敗）があれば、その行や jq の失敗そのものを調べる**
+   （ダイジェストは 1 行を 1 回の書き込みで足すので、壊れた行は書き手の異常）。
 2. **`run_id` を鍵に層 3（`state/logs/<app>-prod.jsonl`）へ降りて、何が起きたかを特定する。**
    ログは JST の 0 時で退避される（`<app>-prod.jsonl.<日付>`）。**前夜の実行は退避ファイルに入っている**
    ので、きのうの退避と現行の両方を渡す。

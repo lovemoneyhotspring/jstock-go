@@ -39,7 +39,7 @@ dow=${rest#* }
 # GUARD・CLOSENET は cron ではなく systemd のタイマー（jstock-guard 8:42・15:12、jstock-close-net
 # 15:22・15:26）の ExecStopPost（deploy/unit-done.sh）が打つ。期限は 8:42 の回の上限（600 秒）と
 # 15:26 の回の上限（240 秒）に猶予を足した時刻。1 日に 2 回打つので、値は後の回の終わり方になる。
-# **Mackerel 側の監視ルール（alive.guard > 0・alive.closenet > 0）は人が足す**。足すまでは投稿されるだけ
+# Mackerel 側の監視ルール（alive.guard > 0・alive.closenet > 0・alive.rate > 0）は 2026-09-25 に足した
 # （deploy/install-systemd.sh でユニットを入れ直す前は印が無く、平日の期限後は 2 になる。ルールは入れ直した後に）
 # RATE は 7:30 の rate sync（cron。平日の日単位の失敗で終了 1）。ふだん数十秒で終わるので期限は 8:30
 checks="MORNING:0940 VERIFY:1600 GUARD:0900 CLOSENET:1535 RATE:0830"
