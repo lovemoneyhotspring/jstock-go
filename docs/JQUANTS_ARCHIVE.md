@@ -145,10 +145,10 @@ jquants sync [--days N] [--only 端点]   台帳を見て必要な端点・日�
 jquants backfill [--since 2016-09]     一括ダウンロードで初回取り込み。再実行は更新ファイルだけ
 jquants status                         端点ごとの月数・最古・最新・最終取得
 jquants check [--date D] [--days 30] [--stale-days 7]
-                                       営業日の欠けと、最終取得が古い全件・範囲の端点を探す（あれば 2 で終了。監視用）
+                                       営業日の欠けと、最終取得が古い全件・範囲の端点を探す（あれば 3 で終了。監視用）
 jquants repair [--days 30] [--stale-days 7] [--only 端点] [--dry-run]
                                        check と同じ判定で欠けを探し、その日だけ取り直す。終わりに古い端点も見る
-                                       （埋まらない・古い端点があれば 2、取り込みの失敗だけなら 1）
+                                       （埋まらない・古い端点があれば 3、取り込みの失敗だけなら 1）
 jquants prune [--only 端点] [--windows W] [--yes]
                                        日分割の端点を時間帯で刈る。既定は数えるだけ（書き換えは --yes）
 jquants query "SELECT …"               DuckDB で端点名のビューを張って SQL（研究用）
@@ -157,6 +157,13 @@ jquants query "SELECT …"               DuckDB で端点名のビューを張�
 ログは `docs/LOGGING.md` の規約どおり `jquants-<env>.jsonl` に。`code` は `jquants.ingest`（端点・対象・rows・changed・source）と `jquants.gap`（欠け検出）・`jquants.stale`（古い端点）。
 ダイジェストは終了コードと揃える: 非 0 で終わった回（取り込みの失敗・埋まらない欠け・古い端点・panic）は `outcome: error` で、
 `anomalies` に `jquants.command_failed: <要約>` が入る。取り込みの件数は `ingests` / `rows` / `failures`。
+
+終了コード: 0 = 正常、1 = 失敗（取り込みの失敗・引数の誤りなど）、2 = panic（`cli.ExitPanic`。記録・通知してから終わる）、
+3 = `check` / `repair` が欠け・古い端点を見つけた（2026-09-24〜。以前は 2 で panic と区別できなかった）。
+crontab・`deploy/*.sh` はこの値で分岐していない（0 か否かだけ）。
+
+一括ファイルのダウンロードの失敗は、エラー文に**署名付き URL を出さない**（2026-09-24〜）。`*url.Error` は URL を
+クエリ（署名）ごと文にするので、ホストと理由だけを残す——エラー文はダイジェストの `command_failed` と通知に載る。
 
 ### レート制限（120 回/分）
 
@@ -403,7 +410,7 @@ jquants query "SELECT * FROM read_parquet('data/jquants/equities_bars_minute/202
   以前は UTC の今日だったので、00:00〜09:00 JST に回すと範囲が 1 日早く終わっていた。
 - **全件・範囲で取る端点の鮮度**。取引カレンダー・TOPIX・決算予定・投資部門別は日の欠けを数えないので、
   台帳の最終取得が `--stale-days`（既定 7 日。取得間隔の 2 倍の方が長ければそちら）より
-  古ければ「古い端点」として出し、欠けと同じく終了コード 2・通知にする（`Ingestor.Stale`）。
+  古ければ「古い端点」として出し、欠けと同じく終了コード 3・通知にする（`Ingestor.Stale`）。
   `repair` も終わりに同じ確認をする（2026-09-24。20:00 の cron を `repair --notify` に替えたときに抜けていた）。
   取り直しはしない（`sync` が次の回に取る）。取引カレンダーは 2026-09-24 から日に 1 回取る
   （`MinIntervalHours` 24*7 → 20。週 1 回のままだと上限が 14 日に緩んでいた）。
