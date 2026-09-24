@@ -253,7 +253,7 @@ WBJP_ENV=prod WBJP_ENV_FILE=$PWD/.env \
 | `CLMKabuNewOrder` の `sCondition = 4`（引け）× 信用返済 | **保険の手仕舞い**（`execution.protect_exit`。**2026-09-20 から有効**・本番で検証中）。手順は下の「引けの保険注文」 | [pkg/wbcore/broker/tachibana_codes.go](../pkg/wbcore/broker/tachibana_codes.go) `conditionCodeOf` |
 | 引けの保険が**一部約定**したときの `CLMOrderList` / `CLMOrderListDetail` の返り方 | 保険の聞き直しで「約定数量が減って見えたら台帳へ書き戻さない」保護の前提（一部約定後の取消・失効で約定数量欄に約定分が載るか。2026-09-20 のレビューで未確認と記録） | [pkg/daytrade/execute/protect.go](../pkg/daytrade/execute/protect.go) |
 | 時価問合の `p_no` 検査が**セッション単位か口座単位か** | 番号順にずらして送る途中で再ログインが入ったときだけ効く（弾かれても 2 周目が直列で取り直す）。実験は下の「時価問合を並列に送れるか」 | [pkg/wbcore/broker/tachibana_price.go](../pkg/wbcore/broker/tachibana_price.go) |
-| 発注と照会の**合計 4 回/秒**（`orderLimiter` 2 + `requestLimiter` 2）が上限に当たらないか | 注文の枠は上げていない（実機の上限を確かめていない）。9/24 の朝に `broker.request_failed` が出ないか見る | 同 `requestLimiterFor` |
+| 発注と照会の**合計 8 回/秒**（`requestLimiter` の 1 枠）が上限に当たらないか | 立花の上限は口全体で 10 回/秒。2026-09-25 に注文 2・照会 2 回/秒の別枠を、合計 8 回/秒の 1 枠にまとめた（別枠 2 + 2 のときは 9/20〜9/24 とも `broker.request_failed` なし）。上げた後の最初の寄成で注文の `p_errno`・`sResultCode` が 0 以外にならないか、送信の間隔が約 0.13 秒に詰まったかを見る | 同 `requestLimiterFor` |
 
 信用建玉（行あり）・信用新規／返済の発注・信用返済の逆指値は 2026-09-14 に本番口座で確認済み（上の節）。
 `daytrade` の台帳を通した信用の 1 周（`open` → `close` → `verify`）は 2026-09-16 に本番で確認済み（4 件を建て、close のあと verify が `carried: 0`）。
