@@ -84,11 +84,10 @@ type SyncResult struct {
 // SyncOrderStatus は結果が確定していない注文をブローカーに照会し、台帳を更新する。
 //
 // ブローカーに無い注文は原則そのまま残す（勝手に「失効」にすると、実は板に
-// 残っていた注文と二重になる）。例外は**送信中（PENDING）のまま
-// UnconfirmedGrace を過ぎても無い**注文——応答が返らず記録だけが残ったもので、
-// 届いていれば翌日には照会できる。これは REJECTED に落とし、次の実行で
-// 差額として埋め直す。これをしないと、届かなかった注文が永久に「発注済み」
-// として当月の予算を食い続ける。
+// 残っていた注文と二重になる）。例外は**今日送った送信中（PENDING）のまま
+// UnconfirmedGrace を過ぎても当日の注文一覧に無い**注文——応答が返らず記録だけが
+// 残ったもの。一覧を信用できるときに限り UNSENT に落とし、次の実行で差額として
+// 埋め直す（条件は resolveUnconfirmed）。前日以前の PENDING は一覧に出ないので落とさない。
 //
 // 約定単価が分かった注文は「発注済み」の額を **株数 × 約定単価** に置き換える。
 // 判断時の価格のままだと、実際に払った額との差だけ差額の計算がずれる。
@@ -202,8 +201,24 @@ func SyncOrderStatus(led *ledger.Ledger, b broker.Broker, now time.Time) (SyncRe
 // resolveUnconfirmed は注文番号の無い PENDING を当日の注文一覧で判定し、台帳を更新する。
 //
 // 一覧を照会できなければ全件を保留にする（次の run で再判定）。
+//
+// **「一覧に無い」を「届いていない」と読むのは、一覧を信用できるときだけ**（2026-09-24 のレビュー A1）:
+//
+//   - 前日以前に送った PENDING は判定しない（保留）。立花の注文一覧（CLMOrderList）は
+//     当日分だけを返すものとして扱っている（tachibana_orders.go の GetOrderHistory。
+//     前日以前を返すかは実機で確かめていない）。前日の当日限りの注文は、約定していても
+//     今日の一覧に出ないかもしれない。「無い」を UNSENT にすると約定済みの注文をもう一度
+//     買う。一覧の中身によらず決めない。送った日が読めない行も同じ扱い
+//   - 今日送って注文番号まで分かっている注文（Expected）がどれも一覧に無ければ、一覧が
+//     空で返った・反映が遅れていると読み、判定を先送りする（reconcile.Options.Expected。
+//     daytrade と同じ塞ぎ方）
+//   - 一覧が 0 件なら判定しない（保留）。積立は 1 日の注文が数件で Expected が空の日が
+//     ほとんどなので、上の目印だけでは「空で返った一覧」を見分けられない
+//
+// 保留した PENDING は台帳に残り、run はその銘柄を発注しない（RunAccumulation）。人（か AI）が
+// 口座の約定履歴で確かめ、`accum pending resolve` で確定する。
 func resolveUnconfirmed(led *ledger.Ledger, b broker.Broker, rows []ledger.LedgerOrder, now time.Time, result *SyncResult) error {
-	hold := func(reason string) {
+	hold := func(rows []ledger.LedgerOrder, reason string) {
 		for _, row := range rows {
 			result.Unresolved = append(result.Unresolved, UnresolvedOrder{
 				ClientOrderID: row.ClientOrderID, Symbol: row.Symbol, Status: row.Status, Reason: reason,
@@ -212,12 +227,49 @@ func resolveUnconfirmed(led *ledger.Ledger, b broker.Broker, rows []ledger.Ledge
 	}
 	jst := clock.ToZone(now, clock.Tokyo)
 	start := time.Date(jst.Year(), jst.Month(), jst.Day(), 0, 0, 0, 0, clock.Tokyo)
+	end := start.AddDate(0, 0, 1)
+
+	var todaysRows, earlier []ledger.LedgerOrder
+	for _, row := range rows {
+		placedAt, err := time.Parse(time.RFC3339, row.PlacedAt)
+		if err != nil || placedAt.Before(start) || !placedAt.Before(end) {
+			earlier = append(earlier, row)
+			continue
+		}
+		todaysRows = append(todaysRows, row)
+	}
+	if len(earlier) > 0 {
+		hold(earlier, "今日より前に送った送信結果不明の注文。立花の注文一覧は前日以前を返さないことがあるので、"+
+			"一覧に無くても「届いていない」とは決めない（口座の約定履歴で確かめて `accum pending resolve`）")
+	}
+	if len(todaysRows) == 0 {
+		return nil
+	}
+	rows = todaysRows
+
 	todays, err := b.GetOrderHistory(start, jst)
 	if err != nil {
-		hold("当日の注文一覧を照会できない: " + err.Error())
+		hold(rows, "当日の注文一覧を照会できない: "+err.Error())
+		return nil
+	}
+	if len(todays) == 0 {
+		// 送信から猶予を過ぎていないものは一覧に載る前なので、いつもどおり次の run で判定する
+		var listEmpty []ledger.LedgerOrder
+		for _, row := range rows {
+			placedAt, _ := time.Parse(time.RFC3339, row.PlacedAt)
+			if now.Sub(placedAt) >= UnconfirmedGrace {
+				listEmpty = append(listEmpty, row)
+			}
+		}
+		hold(listEmpty, "当日の注文一覧が 0 件（届いていないのか一覧が空で返ったのか区別できない）。"+
+			"口座の注文照会で確かめて `accum pending resolve`")
 		return nil
 	}
 	known, err := led.BrokerOrderIDs()
+	if err != nil {
+		return err
+	}
+	expected, err := led.BrokerOrderIDsPlacedBetween(start, end)
 	if err != nil {
 		return err
 	}
@@ -231,7 +283,8 @@ func resolveUnconfirmed(led *ledger.Ledger, b broker.Broker, rows []ledger.Ledge
 		})
 		byID[row.ClientOrderID] = row
 	}
-	resolutions := reconcile.Resolve(pendings, todays, reconcile.Options{Now: now, Grace: UnconfirmedGrace, Known: known})
+	resolutions := reconcile.Resolve(pendings, todays, reconcile.Options{
+		Now: now, Grace: UnconfirmedGrace, Known: known, Expected: expected})
 	for _, r := range resolutions {
 		row := byID[r.Pending.ClientOrderID]
 		switch r.Outcome {
