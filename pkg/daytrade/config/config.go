@@ -1041,8 +1041,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("%s は 0 以上", name)
 		}
 	}
-	// 資金と 1 注文の目安が矛盾していないかは、N を実際に導いて確かめる
-	if !c.Capital.MaxCapital.IsZero() {
+	// 資金と 1 注文の目安が矛盾していないかは、N を実際に導いて確かめる。
+	// 規則 R（turnover）は N = max_positions で order_budget を見ない（Capital.Positions）ので検査しない。
+	// 検査すると建可能額 × capacity_ratio が小さい朝（ロング < order_budget の半分）に検証が落ち、
+	// 上書き前の満額で建てていた（2026-09-25 のレビュー R1）
+	if !c.Capital.MaxCapital.IsZero() && c.Capital.Weighting != WeightingTurnover {
 		if _, err := fees.PositionsFor(c.Capital.MaxCapital, c.Capital.OrderBudget, c.Capital.MaxPositions); err != nil {
 			return fmt.Errorf("capital: %w", err)
 		}

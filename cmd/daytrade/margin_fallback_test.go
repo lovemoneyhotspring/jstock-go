@@ -46,10 +46,88 @@ func TestRatioFallbackOnlyLowers(t *testing.T) {
 		t.Errorf("前日が大きい: total %s fromStale %v, want 固定値 %s のまま", total, fromStale, fixed)
 	}
 
-	// 前日に追証 → 前日の値は使わず固定値（建てるかどうかは当日の値で決める）
+	// 前日に追証 → 建てない。当日の値が読めない朝に分かっている最新の値は「追証」で、
+	// 固定値の満額に戻すのは逆向き（2026-09-25 のレビュー。従来は固定値で建てていた）
 	short := margincap.Snapshot{SinyouSinkidate: decimal.NewFromInt(6_000_000), Fusokugaku: decimal.NewFromInt(1)}
-	if _, _, fromStale = ratioFallbackConfig(cfg, &short); fromStale {
-		t.Error("前日に追証のキャッシュで決め直した")
+	out, total, _ = ratioFallbackConfig(cfg, &short)
+	if !total.IsZero() || out.Capital.Positions() != 0 || out.Margin.Positions() != 0 {
+		t.Errorf("前日に追証: total %s N %d/%d, want 0（建てない）", total, out.Capital.Positions(), out.Margin.Positions())
+	}
+	// 前日の建可能額 0 → 建てない
+	zero := margincap.Snapshot{SinyouSinkidate: decimal.Zero}
+	out, total, _ = ratioFallbackConfig(cfg, &zero)
+	if !total.IsZero() || out.Capital.Positions() != 0 || out.Margin.Positions() != 0 {
+		t.Errorf("前日の建可能額 0: total %s N %d/%d, want 0（建てない）", total, out.Capital.Positions(), out.Margin.Positions())
+	}
+	// 前日の建可能額が 188 万（ロングが order_budget の半分を下回る）→ 満額でなく前日の値で決め直す（R1）
+	tiny := margincap.Snapshot{SinyouSinkidate: decimal.NewFromInt(1_880_000)}
+	out, total, fromStale = ratioFallbackConfig(cfg, &tiny)
+	if !fromStale || !total.LessThan(fixed) || !out.Capital.MaxCapital.LessThan(cfg.Capital.MaxCapital) || out.Validate() != nil {
+		t.Errorf("前日が 188 万: total %s fromStale %v long %s, want 固定値未満", total, fromStale, out.Capital.MaxCapital)
+	}
+}
+
+// 規則 R で建可能額が小さい朝（ロング < order_budget の半分）も検証を通り、元の満額に戻らない（R1）。
+// 従来は Validate の fees.PositionsFor が落ち、applyMarginCap が元の設定（満額・ShockTotalCap 0）を返していた
+func TestRatioSmallCapacityStaysSmall(t *testing.T) {
+	cfg, err := dtconfig.Load("../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	if !cfg.Margin.CapacityRatio.IsPositive() {
+		t.Skip("規則 R（capacity_ratio）でない設定")
+	}
+	half := cfg.Capital.OrderBudget.Div(decimal.NewFromInt(2))
+	for _, cap := range []int64{1_880_000, 1_900_000, 500_000} {
+		snap := margincap.Snapshot{SinyouSinkidate: decimal.NewFromInt(cap)}
+		capped, res := margincap.Apply(cfg, snap)
+		long := capped.Capital.MaxCapital
+		if !long.IsPositive() || !long.LessThan(cfg.Capital.MaxCapital) {
+			t.Errorf("建可能額 %d: ロング %s, want 0 < ロング < %s", cap, long, cfg.Capital.MaxCapital)
+		}
+		if cap == 1_880_000 && !long.LessThan(half) {
+			t.Errorf("建可能額 188 万のロング %s は order_budget の半分 %s を下回るはず（境界の確認）", long, half)
+		}
+		if cap == 1_900_000 && long.LessThan(half) {
+			t.Errorf("建可能額 190 万のロング %s は order_budget の半分 %s 以上のはず（境界の確認）", long, half)
+		}
+		if err := capped.Validate(); err != nil {
+			t.Errorf("建可能額 %d: 決め直した設定が検証を通らない: %v", cap, err)
+		}
+		if res.WatchOnly || capped.Capital.Positions() != cfg.Capital.MaxPositions {
+			t.Errorf("建可能額 %d: N %d, want max_positions %d", cap, capped.Capital.Positions(), cfg.Capital.MaxPositions)
+		}
+		total := long.Add(capped.Margin.MaxCapital)
+		if want := snap.SinyouSinkidate.Mul(cfg.Margin.CapacityRatio).Floor(); !total.Equal(want) {
+			t.Errorf("建可能額 %d: 長短合計 %s, want %s", cap, total, want)
+		}
+		if !capped.Capital.ShockTotalCap.IsPositive() {
+			t.Errorf("建可能額 %d: ショック日の頭打ちが入っていない", cap)
+		}
+	}
+}
+
+// 決め直した設定が検証を通らないときは建てない設定を返す。元の設定（満額）は返さない（R1）
+func TestValidOrWatchOnly(t *testing.T) {
+	cfg, err := dtconfig.Load("../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	bad := cfg
+	bad.Capital.MaxOrder = decimal.NewFromInt(-1)
+	out, err := validOrWatchOnly(cfg, bad)
+	if err == nil {
+		t.Fatal("通らない設定でエラーが返らない")
+	}
+	if out.Capital.Positions() != 0 || out.Margin.Positions() != 0 || !out.Capital.MaxCapital.IsZero() {
+		t.Errorf("検証失敗の戻り値が建てる設定: long %s N %d/%d", out.Capital.MaxCapital, out.Capital.Positions(), out.Margin.Positions())
+	}
+	if err := out.Validate(); err != nil {
+		t.Errorf("建てない設定そのものが検証を通らない: %v", err)
+	}
+	good, err := validOrWatchOnly(cfg, cfg)
+	if err != nil || !good.Capital.MaxCapital.Equal(cfg.Capital.MaxCapital) {
+		t.Errorf("通る設定を変えた: %v %s", err, good.Capital.MaxCapital)
 	}
 }
 
