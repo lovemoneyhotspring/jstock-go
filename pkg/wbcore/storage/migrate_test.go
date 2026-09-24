@@ -1,17 +1,61 @@
 package storage
 
 import (
-	"database/sql"
 	"path/filepath"
 	"testing"
 )
+
+// 2 つのプロセス（別々の接続プール）が同じ DB を同時に開いても、どちらも失敗せず、
+// 冪等でない段も 1 度しか当たらない（BEGIN IMMEDIATE と tx の中での版の読み直し）
+func TestMigrateConcurrentOpenAppliesOnce(t *testing.T) {
+	for round := 0; round < 5; round++ {
+		path := filepath.Join(t.TempDir(), "c.db")
+		migrations := []Migration{
+			{Name: "log", Up: Exec("CREATE TABLE IF NOT EXISTS log (id INTEGER)")},
+			{Name: "insert", Up: Exec("INSERT INTO log VALUES (1)")}, // 冪等でない
+		}
+		// 本番と同じく DB は既にある（新しいファイルを同時に WAL へ切り替える競合は別の話）
+		if db, err := OpenSQLite(path); err != nil {
+			t.Fatal(err)
+		} else {
+			_ = db.Close()
+		}
+		const n = 4
+		errs := make(chan error, n)
+		start := make(chan struct{})
+		for i := 0; i < n; i++ {
+			go func() {
+				db, err := OpenSQLite(path)
+				if err != nil {
+					errs <- err
+					return
+				}
+				defer db.Close()
+				<-start
+				errs <- Migrate(db, migrations)
+			}()
+		}
+		close(start)
+		for i := 0; i < n; i++ {
+			if err := <-errs; err != nil {
+				t.Fatalf("同時に開いた Migrate が失敗: %v", err)
+			}
+		}
+		db, _ := OpenSQLite(path)
+		var rows int
+		if err := db.QueryRow("SELECT count(*) FROM log").Scan(&rows); err != nil || rows != 1 {
+			t.Fatalf("段が %d 回当たった（err %v）", rows, err)
+		}
+		_ = db.Close()
+	}
+}
 
 func TestMigrateAppliesOnceAndTracksVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "m.db")
 	applied := 0
 	migrations := []Migration{
 		{Name: "t", Up: Exec("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)")},
-		{Name: "t.name", Up: func(tx *sql.Tx) error {
+		{Name: "t.name", Up: func(tx Tx) error {
 			applied++
 			return AddColumn(tx, "t", "name", "TEXT NOT NULL DEFAULT ''")
 		}},
