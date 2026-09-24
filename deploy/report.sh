@@ -149,7 +149,7 @@ trap 'rm -f "$STARTED_MARK"' EXIT
 # 後ろに置いたプロンプトまでツール名として飲み込んでしまう。
 printf '%s' "$PROMPT" | timeout "$TIMEOUT" "$CLAUDE_BIN" -p \
   --agent "$AGENT" \
-  --model "${REPORT_MODEL:-claude-fable-5-1}" \
+  --model "${REPORT_MODEL:-fable}" \
   --effort "${REPORT_EFFORT:-medium}" \
   --permission-mode bypassPermissions \
   --disallowedTools "Edit,Write,NotebookEdit" \
