@@ -256,6 +256,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `wbjp.bars_unusable`（warn。ダイジェストの異常にも。保有中の銘柄があれば通知も送る） / `wbjp.calendar_missing`（warn） / `wbjp.market_closed` | 足が古い・読めない銘柄があり、その銘柄はこの回に売りも買いも出さない（保有中なら**損切り・利確・時間切れも止まる**）／取引カレンダーが読めない（dry-run は平日で代用、発注する回は止まる）／休場日のため判断しない | 本文に銘柄・保有株数・理由 |
 | `wbjp.daily_pnl` / `wbjp.daily_pnl_unknown`（warn。ダイジェストの異常にも） | 当日の損益（実現・含み）と `max_daily_loss`／当日の損益を確かめられず新規の買いを止めた | 本文 |
 | `wbjp.regime` / `wbjp.strategy_error`（warn） / `wbjp.margin_missing`（warn） | 相場の状態を評価した／戦略の評価に失敗した／信用残がアーカイブに無い | 本文 |
+| `wbjp.outside_universe`（ダイジェストの `outside_universe` にも） | ユニバース（`universe.symbols`）外の保有（手で買った株など）がある。wbjp は目標を作らず売りも買いも出さない（地合いの手仕舞いも掛けない。`wbjp.reconcile_skip` にも理由が出る）。ユニバースから外した銘柄を自動で手仕舞う仕組みは無いので、外す前に手で売るか、売り切るまでユニバースに残す | 本文に銘柄 |
 | `wbjp.stop_exit`（warn） / `wbjp.stop_removed` / `wbjp.stop_save_failed`（warn） | ストップに掛かった／保有の無い銘柄のストップを外した／ストップを保存できない | 本文 |
 | `wbjp.ledger`（warn / error） | 台帳（実行・建玉・シグナル・未送信・拒否）への書き込みに失敗した | 本文 |
 | `wbjp.crash` | 実行が例外で異常終了した（通知も送る） | `error` |

@@ -318,6 +318,8 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	var allSignals []domain.Signal
 	var combinedSignals []domain.CombinedSignal
 	targets := make(map[string]domain.TargetPosition)
+	// wbjp が売買する銘柄。ユニバース外の保有（手で買った株など）には手を出さない
+	universe := symbolSet(setCfg.Universe.Symbols)
 
 	// 3-1. 全銘柄のシグナルを出す。
 	//
@@ -400,6 +402,9 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 		if _, ng := unusable[t.Symbol]; ng {
 			continue // 判断しない銘柄の目標（シグナルが無いための手仕舞い）を台帳に残さない
 		}
+		if _, ok := universe[t.Symbol]; !ok {
+			continue // ユニバース外の保有（手で買った株など）には手を出さない（地合いの手仕舞いも）
+		}
 		targets[t.Symbol] = t
 	}
 
@@ -463,6 +468,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 			Topix500:          symbolSet(setCfg.Universe.TOPIX500Symbols),
 			BlocksSameDaySale: true,
 			Frozen:            unusable,
+			Universe:          universe,
 		},
 		boughtToday, todayJST)
 	if err != nil {
@@ -471,6 +477,10 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 
 	for sym, why := range plan.Skipped {
 		logger.Info("wbjp.reconcile_skip", fmt.Sprintf("%s 見送り: %s", sym, why))
+	}
+	if outside := outsideUniverseHeld(posMap, universe); len(outside) > 0 {
+		logger.Info("wbjp.outside_universe", "ユニバース外の保有には手を出しません: "+strings.Join(outside, ", "))
+		digest.Note(map[string]any{"outside_universe": outside})
 	}
 
 	// 5. リスク管理チェック (RiskManager)
@@ -581,6 +591,18 @@ func dailyPnL(rep *repo.Repo, todayJST string, positions map[string]domain.Posit
 		return decimal.Zero, unrealized, nil, fmt.Errorf("当日の実現損益を読めません: %w", err)
 	}
 	return r.Amount, unrealized, r.Unpriced, nil
+}
+
+// outsideUniverseHeld はユニバース外で保有している銘柄を昇順で返す。
+func outsideUniverseHeld(posMap map[string]domain.Position, universe map[string]struct{}) []string {
+	var out []string
+	for sym, pos := range posMap {
+		if _, ok := universe[sym]; !ok && pos.Quantity.IsPositive() {
+			out = append(out, sym)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // checkEmptyPositions は、建玉の照会がエラーなしで 0 件を返したのに、台帳では保有中の
