@@ -102,6 +102,13 @@ type Endpoint struct {
 	// （公開前に叩いた等で空を掴んだ日が、訂正の猶予を過ぎて二度と見直されないのを防ぐ）。
 	// 信用残高（週次）や適時開示のように 0 行の日が普通にある端点では偽にしておく。
 	RowsEveryTradingDay bool
+	// RetryEmpty は、ほぼ毎営業日行があるが「本当に 0 行の日」もある端点の印
+	// （日々公表銘柄・決算短信。大納会の 12-30 などに 0 行の日がある）。
+	// 真なら 0 行を掴んだ日を最短間隔（20 時間）を待たずに EmptyRetryInterval で取り直し、
+	// 訂正の猶予（SettleDays）が明けるまでは 0 行の日を欠けと数える。猶予の明けた後に
+	// 取り直してもまだ 0 行なら「本当に 0 行の日」とみなして欠けから外す（Gaps）。
+	// RowsEveryTradingDay と違い、明けた後の 0 行を欠けに残し続けない（毎晩誤報になるため）。
+	RetryEmpty bool
 	// Bulk は一括ダウンロード（/bulk）にあるか。
 	Bulk bool
 	// RangeDays は ModeRange のとき、何日ぶん重ねて取るか。
@@ -199,7 +206,9 @@ var StandardEndpoints = []Endpoint{
 	{
 		Path: "/markets/calendar", Key: []string{"Date"}, DateColumn: "Date",
 		Mode: ModeAll, DateParam: "date", AvailableAt: t0000,
-		SettleDays: 0, MinIntervalHours: 24 * 7, TradingDaysOnly: true, Bulk: false,
+		// 1 回の要求で済むので、他の全件取得と同じく日に 1 回取る。以前は週 1 回（24*7）で、
+		// 鮮度の上限（StaleLimit は取得間隔の 2 倍）が 14 日に緩み、sync が止まっても 2 週間気づけなかった
+		SettleDays: 0, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: false,
 	},
 	{
 		Path: "/equities/master", Key: []string{"Date", "Code"}, DateColumn: "Date",
@@ -224,7 +233,7 @@ var StandardEndpoints = []Endpoint{
 	{
 		Path: "/fins/summary", Key: []string{"DiscDate", "DiscTime", "Code", "DiscNo"},
 		DateColumn: "DiscDate", Mode: ModeDate, DateParam: "date", AvailableAt: t1800,
-		SettleDays: 2, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		SettleDays: 2, MinIntervalHours: 20, TradingDaysOnly: true, RetryEmpty: true, Bulk: true,
 		ExtraDateColumns: []string{"CurPerSt", "CurPerEn", "CurFYSt", "CurFYEn", "NxtFYSt", "NxtFYEn"},
 	},
 	{
@@ -255,7 +264,7 @@ var StandardEndpoints = []Endpoint{
 	{
 		Path: "/markets/margin-alert", Key: []string{"PubDate", "Code", "AppDate"},
 		DateColumn: "PubDate", Mode: ModeDate, DateParam: "date", AvailableAt: t1630,
-		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, Bulk: true,
+		SettleDays: 5, MinIntervalHours: 20, TradingDaysOnly: true, RetryEmpty: true, Bulk: true,
 		ExtraDateColumns: []string{"AppDate"},
 	},
 	{

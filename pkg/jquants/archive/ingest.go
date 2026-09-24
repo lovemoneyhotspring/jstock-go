@@ -178,6 +178,17 @@ func (i *Ingestor) upsertWindowed(ep Endpoint, frame *Frame, windows Windows) (i
 // CSV 等）で残りを止めない。失敗したファイルは台帳に書かれないので、再実行
 // すればそこだけ取り直す。
 func (i *Ingestor) Backfill(ep Endpoint, since string, keepRaw bool) (*SyncResult, error) {
+	return i.backfill(ep, since, keepRaw, false)
+}
+
+// backfill は Backfill の本体。skipFilled なら、日次ファイルで全営業日が埋まっている月の
+// 月次ファイルを取らない（日次の sync・repair の経路）。
+//
+// 月が締まると、日次で取り込み済みの月にも月次ファイル（historical/）が現れる。Backfill は
+// 鍵の違うファイルを「新しい」とみなすので、放っておくと中身の同じ月を丸ごと取り直す。
+// ティックなら 4.2GB・9 分で、20:30 の plan と重なる（2026-09-24 のレビュー）。
+// 手動の `jquants backfill` は明示の取り直しなので従来どおり取る。
+func (i *Ingestor) backfill(ep Endpoint, since string, keepRaw, skipFilled bool) (*SyncResult, error) {
 	if !ep.Bulk {
 		return nil, fmt.Errorf("%s は一括ダウンロードに無い。`sync --days N` で遡ってください", ep.Path)
 	}
@@ -189,6 +200,7 @@ func (i *Ingestor) Backfill(ep Endpoint, since string, keepRaw bool) (*SyncResul
 		return nil, err
 	}
 	result := &SyncResult{}
+	filled := map[string]bool{} // 月 → 日次で埋まっているか（調べた月だけ）
 	for _, item := range items {
 		key := asString(item["Key"])
 		if key == "" {
@@ -197,6 +209,20 @@ func (i *Ingestor) Backfill(ep Endpoint, since string, keepRaw bool) (*SyncResul
 		month := monthIn(key)
 		if since != "" && month != "" && month < since {
 			continue
+		}
+		if skipFilled && len(coverageIn(key)) == len("2006-01") {
+			done, ok := filled[month]
+			if !ok {
+				if done, err = i.filledByDaily(ep, month); err != nil {
+					return nil, err
+				}
+				filled[month] = done
+			}
+			if done {
+				i.info("jquants.bulk_month_skipped", fmt.Sprintf("日次で埋まっている月の月次一括は取らない %s %s", ep.Path, key),
+					map[string]any{"endpoint": ep.Path, "target": "bulk:" + key, "month": month})
+				continue
+			}
 		}
 		target := "bulk:" + key
 		stamp := asString(item["LastModified"])
@@ -214,6 +240,33 @@ func (i *Ingestor) Backfill(ep Endpoint, since string, keepRaw bool) (*SyncResul
 		}
 	}
 	return result, nil
+}
+
+// filledByDaily は月（"2006-01"）の全営業日を、一括の日次ファイルで取り込み済みか。
+// 営業日は取引カレンダーから引く（無ければ平日で代用するので、祝日が埋まらず「埋まっていない」
+// 側に倒れる＝月次を取る）。月がまだ締まっていなければ先の日が埋まっていないので偽。
+func (i *Ingestor) filledByDaily(ep Endpoint, month string) (bool, error) {
+	first, err := time.Parse("2006-01", month)
+	if err != nil {
+		return false, nil
+	}
+	days, err := i.TradingDays(first, first.AddDate(0, 1, -1))
+	if err != nil {
+		return false, err
+	}
+	if len(days) == 0 {
+		return false, nil
+	}
+	covered, err := i.BulkCoverage(ep)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range days {
+		if !covered[d.Format(dateLayout)] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (i *Ingestor) backfillOne(ep Endpoint, key, target, stamp string, keepRaw bool, into *SyncResult) error {
@@ -430,14 +483,39 @@ func (i *Ingestor) due(ep Endpoint, day, now time.Time, target string, backfilli
 	interval := time.Duration(ep.MinIntervalHours) * time.Hour
 	// 毎営業日行があるはずの端点で前回 0 行だった日は、公開が遅れているだけのことが多い
 	// （日経 225 オプションは 16:43・20:00 に 0 行、翌 0:11 に行があった。2026-09-15）。
-	// 最短間隔（20 時間）を待つと翌日の昼まで取りに行かず、朝の open の IV ゲートに間に合わない
-	if last.Rows == 0 && ep.RowsEveryTradingDay && ep.TradingDaysOnly {
+	// 最短間隔（20 時間）を待つと翌日の昼まで取りに行かず、朝の open の IV ゲートに間に合わない。
+	// 0 行の日もある端点（RetryEmpty。日々公表銘柄・決算短信）も、最初の 0 行を 20 時間放置しない
+	if last.Rows == 0 && ep.retriesEmpty() {
 		interval = EmptyRetryInterval
 	}
 	return now.Sub(last.FetchedUTC) >= interval, nil
 }
 
-// EmptyRetryInterval は、毎営業日行があるはずの端点で 0 行を掴んだ日を取り直す間隔。
+// retriesEmpty は 0 行を掴んだ日を EmptyRetryInterval で取り直す端点か。
+func (e Endpoint) retriesEmpty() bool {
+	return e.TradingDaysOnly && (e.RowsEveryTradingDay || e.RetryEmpty)
+}
+
+// emptyIsGap は、台帳の最新が 0 行（fetched に取った）の日を欠けと数えるか。
+//   - 毎営業日行があるはずの端点（RowsEveryTradingDay）は常に欠け
+//   - 0 行の日もある端点（RetryEmpty）は、訂正の猶予が明けるより前に取った 0 行だけ欠け。
+//     明けた後に取り直してまだ 0 行なら、本当に 0 行の日とみなす（毎晩の repair で誤報を繰り返さない）
+//   - それ以外（信用残高・EDINET など）は欠けではない
+func (e Endpoint) emptyIsGap(day, fetched time.Time) bool {
+	if !e.TradingDaysOnly {
+		return false
+	}
+	if e.RowsEveryTradingDay {
+		return true
+	}
+	if !e.RetryEmpty {
+		return false
+	}
+	final := e.AvailableAt.On(day, clock.Tokyo).UTC().AddDate(0, 0, e.SettleDays)
+	return fetched.Before(final)
+}
+
+// EmptyRetryInterval は、毎営業日行があるはずの端点（と RetryEmpty の端点）で 0 行を掴んだ日を取り直す間隔。
 // cron（30 分おき）で 1 時間に 1 回だけ叩き直す。
 //
 // **1 時間ちょうどにしてはいけない（実効 90 分になる）。** 上の判定は
@@ -511,7 +589,8 @@ func (i *Ingestor) Sync(now time.Time, lookbackDays int, only []string) (*SyncRe
 // 月が締まると月次ファイル（historical/）に置き換わる。Backfill は台帳に同じ
 // Key と同じ LastModified があれば飛ばすので、「遡る月から先の全ファイル」を
 // 対象にしても、実際に取るのは新しく現れた日次ファイルと訂正で LastModified が
-// 変わったものだけになる。lookbackDays が負なら端点の SettleDays を使う。
+// 変わったものだけになる。月が締まって現れる月次ファイルは、日次で埋まっていれば取らない
+// （backfill の skipFilled）。lookbackDays が負なら端点の SettleDays を使う。
 func (i *Ingestor) SyncBulk(ep Endpoint, now time.Time, lookbackDays int) (*SyncResult, error) {
 	back := ep.SettleDays
 	if lookbackDays >= 0 {
@@ -519,7 +598,7 @@ func (i *Ingestor) SyncBulk(ep Endpoint, now time.Time, lookbackDays int) (*Sync
 	}
 	today := truncateDay(now.In(clock.Tokyo))
 	since := today.AddDate(0, 0, -back).Format("2006-01")
-	return i.Backfill(ep, since, true)
+	return i.backfill(ep, since, true, true)
 }
 
 func (i *Ingestor) try(result *SyncResult, ep Endpoint, target string, params map[string]string) {
@@ -580,6 +659,7 @@ func covers(covered map[string]bool, day time.Time) bool {
 // ただし営業日なら必ず行がある端点（RowsEveryTradingDay）では、台帳に 0 行とだけ
 // 残っている日は「取れていない」とみなして欠けに数える。0 行を掴んだ日は訂正の猶予を
 // 過ぎると Plan が見直さないので、ここで拾わないと永久に空のまま残る。
+// 0 行の日もある端点（RetryEmpty）は、猶予の明ける前に取った 0 行だけを欠けに数える（emptyIsGap）。
 //
 // 日付モード以外（取引カレンダーなど）は日の欠けの概念が無いので nil。
 // そちらの鮮度は Stale で見る。
@@ -599,16 +679,22 @@ func (i *Ingestor) Gaps(ep Endpoint, start, end time.Time, now time.Time) ([]tim
 	for _, d := range dates {
 		have[d.Format(dateLayout)] = true
 	}
-	latest, err := i.Ledger.LatestRows(ep)
+	latest, err := i.Ledger.Latest(ep)
 	if err != nil {
 		return nil, err
 	}
 	targets := make([]string, 0, len(latest))
 	fetched := map[string]bool{}
-	for t, rows := range latest {
+	for t, rec := range latest {
 		targets = append(targets, t)
-		// 毎営業日行があるはずの端点で 0 行なら、取ったことにしない
-		fetched[t] = rows > 0 || !(ep.RowsEveryTradingDay && ep.TradingDaysOnly)
+		fetched[t] = true
+		if rec.Rows > 0 {
+			continue
+		}
+		// 0 行を欠けと数える端点なら、取ったことにしない
+		if day, err := time.Parse(dateLayout, t); err == nil && ep.emptyIsGap(day, rec.FetchedUTC) {
+			fetched[t] = false
+		}
 	}
 	sort.Strings(targets)
 	covered, err := i.BulkCoverage(ep)
@@ -777,7 +863,7 @@ func (i *Ingestor) Repair(eps []Endpoint, start, end, now time.Time) (*RepairRes
 		ep := plan.Endpoint
 		if ep.BulkOnly {
 			since := plan.Days[0].Format("2006-01")
-			bulk, err := i.Backfill(ep, since, true)
+			bulk, err := i.backfill(ep, since, true, true)
 			if err != nil {
 				i.errorLog("jquants.ingest_failed", fmt.Sprintf("一括の一覧の取得に失敗 %s", ep.Path),
 					map[string]any{"endpoint": ep.Path, "target": "bulk:list", "error": err.Error()})
