@@ -18,6 +18,11 @@
 #   state/backup/crontab/crontab-YYYYMMDD-HHMMSS*.txt と state/logs/crontab.backup.YYYYMMDD-HHMMSS（以前の置き場）
 #                         日付が PRUNE_CRONTAB_DAYS（既定 90）日より前で、かつ新しい方から
 #                         PRUNE_CRONTAB_KEEP（既定 20）世代に入らないものを消す（まとめて 1 つの並びで数える）
+#   state/tachibana/session-<env>-YYYYMMDD.json と .json.lock
+#                         立花のセッション（仮想URL と採番）とその flock 用のロック。1 日 1 組で、使うのは
+#                         当日の分だけ（pkg/wbcore/broker/tachibana.go の sessionFilePath）。日付が
+#                         PRUNE_SESSION_DAYS（既定 7）日より前なら消す。ロックを誰かが握っていれば
+#                         （flock -n で取れなければ）その組は残す
 #   data/jquants/_raw     **消さない。** 一括ダウンロードの csv.gz の原本で、J-Quants は 10 年より前を
 #                         返さなくなる（2016 年の月が順に取れなくなっていく）。Parquet の変換にバグが
 #                         あったときに API を叩き直さず作り直す最後の保険（docs/JQUANTS_ARCHIVE.md「冪等性・安全」）。
@@ -38,6 +43,7 @@ LOG_MAX_MB="${PRUNE_LOG_MAX_MB:-10}"
 DIGEST_DAYS="${PRUNE_DIGEST_DAYS:-400}"
 CRONTAB_DAYS="${PRUNE_CRONTAB_DAYS:-90}"
 CRONTAB_KEEP="${PRUNE_CRONTAB_KEEP:-20}"
+SESSION_DAYS="${PRUNE_SESSION_DAYS:-7}"
 TODAY="${PRUNE_TODAY:-$(TZ=Asia/Tokyo date +%F)}"   # PRUNE_TODAY は試験用
 
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -107,10 +113,27 @@ done < <(
   done | sort -r
 )
 
+# --- 立花のセッション -------------------------------------------------------------------
+# session-<env>-YYYYMMDD.json とそのロック（.json.lock）。ロックを握っているプロセスがいれば組ごと残す
+# （日付の古い組を握ることは無いはずだが、握っている最中に消すと次に開いた側と別の inode を錠にしてしまう）
+cutoff=$(date -d "$TODAY -$SESSION_DAYS days" +%Y%m%d)
+for f in "$HOME_DIR"/state/tachibana/session-*.json "$HOME_DIR"/state/tachibana/session-*.json.lock; do
+  [ -f "$f" ] || continue
+  [[ "$(basename "$f")" =~ ^session-.+-([0-9]{8})\.json(\.lock)?$ ]] || continue
+  [[ "${BASH_REMATCH[1]}" < "$cutoff" ]] || continue
+  lock="${f%.lock}.lock"
+  if [ -f "$lock" ] && ! flock -n "$lock" true; then
+    say "使用中のため残す: $f（$lock を握っているプロセスがいる）"
+    continue
+  fi
+  remove session "$f"
+done
+
 # --- まとめ -------------------------------------------------------------------------
 verb="片付けた"; [ "$DRY_RUN" -eq 1 ] && verb="[dry-run] 片付ける"
 say "$verb: logs（${LOG_MAX_MB}MB 超を退避）${n[logs]:-0} 本（消える .1 $(human "${b[logs]:-0}")）/" \
   "digest（${DIGEST_DAYS} 日より前）${n[digest]:-0} 件 $(human "${b[digest]:-0}") /" \
   "crontab の控え（${CRONTAB_DAYS} 日より前・新しい ${CRONTAB_KEEP} 世代は残す）${n[crontab]:-0} 件 $(human "${b[crontab]:-0}") /" \
+  "立花のセッション（${SESSION_DAYS} 日より前）${n[session]:-0} 件 /" \
   "data/jquants/_raw は消さない"
 exit "$failed"
