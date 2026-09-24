@@ -115,14 +115,16 @@ var requestLimiter = sync.OnceValue(func() *RateLimiter {
 	return NewRateLimiter(Limit{Calls: 2, PerSeconds: 1.0})
 })
 
-// orderLimiter は同じ口の**注文**（新規・訂正・取消）の送信上限（2 回 / 秒）。
+// orderLimiter は同じ口の**注文**（新規・訂正・取消）の送信上限（8 回 / 秒）。
 //
 // 2026-09-19 まで照会と 1 つの枠だった。寄付の open は注文の直前に余力（CLMZanKaiSummary）を
 // 聞くので、その 1 回が注文の枠を食い、2 本目の注文が約 0.4 秒待たされていた（電文そのものは
-// 平均 89 ms。2026-09-15〜18 の実測）。移植元と同じく注文は別枠にする。注文そのものの上限は
-// 上げない——実機の上限を確かめていない。口への送信は合計で最大 4 回/秒になる（移植元は 8 回/秒）。
+// 平均 89 ms。2026-09-15〜18 の実測）。移植元と同じく注文は別枠にする。
+// 2026-09-25 に 2 → 8 回/秒へ上げた。2 回/秒では 3 本目から 0.5 秒おきに寝ていた（9/24 の寄成で
+// 3・4 本目が約 0.3〜0.4 秒待った）。立花の上限は 10 回/秒で、照会の 2 回/秒と合わせて 10 に収める。
+// 注文は応答を待って 1 本ずつ送る（1 本 約 130 ms ≒ 7〜8 回/秒）ので、この枠で寝ることはほぼ無い。
 var orderLimiter = sync.OnceValue(func() *RateLimiter {
-	return NewRateLimiter(Limit{Calls: 2, PerSeconds: 1.0})
+	return NewRateLimiter(Limit{Calls: 8, PerSeconds: 1.0})
 })
 
 // requestLimiterFor は発注・照会の口へ送る電文が使う枠。
