@@ -144,7 +144,9 @@ func ensurePanelCache(db *sql.DB, arch *archive.Archive, cfg config.Config, end 
 	return path, nil
 }
 
-// prunePanelCache は今使うもの以外の古いキャッシュを消す（1 本 80MB 台なので溜めない）。
+// prunePanelCache は今使うもの以外の古いキャッシュを消す（1 本 230MB 前後なので溜めない）。
+// 作りかけ（*.tmp）は別のプロセスが書いている途中かもしれないので残す。
+// 昔の形式はディレクトリなので RemoveAll（Remove では中身のあるディレクトリを消せず、残り続けていた）。
 func prunePanelCache(dir, keep string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -152,9 +154,9 @@ func prunePanelCache(dir, keep string) {
 	}
 	for _, e := range entries {
 		path := filepath.Join(dir, e.Name())
-		if path == keep || !strings.HasPrefix(e.Name(), "panel-") {
+		if path == keep || !strings.HasPrefix(e.Name(), "panel-") || strings.HasSuffix(e.Name(), ".tmp") {
 			continue
 		}
-		os.Remove(path)
+		os.RemoveAll(path)
 	}
 }

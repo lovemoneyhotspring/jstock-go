@@ -128,7 +128,7 @@ Discord に流す。人が毎日 `jq` を叩かなくても、崩れたときに
 | `.claude/agents/periodic-report.md` | 週次・月次のサブエージェント。期間で絞って読む |
 | `deploy/report.sh <daily\|weekly\|monthly>` | 起動と配達。期間に応じたサブエージェントを回し、標準出力を Discord に流す |
 | `cmd/discord-post` | Discord の Bot API で送る。スレッドを作り、2000 文字で分割して連投する。実体は `pkg/wbcore/notify` |
-| cron | 日次 `35 17 * * 1-5` / 週次 `30 21 * * 5` / 月次 `0 22 1 * *`（`deploy/crontab.txt`）。日次は 17:05・17:20 の `daytrade evaluate` の後 |
+| cron | 日次 `35 17 * * 1-5` / 週次 `30 21 * * 5` / 月次 `0 22 1 * *`（`deploy/crontab.txt`）。日次は 17:05 の `daytrade evaluate` の後 |
 
 ```console
 # 手で回す（送らずに中身だけ見る）

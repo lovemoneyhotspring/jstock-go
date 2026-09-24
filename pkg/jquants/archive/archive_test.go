@@ -184,7 +184,12 @@ func TestUpsertLastWins(t *testing.T) {
 		t.Errorf("Close = %v, want 101", got)
 	}
 
-	// 内容が同じなら「変化」は 0（冪等）
+	// 内容が同じなら「変化」は 0（冪等）で、ファイルも書き直さない（更新時刻を鍵にするキャッシュを守る）
+	path := a.PathFor(ep, "2025-01")
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatal(err)
+	}
 	changed, err = a.Upsert(ep, frameOf(t, ep,
 		map[string]any{"Date": "2025-01-06", "Code": "72030", "Close": "101"}))
 	if err != nil {
@@ -192,6 +197,11 @@ func TestUpsertLastWins(t *testing.T) {
 	}
 	if changed != 0 {
 		t.Errorf("同じ内容の取り直しで変化 = %d, want 0", changed)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if !info.ModTime().Equal(past) {
+		t.Errorf("同じ内容なのに書き直した: 更新時刻 %v", info.ModTime())
 	}
 }
 

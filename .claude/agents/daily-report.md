@@ -118,8 +118,8 @@ test/.venv/bin/python test/dt_missed.py <日付>
 
 **ロングの並べ方（LightGBM と既存規則 gap_vol）を毎日比べる。** 2026-09-18 からロングは
 LightGBM で並べ、既存規則なら選んでいた銘柄も記録している（評価表の `rule_picked`）。
-evaluate のたびに構造化ログに `daytrade.rule_compare` が 1 行残る（17:05・17:20 の 2 回走るので、
-17:35 の時点では**同じ日に 2 行**ある。最後の行を見る）:
+evaluate のたびに構造化ログに `daytrade.rule_compare` が 1 行残る（17:05 に走る。手で回した日や 20:20 の後に見るときは
+**同じ日に複数行**あることがある。最後の行を見る）:
 
 ```bash
 jq -c 'select(.code == "daytrade.rule_compare" and .day == "<日付>")' state/logs/daytrade-prod.jsonl | tail -1

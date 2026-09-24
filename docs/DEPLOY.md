@@ -413,7 +413,7 @@ cron では動かない」を潰すため。ほかに cron 固有の罠は `%` �
 - 選定の履歴 `state/daytrade/history/` と `state/wbjp/history/`（追記専用の Parquet、
   `docs/DAYTRADE.md`「履歴」）は `accum backup` の対象外。ファイルは増えるだけで書き換わらないので、
   `state/backup/` と一緒に `rsync -a`（`--delete` なし）で別ホストへ同期する
-- 平日 17:05・17:20・20:20 の `daytrade evaluate` は、朝の候補（選んだ銘柄も次点も）に当日の日足を当てて
+- 平日 17:05・20:20 の `daytrade evaluate` は、朝の候補（選んだ銘柄も次点も）に当日の日足を当てて
   `state/daytrade/history/evaluation/` に残す（17:05 は 17:35 の日次レポートに間に合わせるため、20:20 は公開が
   遅れた日の拾い直し。同じ日を何度評価しても最後の 1 回だけが使われる）。日足が取り込まれる前に走れば何もせず終わる
   （翌日に `--date` 無しでは前日を拾わないので、抜けた日は手で `--date` を付けて回す）。

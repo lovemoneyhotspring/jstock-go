@@ -73,6 +73,20 @@ case "$PERIOD" in
     TITLE="日次レポート $FROM（$(jst -d "$FROM" +%a)）"
     REPORT="$REPORT_DIR/daily-$FROM.md"
     AGENT="daily-report"
+    # 休場日（祝日。cron は平日だけなので土日は来ない）は振り返るものが無い。2026-09-21〜23 は
+    # 3 日とも claude を起動して空のレポートを Discord と vault に流していた。判定は morning-check.sh と
+    # 同じ取引カレンダー。引けない・日付を指定して手で回したときは続ける
+    if [ -z "$ARG" ]; then
+      holdiv=$("${QUERY_BIN:-$HOME_DIR/bin/jquants}" query --limit 0 "
+        SELECT HolDiv FROM read_parquet('$HOME_DIR/data/jquants/markets_calendar/*.parquet')
+        WHERE Date = DATE '$FROM'" 2>/dev/null | tail -1 | tr -d ' ')
+      case "$holdiv" in
+        0|3)
+          echo "$FROM は休場日（HolDiv=$holdiv）。日次レポートは作りません"
+          exit 0
+          ;;
+      esac
+    fi
     ;;
   weekly)
     BASE="${ARG:-$(jst +%F)}"
