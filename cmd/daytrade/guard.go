@@ -45,7 +45,8 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 	if err != nil {
 		return err
 	}
-	if skipHolidayFor(day, "guard", live) {
+	cal, holiday := holidayCalendar(day, "guard", live)
+	if holiday {
 		return nil
 	}
 	if !cfg.Margin.Enabled || !cfg.Margin.CancelOnCorpEvent {
@@ -102,7 +103,7 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 		return nil
 	}
 
-	ev, err := loadCorpEvents(context.Background(), cfg.Margin, day, now)
+	ev, err := loadCorpEvents(context.Background(), cfg.Margin, day, now, cal.Closed)
 	if err != nil {
 		logError("daytrade.news_stale", "ニュースの記録簿を読めず売建の材料を点検できない", map[string]any{"error": err.Error()})
 		digest.Anomaly("daytrade.news_stale", "売建の材料を点検できない: "+err.Error())

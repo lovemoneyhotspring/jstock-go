@@ -154,7 +154,7 @@ func runOpen(opts openOptions) error {
 	var corpDropped []string
 	// ショートの一時停止中（margin.paused）は売らないので、記録簿の鮮度でショートを見送る判定も要らない
 	if cfg.Margin.Enabled && cfg.Margin.ExcludeCorpEvents && !cfg.Margin.Paused {
-		ev, dropped, err := markPlanCorpEvents(cfg, &p, day, now)
+		ev, dropped, err := markPlanCorpEvents(cfg, &p, day, now, cal.Closed)
 		if err != nil {
 			corpStale = err.Error()
 		} else {

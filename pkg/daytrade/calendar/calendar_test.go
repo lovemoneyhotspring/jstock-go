@@ -47,6 +47,34 @@ func TestEmptyCalendarUsesWeekdays(t *testing.T) {
 	}
 }
 
+// Closed は news.ClosedFunc に渡す休場日の判定。JST の時刻（深夜 0 時台・朝）でも
+// その日の暦で答える。範囲外・空のカレンダーは土日（IsTradingDay の代用と同じ）。
+func TestClosed(t *testing.T) {
+	jst := time.FixedZone("JST", 9*3600)
+	// 2025-12-30(火) は営業日、12-31(水)〜2026-01-02(金) は休場、01-05(月) は営業日
+	cal := New([]time.Time{d("2025-12-30"), d("2026-01-05")})
+	cases := []struct {
+		day  time.Time
+		want bool
+	}{
+		{time.Date(2025, 12, 30, 0, 30, 0, 0, jst), false},
+		{time.Date(2025, 12, 31, 8, 0, 0, 0, jst), true}, // 平日の休場日
+		{time.Date(2026, 1, 2, 23, 59, 0, 0, jst), true},
+		{time.Date(2026, 1, 5, 6, 0, 0, 0, jst), false},
+		{time.Date(2026, 6, 1, 6, 0, 0, 0, jst), false}, // 範囲外の月曜
+		{time.Date(2026, 6, 6, 6, 0, 0, 0, jst), true},  // 範囲外の土曜
+	}
+	for _, c := range cases {
+		if got := cal.Closed(c.day); got != c.want {
+			t.Errorf("Closed(%s) = %v, want %v", c.day.Format(time.RFC3339), got, c.want)
+		}
+	}
+	empty := New(nil)
+	if empty.Closed(time.Date(2025, 12, 31, 8, 0, 0, 0, jst)) || !empty.Closed(time.Date(2026, 1, 3, 8, 0, 0, 0, jst)) {
+		t.Error("空のカレンダーが土日の判定に戻っていない")
+	}
+}
+
 func TestNextAndPreviousTradingDay(t *testing.T) {
 	cal := New([]time.Time{d("2026-01-05"), d("2026-01-06"), d("2026-01-09")})
 	next, err := cal.NextTradingDay(d("2026-01-06"), false)

@@ -91,14 +91,15 @@ func planDay(text string, now time.Time) (time.Time, error) {
 // buildPlan は候補を作り、「最新」（open が読む）と履歴（振り返り用）の両方に残す。
 func buildPlan(cfg dtconfig.Config, day time.Time) (dtplan.Plan, error) {
 	arch := openArchive()
-	p, err := dtplan.Build(arch, cfg, day, calendar.FromArchive(arch), clock.NowUTC())
+	cal := calendar.FromArchive(arch)
+	p, err := dtplan.Build(arch, cfg, day, cal, clock.NowUTC())
 	if err != nil {
 		return dtplan.Plan{}, err
 	}
 	// 材料（TOB・MBO など）の印。前夜の時点で分かる分を記録し、ショートから外す。
 	// 効かせる本番は open（朝の記録簿で付け直す）なので、読めなくても plan は作る
 	if cfg.Margin.Enabled && cfg.Margin.ExcludeCorpEvents {
-		if _, _, err := markPlanCorpEvents(cfg, &p, day, clock.NowUTC()); err != nil {
+		if _, _, err := markPlanCorpEvents(cfg, &p, day, clock.NowUTC(), cal.Closed); err != nil {
 			fmt.Println("ニュースの記録簿を読めず、材料の印を付けていません（open で付け直します）: " + err.Error())
 			logWarn("daytrade.news_stale", "記録簿を読めず plan に材料の印を付けない", map[string]any{"reason": err.Error()})
 		}

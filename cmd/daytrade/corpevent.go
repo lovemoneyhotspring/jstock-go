@@ -42,7 +42,8 @@ func (ev corpEvents) staleness(now time.Time, maxMinutes int) string {
 
 // loadCorpEvents は day の判定に使う材料を記録簿から読む。knownAt より後に入った記事は使わない。
 // 記録簿が無いときはエラー（OpenStore は無ければ作るので、先に確かめる）。
-func loadCorpEvents(ctx context.Context, m dtconfig.Margin, day, knownAt time.Time) (corpEvents, error) {
+// closed は休場日の判定（取引カレンダーの Calendar.Closed）。鮮度の判定で休場日の取れていない日を問わない。
+func loadCorpEvents(ctx context.Context, m dtconfig.Margin, day, knownAt time.Time, closed news.ClosedFunc) (corpEvents, error) {
 	path := appSettings.NewsDBPath()
 	if _, err := os.Stat(path); err != nil {
 		return corpEvents{}, fmt.Errorf("ニュースの記録簿がありません（%s）: %w", path, err)
@@ -68,8 +69,9 @@ func loadCorpEvents(ctx context.Context, m dtconfig.Margin, day, knownAt time.Ti
 			}
 		}
 	}
-	// 鮮度は必要な日（今日から news.FreshDays 日）ごとに見る。前日だけ取り込みに失敗した朝を通さない
-	if out.lastFetched, out.freshDay, err = store.Fresh(ctx, knownAt, news.FreshDays); err != nil {
+	// 鮮度は必要な日（今日から news.FreshDays 日）ごとに見る。前日だけ取り込みに失敗した朝を通さない。
+	// 休場日（取引カレンダー。読めなければ土日）の取れていない日は問わない
+	if out.lastFetched, out.freshDay, err = store.Fresh(ctx, knownAt, news.FreshDays, closed); err != nil {
 		return corpEvents{}, err
 	}
 	return out, nil
@@ -77,8 +79,8 @@ func loadCorpEvents(ctx context.Context, m dtconfig.Margin, day, knownAt time.Ti
 
 // markPlanCorpEvents は plan の候補に材料の印を付け、ショートの対象から落とした銘柄をログに残す。
 // 記録簿を読めなければ印を付けずにエラーを返す（見送るかは呼び出し側が決める）。
-func markPlanCorpEvents(cfg dtconfig.Config, p *dtplan.Plan, day, now time.Time) (corpEvents, []string, error) {
-	ev, err := loadCorpEvents(context.Background(), cfg.Margin, day, now)
+func markPlanCorpEvents(cfg dtconfig.Config, p *dtplan.Plan, day, now time.Time, closed news.ClosedFunc) (corpEvents, []string, error) {
+	ev, err := loadCorpEvents(context.Background(), cfg.Margin, day, now, closed)
 	if err != nil {
 		return corpEvents{}, nil, err
 	}

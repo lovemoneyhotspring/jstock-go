@@ -33,19 +33,20 @@ type SyncResult struct {
 	Days     []SyncDay
 }
 
-// FailureError は平日の日単位の失敗があればエラーを返す（news sync の終了コードに使う）。
+// FailureError は営業日の日単位の失敗があればエラーを返す（news sync の終了コードに使う）。
 // 失敗した日は台帳に残り次回また取りに行くが、終了 0 だと cron のログを読まない限り
 // 取り込みが止まっていることに気づけない。
 //
-// 土日の失敗は数えない（Weekend。記事の無い日曜は毎週失敗になり、朝の --days 5 が
-// 月〜木に毎回 1 で終わってしまう）。失敗の件数と表示は Failed・Days に残る。
-func (r SyncResult) FailureError() error {
+// 休場日（closed。nil なら土日）の失敗は数えない（ClosedFunc。記事の無い日曜は毎週失敗になり、
+// 朝の --days 5 が月〜木に毎回 1 で終わってしまう）。失敗の件数と表示は Failed・Days に残る。
+func (r SyncResult) FailureError(closed ClosedFunc) error {
+	closed = closed.orWeekend()
 	var days []string
 	for _, d := range r.Days {
 		if d.Err == nil {
 			continue
 		}
-		if day, err := time.ParseInLocation("2006-01-02", d.Day, clock.Tokyo); err == nil && Weekend(day) {
+		if day, err := time.ParseInLocation("2006-01-02", d.Day, clock.Tokyo); err == nil && closed(day) {
 			continue
 		}
 		days = append(days, d.Day)
