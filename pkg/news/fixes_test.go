@@ -172,9 +172,9 @@ func TestSync(t *testing.T) {
 	if res.Imported != 4 || res.Failed != 1 || res.Skipped != 0 || len(src.calls) != 5 {
 		t.Fatalf("1 回目 res = %+v calls = %v", res, src.calls)
 	}
-	// 日単位の失敗は news sync の終了コードに出す
-	if err := res.FailureError(); err == nil || !strings.Contains(err.Error(), "2026-09-12") {
-		t.Errorf("FailureError = %v, want 9/12 の失敗", err)
+	// 9/12 は土曜なので終了コードには出さない（TestFailureErrorSkipsWeekend）
+	if err := res.FailureError(); err != nil {
+		t.Errorf("土曜だけの失敗の FailureError = %v, want nil", err)
 	}
 	var status string
 	if err := s.DB().QueryRow(`SELECT status FROM news_days WHERE feed_date = '2026-09-12'`).Scan(&status); err != nil || status != "電文の失敗" {
@@ -249,5 +249,28 @@ func TestListQuery(t *testing.T) {
 		if got := ids(c.f); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("ListQuery(%+v) = %v, want %v", c.f, got, c.want)
 		}
+	}
+}
+
+// 平日の日単位の失敗は news sync の終了コードに出す。土日の失敗は出さない
+// （記事の無い日曜は一覧の項目の無い応答で毎週失敗になる。2026-09-13・09-20）。
+func TestFailureErrorSkipsWeekend(t *testing.T) {
+	boom := errors.New("電文の失敗")
+	weekend := SyncResult{Failed: 2, Days: []SyncDay{
+		{Day: "2026-09-21", Items: 3},
+		{Day: "2026-09-20", Err: boom}, // 日曜
+		{Day: "2026-09-19", Err: boom}, // 土曜
+	}}
+	if err := weekend.FailureError(); err != nil {
+		t.Errorf("土日だけの失敗の FailureError = %v, want nil", err)
+	}
+	weekday := SyncResult{Failed: 2, Days: []SyncDay{
+		{Day: "2026-09-20", Err: boom},
+		{Day: "2026-09-18", Err: boom}, // 金曜
+	}}
+	err := weekday.FailureError()
+	if err == nil || !strings.Contains(err.Error(), "2026-09-18") || strings.Contains(err.Error(), "2026-09-20") ||
+		!strings.HasPrefix(err.Error(), "1 日") {
+		t.Errorf("FailureError = %v, want 9/18 だけの失敗", err)
 	}
 }

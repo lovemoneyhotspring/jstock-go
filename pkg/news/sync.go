@@ -33,20 +33,27 @@ type SyncResult struct {
 	Days     []SyncDay
 }
 
-// FailureError は日単位の失敗があればエラーを返す（news sync の終了コードに使う）。
+// FailureError は平日の日単位の失敗があればエラーを返す（news sync の終了コードに使う）。
 // 失敗した日は台帳に残り次回また取りに行くが、終了 0 だと cron のログを読まない限り
 // 取り込みが止まっていることに気づけない。
+//
+// 土日の失敗は数えない（Weekend。記事の無い日曜は毎週失敗になり、朝の --days 5 が
+// 月〜木に毎回 1 で終わってしまう）。失敗の件数と表示は Failed・Days に残る。
 func (r SyncResult) FailureError() error {
-	if r.Failed == 0 {
-		return nil
-	}
 	var days []string
 	for _, d := range r.Days {
-		if d.Err != nil {
-			days = append(days, d.Day)
+		if d.Err == nil {
+			continue
 		}
+		if day, err := time.ParseInLocation("2006-01-02", d.Day, clock.Tokyo); err == nil && Weekend(day) {
+			continue
+		}
+		days = append(days, d.Day)
 	}
-	return fmt.Errorf("%d 日の取り込みに失敗しました（%s。次回の sync で取り直します）", r.Failed, strings.Join(days, ", "))
+	if len(days) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d 日の取り込みに失敗しました（%s。次回の sync で取り直します）", len(days), strings.Join(days, ", "))
 }
 
 // Walk は JST の now から days 日さかのぼり、取るべき日のニュースを source から引いて visit に渡す。

@@ -177,6 +177,18 @@ func TestFreshChecksEachDay(t *testing.T) {
 			t.Fatalf("Fresh = %v %s %v, want %v", at, day, err, evening)
 		}
 	})
+	t.Run("日曜の失敗は問わない", func(t *testing.T) {
+		// 記事の無い日曜は一覧の項目の無い応答で失敗になる（2026-09-13・09-20）。
+		// 問うと、日曜が窓に入る月〜木の朝はいつもショートを見送ってしまう
+		s := fill(t)
+		if err := s.RecordFailure(ctx, "2026-09-13", time.Date(2026, 9, 15, 6, 20, 0, 0, jst), "応答に aCLMMfdsNews がありません"); err != nil {
+			t.Fatal(err)
+		}
+		at, day, err := s.Fresh(ctx, now, FreshDays)
+		if err != nil || day != "2026-09-15" || !at.Equal(time.Date(2026, 9, 15, 8, 52, 0, 0, jst)) {
+			t.Fatalf("Fresh = %v %s %v, want 9/15 8:52", at, day, err)
+		}
+	})
 	t.Run("窓の外の日は見ない", func(t *testing.T) {
 		s := fill(t)
 		if err := s.RecordFailure(ctx, "2026-09-10", now, "timeout"); err != nil {
