@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	_ "github.com/marcboeker/go-duckdb"
+	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 const (
@@ -32,6 +32,16 @@ const (
 	// Go 側（パネルを構造体に持つ）が約 1.6GB あるので、プロセス全体はこの上限 + 1.6GB
 	// と見ておく。時間は実行ごとに数秒ぶれるので、上限との関係は「絞るほどスピルして遅くなる」
 	// という傾向として読む。手元で速く回したいときは WBJP_DUCKDB_MEMORY_LIMIT で上げる。
+	//
+	// 上の表は DuckDB 1.1.3（go-duckdb v1.8.5）のとき。2026-09-24 に duckdb-go v2（DuckDB 1.5.5）へ
+	// 上げたときの測り直し（--no-cache、2017-01-01〜2026-09-24。損益は日足・分足とも 1 行も変わらず）:
+	//
+	//	版      上限   プロセス全体のピーク   時間
+	//	1.1.3   3GB    Out of Memory（パネルが育って 3GB に収まらなくなっていた）
+	//	1.1.3   5GB    7.93GB                43.1 秒
+	//	1.5.5   3GB    4.01GB                40.8 秒
+	//
+	// 手順は test/duckdb_upgrade_compare.sh。
 	DefaultDuckDBMemoryLimit = "3GB"
 )
 
