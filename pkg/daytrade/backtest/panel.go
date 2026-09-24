@@ -119,17 +119,12 @@ func tercilesOf(day []Row, cfg config.Config) []int {
 	return universe.CapTerciles(caps, mask)
 }
 
-// UniverseView は KeepAll で読んだパネルに 1 つの設定の母集団を当てた見え方を返す。
+// universeViewWith は KeepAll で読んだパネルに 1 つの設定の母集団を当てた見え方を返す。
 // 元のパネルは変えない（格子は同じパネルを設定の数だけ当て直す）。
-//
 // 行は日ごとにまとまっている前提（LoadPanel は d, code 順に並べて返す）。
-func UniverseView(panel *Panel, cfg config.Config) *Panel {
-	return universeViewWith(panel, cfg, nil, 0)
-}
-
-// universeViewWith は 3 分位を外から渡せる UniverseView。terciles は全行ぶんを
-// 行の並びのまま並べたもの（min_turnover が同じ設定どうしで使い回す——格子で
-// 設定ごとに 490 万行を並べ替え直すと 1 本あたり数秒を無駄に払う）。
+//
+// terciles は全行ぶんを行の並びのまま並べたもの（min_turnover が同じ設定どうしで
+// 使い回す——格子で設定ごとに 490 万行を並べ替え直すと 1 本あたり数秒を無駄に払う）。
 // hint は結果の行数の見当（0 なら見当なし）。
 func universeViewWith(panel *Panel, cfg config.Config, terciles []int, hint int) *Panel {
 	out := &Panel{Days: panel.Days, Rows: make([]Row, 0, hint)}
@@ -203,7 +198,7 @@ func LoadPanel(arch *archive.Archive, start, end time.Time, cfg config.Config) (
 // PanelOptions はパネルの読み方。ゼロ値は「その設定の母集団だけを持つ」。
 type PanelOptions struct {
 	// KeepAll が真なら母集団の判定を当てず、下限を満たす行を全部返す。
-	// 格子（backtest --grid）が設定ごとに UniverseView で当て直すための形。
+	// 格子（backtest --grid）が設定ごとに universeViewWith で当て直すための形。
 	KeepAll bool
 	// TurnoverFloor は残す売買代金 20 日中央値の下限（円）。0 なら PanelTurnoverFloor。
 	// 格子では「並べた設定の min_turnover の最小値」を渡して行数を抑える。

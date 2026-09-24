@@ -133,17 +133,6 @@ func AddMarginAlert(arch *archive.Archive, code string, pubDate time.Time, jsfSt
 	return err
 }
 
-// AddEarningsDate は当日の決算発表予定を足す。
-func AddEarningsDate(arch *archive.Archive, code string, pubDate, schDate time.Time) error {
-	frame := &archive.Frame{Columns: []string{"PubDate", "Code", "SchDate"}}
-	frame.AppendRow(map[string]*string{
-		"PubDate": ptr(pubDate.Format(dateLayout)), "Code": ptr(code),
-		"SchDate": ptr(schDate.Format(dateLayout)),
-	})
-	_, err := arch.Upsert(archive.MustEndpoint("fins_earnings_date"), frame)
-	return err
-}
-
 // MinuteBar は分足 1 本（試験用。四本値は同じ値、出来高は 100 株）。
 type MinuteBar struct {
 	// Time は足の**開始**時刻（"09:00"）。09:00 の足に寄付の板寄せが入る。

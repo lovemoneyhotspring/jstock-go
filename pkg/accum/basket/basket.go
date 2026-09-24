@@ -376,26 +376,6 @@ type BasketResult struct {
 	BoostedDays int
 }
 
-// Summary は表示・JSON 用の要約。
-func (r BasketResult) Summary() map[string]any {
-	out := map[string]any{
-		"期間":     fmt.Sprintf("%s 〜 %s", r.Start, r.End),
-		"総投入額":   r.Basket.Contributed,
-		"期末評価額":  r.Basket.TerminalValue,
-		"総リターン":  r.Basket.TotalReturn(),
-		"XIRR":   r.Basket.XIRR,
-		"最大DD":   r.Basket.MaxDrawdown,
-		"銘柄数":    len(r.Symbols),
-		"増額発動日数": r.BoostedDays,
-	}
-	if r.Benchmark != nil {
-		out["基準 期末評価額"] = r.Benchmark.TerminalValue
-		out["基準 XIRR"] = r.Benchmark.XIRR
-		out["基準 最大DD"] = r.Benchmark.MaxDrawdown
-	}
-	return out
-}
-
 // fills は約定価格＝翌営業日の寄付（無ければ翌日終値、最終日は当日終値）。
 func fills(bars []domain.Bar) map[string]float64 {
 	out := make(map[string]float64, len(bars))

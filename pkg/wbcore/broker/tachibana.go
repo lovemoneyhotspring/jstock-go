@@ -266,7 +266,7 @@ func (t *TachibanaBroker) clientOrderIDFor(number string) string {
 	t.nativeMu.Lock()
 	defer t.nativeMu.Unlock()
 	for clientID, native := range t.nativeOrderIDs {
-		if n, _, ok := splitBrokerOrderID(native); ok && n == number {
+		if n, _, ok := SplitOrderID(native); ok && n == number {
 			return clientID
 		}
 	}
@@ -1127,7 +1127,7 @@ func (t *TachibanaBroker) orderNumberOf(clientOrderID string, brokerOrderID *str
 	if raw == "" {
 		raw = t.nativeOrderID(clientOrderID)
 	}
-	number, day, ok := splitBrokerOrderID(raw)
+	number, day, ok := SplitOrderID(raw)
 	if !ok {
 		return "", "", fmt.Errorf(
 			"client_order_id=%q の立花証券の注文番号が分からないため%sできません", clientOrderID, purpose)

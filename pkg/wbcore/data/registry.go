@@ -50,9 +50,6 @@ const (
 // Available は登録済みの取得元の名前（辞書順）。
 func Available() []string { return providers.Available() }
 
-// Describe は取得元の名前と 1 行説明。
-func Describe() []registry.Described { return providers.Describe() }
-
 // Connect は名前で選んだ取得元を組み立てる。
 //
 // 未知の名前には候補を添える。その取得元が市場に対応していない場合は

@@ -80,8 +80,9 @@ func TestLedger_Lifecycle(t *testing.T) {
 	}
 }
 
-// 拒否・未送信・dry-run は「出していない」。それ以外（送信中・受理・約定・取消・失効）は
-// 一度ブローカーに届いた（かもしれない）注文なので、同じ ID を再送させない。
+// 拒否・未送信・dry-run は「出していない」。それ以外（送信中・受理・一部約定・約定・取消・失効・
+// 不明）は一度ブローカーに届いた（かもしれない）注文なので、同じ ID を再送させない。
+// 状態だけで決まり、約定 0 株の取消・失効も「出した」（daytrade とは違う。理由は WasPlaced のコメント）。
 func TestWasPlacedByStatus(t *testing.T) {
 	l, err := OpenLedger(filepath.Join(t.TempDir(), "accum.db"))
 	if err != nil {
@@ -95,7 +96,9 @@ func TestWasPlacedByStatus(t *testing.T) {
 	}{
 		{string(domain.OrderStatusPending), true},
 		{string(domain.OrderStatusSubmitted), true},
+		{string(domain.OrderStatusPartiallyFilled), true},
 		{string(domain.OrderStatusFilled), true},
+		{string(domain.OrderStatusUnknown), true},
 		{string(domain.OrderStatusCancelled), true},
 		{string(domain.OrderStatusExpired), true},
 		{string(domain.OrderStatusRejected), false},
@@ -122,6 +125,15 @@ func TestWasPlacedByStatus(t *testing.T) {
 				t.Errorf("WasPlaced(%s) = %v, want %v", tc.status, placed, tc.want)
 			}
 		})
+	}
+
+	// 一部約定してから取り消された注文も「出した」（状態だけで決まる）
+	partial := decimal.NewFromInt(50)
+	if err := l.UpdateStatus("order-"+string(domain.OrderStatusCancelled), string(domain.OrderStatusCancelled), &partial, &price); err != nil {
+		t.Fatal(err)
+	}
+	if placed, err := l.WasPlaced("order-" + string(domain.OrderStatusCancelled)); err != nil || !placed {
+		t.Errorf("一部約定の取消: WasPlaced = (%v, %v), want (true, nil)", placed, err)
 	}
 
 	// 台帳に無い ID はエラーではなく「出していない」

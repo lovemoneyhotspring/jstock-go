@@ -75,8 +75,6 @@ const (
 	ReasonExpired ReasonCode = "expired"
 )
 
-func (r ReasonCode) String() string { return string(r) }
-
 // イベント種別（event 列）。
 const (
 	EventIntent = "intent"

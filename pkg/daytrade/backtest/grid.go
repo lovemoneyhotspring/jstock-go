@@ -13,7 +13,7 @@ import (
 // 格子（複数の設定を 1 プロセスで回す）。
 //
 // パネルと危険信号の材料は設定に依存しないので 1 回だけ読み、設定ごとに母集団を
-// 当て直して（UniverseView）Simulate に掛ける。11 本回す日で読み込みを 11 回払わない。
+// 当て直して（universeViewWith）Simulate に掛ける。11 本回す日で読み込みを 11 回払わない。
 
 // GridEntry は格子の 1 本（設定と、出力に付ける名前）。
 type GridEntry struct {

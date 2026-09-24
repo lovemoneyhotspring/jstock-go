@@ -3,6 +3,7 @@ package execute
 import (
 	"testing"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/logging"
 )
@@ -135,7 +136,8 @@ func TestImportFillsSkipsSellsAndUnfilled(t *testing.T) {
 	}
 }
 
-// 注文番号の分け方は broker の splitBrokerOrderID と同じ（空白を落とす・番号か営業日が空なら通さない）。
+// 約定の取り込みが注文番号を分ける規則（broker.SplitOrderID）。空白を落とし、番号か営業日が
+// 空なら通さない。以前は accum に複製があり、空白を落とさず "123/" も番号 "123" として通していた。
 func TestSplitOrderNumberMatchesBroker(t *testing.T) {
 	cases := []struct {
 		in          string
@@ -150,9 +152,9 @@ func TestSplitOrderNumberMatchesBroker(t *testing.T) {
 		{"", "", "", false},
 	}
 	for _, tc := range cases {
-		number, day, ok := splitOrderNumber(tc.in)
+		number, day, ok := broker.SplitOrderID(tc.in)
 		if number != tc.number || day != tc.day || ok != tc.ok {
-			t.Errorf("splitOrderNumber(%q) = (%q, %q, %v), want (%q, %q, %v)",
+			t.Errorf("SplitOrderID(%q) = (%q, %q, %v), want (%q, %q, %v)",
 				tc.in, number, day, ok, tc.number, tc.day, tc.ok)
 		}
 	}

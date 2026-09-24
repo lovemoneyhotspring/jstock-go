@@ -255,12 +255,12 @@ func TestToOrderRejectsUnknownSide(t *testing.T) {
 }
 
 func TestSplitBrokerOrderID(t *testing.T) {
-	number, day, ok := splitBrokerOrderID("12345/20260903")
+	number, day, ok := SplitOrderID("12345/20260903")
 	if !ok || number != "12345" || day != "20260903" {
 		t.Errorf("分解 = %s / %s (%v)", number, day, ok)
 	}
 	for _, bad := range []string{"", "12345", "/20260903", "12345/"} {
-		if _, _, ok := splitBrokerOrderID(bad); ok {
+		if _, _, ok := SplitOrderID(bad); ok {
 			t.Errorf("%q を受け入れてしまいました", bad)
 		}
 	}

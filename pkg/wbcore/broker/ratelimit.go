@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -100,14 +99,4 @@ func (r *RateLimiter) AcquireN(tokens int) (time.Duration, error) {
 		r.sleep(delay)
 	}
 	return delay, nil
-}
-
-// Wait は context の期限を尊重して 1 トークン待つ。
-// 長時間の待ちが起こりうる経路（同期処理など）では、こちらで中断できるようにする。
-func (r *RateLimiter) Wait(ctx context.Context) error {
-	return r.limiter.Wait(ctx)
-}
-
-func (r *RateLimiter) String() string {
-	return "<RateLimiter " + r.limit.String() + ">"
 }

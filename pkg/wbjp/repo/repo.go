@@ -419,10 +419,6 @@ type execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
-func (r *Repo) SaveStop(rec StopRecord) error {
-	return saveStop(r.db, rec)
-}
-
 func saveStop(db execer, rec StopRecord) error {
 	now := clock.NowUTC().Format(time.RFC3339)
 	var pctStr, hcStr, initStopStr, initQtyStr *string
@@ -461,11 +457,6 @@ func saveStop(db execer, rec StopRecord) error {
 		rec.Symbol, rec.StopPrice.String(), rec.EntryPrice.String(), rec.CreatedOn,
 		trailingInt, rec.ATRMultiple.String(), pctStr, hcStr, initStopStr, initQtyStr, scaledOutInt, now,
 	)
-	return err
-}
-
-func (r *Repo) DeleteStop(symbol string) error {
-	_, err := r.db.Exec("DELETE FROM stops WHERE symbol = ?;", symbol)
 	return err
 }
 
@@ -511,8 +502,19 @@ func (r *Repo) SyncStops(records map[string]StopRecord) error {
 
 // WasPlaced はその注文 ID を既に発注済みかを返す。
 //
-// 送信後・記録前に落ちた場合の再送を止めるための鍵。拒否された注文は
+// 送信後・記録前に落ちた場合の再送を止めるための鍵。拒否・未送信・dry-run の注文は
 // 「出していない」と同じ扱いにして、次回もう一度出せるようにする。
+//
+// なぜ取消・失効を「出した」と数えるか（daytrade とは逆）: wbjp の ID は日付・銘柄・売買・
+// 数量だけで決まり（engine の MakeClientOrderID）、再送の種を変える仕組みが無い。同じ ID で
+// 送り直すと RecordOrder の UPSERT が既存の行（約定の記録を含む）を上書きし、ブローカーには
+// 2 件あるのに台帳は 1 行になる。取消・失効は一部約定していることもあるが、この判定は状態だけを
+// 見るので約定の有無にかかわらず「出した」側に倒す。同じ日に同じ数量を出し直さないだけで、
+// 数量が変われば ID も変わる（二重発注でなく出し直しの見送りの側）。
+// 拒否・未送信はブローカーに注文が無いので、同じ ID の行を上書きしても失うものが無い。
+// PENDING・UNKNOWN は届いたかもしれないので「出した」側。
+//
+// 状態ごとの答えは TestWasPlacedByStatus が固定している。
 //
 // 台帳が読めないときはエラー。「読めない」を「出していない」と読むと、
 // プロセスをまたいだ二重発注の唯一の柵が外れる。
@@ -991,18 +993,6 @@ func scanOrder(src scanner) (*OrderRecord, error) {
 		return nil, fmt.Errorf("注文 %s の avg_fill_price が数値ではありません: %w", rec.ClientOrderID, err)
 	}
 	return &rec, nil
-}
-
-// UpdateOrderStatus は状態だけを書き換える。約定の記録（filled_quantity 等）は触らない。
-//
-// 取消の記録に使う。UpdateOrder は約定数量を必ず受けるので、部分約定した注文を
-// 取り消したときに約定分を 0 に戻してしまう。
-func (r *Repo) UpdateOrderStatus(clientOrderID string, status domain.OrderStatus) error {
-	_, err := r.db.Exec(
-		`UPDATE orders SET status = ?, updated_at = ? WHERE client_order_id = ?;`,
-		string(status), clock.NowUTC().Format(time.RFC3339), clientOrderID,
-	)
-	return err
 }
 
 // UpdateOrder は注文の約定状況を書き戻す。

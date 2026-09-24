@@ -52,8 +52,10 @@ func brokerOrderIDOf(orderNumber, orderDay string) string {
 	return fmt.Sprintf("%s/%s", strings.TrimSpace(orderNumber), strings.TrimSpace(orderDay))
 }
 
-// splitBrokerOrderID は "番号/営業日" を分解する。
-func splitBrokerOrderID(value string) (number, day string, ok bool) {
+// SplitOrderID は broker_order_id（"番号/営業日"。brokerOrderIDOf の逆）を分解する。
+// 前後の空白は落とし、番号か営業日が空（"123/"・"/20260925"）なら ok は偽で番号も空を返す。
+// accum の約定の取り込み（importfills）も同じ規則で分けるので、ここを唯一の定義にする。
+func SplitOrderID(value string) (number, day string, ok bool) {
 	number, day, ok = strings.Cut(strings.TrimSpace(value), "/")
 	if !ok || number == "" || day == "" {
 		return "", "", false
@@ -241,7 +243,7 @@ func (t *TachibanaBroker) GetOrder(clientOrderID string, brokerOrderID *string) 
 	if raw == "" {
 		raw = t.nativeOrderID(clientOrderID)
 	}
-	number, day, ok := splitBrokerOrderID(raw)
+	number, day, ok := SplitOrderID(raw)
 	if !ok {
 		return nil, fmt.Errorf(
 			"client_order_id=%q の立花証券の注文番号が分かりません"+

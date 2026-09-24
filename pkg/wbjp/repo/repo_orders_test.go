@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -40,7 +41,7 @@ func TestStopsRoundTripKeepsTrailingPct(t *testing.T) {
 		HighestClose: ptr(dec("2100")), InitialStopPrice: ptr(dec("1900")), InitialQuantity: ptr(dec("100")),
 		ScaledOut: true,
 	}
-	if err := r.SaveStop(rec); err != nil {
+	if err := r.SyncStops(map[string]StopRecord{rec.Symbol: rec}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := r.GetStops()
@@ -63,7 +64,7 @@ func TestStopsRoundTripKeepsTrailingPct(t *testing.T) {
 
 	// nil の trailing_pct も往復する（ATR 追従に戻る）
 	rec.TrailingPct = nil
-	if err := r.SaveStop(rec); err != nil {
+	if err := r.SyncStops(map[string]StopRecord{rec.Symbol: rec}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = r.GetStops()
@@ -71,7 +72,7 @@ func TestStopsRoundTripKeepsTrailingPct(t *testing.T) {
 		t.Errorf("nil が残らない: %v", got["7203"].TrailingPct)
 	}
 
-	if err := r.DeleteStop("7203"); err != nil {
+	if err := r.SyncStops(nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ = r.GetStops(); len(got) != 0 {
@@ -83,11 +84,13 @@ func TestStopsRoundTripKeepsTrailingPct(t *testing.T) {
 // 残ると次に同じ銘柄を建てたとき古い建値・作成日を引き継ぐ。
 func TestSyncStopsRemovesClosedPositions(t *testing.T) {
 	r := openTemp(t)
+	stops := map[string]StopRecord{}
 	for _, sym := range []string{"7203", "6758"} {
-		if err := r.SaveStop(StopRecord{Symbol: sym, StopPrice: dec("100"), EntryPrice: dec("110"),
-			CreatedOn: "2026-08-01", ATRMultiple: dec("2")}); err != nil {
-			t.Fatal(err)
-		}
+		stops[sym] = StopRecord{Symbol: sym, StopPrice: dec("100"), EntryPrice: dec("110"),
+			CreatedOn: "2026-08-01", ATRMultiple: dec("2")}
+	}
+	if err := r.SyncStops(stops); err != nil {
+		t.Fatal(err)
 	}
 	// 6758 は手仕舞い済み、9984 は新規、7203 はストップが上がった
 	if err := r.SyncStops(map[string]StopRecord{
@@ -155,6 +158,50 @@ func TestWasPlacedIgnoresRejectedUnsentAndDryRun(t *testing.T) {
 		if placed, err = r.WasPlaced(req.ClientOrderID); err != nil || placed {
 			t.Errorf("%s は送り直せる: placed=%v err=%v", status, placed, err)
 		}
+	}
+}
+
+// TestWasPlacedByStatus は状態ごとの WasPlaced。拒否・未送信・dry-run だけが「出していない」。
+// 取消・失効は約定 0 株でも「出した」（daytrade とは違う。理由は WasPlaced のコメント）。
+func TestWasPlacedByStatus(t *testing.T) {
+	r := openTemp(t)
+	startRun(t, r, "run-1")
+	cases := []struct {
+		status string
+		filled string
+		want   bool
+	}{
+		{string(domain.OrderStatusPending), "0", true},
+		{string(domain.OrderStatusSubmitted), "0", true},
+		{string(domain.OrderStatusPartiallyFilled), "50", true},
+		{string(domain.OrderStatusFilled), "100", true},
+		{string(domain.OrderStatusUnknown), "0", true},
+		{string(domain.OrderStatusCancelled), "0", true},
+		{string(domain.OrderStatusCancelled), "50", true}, // 一部約定してから取消
+		{string(domain.OrderStatusExpired), "0", true},
+		{string(domain.OrderStatusRejected), "0", false},
+		{string(domain.OrderStatusUnsent), "0", false},
+		{"dry_run", "0", false},
+	}
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%s_filled%s", tc.status, tc.filled), func(t *testing.T) {
+			req := newRequest(t, fmt.Sprintf("cid-%d", i), "7203", domain.SideBuy, 100)
+			if err := r.RecordOrder("run-1", req, tc.status, nil); err != nil {
+				t.Fatal(err)
+			}
+			if tc.filled != "0" {
+				if err := r.UpdateOrder(req.ClientOrderID, domain.OrderStatus(tc.status), dec(tc.filled), nil, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			placed, err := r.WasPlaced(req.ClientOrderID)
+			if err != nil {
+				t.Fatalf("台帳を読めません: %v", err)
+			}
+			if placed != tc.want {
+				t.Errorf("WasPlaced(%s, 約定 %s 株) = %v, want %v", tc.status, tc.filled, placed, tc.want)
+			}
+		})
 	}
 }
 
@@ -290,7 +337,9 @@ func TestUnresolvedOrdersRejectsCorruptQuantity(t *testing.T) {
 	}
 }
 
-func TestUpdateOrderStatusKeepsFills(t *testing.T) {
+// TestCancelledAfterPartialFillKeepsFills は、部分約定の後に取り消された注文。本番の同期は
+// 取消でも証券会社の約定数量ごと UpdateOrder で書くので、約定分が残り未確定にも出ない。
+func TestCancelledAfterPartialFillKeepsFills(t *testing.T) {
 	r := openTemp(t)
 	startRun(t, r, "run-1")
 	req := newRequest(t, "cid-1", "7203", domain.SideBuy, 200)
@@ -301,7 +350,7 @@ func TestUpdateOrderStatusKeepsFills(t *testing.T) {
 	if err := r.UpdateOrder(req.ClientOrderID, domain.OrderStatusPartiallyFilled, dec("100"), &price, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.UpdateOrderStatus(req.ClientOrderID, domain.OrderStatusCancelled); err != nil {
+	if err := r.UpdateOrder(req.ClientOrderID, domain.OrderStatusCancelled, dec("100"), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := r.GetOrder(req.ClientOrderID)

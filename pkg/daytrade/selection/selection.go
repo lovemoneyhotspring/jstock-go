@@ -657,8 +657,3 @@ func SpillInto(n int, budget, baseBudget, spill decimal.Decimal, maxN int) (int,
 	}
 	return nDay, total.Div(decimal.NewFromInt(int64(nDay))).Floor()
 }
-
-// ThresholdPrice は「寄付がこの値未満なら候補」の閾値（前日終値 × (1 + maxGap)）。
-func ThresholdPrice(prevClose, maxGap decimal.Decimal) decimal.Decimal {
-	return prevClose.Mul(decimal.NewFromInt(1).Add(maxGap)).Round(1)
-}
