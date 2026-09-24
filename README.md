@@ -147,7 +147,7 @@ accum run --live          # 注文を出す。口座は .env の WBJP_ENV（uat 
 |---|---|
 | 保存 | 時刻は必ず時間帯付き。SQLite の `placed_at` は UTC の ISO 8601（`+00:00` 付き）。暦日（`date`）は取引所の日付で時刻ではないので時間帯を持たない |
 | 演算・判定 | UTC。取引所の現地時刻が要る判断（発注時間帯・引けの前後）は、その場で `Market.timezone` に変換して比べる |
-| 表示 | 設定の時間帯（`WBJP_TIMEZONE`、既定 UTC）。日本で運用するなら `.env` に `WBJP_TIMEZONE=Asia/Tokyo`。どの時間帯でも**略号を必ず添える**（`2026-08-29 06:20 UTC` / `15:20 JST`）。DB に UTC で保存された時刻（`placed_at` 等）も `explain` / `runs` では設定の時間帯に直して出す |
+| 表示 | 設定の時間帯（`WBJP_TIMEZONE`、既定 Asia/Tokyo）。UTC で見たいときは `.env` に `WBJP_TIMEZONE=UTC`。どの時間帯でも**略号を必ず添える**（`2026-08-29 06:20 UTC` / `15:20 JST`）。DB に UTC で保存された時刻（`placed_at` 等）も `explain` / `runs` では設定の時間帯に直して出す |
 | ログ | 端末の表示は設定の時間帯（オフセット付き ISO）。ファイルのログには加えて `ts_utc`（常に UTC）が入る |
 
 ## ログ（後から AI に読ませる用）
