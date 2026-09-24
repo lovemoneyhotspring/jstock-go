@@ -30,7 +30,7 @@ func TestRatioFallbackOnlyLowers(t *testing.T) {
 		t.Errorf("キャッシュ無しのショック日の頭打ち %s, want %s", out.Capital.ShockTotalCap, fixed)
 	}
 
-	// 前日の建可能額が小さい（×0.68 が固定値を下回る）→ そちらで決め直す
+	// 前日の建可能額が小さい（× capacity_ratio が固定値を下回る）→ そちらで決め直す
 	small := margincap.Snapshot{SinyouSinkidate: decimal.NewFromInt(6_000_000)}
 	out, total, fromStale = ratioFallbackConfig(cfg, &small)
 	if !fromStale || !total.LessThan(fixed) || out.Validate() != nil {
@@ -79,7 +79,7 @@ func TestRankingConfigForUsesDatedSnapshot(t *testing.T) {
 	if got.Margin.Enabled {
 		total = total.Add(got.Margin.MaxCapital)
 	}
-	if want := decimal.NewFromInt(7_582_401); !total.Equal(want) {
-		t.Errorf("控えのある日の長短合計 %s, want %s（建可能額 × 0.68）", total, want)
+	if want := snap.SinyouSinkidate.Mul(cfg.Margin.CapacityRatio).Floor(); !total.Equal(want) {
+		t.Errorf("控えのある日の長短合計 %s, want %s（建可能額 × capacity_ratio）", total, want)
 	}
 }

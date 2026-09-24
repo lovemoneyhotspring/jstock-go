@@ -292,12 +292,12 @@ func TestSizeDayRatioStaysWithinCapacity(t *testing.T) {
 		wantTotal int64 // ロングの総額（N × 1 注文）
 		atMost    int64
 	}{
-		// 平日: ロング 558 万 + 回したショート 200 万 = 758 万（上限 7,582,401）
+		// 平日: ロング 494 万 + 回したショート 198 万 = 691 万（上限 = 建可能額 11,150,590 × 62% = 6,913,365）
 		{name: "平日", sinkidate: 11_150_590, verdict: regime.Verdict{Trade: true, Scale: 1},
-			wantTotal: 7_582_390, atMost: 7_582_401},
-		// ショック日: ロング 558 万 × 1.5 = 837 万 < 上限 858 万（ショートは ×0 で回す枠なし）
+			wantTotal: 6_913_350, atMost: 6_913_365},
+		// ショック日: ロング 494 万 × 1.5 = 741 万 < 上限 803 万（ショートは ×0 で回す枠なし）
 		{name: "ショック日", sinkidate: 11_150_590, verdict: regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: 1.5},
-			wantTotal: 8_373_600, atMost: 8_585_954},
+			wantTotal: 7_407_170, atMost: 8_028_424},
 		// 天井に達した口座のショック日: ロング 800 万 × 1.5 = 1,200 万 → 天井 1,000 万で頭打ち
 		{name: "天井のショック日", sinkidate: 20_000_000, verdict: regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: 1.5},
 			wantTotal: 10_000_000, atMost: 10_000_000},

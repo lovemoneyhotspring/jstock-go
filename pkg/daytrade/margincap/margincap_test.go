@@ -283,7 +283,7 @@ func TestApplyFlagsWatchOnlyCollapse(t *testing.T) {
 	}
 }
 
-// margin.capacity_ratio（規則 R）: 長短合計 = min(建可能額 × 68%, 天井 1,000 万) を上げ下げ両方に当てる。
+// margin.capacity_ratio（規則 R）: 長短合計 = min(建可能額 × capacity_ratio（62%）, 天井 1,000 万) を上げ下げ両方に当てる。
 // 本番の設定と 2026-09-24 朝の実際の建可能額で確かめる。
 func TestApplyRatioLiveConfig(t *testing.T) {
 	cfg, err := config.Load("../../../config/daytrade_margin")
@@ -301,14 +301,14 @@ func TestApplyRatioLiveConfig(t *testing.T) {
 		wantRatio, wantWatch, change bool
 	}{
 		// 1,115 万 × 68% = 758 万。ショートは長短比 2:7 で 216 万 → 上限 200 万、残り 558 万がロング
-		{name: "今朝の値", sinkidate: "11150590", wantLong: "5582401", wantShort: "2000000",
-			wantNormal: "7582401", wantShock: "8585954", wantRatio: true, change: true},
+		{name: "今朝の値", sinkidate: "11150590", wantLong: "4938117", wantShort: "1975248",
+			wantNormal: "6913365", wantShock: "8028424", wantRatio: true, change: true},
 		// 天井 1,000 万で止まる（ショック日も天井を超えない）
 		{name: "保証金が増えた", sinkidate: "20000000", wantLong: "8000000", wantShort: "2000000",
 			wantNormal: "10000000", wantShock: "10000000", wantRatio: true, change: true},
 		// 小さい朝はショートを長短比で割る（ロングが 0 にならない）
-		{name: "保証金が小さい", sinkidate: "2000000", wantLong: "971428", wantShort: "388572",
-			wantNormal: "1360000", wantShock: "1540000", wantRatio: true, change: true},
+		{name: "保証金が小さい", sinkidate: "2000000", wantLong: "885714", wantShort: "354286",
+			wantNormal: "1240000", wantShock: "1440000", wantRatio: true, change: true},
 		// 追証の日は建てない
 		{name: "追証", sinkidate: "11150590", fusoku: "1000", wantLong: "0", wantShort: "0",
 			wantNormal: "0", wantShock: "0", wantRatio: true, wantWatch: true, change: true},
