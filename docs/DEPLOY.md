@@ -154,7 +154,7 @@ deploy/install-crontab.sh             # バックアップを取り、構文を�
 |---|---|
 | cron が止まった・crontab が消えた・cron の行が壊れた | `jstock-close-net`（平日 15:22・15:26）が、当日の close の成功記録（ダイジェスト）が無ければ代わりに `close` を走らせる |
 | crontab から jstock-go のブロックが消えた（上書き・空） | `jstock-guard`（平日 8:42・15:12）が `state/crontab.good` から戻す |
-| 寄る前の点検が落ちた（設定を読めない・plan が無い） | `jstock-guard`（8:42）が直す: 設定は `deploy/build.sh` で作り直し（作業ツリーが**コミット済みの main** のときだけ）→ まだ動かなければ `deploy/rollback-bin.sh` で 1 世代前へ。plan は `daytrade plan --if-missing`。台帳・ディスクは通知のみ |
+| 寄る前の点検が落ちた（設定を読めない・plan が無い） | `jstock-guard`（8:42）が直す: 設定は `deploy/build.sh` で作り直し（作業ツリーが**コミット済みの main** のときだけ）→ まだ動かなければ `deploy/rollback-bin.sh` で 1 世代前へ（戻しても動かなければ、戻す前の版へ進め直す）。plan は `daytrade plan --if-missing`。台帳・ディスクは通知のみ。時間切れ（124/137）は「動かない」と分からないので戻さない。全体を `GUARD_BUDGET`（既定 500 秒）の締め切りに収め、残りが足りない段は飛ばして通知する |
 | **マシン停止・ネット断** | ローカルの仕組みでは救えない。**ブローカーに置いた保険の引け注文**（`execution.protect_exit`。`daytrade protect`）が引けで手仕舞う。2026-09-20 から有効（実機で未検証のまま本番で検証中。`docs/BROKER_VERIFY.md`「引けの保険注文」）。戻すなら `protect_exit = false`。**保険は後場（12:31〜）だけ**なので、前場（9:00〜12:30）に止まると救えない（前場に置いた「引け」は前引けで約定する） |
 
 ```bash
@@ -169,6 +169,10 @@ deploy/tests/prune_state_test.sh    # prune-state.sh（置き場の掃除）の�
 
 - ログは `state/logs/systemd-guard.log`。**通知は「自動で対応した／できなかった」の結果**を 1 通（何も問題が
   無ければ出さない）
+- `jstock-guard` は作り直し・preflight（最大 4 回）・plan・rollback のどれにも timeout を掛け、全体を
+  `GUARD_BUDGET`（既定 500 秒）に収める。最後の通知を足しても systemd の `TimeoutStartSec=600` に届かない。
+  それでも止められたとき（固まった・OOM）は、ユニットの `ExecStopPost`（`deploy/unit-done.sh`）が
+  「途中で止められた」を通知する
 - crontab を**意図して止める**ときは `state/crontab.paused` を作る（あると crontab の復元を飛ばす）。
   jstock-go の行だけをコメントアウトして止めた場合（`# wbjp（` の目印が残っている）は、戻さず通知だけ。
   ふつうの止め方は `execution.kill_switch = true`（cron は消さなくてよい）
@@ -295,6 +299,9 @@ echo 'テスト' | bin/discord-post
 ——追記専用の履歴（Parquet）とダイジェストを期間で読むので、日次の保持期間より
 長い範囲でも振り返れる。仕組みは [FEEDBACK.md](FEEDBACK.md)「4. レポート（Discord）」。
 
+`report.sh` の終了コードは 0 = 送った・1 = レポートを作れなかった（失敗の知らせを送る）・2 = `WBJP_ENV` が未設定か引数の誤り・
+**3 = 作れたが Discord に送れなかった**（本文は `state/reports/` に残る。古い控えの掃除は続けてから 3 で終わる）。
+
 vault（`~/obsidian-vault`）への commit は**そのノートだけ**を対象にする（`git commit -- <path>`）。
 人が vault で add しかけていた変更は巻き込まない。commit / push に失敗したら cron のログに書き、
 Discord（`WBJP_ALERT_CHANNEL_ID` / レポートの送り先）にも短く流す。
@@ -320,10 +327,10 @@ Discord（`WBJP_ALERT_CHANNEL_ID` / レポートの送り先）にも短く流�
   - 同じ仕組みで `alive.guard`（jstock-guard、期限 9:00）・`alive.closenet`（jstock-close-net、期限 15:35）・
     `alive.rate`（7:30 の rate sync、期限 8:30）も投稿する。systemd の 2 本は ExecStopPost の `deploy/unit-done.sh` が
     印を残し、時間切れ・シグナルで止められたときは Discord にも「途中で止められた」を送る。
-    **この 3 本の監視ルールは Mackerel 側に人が足す**（足すまでは投稿されるだけ。systemd の 2 本は
-    `deploy/install-systemd.sh` でユニットを入れ直してから）。
+    この 3 本の監視ルール（`alive.guard > 0`・`alive.closenet > 0`・`alive.rate > 0`）は 2026-09-25 に Mackerel 側へ足した
+    （systemd の 2 本は `deploy/install-systemd.sh` でユニットを入れ直してから効く）。
   - API キーは `.env` の `MACKEREL_APIKEY`、無ければ `/etc/mackerel-agent/mackerel-agent.conf` から読む。
-    監視ルールは Mackerel 側にある（名前が `jstock:` で始まる 3 本）。通知先は Mackerel の通知チャンネル。
+    監視ルールは Mackerel 側にある（名前が `jstock:` で始まる 6 本。`alive.cron`・`alive.morning`・`alive.verify` の 3 本に、2026-09-25 に上の 3 本を足した）。通知先は Mackerel の通知チャンネル。
   - `ping.sh` は `.env` に `HEALTHCHECK_URL_<KEY>` があれば healthchecks.io 型の URL へも打つ（未設定なら打たない）。
 - **打ち切り・見送りの通知（`WITH_LOCK_NOTIFY=1`）。** `with-lock.sh` の `[timeout]`・`[killed]`・`[lock_busy]` はログに
   書くだけだと誰も読まない（朝の点検は open と snap だけ）。open / guard / close / verify / plan の行は
@@ -351,6 +358,8 @@ Discord（`WBJP_ALERT_CHANNEL_ID` / レポートの送り先）にも短く流�
 - `.env` は丸ごと export しない。claude の子に渡すのは `WBJP_ENV` とメモリの上限だけで、
   Discord の送信だけがサブシェルで `.env` を読む。`bin/*` の Go は自分で `.env` を読むので、
   エージェントが叩く `review` などは困らない。
+- 終了コードは 0 = 異常なし（claude を起こさない）か送った・1 = レポートを作れなかった（失敗の知らせを送る）・
+  2 = `WBJP_ENV` が未設定・**3 = 作れたが Discord に送れなかった**（本文は `state/reports/night-repair-<日付>.md` に残る）。
 
 ### 置き場の掃除（prune-state）
 
@@ -362,10 +371,12 @@ Discord（`WBJP_ALERT_CHANNEL_ID` / レポートの送り先）にも短く流�
 | `state/logs/*.log`（cron の `>>` が書く素のログ） | 10MB を超えたら `<name>.log.1` へ退避（前の `.1` は上書き）。rename なので書きかけの行を失わない。JSONL（`*.jsonl`）は Go 側が日次で退避し 90 日で消すので触らない |
 | `state/digest/<env>-<日付>.jsonl` | 日付が 400 日より前なら消す |
 | `state/backup/crontab/crontab-*.txt`・`state/logs/crontab.backup.*`（以前の置き場） | 90 日より前で、新しい方から 20 世代に入らないものを消す |
+| `state/tachibana/session-<env>-YYYYMMDD.json` と `.json.lock` | 立花のセッション（仮想 URL と採番）と flock 用のロック。使うのは当日の分だけ。日付が 7 日より前なら組で消す。ロックを誰かが握っていれば（`flock -n` で取れなければ）その組は残す |
+| `test/out/**`（検証の中間出力。git の管理外） | 名前に日付が無いので更新時刻で見て、30 日より前なら消す。`.gitkeep` と、中身が空になったディレクトリは残す（`test/*.py` で作り直せる） |
 | `data/jquants/_raw/` | **消さない。** 一括ダウンロードの原本で、J-Quants は 10 年より前を返さなくなるので再取得できない（`docs/JQUANTS_ARCHIVE.md`「冪等性・安全」） |
 
 名前から日付を読めないファイルは触らない。日数・世代数・上限は `PRUNE_DIGEST_DAYS`・`PRUNE_CRONTAB_DAYS`・
-`PRUNE_CRONTAB_KEEP`・`PRUNE_LOG_MAX_MB` で変えられる。state の SQLite の複製（`state/backup/*.db`）は
+`PRUNE_CRONTAB_KEEP`・`PRUNE_LOG_MAX_MB`・`PRUNE_SESSION_DAYS`・`PRUNE_TESTOUT_DAYS` で変えられる。state の SQLite の複製（`state/backup/*.db`）は
 `accum backup` が世代を管理する（既定 30 世代）ので対象にしない。
 
 ### cron を入れる前の検証

@@ -152,6 +152,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `accum.sync_failed` / `accum.backup_failed`（ダイジェストの異常） / `accum.history_failed` / `accum.ledger` / `accum.ledger_read_failed` | 足の同期・注文状態の照会の失敗／バックアップの失敗／判断履歴・台帳への書き込み・読み込みの失敗 | 本文 |
 | `accum.import_fill` / `accum.import_no_price` | `accum import-fills` が約定を取り込んだ／単価が取れず取り込めなかった | 本文 |
 | `accum.verify_order` / `accum.verify_dry_run` / `accum.verify_query_failed` / `accum.verify_stop` / `accum.verify_stop_dry_run` / `accum.verify_stop_cancel_failed` | 発注経路の検証（`verify-order`・逆指値の検証。[BROKER_VERIFY.md](BROKER_VERIFY.md)）の結果 | 本文 |
+| `accum.execution`（warn） | 実行品質の記録（`state/accum/history/execution/`。`run`・`orders --check` の終わりに書き出す）に失敗した。実行は落とさない。[FEEDBACK.md](FEEDBACK.md)「実行品質」 | `error` |
 | `accum.timezone`（warn） | `WBJP_TIMEZONE` を解釈できず、表示は既定の日本時間のまま（ファイルの `ts_utc` は常に UTC） | 本文 |
 | `accum.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`。panic は `<app>.panic`（`error`, `stack`） |
 
@@ -215,7 +216,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `daytrade.execution` / `daytrade.history` / `daytrade.evaluate_unmatched`（warn） | 実行品質の記録・履歴の追記に失敗した／順位表に無い約定があり評価から落ちる | `error` / `kind`, `error` / `day`, `orders` |
 | `daytrade.sector`（warn） | 業種が取れない候補があり `max_per_sector` がその分効かない | `no_sector`, `ranked`, `max_per_sector` |
 | `daytrade.margin_warm`（info / warn） | 8:53 の `warm-margin` が委託保証金をキャッシュに焼いた／取れなかった・応答に無い項目・不足額（追証。通知も送る） | 保証金の内訳（`sonota_kousokukin` など） |
-| `daytrade.margin_cap`（warn / error） | `open` が保証金で建玉の上限を導いた。キャッシュが無い／当日ぶんでないときは設定の値で建てる（warn）、下げた設定が検証を通らない（error。通知も送る） | 導いた上限、`cached_day` |
+| `daytrade.margin_cap`（warn / error） | `open` が保証金で建玉の上限を導いた。キャッシュが無い／当日ぶんでないときは設定の値で建てる（warn）。規則 R（`margin.capacity_ratio`）では、当日の保証金が読めない朝は設定の固定値と前日のキャッシュで決め直した値の**小さい方**（ショック日も同額で頭打ち。前日が追証か建可能額 0 なら建てない。本文が `規則 R: 保証金が読めない（…）`、通知は 1 日 1 回）。決め直した設定が検証を通らない朝は**その日は建てない**（error。WatchOnly に倒して通知も送る。2026-09-25 まで設定の値で建てていた）。N が 0 に落ちた朝も建てない（warn・通知）。[DAYTRADE.md](DAYTRADE.md) の保証金の節 | 導いた上限、`cached_day`、`fallback_total`・`stale_total`・`shock_total_cap`（読めない朝）、`error` |
 | `daytrade.corp_event` / `daytrade.corp_note` | ニュースの材料でショートの対象から外した（TOB など）／記録だけで外さなかった（`open`・`plan`） | `symbol`, `name`, `kind`, `at`, `headline` |
 | `daytrade.corp_guard`（info / warn / error） | `guard` が材料の出た売建を見つけた／取消・返済した／処置できなかった（`daytrade.corp_guard_failed` は異常。通知も送る） | `symbol`, `kind`, `at`, `headline` |
 | `daytrade.news_stale`（error / warn。異常にも） | ニュースの記録簿を読めない（売建の点検ができない。通知も送る）／古いまま点検した | `error` / `reason`, `phase` |
@@ -235,7 +236,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 |---|---|---|
 | `broker.request` | 電文を送って応答を読めた（ログインも） | `clm`（電文の種類）, `iface`（`request` / `price` / `master` / `auth`）, `p_no`, `symbol`, `elapsed_ms`, `timeout_ms`, `http_status`, `p_errno`, `result_code`, `result_text`, `order_number` |
 | `broker.request_failed` | 通信エラー・HTTP エラー・JSON でない応答・締め切りで送らなかった（warning） | 同上＋ `error`, `body`（応答本文の先頭 300 文字。メンテ画面等の切り分け） |
-| `broker.retry` | 照会を送り直す（通信エラーで 1 度、セッション失効 `p_errno=2` で 1 度）。新規注文は送り直さない。`-1`（引数エラー）・`-62`（時間外）はセッションを捨てず送り直さない | `clm`, `stage`（`login` / `send`）, `error` / `p_errno`, `backoff_ms` |
+| `broker.retry` | 照会を送り直す（通信エラーで 1 度、セッション失効 `p_errno=2` で 1 度）。新規注文は送り直さない。`-1`（引数エラー）・`-62`（時間外）はセッションを捨てず送り直さない。**ログインの拒否（`ErrLoginRejected`。`p_errno` が 0 でない・`sResultCode` の業務エラー）は送り直さず**、同じプロセスではもうログインしない（失敗ログインを重ねると口座がロックされうる。時間外 `-62` だけは時間が解決するので例外）。直し方は設定を直してプロセスを起こし直すこと（cron の次の回は別プロセスなので自然に再ログインする）。拒否は `broker.request_failed` に出る | `clm`, `stage`（`login` / `send`）, `error` / `p_errno`, `backoff_ms` |
 | `broker.warning` | 応答に `sWarningCode` が付いた（受理されたうえでの注意書き。warning） | `clm`, `iface`, `p_no`, `warning_code`, `warning_text`, `order_number` |
 | `broker.duplicate_order` | 同じプロセスで同じ `client_order_id` を既に出していたので送らなかった（warning） | `client_order_id`, `broker_order_id`, `symbol` |
 | `broker.order_number_missing` | 発注は受理されたのに注文番号が無い（以後照会・取消できない。error） | `client_order_id`, `symbol` |

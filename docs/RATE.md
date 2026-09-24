@@ -75,8 +75,8 @@ API が遡れるのは 90 日までで、止めた期間は取り返せないた
 初出時刻を測りたくなったときに、下の例で入れる。
 
 ```cron
-# 立花 API の動きを日次で足す（07:10 配信なので 07:30 以降）。これだけが crontab に入っている
-30 7 * * 1-5      cd ~/jstock-go && bin/rate sync --days 5 >> state/logs/rate.log 2>&1
+# 立花 API の動きを日次で足す（07:10 配信なので 07:30 以降）。これだけが crontab に入っている（deploy/crontab.txt と同じ行）
+30 7 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/rate.lock $WBJP_BIN/rate sync --days 5 >> state/logs/rate.log 2>&1; deploy/ping.sh RATE $? >> state/logs/ping.log 2>&1
 # 以下は入れていない例。グレイルの初出時刻を測る（朝方を細かく、日中は粗く）
 */5 5-10 * * 1-5  cd ~/jstock-go && bin/rate fetch --quiet >> state/logs/rate.log 2>&1
 */20 11-23 * * *  cd ~/jstock-go && bin/rate fetch --quiet >> state/logs/rate.log 2>&1
@@ -88,8 +88,11 @@ API が遡れるのは 90 日までで、止めた期間は取り返せないた
 1 日取れなくても止めない（`news sync` と同じ）。日曜に立花の応答が空（`aCLMMfdsNews` が無い）で返る日があり、
 以前はそこで止まって、それより前の日が届かなかった。取れなかった日は済みにならず、次の回でまた取る。
 日のめぐり方（済みの飛ばし・直近の取り直し・1 日の失敗で止めない）は `news.Walk` を `news sync` と共有している
-（2026-09-24。以前は `rate.SyncNews` が `news.Sync` の複製だった）。ただし `rate sync` は取れなかった日があっても
-終了 0 のまま（日曜の空応答が毎週あるため）。`news sync` は 1 で終わる。
+（2026-09-24。以前は `rate.SyncNews` が `news.Sync` の複製だった）。
+**平日に取れなかった日があれば `rate sync` は終了 1**（2026-09-25。休場日の失敗は数えない。日曜の空応答が毎週あるため）。
+判定は `news sync` と同じ `news.FailedDaysError`（`rate.SyncNewsResult.FailureError` から呼ぶ）。取れなかった日は
+それでも済みにならず、次の回で取り直す。終了コードは cron で `deploy/ping.sh RATE` が `state/ping/RATE` に残し、
+`deploy/mackerel-alive.sh` が Mackerel の `alive.rate` として投稿する（期限 8:30。ロックで見送った回も 1 に数える）。
 
 `sync` は取り込み済みの日を飛ばすが、**直近 `--recent` 日（既定 3）は済みでも取り直す**。
 まとめは 07:10 に配信されるので、それより前に回した日は `event_count=0` で「済み」になり、

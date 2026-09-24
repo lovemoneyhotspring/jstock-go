@@ -5,7 +5,8 @@
 // （代用有価証券の ETF は日本株と一緒に下がるので、下げた日に建玉も縮めると
 // 底で縮小して戻りを取り逃す。研究ノート 2026-09-daytrade-collateral-etf）。
 //
-// 朝 8:53 の `daytrade warm-margin` が焼き、9:01 の open が読む（data/daytrade/margin.json）。
+// 朝 8:53（取れなければ 8:56）の `daytrade warm-margin` が焼き、寄る前の回（crontab の DT_PREOPEN_AT）
+// からの open が読む（data/daytrade/margin.json）。
 // 前夜には焼かない——受入保証金は夜間更新で確定するので、前夜の値は代用有価証券の評価替えを
 // 取りこぼす（IsFresh が当日取得ぶんだけを通す）。取れなければ設定の値で建てる
 // ——保証金が読めないことを理由に売買を止めない。usmarket（VIX）と同じ約束。

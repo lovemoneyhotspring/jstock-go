@@ -96,7 +96,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 1 日取れなくても止めない（日曜に応答が空の日がある）。グレイル（rate fetch）・トレーダーズ（rate history）は入れない（docs/RATE.md）。
 # 平日の日単位の失敗は rate sync の終了コード 1 になるので、deploy/ping.sh RATE で state/ping/RATE に残し、
 # deploy/mackerel-alive.sh が alive.rate として投稿する（期限 8:30）。ロックで見送った回（flock -n の 1）も 1 に数える。
-# Mackerel 側の監視ルール（alive.rate > 0）は人が足す（足すまでは投稿されるだけ）
+# Mackerel 側の監視ルール（alive.rate > 0）は 2026-09-25 に足した
 30 7 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/rate.lock $WBJP_BIN/rate sync --days 5                                               >> state/logs/rate.log        2>&1; deploy/ping.sh RATE $? >> state/logs/ping.log 2>&1
 # 平日は open と plan の前にも当日ぶんを取り直す（TOB などの材料をショートから外すため）。
 # 適時開示は配信時刻から 2〜4 分で電文に載る（2026-09-15 の実測。15:30 の 67 件で最大 4.3 分）。

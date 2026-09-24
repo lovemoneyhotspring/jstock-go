@@ -45,6 +45,9 @@ jq 'select(.anomalies)' state/digest/prod-2026-09-03.jsonl
 `amount` を上書きするので、事後には「判断時にいくらのつもりだったか」を復元できない。
 改善に使いたいのはまさにその差分なので、別に追記専用の表を持つ。
 
+記録は実行中に貯め、実行の終わりに書き出す（`execution.Flush`）。daytrade の open・close・guard・protect に加えて、
+accum の `run` と `orders --check` も終わりに `state/accum/history/execution/` へ書き出す（失敗は `accum.execution` の warn。実行は落とさない）。
+
 1 回の発注は必ず 2 つの時点に分かれる（発注した瞬間に約定価格は分からない）。
 1 行を書き換えるのではなく、`client_order_id` を鍵に行を足す:
 
@@ -171,10 +174,15 @@ DRY_RUN=1 deploy/report.sh monthly 2026-08   # その月
 |---|---|---|
 | `attributed`（届いていた） | 注文番号と状態を帰属 | 通常どおり照会・手仕舞い |
 | `not_sent`（届いていない） | `UNSENT`（終了状態） | 種を変えて送り直す。daytrade は同じ実行の中で 1 度、wbjp / accum は次の実行の差分で |
-| `too_recent`（送った直後） | `PENDING` のまま | 次の実行で判定 |
+| `too_recent`（送った直後。Grace 未満。**台帳が今日の注文番号を 1 つも知らず（Expected が空）一覧も 0 件なら送信から 60 秒**＝`reconcile.EmptyListGrace`） | `PENDING` のまま | 次の実行で判定 |
 | `ambiguous`（同じ銘柄で細部の違う未帰属の注文がある） | `PENDING` のまま | 通知＋ダイジェストの異常。daytrade はその銘柄を触らない、wbjp は発注を止める |
 
 一覧を照会できないときは判定せず、実弾を出さない（`*.pending_unresolved`）。cron の次の回で再判定する。
+
+`EmptyListGrace`（60 秒）は当日最初の注文が結果不明になった朝のため。Expected で一覧の生死を確かめられず、
+空で返った・反映の遅れた一覧を信じて `not_sent` にすると、daytrade は種を変えて送り直す（二重発注）。
+効くのは「Expected が空」かつ「一覧が 0 件」のときだけで、2 本目以降や一覧に何か載っている朝は Grace で判定する
+（close・protect は朝の建玉の番号が Expected に入るので引けに遅れない。`pkg/wbcore/reconcile/reconcile.go` のコメント）。
 
 ダイジェストには `pending_attributed` / `pending_unsent` / `pending_ambiguous` / `pending_too_recent` の
 件数が載る。AI が動くのは **`pending_ambiguous` が 2 回以上の実行にまたがって続く**ときだけ。
@@ -203,7 +211,11 @@ bin/daytrade pending resolve <client_order_id> --unsent
 - 候補の数量が違い、`created_at` が `placed_at` より前 → 別の戦略（手動・別 cron）の注文。台帳の注文は **`UNSENT`**
 - 候補のどれも説明がつかない → `UNSENT` にせず、その日のその銘柄は触らない（`PENDING` のまま翌日の verify で建玉を突き合わせる）
 
+`--attribute` で `--status FILLED` / `PARTIALLY_FILLED` を付けるときは **`--filled`（0 より大きく注文数量以下の約定数量）が必須**
+（無い・0・注文数量を超える値はエラー。`pkg/wbcore/cli/pending.go` の `checkFilled`）。
+
 `pending resolve` は `PENDING` の行しか触らない（先に自動判定や約定が入っていれば拒否する）ので、
-2 回実行しても壊れない。直したあとは通常の cron がそのまま続く——`UNSENT` なら次の実行で種を変えて送り直し、
+2 回実行しても壊れない。読んでから書くまでに別の書き手が確定させていて**更新が 0 行なら、「直した」とは言わずエラーで終わる**
+（status を見直す）。直したあとは通常の cron がそのまま続く——`UNSENT` なら次の実行で種を変えて送り直し、
 帰属なら close / verify が注文番号で照会する。**daily-report サブエージェントは読むだけ**なので、
 修復は Claude Code のセッション（人が起動する、または cron が `claude -p` で呼ぶ）が行う。

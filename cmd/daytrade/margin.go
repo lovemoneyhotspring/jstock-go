@@ -147,12 +147,12 @@ func applyMarginCap(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 
 	snapshot, ok := margincap.Read(marginCachePath())
 	if !ok {
-		logWarn("daytrade.margin_cap", "保証金のキャッシュが無い（設定の値で建てる）", fields)
+		logWarn("daytrade.margin_cap", "保証金のキャッシュが無い（設定の値で建てる。規則 R では ratioFallback で長短合計を設定の固定値に、ショック日も同額で頭打ち）", fields)
 		return ratioFallback(cfg, day, nil, fields)
 	}
 	if !snapshot.IsFresh(day) {
 		fields["cached_day"] = snapshot.Day
-		logWarn("daytrade.margin_cap", "保証金のキャッシュが当日ぶんでない（設定の値で建てる）", fields)
+		logWarn("daytrade.margin_cap", "保証金のキャッシュが当日ぶんでない（設定の値で建てる。規則 R では ratioFallback で設定の固定値とこのキャッシュの値の小さい方に決め直す。追証・建可能額 0 なら建てない）", fields)
 		return ratioFallback(cfg, day, &snapshot, fields)
 	}
 
