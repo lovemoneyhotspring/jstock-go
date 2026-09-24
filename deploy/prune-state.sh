@@ -23,6 +23,10 @@
 #                         当日の分だけ（pkg/wbcore/broker/tachibana.go の sessionFilePath）。日付が
 #                         PRUNE_SESSION_DAYS（既定 7）日より前なら消す。ロックを誰かが握っていれば
 #                         （flock -n で取れなければ）その組は残す
+#   test/out/**           検証の中間出力（git の管理外。CLAUDE.md「中間出力は test/out/」）。test/*.py で作り直せる。
+#                         名前に日付が無いので更新時刻で見て、PRUNE_TESTOUT_DAYS（既定 30）日より前なら消す。
+#                         候補表の parquet が 1 本 200MB 級で、2 週間で 700MB 超まで溜まった（2026-09-25）。
+#                         .gitkeep と、中身が空になったディレクトリは残す
 #   data/jquants/_raw     **消さない。** 一括ダウンロードの csv.gz の原本で、J-Quants は 10 年より前を
 #                         返さなくなる（2016 年の月が順に取れなくなっていく）。Parquet の変換にバグが
 #                         あったときに API を叩き直さず作り直す最後の保険（docs/JQUANTS_ARCHIVE.md「冪等性・安全」）。
@@ -44,6 +48,7 @@ DIGEST_DAYS="${PRUNE_DIGEST_DAYS:-400}"
 CRONTAB_DAYS="${PRUNE_CRONTAB_DAYS:-90}"
 CRONTAB_KEEP="${PRUNE_CRONTAB_KEEP:-20}"
 SESSION_DAYS="${PRUNE_SESSION_DAYS:-7}"
+TESTOUT_DAYS="${PRUNE_TESTOUT_DAYS:-30}"
 TODAY="${PRUNE_TODAY:-$(TZ=Asia/Tokyo date +%F)}"   # PRUNE_TODAY は試験用
 
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -129,11 +134,19 @@ for f in "$HOME_DIR"/state/tachibana/session-*.json "$HOME_DIR"/state/tachibana/
   remove session "$f"
 done
 
+# --- test/out（検証の中間出力） --------------------------------------------------------
+if [ -d "$HOME_DIR/test/out" ]; then
+  while IFS= read -r -d '' f; do
+    remove testout "$f"
+  done < <(find "$HOME_DIR/test/out" -type f ! -name .gitkeep -mtime "+$TESTOUT_DAYS" -print0)
+fi
+
 # --- まとめ -------------------------------------------------------------------------
 verb="片付けた"; [ "$DRY_RUN" -eq 1 ] && verb="[dry-run] 片付ける"
 say "$verb: logs（${LOG_MAX_MB}MB 超を退避）${n[logs]:-0} 本（消える .1 $(human "${b[logs]:-0}")）/" \
   "digest（${DIGEST_DAYS} 日より前）${n[digest]:-0} 件 $(human "${b[digest]:-0}") /" \
   "crontab の控え（${CRONTAB_DAYS} 日より前・新しい ${CRONTAB_KEEP} 世代は残す）${n[crontab]:-0} 件 $(human "${b[crontab]:-0}") /" \
   "立花のセッション（${SESSION_DAYS} 日より前）${n[session]:-0} 件 /" \
+  "test/out（${TESTOUT_DAYS} 日より前）${n[testout]:-0} 件 $(human "${b[testout]:-0}") /" \
   "data/jquants/_raw は消さない"
 exit "$failed"
