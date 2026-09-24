@@ -124,7 +124,7 @@ check "NO_POST=1 では Discord に投げない" '[ ! -e "$H/posted" ]'
 # --- crontab.txt の行の形（スクリプトが正しくても、行が古いままだと効かない）---
 C="$REPO/deploy/crontab.txt"
 check "wait-until.sh を呼ぶ行は全部 WAIT_UNTIL_LOG を前置している" \
-  '[ "$(grep -v "^#" "$C" | grep -c "deploy/wait-until.sh")" -ge 2 ] && ! grep -v "^#" "$C" | grep "deploy/wait-until.sh" | grep -qv "WAIT_UNTIL_LOG=state/logs/daytrade-open.log deploy/wait-until.sh"'
+  '[ "$(grep -v "^#" "$C" | grep -c "deploy/wait-until.sh")" -ge 2 ] && ! grep -v "^#" "$C" | grep "deploy/wait-until.sh" | grep -Eqv "WAIT_UNTIL_LOG=state/logs/daytrade-(open|snap).log deploy/wait-until.sh"'
 snap_ok=1; snap_n=0
 while IFS= read -r line; do
   snap_n=$((snap_n + 1))
@@ -135,7 +135,14 @@ done < <(grep -v "^#" "$C" | grep "daytrade snap" | grep -- "--max-run")
 check "snap の --max-run は必ず WITH_LOCK_TIMEOUT より手前（同じか逆だと TERM が先に当たり何も記録しない）" \
   '[ "$snap_n" -ge 2 ] && [ "$snap_ok" = 1 ]'
 check "8:59 台の snap は KILL の猶予を詰めている（既定の 10 秒だと寄る前の open のロック待ちを越える）" \
-  '! grep -v "^#" "$C" | grep -E -- "--slot 0859(35|55)" | grep -qv "WITH_LOCK_KILL_AFTER="'
+  '! grep -v "^#" "$C" | grep -E -- "--slot 0859[0-9]{2}" | grep -qv "WITH_LOCK_KILL_AFTER="'
+# 寄る前の snap は固まっても寄る前の open の 1 秒前までにロックを手放す（開始 + 打ち切り + KILL ≤ DT_PREOPEN_AT − 1）
+secs() { awk -F: '{printf "%.1f", $1*3600 + $2*60 + $3}' <<<"$1"; }
+pre=$(sed -n 's/^DT_PREOPEN_AT=//p' "$C"); presnap=$(sed -n 's/^DT_PRESNAP_AT=//p' "$C")
+sl=$(grep -v "^#" "$C" | grep -- "--slot 085943")
+st=$(sed -n 's/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p' <<<"$sl"); sk=$(sed -n 's/.*WITH_LOCK_KILL_AFTER=\([0-9]*\).*/\1/p' <<<"$sl")
+check "寄る前の snap（DT_PRESNAP_AT）は固まっても DT_PREOPEN_AT の 1 秒前までにロックを手放す" \
+  '[ -n "$pre" ] && [ -n "$presnap" ] && [ -n "$st" ] && [ -n "$sk" ] && grep -q "wait-until.sh \$DT_PRESNAP_AT" <<<"$sl" && awk -v a="$(secs "$presnap")" -v t="$st" -v k="$sk" -v b="$(secs "$pre")" "BEGIN{exit !(a + t + k <= b - 1)}"'
 
 echo
 [ "$fail" = 0 ] && echo "全部通った" || echo "失敗あり"

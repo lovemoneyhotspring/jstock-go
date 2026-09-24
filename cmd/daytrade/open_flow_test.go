@@ -298,7 +298,7 @@ func TestOpenFlow(t *testing.T) {
 	}
 	cases := []flowCase{
 		{
-			// 寄る前の回（8:59:50）: ロングを寄成で。ショートは paused
+			// 寄る前の回（8:59:53）: ロングを寄成で。ショートは paused
 			name: "preopen_long", knobs: flowKnobs{marginPaused: true, excludeCorpEvents: true},
 			calendar: tradingCalendar(), usRet: ret(-0.005), env: settings.EnvProd,
 			runs: []flowRun{{at: jstAt(8, 59, 50, 0), opts: liveOpts()}},
