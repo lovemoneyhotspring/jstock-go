@@ -22,6 +22,12 @@ type RiskContext struct {
 	PendingValue     map[string]decimal.Decimal
 	OrdersToday      int
 	RealizedPnLToday decimal.Decimal
+	// UnrealizedPnLToday は保有中の建玉の当日の値動き（評価損益の変化）。本番だけ渡す
+	// （backtest は 0。寄付で約定し終値で判断するので、判断の時点で当日の含み損益は無い）。
+	UnrealizedPnLToday decimal.Decimal
+	// DailyPnLUnknown は当日の損益を確かめられなかったこと（約定単価・取得単価が分からない等）。
+	// 上限に達しているかを判断できないので、新規の買いを止める。
+	DailyPnLUnknown bool
 }
 
 type RiskManager struct {
@@ -58,7 +64,10 @@ func (r *RiskManager) Check(req domain.OrderRequest, ctx RiskContext, preview *d
 
 	// 4. 当日最大損失（買い新規建てのみ制限）
 	if req.Side == domain.SideBuy {
-		loss := ctx.RealizedPnLToday.Neg()
+		if ctx.DailyPnLUnknown {
+			return RiskDecision{Approved: false, Reason: "当日の損益を確かめられないため新規の買いを止める（max_daily_loss を判断できない）"}
+		}
+		loss := ctx.RealizedPnLToday.Add(ctx.UnrealizedPnLToday).Neg()
 		if loss.GreaterThanOrEqual(r.config.MaxDailyLoss) {
 			return RiskDecision{Approved: false, Reason: fmt.Sprintf("当日の損失 %s 円が上限 %s 円に達している", loss, r.config.MaxDailyLoss)}
 		}

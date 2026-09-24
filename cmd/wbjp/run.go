@@ -435,14 +435,29 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 		return fmt.Errorf("当日の発注件数を読めません: %w", err)
 	}
 
+	// 当日の損益（max_daily_loss）。以前は 0 固定で、本番では上限が効いていなかった
+	// （2026-09-24 のレビュー W5）。確かめられなければ新規の買いを止める
+	realized, unrealized, unpriced, err := dailyPnL(rep, todayJST, posMap, lastPrices, boughtToday)
+	if err != nil {
+		unpriced = append(unpriced, err.Error())
+	}
+	if len(unpriced) > 0 {
+		logger.Warn("wbjp.daily_pnl_unknown", "当日の損益を確かめられないため新規の買いを止めます:\n"+strings.Join(unpriced, "\n"))
+		digest.Anomaly("wbjp.daily_pnl_unknown", fmt.Sprintf("%d 件（新規の買いを止めた）", len(unpriced)))
+	}
+	logger.Info("wbjp.daily_pnl", fmt.Sprintf("当日の損益: 実現 %s 円・含み %s 円（上限 %s 円）",
+		realized.Round(0), unrealized.Round(0), setCfg.Risk.MaxDailyLoss))
+
 	riskCtx := &risk.RiskContext{
-		Equity:           equity,
-		Balance:          *bal,
-		Positions:        posMap,
-		BasePrices:       lastPrices,
-		PendingValue:     pendingValue,
-		OrdersToday:      ordersToday,
-		RealizedPnLToday: decimal.Zero,
+		Equity:             equity,
+		Balance:            *bal,
+		Positions:          posMap,
+		BasePrices:         lastPrices,
+		PendingValue:       pendingValue,
+		OrdersToday:        ordersToday,
+		RealizedPnLToday:   realized,
+		UnrealizedPnLToday: unrealized,
+		DailyPnLUnknown:    len(unpriced) > 0,
 	}
 
 	var requests []domain.OrderRequest
@@ -483,6 +498,35 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 }
 
 var decimalZero = decimal.Zero
+
+// dailyPnL は当日の損益を実現（台帳の約定した売り）と含み（保有中の建玉の当日の値動き）に分けて返す。
+//
+// 含みの基準は、当日買い付けた銘柄なら取得単価、それ以外は判断に使う直近の終値
+// （場中は前営業日の終値）。現値（LastPrice）が無い・直近の終値が無い（足が古い）建玉は数えない。
+// unpriced は実現損益に入れられなかった売り（1 件でもあれば当日の損益は確かでない）。
+func dailyPnL(rep *repo.Repo, todayJST string, positions map[string]domain.Position,
+	lastPrices map[string]decimal.Decimal, boughtToday map[string]struct{},
+) (realized, unrealized decimal.Decimal, unpriced []string, err error) {
+	unrealized = decimal.Zero
+	for sym, pos := range positions {
+		if !pos.Quantity.IsPositive() || !pos.LastPrice.IsPositive() {
+			continue
+		}
+		ref, ok := lastPrices[sym]
+		if _, bought := boughtToday[sym]; bought && pos.CostPrice.IsPositive() {
+			ref, ok = pos.CostPrice, true
+		}
+		if !ok || !ref.IsPositive() {
+			continue
+		}
+		unrealized = unrealized.Add(pos.LastPrice.Sub(ref).Mul(pos.Quantity))
+	}
+	r, err := rep.RealizedPnLOn(todayJST)
+	if err != nil {
+		return decimal.Zero, unrealized, nil, fmt.Errorf("当日の実現損益を読めません: %w", err)
+	}
+	return r.Amount, unrealized, r.Unpriced, nil
+}
 
 // decideStopExits はストップ由来の目標を決め（risk.ExitPlan。backtest と同じ）、その後で
 // ストップを保存する。

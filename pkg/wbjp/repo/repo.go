@@ -572,6 +572,68 @@ func (r *Repo) BrokerOrderIDsPlacedOn(dayJST string) (map[string]struct{}, error
 	return out, rows.Err()
 }
 
+// RealizedPnL は RealizedPnLOn の結果。
+type RealizedPnL struct {
+	// Amount は約定した売りの実現損益の合計（約定単価 − 取得単価）× 約定株数。
+	Amount decimal.Decimal
+	// Unpriced は取得単価か約定単価が分からず、Amount に入れられなかった注文
+	// （"client_order_id 銘柄: 理由"）。1 件でもあれば当日の損益は確かでない。
+	Unpriced []string
+}
+
+// RealizedPnLOn はその日（JST）に出した売りのうち約定したぶんの実現損益。
+//
+// 取得単価は、その銘柄のその日までで最後の建玉の記録（position_snapshots.cost_price）。
+// 売りを出す回は必ず建玉を記録してから判断するので、手仕舞った後でも売る前の取得単価が
+// 残っている。約定単価は avg_fill_price、無ければ指値（売りの指値は約定単価以下なので
+// 利益を小さく・損失を大きく見積もる側）。どちらも無いものは Unpriced に入れる。
+// wbjp の注文は当日限りなので、その日に出した売りの約定はその日の約定。
+func (r *Repo) RealizedPnLOn(dayJST string) (RealizedPnL, error) {
+	result := RealizedPnL{Amount: decimal.Zero}
+	rows, err := r.db.Query(
+		`SELECT o.client_order_id, o.symbol, o.filled_quantity, o.avg_fill_price, o.limit_price,
+		        (SELECT s.cost_price FROM position_snapshots s
+		          WHERE s.symbol = o.symbol AND s.as_of <= ?
+		          ORDER BY s.as_of DESC, s.id DESC LIMIT 1)
+		   FROM orders o
+		  WHERE o.placed_on = ? AND o.side = ? AND o.status != ?
+		    AND CAST(o.filled_quantity AS REAL) > 0
+		  ORDER BY o.placed_at;`,
+		dayJST, dayJST, string(domain.SideSell), "dry_run",
+	)
+	if err != nil {
+		return result, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, symbol, filledText string
+		var avgText, limitText, costText *string
+		if err := rows.Scan(&id, &symbol, &filledText, &avgText, &limitText, &costText); err != nil {
+			return result, err
+		}
+		filled, err := decimal.NewFromString(filledText)
+		if err != nil {
+			result.Unpriced = append(result.Unpriced, fmt.Sprintf("%s %s: 約定数量が読めない", id, symbol))
+			continue
+		}
+		price, perr := parseDecimalPtrStrict(avgText)
+		if perr != nil || price == nil {
+			price, perr = parseDecimalPtrStrict(limitText)
+		}
+		if perr != nil || price == nil || !price.IsPositive() {
+			result.Unpriced = append(result.Unpriced, fmt.Sprintf("%s %s: 約定単価が分からない", id, symbol))
+			continue
+		}
+		cost, cerr := parseDecimalPtrStrict(costText)
+		if cerr != nil || cost == nil || !cost.IsPositive() {
+			result.Unpriced = append(result.Unpriced, fmt.Sprintf("%s %s: 取得単価が分からない（建玉の記録が無い）", id, symbol))
+			continue
+		}
+		result.Amount = result.Amount.Add(price.Sub(*cost).Mul(filled))
+	}
+	return result, rows.Err()
+}
+
 // OrdersToday はその日に実際に発注した件数。
 //
 // max_orders_per_day はプロセスをまたいで効かないと意味がない。
