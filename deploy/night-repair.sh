@@ -159,7 +159,7 @@ STATUS_BEFORE="$(git status --porcelain)"
 # プロンプトは標準入力から渡す（--disallowedTools は可変長引数で、後ろの引数を飲み込む）
 printf '%s' "$PROMPT" | timeout 1800 "$CLAUDE_BIN" -p \
   --agent night-repair \
-  --model "${NIGHT_REPAIR_MODEL:-claude-fable-5-1}" \
+  --model "${NIGHT_REPAIR_MODEL:-fable}" \
   --effort "${NIGHT_REPAIR_EFFORT:-medium}" \
   --permission-mode bypassPermissions \
   --disallowedTools "${DISALLOWED[@]}" \
