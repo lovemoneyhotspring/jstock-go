@@ -237,12 +237,16 @@ func Flush() error {
 		// 項目に NaN・Inf などが入ると直列化できない。その日の実行が「無かった」ことに
 		// ならないよう、項目を外した最小の行に失敗の理由を添えて書き、エラーも返す
 		minimal := map[string]any{}
-		for _, key := range []string{"schema", "ts_utc", "app", "env", "command", "run_id", "outcome", "dur_ms", "verify"} {
+		// anomalies は文字列の並びなので必ず直列化できる。落とすと 6:00 の night-repair が異常を数えない
+		for _, key := range []string{"schema", "ts_utc", "app", "env", "command", "run_id", "outcome", "dur_ms", "verify", "anomalies"} {
 			if value, ok := record[key]; ok {
 				minimal[key] = value
 			}
 		}
 		minimal["marshal_error"] = marshalErr.Error()
+		// 直列化の失敗そのものも異常として残す（項目が消えたことに夜の点検で気づけるように）
+		anomalies, _ := minimal["anomalies"].([]string)
+		minimal["anomalies"] = append(append([]string(nil), anomalies...), "digest.marshal_error")
 		var err error
 		if line, err = json.Marshal(minimal); err != nil {
 			return marshalErr

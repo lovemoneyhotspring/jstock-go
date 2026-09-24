@@ -70,6 +70,7 @@ func TestFlushKeepsMinimalLineOnMarshalError(t *testing.T) {
 	dir := t.TempDir()
 	start(t, dir)
 	Note(map[string]any{"ratio": math.NaN()})
+	Anomaly("quote.stale", "7203")
 
 	if err := Flush(); err == nil {
 		t.Fatal("直列化の失敗はエラーで返すべき")
@@ -83,6 +84,11 @@ func TestFlushKeepsMinimalLineOnMarshalError(t *testing.T) {
 	}
 	if _, has := record["ratio"]; has {
 		t.Errorf("直列化できない項目が残っている: %v", record)
+	}
+	// 異常の印は残し、直列化の失敗も異常として足す（night-repair が数えられるように）
+	anomalies, _ := record["anomalies"].([]any)
+	if len(anomalies) != 2 || anomalies[0] != "quote.stale: 7203" || anomalies[1] != "digest.marshal_error" {
+		t.Errorf("異常の印 %v, want [quote.stale: 7203 digest.marshal_error]", record["anomalies"])
 	}
 }
 
