@@ -56,87 +56,33 @@ func newRunCmd() *cobra.Command {
 
 // runDaily は本体。RunE から切り出してあるのは、異常終了を run.Crash で記録・通知するため。
 func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bool) (err error) {
-	// 以降のログの全行とダイジェストに印を付ける（env とは独立）
-	run.SetVerify(brokerVerifyFlag)
-	setCfg, err := wbjpcfg.LoadSettingsFile(configDirFlag)
+	d, err := prepareDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag)
 	if err != nil {
 		return err
 	}
-	stratCfg, err := wbjpcfg.LoadStrategiesConfig(configDirFlag)
-	if err != nil {
-		return err
-	}
-
-	canLive, reason := appSettings.CanExecuteLive(liveFlag, setCfg.Risk.KillSwitch)
-	envName := "テスト口座 (UAT)"
-	if appSettings.Env.IsProduction() {
-		envName = "本番口座 (PROD)"
-	}
-	fmt.Printf("口座: %s (WBJP_ENV=%s)  発注: %s (%s)\n\n", envName, appSettings.Env, func() string {
-		if canLive {
-			return "する"
-		}
-		return "しない"
-	}(), reason)
-
-	if err := cli.ConfirmLive(appSettings, canLive, yesFlag); err != nil {
-		return err
-	}
-
-	// ロガーとリポジトリ（run_id は入口で発行済み。ログ・DB・履歴で共有する）
-	runID := run.RunID
-	logger := run.Logger
+	setCfg, stratCfg, canLive, runID, logger := d.setCfg, d.stratCfg, d.canLive, d.runID, d.logger
 
 	rep, err := repo.OpenRepo(appSettings.DBPath())
 	if err != nil {
 		return err
 	}
 	defer rep.Close()
+	d.rep = rep
 
-	todayJST := clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006-01-02")
-	today, err := time.Parse("2006-01-02", todayJST)
-	if err != nil {
-		return fmt.Errorf("今日の日付を読めません: %w", err)
-	}
-	// 営業日と「あるべき最後の足」は東証のカレンダーで決める
-	cal := calendar.FromArchive(archive.NewArchive(appSettings.JQuantsArchiveDir()))
-	if skip, err := tradingDayGate(cal, today, canLive); err != nil {
+	if done, err := d.openDay(); done || err != nil {
 		return err
-	} else if skip != "" {
-		logger.Info("wbjp.market_closed", skip)
-		fmt.Println(skip)
-		return nil
 	}
-	if cal.Empty() {
-		logger.Warn("wbjp.calendar_missing", "取引カレンダーが読めないので平日を営業日とみなします（祝日明けは足が古いとみなして止まる）")
-	}
-	mode := "dry_run"
-	if canLive {
-		mode = "live"
-	}
-	if err := rep.StartRun(runID, todayJST, string(appSettings.Env), mode); err != nil {
+	todayJST, today, cal := d.todayJST, d.today, d.cal
+	if err := rep.StartRun(runID, todayJST, string(appSettings.Env), d.mode()); err != nil {
 		return fmt.Errorf("実行の記録を始められません: %w", err)
 	}
-	// 途中で返っても実行の終わりを残す（runs.status が running のまま残らないように）。
-	// 評価額・現金は照会できた時点で埋まる
-	var finishEquity, finishCash *decimal.Decimal
-	defer func() {
-		status := "success"
-		var errText *string
-		if err != nil {
-			status = "failed"
-			s := err.Error()
-			errText = &s
-		}
-		if ferr := rep.FinishRun(runID, status, finishEquity, finishCash, errText); ferr != nil {
-			logger.Warn("wbjp.ledger", fmt.Sprintf("実行の終了を記録できません: %v", ferr))
-		}
-	}()
+	// 途中で返っても実行の終わりを残す（runs.status が running のまま残らないように）
+	defer func() { d.finishRun(err) }()
 
 	// 判断の前に足を更新する。cron の data sync とは独立に、
 	// この実行が見る足を自分で最新にしてから判断する
 	// （--no-sync で抑止。取得元が不調な日に保存済みだけで回すため）。
-	if !noSyncFlag {
+	if !d.noSync {
 		if failures := syncUniverseBars(setCfg, logger, runSyncDays, false, false); failures > 0 {
 			logger.Warn("run.sync_failed",
 				fmt.Sprintf("%d 銘柄の足を更新できませんでした（保存済みの足で続けます）", failures))
@@ -158,7 +104,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 		return err
 	}
 	equity := bal.CashBalance.Add(bal.MarketValue)
-	finishEquity, finishCash = &equity, &bal.CashBalance
+	d.finishEquity, d.finishCash = &equity, &bal.CashBalance
 	// 建玉が見えないまま進むと、保有中の銘柄を「未保有」として買い足し、ストップも
 	// 現値で作り直してしまう。発注する回は照会に失敗した時点で止める
 	posMap, err := b.PositionsBySymbol()
@@ -215,7 +161,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 
 	// 建玉の照会がエラーなしで 0 件なのに、台帳では保有中のはずの銘柄がある。信じると
 	// ストップを全部消し、保有中の銘柄を新規として買い直すので、発注する回は止める
-	if err := checkEmptyPositions(rep, posMap, string(appSettings.Env), runID, canLive, acceptFlatFlag, logger); err != nil {
+	if err := checkEmptyPositions(rep, posMap, string(appSettings.Env), runID, canLive, d.acceptFlat, logger); err != nil {
 		return err
 	}
 
@@ -565,6 +511,109 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 }
 
 var decimalZero = decimal.Zero
+
+// dailyRun は日次実行 1 回ぶんの状態。runDaily の段（準備・接続・照合・判断・発注）が順に埋める。
+type dailyRun struct {
+	// 準備（prepareDaily）
+	noSync, acceptFlat bool
+	setCfg             *wbjpcfg.SettingsFile
+	stratCfg           *wbjpcfg.StrategiesConfig
+	canLive            bool
+	// ロガーと run_id（run_id は入口で発行済み。ログ・DB・履歴で共有する）
+	runID  string
+	logger *logging.Logger
+	rep    *repo.Repo
+
+	// 判定日（openDay）。営業日と「あるべき最後の足」は東証のカレンダーで決める
+	todayJST string
+	today    time.Time
+	cal      *calendar.Calendar
+
+	// 実行の終わりに残す評価額・現金（照会できた時点で埋まる）
+	finishEquity, finishCash *decimal.Decimal
+}
+
+// prepareDaily は設定を読み、発注するかを決めて口座を表示し、本番発注なら確認を取る。
+func prepareDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bool) (*dailyRun, error) {
+	// 以降のログの全行とダイジェストに印を付ける（env とは独立）
+	run.SetVerify(brokerVerifyFlag)
+	setCfg, err := wbjpcfg.LoadSettingsFile(configDirFlag)
+	if err != nil {
+		return nil, err
+	}
+	stratCfg, err := wbjpcfg.LoadStrategiesConfig(configDirFlag)
+	if err != nil {
+		return nil, err
+	}
+
+	canLive, reason := appSettings.CanExecuteLive(liveFlag, setCfg.Risk.KillSwitch)
+	envName := "テスト口座 (UAT)"
+	if appSettings.Env.IsProduction() {
+		envName = "本番口座 (PROD)"
+	}
+	fmt.Printf("口座: %s (WBJP_ENV=%s)  発注: %s (%s)\n\n", envName, appSettings.Env, func() string {
+		if canLive {
+			return "する"
+		}
+		return "しない"
+	}(), reason)
+
+	if err := cli.ConfirmLive(appSettings, canLive, yesFlag); err != nil {
+		return nil, err
+	}
+
+	return &dailyRun{
+		noSync: noSyncFlag, acceptFlat: acceptFlatFlag,
+		setCfg: setCfg, stratCfg: stratCfg, canLive: canLive,
+		runID: run.RunID, logger: run.Logger,
+	}, nil
+}
+
+// openDay は今日（JST）を決め、休場日なら判断も発注もせずに終える（done）。
+// カレンダーが読めなければ発注する回は止める（tradingDayGate）。
+func (d *dailyRun) openDay() (done bool, err error) {
+	d.todayJST = clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006-01-02")
+	d.today, err = time.Parse("2006-01-02", d.todayJST)
+	if err != nil {
+		return false, fmt.Errorf("今日の日付を読めません: %w", err)
+	}
+	// 営業日と「あるべき最後の足」は東証のカレンダーで決める
+	d.cal = calendar.FromArchive(archive.NewArchive(appSettings.JQuantsArchiveDir()))
+	if skip, err := tradingDayGate(d.cal, d.today, d.canLive); err != nil {
+		return false, err
+	} else if skip != "" {
+		d.logger.Info("wbjp.market_closed", skip)
+		fmt.Println(skip)
+		return true, nil
+	}
+	if d.cal.Empty() {
+		d.logger.Warn("wbjp.calendar_missing", "取引カレンダーが読めないので平日を営業日とみなします（祝日明けは足が古いとみなして止まる）")
+	}
+	return false, nil
+}
+
+// mode は runs.mode に残す実行の形（live / dry_run）。
+func (d *dailyRun) mode() string {
+	if d.canLive {
+		return "live"
+	}
+	return "dry_run"
+}
+
+// finishRun は実行の終わりを台帳に残す（err があれば failed）。評価額・現金は照会できた時点で
+// 埋まっている（照会の前に止まった回は空）。
+func (d *dailyRun) finishRun(err error) {
+	status := "success"
+	var errText *string
+	if err != nil {
+		status = "failed"
+		s := err.Error()
+		errText = &s
+	}
+	if ferr := d.rep.FinishRun(d.runID, status, d.finishEquity, d.finishCash, errText); ferr != nil {
+		d.logger.Warn("wbjp.ledger", fmt.Sprintf("実行の終了を記録できません: %v", ferr))
+	}
+}
 
 // dailyPnL は当日の損益を実現（台帳の約定した売り）と含み（保有中の建玉の当日の値動き）に分けて返す。
 //
