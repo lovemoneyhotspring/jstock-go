@@ -645,3 +645,62 @@ func TestSimulateSpreadOnlyForOpened(t *testing.T) {
 		t.Errorf("判定できない日の費用 = %v, want ≈ %v（払う側に倒す）", unknownFees, openedFees)
 	}
 }
+
+// 規則 R（turnover）のショック日は、本番（execute.SizeDay）と同じく倍率を選ぶ前の予算に掛ける。
+// 選んだ後に株数を掛けると、売買代金で決めた 1 銘柄の上限を倍率ぶん破る（2026-09-25 のレビュー）。
+func TestSimulateMarginTurnoverShockScalesBeforePick(t *testing.T) {
+	days := fixture.BusinessDays(start, 60)
+	arch := buildArchive(t, days)
+	cfg := baseConfig()
+	cfg.Margin.Enabled = true
+	cfg.Margin.Paused = true
+	cfg.Margin.Cash = decimal.NewFromInt(2_000_000)
+	cfg.Margin.MaxCapital = decimal.NewFromInt(2_000_000)
+	cfg.Margin.MinGap = decimal.RequireFromString("0.05")
+	cfg.Capital.Weighting = "turnover"
+	cfg.Capital.TurnoverRatio = decimal.RequireFromString("0.002")
+	cfg.Capital.NameDivisor = 1
+	from, to := days[30], days[len(days)-1]
+	panel, err := backtest.LoadPanel(arch, from, to, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shockDay := days[len(days)-1].Format(layout)
+	us := decimal.RequireFromString("-0.02")
+	cfg.Regime.ShockUsRet = &us
+	cfg.Regime.ShockLongScale = decimal.NewFromInt(2)
+	cfg.Regime.ShockShortScale = decimal.Zero
+	ret := -0.03
+	shocked, err := backtest.SimulateMargin(panel, cfg, &backtest.Inputs{UsRet: map[string]*float64{shockDay: &ret}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnover := map[string]float64{}
+	for _, r := range panel.Rows {
+		if r.Date.Format(layout) == shockDay {
+			turnover[r.Code] = r.TurnoverMed
+		}
+	}
+	ratio, _ := cfg.Capital.TurnoverRatio.Float64()
+	n := 0
+	for _, tr := range shocked.LongTrades {
+		if tr.Date.Format(layout) != shockDay {
+			continue
+		}
+		n++
+		if cap := turnover[tr.Code] * ratio; tr.Amount > cap+1 {
+			t.Errorf("%s: ショック日の金額 %.0f が売買代金の上限 %.0f を超えた（選んだ後に倍率を掛けている）", tr.Code, tr.Amount, cap)
+		}
+		if tr.Scale != 2 {
+			t.Errorf("%s: 表示の倍率 %v, want 2", tr.Code, tr.Scale)
+		}
+	}
+	if n == 0 {
+		t.Fatal("ショック日にロングが建っていない（上限が 1 単元に届かない。turnover_ratio を見直す）")
+	}
+	for _, d := range shocked.Daily {
+		if d.Date.Format(layout) == shockDay && d.LongScale != 2 {
+			t.Errorf("ショック日の LongScale %v, want 2", d.LongScale)
+		}
+	}
+}

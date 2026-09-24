@@ -5,6 +5,7 @@ import (
 	"time"
 
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/execute"
 	dtledger "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
 	dtplan "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/plan"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
@@ -37,9 +38,9 @@ func newStatusCmd() *cobra.Command {
 			if cfg.Capital.Positions() == 0 {
 				suffix = "（資金 0: 買わない）"
 			}
-			fmt.Printf("%s: %s  資金 %s 円 → N=%d、1 注文 %s 円%s\n",
+			fmt.Printf("%s: %s  資金 %s 円 → N=%d、%s%s\n",
 				cfg.StrategyName(), state, yen(cfg.Capital.MaxCapital),
-				cfg.Capital.Positions(), yen(cfg.Capital.BudgetPerOrder()), suffix)
+				cfg.Capital.Positions(), execute.LongBudgetText(cfg.Capital, cfg.Capital.Positions(), cfg.Capital.BudgetPerOrder()), suffix)
 
 			p, ok, err := dtplan.Load(appSettings.DaytradeDir(), day)
 			if err != nil {

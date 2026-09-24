@@ -5,9 +5,11 @@ import (
 	"strings"
 	"time"
 
+	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	dtevaluate "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/evaluate"
 	dthistory "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/history"
 	dtledger "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/ledger"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/margincap"
 	dtplan "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/plan"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/universe"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
@@ -98,7 +100,7 @@ func runEvaluate(date string, asJSON bool) error {
 				"reason": "no_plan", "phase": "evaluate", "day": day.Format(DateLayout)})
 			return nil
 		}
-		rows = dtevaluate.ReconstructRanking(p, bars, cfg, now)
+		rows = dtevaluate.ReconstructRanking(p, bars, rankingConfigFor(cfg, day), now)
 		runIDOfRanking = ""
 		source = dtevaluate.SourceArchiveOpen
 		fmt.Println("9:00 の順位表が無いので、前夜の plan と当日の始値から順位を作り直しました")
@@ -313,4 +315,23 @@ func printRuleComparison(result history.Frame) {
 	if cmp.LaterRuns > 0 {
 		fmt.Printf("  ※後の回で建てた %d 件は比べから外した（1 回目の選定どうしで比べる）\n", cmp.LaterRuns)
 	}
+}
+
+// rankingConfigFor は順位表を作り直すときの設定。規則 R（margin.capacity_ratio）は総額を朝の建可能額で
+// 決め直すので、その日の保証金の控え（warm-margin が書く）があれば open と同じく margincap.Apply を当てる。
+// 控えが無い日（2026-09-25 より前・取得に失敗した朝）は設定の値のまま（総額が本番とずれうる）。
+func rankingConfigFor(cfg dtconfig.Config, day time.Time) dtconfig.Config {
+	if !cfg.Margin.CapacityRatio.IsPositive() {
+		return cfg
+	}
+	snap, ok := margincap.Read(margincap.DatedCachePath(appSettings.DataDir, day.Format(DateLayout)))
+	if !ok {
+		logInfo("daytrade.ranking_config", "その日の保証金の控えが無いので設定の総額で作り直す", map[string]any{"day": day.Format(DateLayout)})
+		return cfg
+	}
+	capped, res := margincap.Apply(cfg, snap)
+	if res.WatchOnly || capped.Validate() != nil {
+		return cfg
+	}
+	return capped
 }

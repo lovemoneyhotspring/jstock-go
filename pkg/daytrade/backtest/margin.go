@@ -96,8 +96,11 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 		shortTrades = nil // 一時停止: ショートは建てず、枠は SpillToLong でロングへ
 	}
 
-	if cfg.Margin.SpillToLong {
+	// 規則 R は倍率を選ぶ前に掛けるので、spill を使わない設定でも日ごとに選ぶ経路を通す
+	preScale := cfg.Capital.Weighting == config.WeightingTurnover
+	if cfg.Margin.SpillToLong || preScale {
 		return simulateMarginSpill(panel, cfg, signals, spillInputs{
+			spill: cfg.Margin.SpillToLong, preScale: preScale,
 			longParams: longParams, longRows: longRows, shortTrades: shortTrades, byKey: byKey,
 			shortTotal: cfg.Margin.BudgetPerOrder().Mul(decimal.NewFromInt(int64(nShort))).InexactFloat64(), carryPenalty: carryPenalty,
 			longCapital: longCapital, shortCapital: shortCapital,
@@ -150,7 +153,7 @@ func applyRegimeSeesaw(longDaily, shortDaily map[string]*Daily, panel *Panel, cf
 		longPnL = append(longPnL, ledgerPnL(long.PnL, long.Commission))
 		longScales = append(longScales, longScale)
 		longTraded = append(longTraded, longScale > 0 && long.N > 0)
-		out = append(out, combineDay(day, long, short, longScale, shortMul))
+		out = append(out, combineDay(day, long, short, longScale, longScale, shortMul))
 	}
 	return out
 }
@@ -200,16 +203,18 @@ func seesawScales(verdict regime.Verdict, m config.Margin) (longScale, shortMul 
 }
 
 // combineDay は両脚の日次を倍率で畳んで 1 日にする。
-func combineDay(day time.Time, long, short *Daily, longScale, shortMul float64) Daily {
+// longMul はロングの損益に掛ける倍率。選ぶ前に倍率を掛け終えた日（規則 R）は 1、
+// それ以外は longScale と同じ。表示の LongScale / Scale は常に longScale。
+func combineDay(day time.Time, long, short *Daily, longScale, longMul, shortMul float64) Daily {
 	d := Daily{
 		Date:            day,
 		LongScale:       longScale,
 		ShortMultiplier: shortMul,
-		LongPnL:         long.PnL * longScale,
-		LongGross:       long.Gross * longScale,
-		LongFees:        long.Fees * longScale,
-		LongCommission:  long.Commission * longScale,
-		LongAmount:      long.Amount * longScale,
+		LongPnL:         long.PnL * longMul,
+		LongGross:       long.Gross * longMul,
+		LongFees:        long.Fees * longMul,
+		LongCommission:  long.Commission * longMul,
+		LongAmount:      long.Amount * longMul,
 		ShortPnL:        short.PnL * shortMul,
 		ShortGross:      short.Gross * shortMul,
 		ShortFees:       short.Fees * shortMul,
@@ -234,6 +239,10 @@ func combineDay(day time.Time, long, short *Daily, longScale, shortMul float64) 
 
 // spillInputs は simulateMarginSpill の材料。
 type spillInputs struct {
+	// spill はショートの余りをロングへ回すか（margin.spill_to_long）。
+	spill bool
+	// preScale はロングの倍率（縮小・ショック日）を選ぶ前の予算に掛けるか（規則 R）。
+	preScale    bool
 	longParams  legParams
 	longRows    map[string][]Row
 	shortTrades []Trade
@@ -277,20 +286,34 @@ func simulateMarginSpill(panel *Panel, cfg config.Config, signals *Inputs, in sp
 		shortMultiplier[key] = shortMul
 
 		spill := 0.0
-		if shortMul > 0 && in.shortTotal > shortUsed[key] {
+		if in.spill && shortMul > 0 && in.shortTotal > shortUsed[key] {
 			spill = shortMul * (in.shortTotal - shortUsed[key])
 		}
+		// 規則 R（turnover）は本番（execute.SizeDay）と同じく、倍率を**選ぶ前の予算**に掛ける。
+		// 1 銘柄の上限は売買代金で頭打ちになるので、選んだ後に株数を ×1.5 すると上限を破り、
+		// 余りが下の順位へ回らない（本番と銘柄数も金額も変わる）。等金額は後から掛けても同じなので従来どおり
+		pickBudget, longMul := budget, longScale
+		if in.preScale {
+			pickBudget, longMul = budget.Mul(decimal.NewFromFloat(longScale)).Floor(), 1
+			if longScale <= 0 {
+				longMul = 0
+			}
+		}
 		// 銘柄数と 1 注文の予算は本番と同じ式（selection.SpillInto）。
-		n, dayBudget := selection.SpillInto(nLong, budget, budget, decimal.NewFromFloat(spill), maxN)
-		dayTrades := pickDay(in.longRows[key], in.longParams, n, dayBudget)
-		dayTrades = applyCarry(dayTrades, in.byKey, 1, in.carryPenalty)
+		n, dayBudget := selection.SpillInto(nLong, pickBudget, budget, decimal.NewFromFloat(spill), maxN)
+		var dayTrades []Trade
+		if longScale > 0 {
+			dayTrades = pickDay(in.longRows[key], in.longParams, n, dayBudget)
+			dayTrades = applyCarry(dayTrades, in.byKey, 1, in.carryPenalty)
+		}
 		long := sumDaily(day, dayTrades)
 
+		// 資産曲線ゲートの入力は「倍率 1 のときの損益 × 倍率」。前もって掛けた日は倍率 1 として積む
 		longPnL = append(longPnL, ledgerPnL(long.PnL, long.Commission))
-		longScales = append(longScales, longScale)
+		longScales = append(longScales, longMul)
 		longTraded = append(longTraded, longScale > 0 && long.N > 0)
-		out = append(out, combineDay(day, long, shortDaily[key], longScale, shortMul))
-		longTrades = append(longTrades, scaleTrades(dayTrades, map[string]float64{key: longScale})...)
+		out = append(out, combineDay(day, long, shortDaily[key], longScale, longMul, shortMul))
+		longTrades = append(longTrades, markScale(scaleTrades(dayTrades, map[string]float64{key: longMul}), longScale)...)
 	}
 	shortTrades := scaleTrades(in.shortTrades, shortMultiplier)
 	return &MarginResult{

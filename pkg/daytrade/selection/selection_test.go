@@ -481,8 +481,14 @@ func TestPickFromTurnoverAllocatesInRankOrder(t *testing.T) {
 		t.Errorf("最後の銘柄 %s 円, want 残りの 40 万", last.Amount())
 	}
 	reasons := PickReasons(ranked, opts, picks)
-	if reasons["1003"] != ReasonOverBudget || reasons["1004"] != ReasonOverBudget {
-		t.Errorf("理由 1003=%s 1004=%s, want over_budget", reasons["1003"], reasons["1004"])
+	// 総額 ÷ 7（100 万）には 1 単元が載るので、値がさ（over_budget）でなく売買代金の上限（turnover_cap）
+	if reasons["1003"] != ReasonTurnoverCap || reasons["1004"] != ReasonTurnoverCap {
+		t.Errorf("理由 1003=%s 1004=%s, want turnover_cap", reasons["1003"], reasons["1004"])
+	}
+	// 1 単元が総額 ÷ 7 も超える値がさは over_budget のまま
+	pricey := append([]Ranked{row(0, "9999", 20000, 1e12)}, ranked...)
+	if r := PickReasons(pricey, opts, PickFrom(pricey, opts))["9999"]; r != ReasonOverBudget {
+		t.Errorf("値がさの理由 %s, want over_budget", r)
 	}
 	for _, p := range picks {
 		if reasons[p.Symbol] != ReasonPicked {
