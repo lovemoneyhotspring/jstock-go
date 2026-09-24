@@ -1,0 +1,10 @@
+err: <nil>
+lotCalls: 0
+stale: []
+[0] Symbol=8888 Amount=0 Quantity=0 Limit=nil Failed=true LotUnknown=false Market= JudgedOn= Month= Close=0 Target=0 Placed=0 Multiplier=0 Tactic=
+    Reason=
+    Note=足データを読めない: failed to open parquet <tmp>/8888.T.parquet: open <tmp>/8888.T.parquet: permission denied
+    Request=nil
+started 1306: 2025-01-01 (<nil>)
+started 563A: nil (<nil>)
+started 2559: nil (<nil>)

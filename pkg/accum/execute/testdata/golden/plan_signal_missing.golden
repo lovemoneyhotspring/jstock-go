@@ -1,0 +1,10 @@
+err: <nil>
+lotCalls: 0
+stale: []
+[0] Symbol=1306 Amount=0 Quantity=0 Limit=nil Failed=true LotUnknown=false Market= JudgedOn= Month= Close=0 Target=0 Placed=0 Multiplier=0 Tactic=
+    Reason=
+    Note=判定用の足（^NONE）が無いため見送り
+    Request=nil
+started 1306: 2025-01-01 (<nil>)
+started 563A: nil (<nil>)
+started 2559: nil (<nil>)

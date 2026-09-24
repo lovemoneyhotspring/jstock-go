@@ -1,0 +1,13 @@
+err: <nil>
+OrdersFailedError: false
+log:
+  [info] [accum.dry_run] [dry-run] 1306 100株 @ 1010円 (今月の目標 200000（基本 200000＋増額 0）− 発注済み 0)
+alerts:
+calls:
+  LotSizes [1306]
+  GetBalance
+  Preview 1306
+ledger:
+  9704a7f987c193f1698c92fad29516fa sym=1306 mkt=JP qty=100 filled=0 status=dry_run amount=200000 month=2026-09-01 placed=2026-09-14T05:30:00Z updated=nil broker=nil avg=nil
+history:
+  decision/2026-09-14T053000Z-manual.parquet

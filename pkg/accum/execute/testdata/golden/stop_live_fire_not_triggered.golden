@@ -1,0 +1,22 @@
+err: <nil>
+ErrNoPosition: false
+request: {ID:a36c2e546fffe75545d56ac893979b15 Sym:563A Side:SELL Type:MARKET Qty:1 Limit:nil Tax:SPECIFIC Trade:CASH Cond: Stop:{Trigger:1030 Price:nil} Reason:逆指値経路の実機検証（1 単元・発火しない水準）}
+trigger=1030 corrected=1010 limit=0
+step 発注 ok=true 受理（注文番号 B-1）
+step 照会 ok=false 状態 SUBMITTED・条件 1030 円 だが発火していない（条件は現在値より上のはず）
+step 訂正 ok=true 発火後は拒否された（期待どおり）: 訂正できない
+step 約定 ok=false 状態 PARTIALLY_FILLED  約定 0 / 1 株  約定単価 —
+step 取消 ok=true 状態 CANCELLED
+log:
+  [info] [accum.verify_stop] 逆指値を置きました: 563A 1 株 条件 1030 円（ID: a36c2e546fffe75545d56ac893979b15）
+calls:
+  LotSizes [563A]
+  MarketPrices [563A]
+  PositionsBySymbol
+  Place {ID:a36c2e546fffe75545d56ac893979b15 Sym:563A Side:SELL Type:MARKET Qty:1 Limit:nil Tax:SPECIFIC Trade:CASH Cond: Stop:{Trigger:1030 Price:nil} Reason:逆指値経路の実機検証（1 単元・発火しない水準）}
+  GetOrder a36c2e546fffe75545d56ac893979b15 B-1
+  CorrectStop a36c2e546fffe75545d56ac893979b15 B-1 trigger=1010 price=nil
+  GetOrder a36c2e546fffe75545d56ac893979b15 B-1
+  GetOrder a36c2e546fffe75545d56ac893979b15 B-1
+  Cancel a36c2e546fffe75545d56ac893979b15 B-1
+  GetOrder a36c2e546fffe75545d56ac893979b15 B-1

@@ -1,0 +1,13 @@
+err: <nil>
+OrdersFailedError: false
+log:
+  [warn] [accum.unresolved] 照会できず保留: 1306（前日の不明 / PENDING）: 今日より前に送った送信結果不明の注文。立花の注文一覧は前日以前を返さないことがあるので、一覧に無くても「届いていない」とは決めない（口座の約定履歴で確かめて `accum pending resolve`）
+alerts:
+  積立: 送信結果不明の注文が残っています（口座の約定履歴で確かめて `accum pending resolve` で確定するまで、その銘柄は発注しません）
+  1306（前日の不明 / PENDING）: 今日より前に送った送信結果不明の注文。立花の注文一覧は前日以前を返さないことがあるので、一覧に無くても「届いていない」とは決めない（口座の約定履歴で確かめて `accum pending resolve`）
+calls:
+  GetOrder 前日の不明
+  GetBalance
+ledger:
+  前日の不明 sym=1306 mkt=JP qty=100 filled=0 status=PENDING amount=200000 month=2026-09-01 placed=2026-09-12T17:20:00Z updated=nil broker=nil avg=nil
+history:

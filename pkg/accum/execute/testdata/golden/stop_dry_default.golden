@@ -1,0 +1,11 @@
+err: <nil>
+ErrNoPosition: false
+request: {ID:a36c2e546fffe75545d56ac893979b15 Sym:563A Side:SELL Type:MARKET Qty:1 Limit:nil Tax:SPECIFIC Trade:CASH Cond: Stop:{Trigger:2694 Price:nil} Reason:逆指値経路の実機検証（1 単元・発火しない水準）}
+trigger=2694 corrected=0 limit=0
+step 発注 ok=true dry-run（送っていません）
+log:
+  [info] [accum.verify_stop_dry_run] [dry-run] 563A を 1 株 売り逆指値 条件 2694 円（現在値 2777 円 の −3%）
+calls:
+  LotSizes [563A]
+  MarketPrices [563A]
+  PositionsBySymbol

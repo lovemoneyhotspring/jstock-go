@@ -1,0 +1,11 @@
+err: <nil>
+ErrNoPosition: false
+request: {ID:ae8c9ace5bd56fdb1348e3d6b4e76f1c Sym:563A Side:SELL Type:LIMIT Qty:30 Limit:32800 Tax:SPECIFIC Trade:CASH Cond: Stop:{Trigger:29680 Price:nil} Reason:通常＋逆指値の実機検証（1 単元・約定しない指値）}
+trigger=29680 corrected=0 limit=32800
+step 発注 ok=true dry-run（送っていません）
+log:
+  [info] [accum.verify_stop_dry_run] [dry-run] 563A を 30 株 売り逆指値 条件 29680 円（現在値 31234 円 の −5%）
+calls:
+  LotSizes [563A]
+  MarketPrices [563A]
+  PositionsBySymbol

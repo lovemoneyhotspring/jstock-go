@@ -1,0 +1,10 @@
+err: 台帳を読めないため発注を中止しました: 台帳の送信結果不明の注文を読めません: sql: database is closed
+OrdersFailedError: false
+log:
+  [warn] [accum.sync_failed] 注文の照会に失敗（前回の状態のまま続けます）: 台帳の未確定の注文を読めません: sql: database is closed
+  [error] [accum.ledger_read_failed] 台帳の送信結果不明の注文を読めません: sql: database is closed
+alerts:
+calls:
+ledger:
+  (台帳を読めない: sql: database is closed)
+history:

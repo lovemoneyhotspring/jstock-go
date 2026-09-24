@@ -1,0 +1,12 @@
+err: 台帳に無い当月の約定があります（二重買付になります）: 1306 100000円
+台帳（<tmp>/accum.db）が失われているか、別の環境で発注した可能性があります。状態を確かめてから実行してください
+OrdersFailedError: false
+log:
+  [error] [accum.unrecorded_fills] 台帳に無い当月の約定があります（二重買付の恐れ）: 1306 100000円
+alerts:
+calls:
+  LotSizes [1306]
+  GetOrderHistory 2026-09-01T00:00:00+09:00..2026-09-14T14:30:00+09:00
+ledger:
+history:
+  decision/2026-09-14T053000Z-manual.parquet

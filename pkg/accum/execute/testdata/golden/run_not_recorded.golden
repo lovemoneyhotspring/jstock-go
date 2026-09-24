@@ -1,0 +1,15 @@
+err: 注文 9704a7f987c193f1698c92fad29516fa（注文番号 B-1306）は受理されましたが台帳を更新できません（台帳は PENDING のまま。発注を止めます）: sql: database is closed
+OrdersFailedError: false
+log:
+  [error] [accum.order_not_recorded] 1306: 注文 9704a7f987c193f1698c92fad29516fa（注文番号 B-1306）は受理されましたが台帳を更新できません（台帳は PENDING のまま。発注を止めます）: sql: database is closed
+alerts:
+calls:
+  LotSizes [1306]
+  GetOrderHistory 2026-09-01T00:00:00+09:00..2026-09-14T14:30:00+09:00
+  GetBalance
+  Preview 1306
+  Place {ID:9704a7f987c193f1698c92fad29516fa Sym:1306 Side:BUY Type:LIMIT Qty:100 Limit:1010 Tax:SPECIFIC Trade:CASH Cond: Stop:nil Reason:今月の目標 200000（基本 200000＋増額 0）− 発注済み 0}
+ledger:
+  (台帳を読めない: sql: database is closed)
+history:
+  decision/2026-09-14T053000Z-manual.parquet

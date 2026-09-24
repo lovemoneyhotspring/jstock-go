@@ -1,0 +1,10 @@
+err: <nil>
+lotCalls: 0
+stale: []
+[0] Symbol=1306 Amount=163333 Quantity=100 Limit=1010 Failed=false LotUnknown=false Market=JP JudgedOn=2026-09-13 Month=2026-09-01 Close=1000 Target=163333 Placed=0 Multiplier=1 Tactic=constant
+    Reason=今月の目標 113333（基本 113333〔9/14 開始、残り 17/30 日で日割り〕＋増額 0）＋前月からの繰り越し 50000− 発注済み 0
+    Note=
+    Request={ID:9704a7f987c193f1698c92fad29516fa Sym:1306 Side:BUY Type:LIMIT Qty:100 Limit:1010 Tax:SPECIFIC Trade:CASH Cond: Stop:nil Reason:今月の目標 113333（基本 113333〔9/14 開始、残り 17/30 日で日割り〕＋増額 0）＋前月からの繰り越し 50000− 発注済み 0}
+started 1306: 2026-09-14 (<nil>)
+started 563A: nil (<nil>)
+started 2559: nil (<nil>)

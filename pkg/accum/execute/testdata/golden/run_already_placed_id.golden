@@ -1,0 +1,14 @@
+err: <nil>
+OrdersFailedError: false
+log:
+  [info] [accum.skip] 1306: 既に発注済み (ID: 9704a7f987c193f1698c92fad29516fa)
+alerts:
+calls:
+  GetOrder 9704a7f987c193f1698c92fad29516fa
+  LotSizes [1306]
+  GetOrderHistory 2026-09-01T00:00:00+09:00..2026-09-14T14:30:00+09:00
+  GetBalance
+ledger:
+  9704a7f987c193f1698c92fad29516fa sym=1306 mkt=JP qty=100 filled=0 status=SUBMITTED amount=0 month=nil placed=2026-09-14T05:20:00Z updated=nil broker=nil avg=nil
+history:
+  decision/2026-09-14T053000Z-manual.parquet

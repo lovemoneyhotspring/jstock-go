@@ -1,0 +1,17 @@
+err: 1 件を発注できませんでした: 1306: 買付余力不足 (必要 101000 / 余力 49000)
+OrdersFailedError: true
+log:
+  [info] [accum.order] 発注成功: 1305 90株 (ID: ea17d97544dce5ddb3a05232f85743b1)
+  [error] [accum.order_failed] 1306: 買付余力不足 (必要 101000 / 余力 49000)
+alerts:
+calls:
+  LotSizes [1305 1306]
+  GetOrderHistory 2026-09-01T00:00:00+09:00..2026-09-14T14:30:00+09:00
+  GetBalance
+  Preview 1305
+  Place {ID:ea17d97544dce5ddb3a05232f85743b1 Sym:1305 Side:BUY Type:LIMIT Qty:90 Limit:2020 Tax:SPECIFIC Trade:CASH Cond: Stop:nil Reason:今月の目標 200000（基本 200000＋増額 0）− 発注済み 0}
+  Preview 1306
+ledger:
+  ea17d97544dce5ddb3a05232f85743b1 sym=1305 mkt=JP qty=90 filled=0 status=SUBMITTED amount=200000 month=2026-09-01 placed=2026-09-14T05:30:00Z updated=2026-09-14T05:30:00Z broker=B-1305 avg=nil
+history:
+  decision/2026-09-14T053000Z-manual.parquet

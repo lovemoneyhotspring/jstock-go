@@ -1,0 +1,13 @@
+err: <nil>
+OrdersFailedError: false
+log:
+  [warn] [accum.unresolved] 照会できず保留: 1306（前回 / SUBMITTED）: 照会できない
+alerts:
+  積立: 前回の注文を照会できません（次の run で再判定。続くなら口座を確認してください）
+  1306（前回 / SUBMITTED）: 照会できない
+calls:
+  GetOrder 前回
+  GetBalance
+ledger:
+  前回 sym=1306 mkt=JP qty=100 filled=0 status=SUBMITTED amount=200000 month=2026-09-01 placed=2026-09-13T05:30:00Z updated=nil broker=nil avg=nil
+history:

@@ -1,0 +1,9 @@
+err: 563A の保有が足りません（必要 20 株 / 保有 15 株）。先に `accum verify-order --symbol 563A --live -y` で 1 単元買って、約定を待ってください
+ErrNoPosition: true
+request: {ID: Sym: Side: Type: Qty:0 Limit:nil Tax: Trade: Cond: Stop:nil Reason:}
+trigger=0 corrected=0 limit=0
+log:
+calls:
+  LotSizes [563A]
+  MarketPrices [563A]
+  PositionsBySymbol
