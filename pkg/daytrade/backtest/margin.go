@@ -258,10 +258,23 @@ type spillInputs struct {
 }
 
 // preScaledBudget は規則 R の選ぶ前の 1 注文の予算: 倍率を掛け、ショック日は総額を limit で頭打ち
-// （本番の execute.SizeDay と同じ順序: 倍率の後、余りの前）。limit 0 は上限なし。
-func preScaledBudget(budget decimal.Decimal, longScale float64, shock bool, n int, limit decimal.Decimal) decimal.Decimal {
-	b := budget.Mul(decimal.NewFromFloat(longScale)).Floor()
-	if shock && limit.IsPositive() && n > 0 {
+// （本番の execute.SizeDay と同じ順序: 縮小 → ショック日の倍率 → 頭打ち、余りの前）。limit 0 は上限なし。
+//
+// 丸めも本番に揃える: 倍率は段ごとに掛けて円に四捨五入（Round(0)）、頭打ちは切り捨て。
+// 倍率を掛け合わせてから切り捨てると 1〜2 円ずれる（2026-09-25 のレビュー）。
+// 止める日（Trade = false）は 0（呼ぶ側は longScale 0 で建てない）。
+func preScaledBudget(budget decimal.Decimal, v regime.Verdict, longShrink bool, n int, limit decimal.Decimal) decimal.Decimal {
+	if !v.Trade {
+		return decimal.Zero
+	}
+	b := budget
+	if v.Weak() && longShrink {
+		b = b.Mul(decimal.NewFromFloat(v.Scale)).Round(0)
+	}
+	if v.Shock {
+		b = b.Mul(decimal.NewFromFloat(v.ShockLong)).Round(0)
+	}
+	if v.Shock && limit.IsPositive() && n > 0 {
 		if b.Mul(decimal.NewFromInt(int64(n))).GreaterThan(limit) {
 			b = limit.Div(decimal.NewFromInt(int64(n))).Floor()
 		}
@@ -328,7 +341,7 @@ func simulateMarginSpill(panel *Panel, cfg config.Config, signals *Inputs, in sp
 		// 余りが下の順位へ回らない（本番と銘柄数も金額も変わる）。等金額は後から掛けても同じなので従来どおり
 		pickBudget, longMul := budget, longScale
 		if in.preScale {
-			pickBudget, longMul = preScaledBudget(budget, longScale, verdict.Shock, nLong, in.shockTotalCap), 1
+			pickBudget, longMul = preScaledBudget(budget, verdict, cfg.Margin.LongShrink, nLong, in.shockTotalCap), 1
 			if longScale <= 0 {
 				longMul = 0
 			}
