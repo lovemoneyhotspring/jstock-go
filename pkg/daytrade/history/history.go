@@ -379,7 +379,10 @@ func bookText(value any) any {
 //
 // rulePicks は既存規則の順位で選んでいたら（selection.RulePicks）。機械学習で並べた日に
 // rule_picked の列へ残し、既存規則を参考として追えるようにする。
-func RankingFrame(ranking []selection.Ranked, picks, rulePicks []selection.Pick, side string, n int, budget decimal.Decimal, reasons map[string]string) history.Frame {
+//
+// perName は over_budget（1 単元が載らない）を判定する 1 銘柄の予算（selection.PickOptions.PerNameBudget）。
+// 規則 R では総額 ÷ name_divisor で、列の budget（総額 ÷ N）で判定すると飛ばす判定と食い違う。
+func RankingFrame(ranking []selection.Ranked, picks, rulePicks []selection.Pick, side string, n int, budget, perName decimal.Decimal, reasons map[string]string) history.Frame {
 	picked := make(map[string]selection.Pick, len(picks))
 	for _, p := range picks {
 		picked[p.Symbol] = p
@@ -400,7 +403,7 @@ func RankingFrame(ranking []selection.Ranked, picks, rulePicks []selection.Pick,
 			"vol20": floatOrNil(r.Vol), "picked": false,
 			"quantity": nil, "amount": nil,
 			"n": int64(n), "budget": budgetF,
-			"over_budget": selection.OverBudget(budget, r.Price), "skipped": false,
+			"over_budget": selection.OverBudget(perName, r.Price), "skipped": false,
 			"reason":    nil,
 			"rule_rank": int64(r.RuleRank), "rule_picked": rulePicked[r.Symbol],
 			"score": floatOrNil(r.Score), "rule_off": false,

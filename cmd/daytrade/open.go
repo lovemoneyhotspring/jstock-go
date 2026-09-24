@@ -289,7 +289,7 @@ func (s *openState) pickLong(ranking []selection.Ranked, n int, budget decimal.D
 		rulePicks = nil
 	}
 	s.summary["rule_off"] = ruleOff
-	longFrame := dthistory.RankingFrame(ranking, picks, rulePicks, "BUY", n, budget, longReasons)
+	longFrame := dthistory.RankingFrame(ranking, picks, rulePicks, "BUY", n, budget, longOpts.PerNameBudget(), longReasons)
 	if ruleOff {
 		longFrame = dthistory.MarkRuleOff(longFrame)
 	}
@@ -330,7 +330,7 @@ func (s *openState) recordRanking(short openShortLeg, spill decimal.Decimal, pic
 		fmt.Printf("ショート: %sの倍率 %s × 1 注文 %s 円 = %s 円  対象 %d 銘柄\n",
 			label, short.multiplier.String(), yen(s.cfg.Margin.BudgetPerOrder()), yen(short.budget), len(s.shortUniverse))
 		printPicks(short.picks, len(s.rankQuotes), s.p, false, "寄付の売建（信用）")
-		frames = append(frames, dthistory.RankingFrame(short.ranking, short.picks, short.picks, "SELL", short.n, short.budget, short.reasons))
+		frames = append(frames, dthistory.RankingFrame(short.ranking, short.picks, short.picks, "SELL", short.n, short.budget, short.budget, short.reasons))
 		s.summary["short_n"] = short.n
 		s.summary["short_budget"] = short.budget
 		s.summary["short_multiplier"] = short.multiplier
@@ -960,7 +960,7 @@ func appendSkippedRanking(cfg dtconfig.Config, p dtplan.Plan, quotes map[string]
 	var frames []history.Frame
 	for _, leg := range dtevaluate.NominalLegs(p, quotes, cfg) {
 		frames = append(frames, dthistory.MarkSkipped(
-			dthistory.RankingFrame(leg.Ranking, leg.Picks, leg.RulePicks, leg.Side, leg.N, leg.Budget, leg.Reasons)))
+			dthistory.RankingFrame(leg.Ranking, leg.Picks, leg.RulePicks, leg.Side, leg.N, leg.Budget, leg.PerName, leg.Reasons)))
 	}
 	if path := appendHistory(dthistory.KindRanking, concatFrames(frames), day); path != "" {
 		fmt.Printf("見送りの日の順位表（建てていたら）を履歴に追記 %s\n", path)

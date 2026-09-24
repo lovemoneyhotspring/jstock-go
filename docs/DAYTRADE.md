@@ -731,6 +731,8 @@ daytrade trades --side SELL --csv /tmp/short.csv                 # 脚で絞っ�
 `over_budget` は 1 単元が予算を超えて飛ばされた銘柄で、値がさ株の取り逃がしを追える。
 規則 R（`weighting = "turnover"`）では、売買代金 × `turnover_ratio` に 1 単元が載らず飛ばされた薄い銘柄は
 `reason = turnover_cap`（`over_budget` は偽）。総額 ÷ `name_divisor` にも載らない値がさだけが `over_budget`（2026-09-25 から）。
+規則 R の `over_budget` の列も 1 銘柄の上限（総額 ÷ `name_divisor`）で判定する——列の `budget`（総額 ÷ N）では
+判定しない（2026-09-25 のレビューまでは `budget` で判定していて、飛ばす判定と食い違っていた）。
 全行は DuckDB で直接読める:
 
 ```bash
