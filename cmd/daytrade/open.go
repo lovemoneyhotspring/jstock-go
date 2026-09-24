@@ -134,12 +134,15 @@ type openState struct {
 	rankQuotes map[string]selection.Quote
 }
 
+// runOpen は寄付の 1 回。段の順（準備 → plan → 台帳と接続 → 発注済みの数え直し → 気配 → 要約の始まり →
+// 寄付の判定 → 件数と予算 → ショート → ロング → 順位表 → 発注）は変えない。9:00:01.2 の発注までの
+// 経路なので、段の間に I/O や時刻の読み取りを足さない（testdata/open_flow の流れのテストが見張る）。
+// 台帳の Close と実行品質の書き出しの defer はここに置く（どの段で抜けても走る）。
 func runOpen(opts openOptions) error {
 	s, done, err := prepareOpen(opts)
 	if done || err != nil {
 		return err
 	}
-
 	if err := s.loadPlan(); err != nil {
 		return err
 	}
@@ -164,25 +167,21 @@ func runOpen(opts openOptions) error {
 	if done, err := s.countPlaced(); done || err != nil {
 		return err
 	}
-
 	if done := s.readQuotes(); done {
 		return nil
 	}
-
 	if done := s.startSummary(); done {
 		return nil
 	}
-
 	if done, err := s.judgeDay(); done || err != nil {
 		return err
 	}
 
 	s.sizeDay()
+	// ショートの脚を**先に**決める: 使わなかった資金をロングに回すため（margin.spill_to_long）
 	short := s.pickShort()
-
 	long, spill, spillNotes := s.spillToLong(short)
 	n, budget := long.N, long.Budget
-
 	ranking, done := s.rankLong(spill, spillNotes)
 	if done {
 		return nil
@@ -190,71 +189,7 @@ func runOpen(opts openOptions) error {
 	picks, frames := s.pickLong(ranking, n, budget)
 	picks = s.recordRanking(short, spill, picks, frames)
 
-	if len(picks) == 0 {
-		logInfo("daytrade.skip", "条件に合う銘柄なし", map[string]any{"reason": "no_picks", "quotes": len(s.quotes)})
-		s.finish("no_picks", nil)
-		return nil
-	}
-	if s.watchOnly {
-		logInfo("daytrade.skip", "資金 0 のため買わない", map[string]any{"reason": "no_capital", "picks": len(picks)})
-		s.finish("no_capital", nil)
-		return nil
-	}
-	if err := confirmLive(s.allowed, s.opts.yes); err != nil {
-		return err
-	}
-
-	if s.allowed {
-		// 台帳に無い建玉がブローカーにあれば、この実行は二重に建てることになる。
-		// 冪等性は台帳の client_order_id で担保しているので、台帳を失う・別ホストへ
-		// 移す・復元した直後は効かない。発注の直前にブローカーと突き合わせる
-		if err := execute.EnsureNoUnrecordedPositions(s.env, s.held, picks, s.carried); err != nil {
-			var unrecorded *execute.ErrUnrecordedPositions
-			if errors.As(err, &unrecorded) {
-				digest.Anomaly("daytrade.unrecorded_positions",
-					fmt.Sprintf("%d 銘柄に台帳外の建玉", len(unrecorded.Positions)))
-			}
-			return err
-		}
-	}
-
-	// 米国小幅高の日を寄指だけで取引する設定では、指値を作れない銘柄（前日終値が無い・呼値に丸められない）を
-	// 寄成で出さない。平常日は寄成に戻るだけでよいが、この日の寄成は損の側（−9〜−12 bp/日）
-	if s.verdict.UsLow && s.cfg.Execution.UsLowPreopenOnly() {
-		before := len(picks)
-		picks = dropWithoutOpeningLimit(picks, s.cfg)
-		s.summary["opening_limit_dropped"] = before - len(picks)
-	}
-
-	// 台帳に残す「送る直前の時価」は、取ったばかりの気配があればそれを使う（取り直すと順位表と
-	// 1 本目の注文の間に往復が 1 つ挟まる）。年齢は**取り始め**から測る——120 銘柄ずつの直列なので
-	// 先頭のバッチがいちばん古い。古ければ渡さず、PlacePicks が従来どおり取り直す
-	if age := clock.NowUTC().Sub(s.quotesStarted); s.allowed && age <= refReuseMaxAge {
-		s.env.RefPrices = execute.RefPricesFromQuotes(s.received, picks)
-		logInfo("daytrade.ref_price", "執行時の時価に選定の気配を使う", map[string]any{
-			"age_ms": age.Milliseconds(), "reused": s.env.RefPrices != nil, "picks": len(picks)})
-	}
-	orders, failures, err := execute.PlacePicks(s.env, s.b, picks)
-	run.FlushAlerts()
-	if err != nil {
-		return err
-	}
-	if len(failures) > 0 {
-		alert(fmt.Sprintf("デイトレ: %d 件の建玉が通らず", len(failures)), strings.Join(failures, "\n"))
-		digest.Anomaly("daytrade.order_failed", fmt.Sprintf("%d 件の建玉が通らず", len(failures)))
-	}
-	s.finish("picked", map[string]any{"orders": orders, "failures": len(failures)})
-	logInfo("daytrade.run", "寄付の買いを終了", map[string]any{
-		"phase": "open", "live": s.allowed, "reason": s.reason,
-		"n": n, "budget": budget.String(), "scale": s.verdict.Scale,
-		"picks": len(picks), "failures": len(failures),
-		"already_long": s.placed.Long, "already_short": s.placed.Short,
-		"elapsed_ms": clock.NowUTC().Sub(s.started).Milliseconds(), "deadline": deadlineText(s.deadline),
-	})
-	digest.Note(map[string]any{
-		"phase": "open", "live": s.allowed, "picks": len(picks), "failures": len(failures),
-	})
-	return nil
+	return s.place(picks, n, budget)
 }
 
 // spillToLong はショートの余りをロングに回した後のロングの件数と予算を決める（margin.spill_to_long）。
@@ -412,6 +347,76 @@ func (s *openState) recordRanking(short openShortLeg, spill decimal.Decimal, pic
 	s.summary["long_picks"] = longPicks
 	s.summary["short_picks"] = len(picks) - longPicks
 	return picks
+}
+
+// place は候補が無い・資金 0 の回を見送り、live なら台帳外の建玉が無いことを確かめてから寄付の注文を出す。
+// 出し切ってから保留した運用通知を送り、要約（open_run）・ログ・ダイジェストに結果を残す。
+func (s *openState) place(picks []selection.Pick, n int, budget decimal.Decimal) error {
+	if len(picks) == 0 {
+		logInfo("daytrade.skip", "条件に合う銘柄なし", map[string]any{"reason": "no_picks", "quotes": len(s.quotes)})
+		s.finish("no_picks", nil)
+		return nil
+	}
+	if s.watchOnly {
+		logInfo("daytrade.skip", "資金 0 のため買わない", map[string]any{"reason": "no_capital", "picks": len(picks)})
+		s.finish("no_capital", nil)
+		return nil
+	}
+	if err := confirmLive(s.allowed, s.opts.yes); err != nil {
+		return err
+	}
+
+	if s.allowed {
+		// 台帳に無い建玉がブローカーにあれば、この実行は二重に建てることになる。
+		// 冪等性は台帳の client_order_id で担保しているので、台帳を失う・別ホストへ
+		// 移す・復元した直後は効かない。発注の直前にブローカーと突き合わせる
+		if err := execute.EnsureNoUnrecordedPositions(s.env, s.held, picks, s.carried); err != nil {
+			var unrecorded *execute.ErrUnrecordedPositions
+			if errors.As(err, &unrecorded) {
+				digest.Anomaly("daytrade.unrecorded_positions",
+					fmt.Sprintf("%d 銘柄に台帳外の建玉", len(unrecorded.Positions)))
+			}
+			return err
+		}
+	}
+
+	// 米国小幅高の日を寄指だけで取引する設定では、指値を作れない銘柄（前日終値が無い・呼値に丸められない）を
+	// 寄成で出さない。平常日は寄成に戻るだけでよいが、この日の寄成は損の側（−9〜−12 bp/日）
+	if s.verdict.UsLow && s.cfg.Execution.UsLowPreopenOnly() {
+		before := len(picks)
+		picks = dropWithoutOpeningLimit(picks, s.cfg)
+		s.summary["opening_limit_dropped"] = before - len(picks)
+	}
+
+	// 台帳に残す「送る直前の時価」は、取ったばかりの気配があればそれを使う（取り直すと順位表と
+	// 1 本目の注文の間に往復が 1 つ挟まる）。年齢は**取り始め**から測る——120 銘柄ずつの直列なので
+	// 先頭のバッチがいちばん古い。古ければ渡さず、PlacePicks が従来どおり取り直す
+	if age := clock.NowUTC().Sub(s.quotesStarted); s.allowed && age <= refReuseMaxAge {
+		s.env.RefPrices = execute.RefPricesFromQuotes(s.received, picks)
+		logInfo("daytrade.ref_price", "執行時の時価に選定の気配を使う", map[string]any{
+			"age_ms": age.Milliseconds(), "reused": s.env.RefPrices != nil, "picks": len(picks)})
+	}
+	orders, failures, err := execute.PlacePicks(s.env, s.b, picks)
+	run.FlushAlerts()
+	if err != nil {
+		return err
+	}
+	if len(failures) > 0 {
+		alert(fmt.Sprintf("デイトレ: %d 件の建玉が通らず", len(failures)), strings.Join(failures, "\n"))
+		digest.Anomaly("daytrade.order_failed", fmt.Sprintf("%d 件の建玉が通らず", len(failures)))
+	}
+	s.finish("picked", map[string]any{"orders": orders, "failures": len(failures)})
+	logInfo("daytrade.run", "寄付の買いを終了", map[string]any{
+		"phase": "open", "live": s.allowed, "reason": s.reason,
+		"n": n, "budget": budget.String(), "scale": s.verdict.Scale,
+		"picks": len(picks), "failures": len(failures),
+		"already_long": s.placed.Long, "already_short": s.placed.Short,
+		"elapsed_ms": clock.NowUTC().Sub(s.started).Milliseconds(), "deadline": deadlineText(s.deadline),
+	})
+	digest.Note(map[string]any{
+		"phase": "open", "live": s.allowed, "picks": len(picks), "failures": len(failures),
+	})
+	return nil
 }
 
 // sizeDay はその日の件数と 1 注文の予算を決め（execute.SizeDay）、順位付けに使う気配から今日建てた銘柄・
