@@ -84,47 +84,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	}
 	barStore, b, bal, equity, posMap := d.barStore, d.b, d.bal, d.equity, d.posMap
 
-	// 送信結果が分からなかった注文を判定する。決められないものがあれば発注しない
-	//（同じ銘柄に二重に出しうる）。dry-run は台帳に PENDING を作らないので飛ばす。
-	// 約定の取り込みまで建玉 0 件の確認（checkEmptyPositions）より先に行う（前の回の
-	// 売り・買いが約定したかで「持っているはず」が変わる）
-	if canLive {
-		summary, err := resolvePendingOrders(rep, b, logger, clock.NowUTC())
-		if err != nil {
-			digest.Anomaly("wbjp.pending_unresolved", err.Error())
-			return err
-		}
-		if summary.Attributed+summary.NotSent+summary.Ambiguous+summary.TooRecent > 0 {
-			digest.Note(summary.Fields("pending"))
-		}
-		if err := pendingBlocksOrders(summary); err != nil {
-			return err
-		}
-
-		// 出した注文の約定・失効を台帳に取り込む。当日買付（差金決済の柵）と
-		// 未約定の買い（比率上限）はこの台帳から数えるので、発注の判断より先に行う。
-		// 照会できなかった注文は未確定のまま残る（未約定に数え続けるので安全側）
-		fills, err := execute.SyncFills(rep, b)
-		if err != nil {
-			digest.Anomaly("wbjp.fill_sync_failed", err.Error())
-			return err
-		}
-		for _, c := range fills.Changes {
-			logger.Info("wbjp.fill", fmt.Sprintf("%s: %s → %s（%s/%s 株約定, ID: %s）",
-				c.Symbol, c.Before, c.After, c.FilledQuantity, c.Quantity, c.ClientOrderID))
-		}
-		if len(fills.Unresolved) > 0 {
-			logger.Warn("wbjp.fill_unresolved", "注文を照会できません（台帳は未確定のまま）:\n"+strings.Join(fills.Unresolved, "\n"))
-			digest.Anomaly("wbjp.fill_unresolved", fmt.Sprintf("%d 件の注文を照会できません（次の実行で再照会）", len(fills.Unresolved)))
-		}
-		if len(fills.Changes) > 0 {
-			digest.Note(map[string]any{"phase": "fills", "changed": len(fills.Changes)})
-		}
-	}
-
-	// 建玉の照会がエラーなしで 0 件なのに、台帳では保有中のはずの銘柄がある。信じると
-	// ストップを全部消し、保有中の銘柄を新規として買い直すので、発注する回は止める
-	if err := checkEmptyPositions(rep, posMap, string(appSettings.Env), runID, canLive, d.acceptFlat, logger); err != nil {
+	if err := d.checkLedger(); err != nil {
 		return err
 	}
 
@@ -619,6 +579,52 @@ func (d *dailyRun) connect() error {
 		d.logger.Warn("wbjp.ledger", fmt.Sprintf("建玉の記録を残せません: %v", err))
 	}
 	return nil
+}
+
+// checkLedger は発注の判断の前に台帳を口座に合わせる（発注する回だけ）: 送信結果が分からなかった
+// 注文の判定と約定・失効の取り込み。その後で建玉 0 件の照会を信じてよいかを確かめる。
+func (d *dailyRun) checkLedger() error {
+	// 送信結果が分からなかった注文を判定する。決められないものがあれば発注しない
+	//（同じ銘柄に二重に出しうる）。dry-run は台帳に PENDING を作らないので飛ばす。
+	// 約定の取り込みまで建玉 0 件の確認（checkEmptyPositions）より先に行う（前の回の
+	// 売り・買いが約定したかで「持っているはず」が変わる）
+	if d.canLive {
+		summary, err := resolvePendingOrders(d.rep, d.b, d.logger, clock.NowUTC())
+		if err != nil {
+			digest.Anomaly("wbjp.pending_unresolved", err.Error())
+			return err
+		}
+		if summary.Attributed+summary.NotSent+summary.Ambiguous+summary.TooRecent > 0 {
+			digest.Note(summary.Fields("pending"))
+		}
+		if err := pendingBlocksOrders(summary); err != nil {
+			return err
+		}
+
+		// 出した注文の約定・失効を台帳に取り込む。当日買付（差金決済の柵）と
+		// 未約定の買い（比率上限）はこの台帳から数えるので、発注の判断より先に行う。
+		// 照会できなかった注文は未確定のまま残る（未約定に数え続けるので安全側）
+		fills, err := execute.SyncFills(d.rep, d.b)
+		if err != nil {
+			digest.Anomaly("wbjp.fill_sync_failed", err.Error())
+			return err
+		}
+		for _, c := range fills.Changes {
+			d.logger.Info("wbjp.fill", fmt.Sprintf("%s: %s → %s（%s/%s 株約定, ID: %s）",
+				c.Symbol, c.Before, c.After, c.FilledQuantity, c.Quantity, c.ClientOrderID))
+		}
+		if len(fills.Unresolved) > 0 {
+			d.logger.Warn("wbjp.fill_unresolved", "注文を照会できません（台帳は未確定のまま）:\n"+strings.Join(fills.Unresolved, "\n"))
+			digest.Anomaly("wbjp.fill_unresolved", fmt.Sprintf("%d 件の注文を照会できません（次の実行で再照会）", len(fills.Unresolved)))
+		}
+		if len(fills.Changes) > 0 {
+			digest.Note(map[string]any{"phase": "fills", "changed": len(fills.Changes)})
+		}
+	}
+
+	// 建玉の照会がエラーなしで 0 件なのに、台帳では保有中のはずの銘柄がある。信じると
+	// ストップを全部消し、保有中の銘柄を新規として買い直すので、発注する回は止める
+	return checkEmptyPositions(d.rep, d.posMap, string(appSettings.Env), d.runID, d.canLive, d.acceptFlat, d.logger)
 }
 
 // finishRun は実行の終わりを台帳に残す（err があれば failed）。評価額・現金は照会できた時点で
