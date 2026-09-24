@@ -149,7 +149,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	var b broker.Broker
 	if !canLive {
 		b = broker.NewPaperBroker(decimal.Zero, "open")
-	} else if b, err = run.ConnectBroker(setCfg.Execution.Broker, appSettings); err != nil {
+	} else if b, err = runBroker(setCfg.Execution.Broker, appSettings); err != nil {
 		return err
 	}
 

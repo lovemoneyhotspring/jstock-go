@@ -1,0 +1,32 @@
+=== 実行 1: 2026-09-24 09:31 JST live=true accept_flat=false env=prod
+--- 戻り値
+送信結果不明の注文 1 件が届いたか分からない（注文一覧が空・反映待ち、または送った直後）ため、この回の発注を中止しました（二重発注を避けます）。次の回で判定し直します
+--- ブローカーへの接続: 1 回
+--- ブローカーの呼び出し
+GetBalance
+PositionsBySymbol
+GetOrderHistory 2026-09-24T00:00:00+09:00 2026-09-24T23:59:59+09:00
+--- 出した注文
+--- 通知
+wbjp: 送信結果不明の注文を判定できないため発注を中止しました | 送信結果不明の注文 1 件が届いたか分からない（注文一覧が空・反映待ち、または送った直後）ため、この回の発注を中止しました（二重発注を避けます）。次の回で判定し直します
+wbjp: 日次実行が異常終了 | 送信結果不明の注文 1 件が届いたか分からない（注文一覧が空・反映待ち、または送った直後）ため、この回の発注を中止しました（二重発注を避けます）。次の回で判定し直します
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.pending_resolved","command":"run","env":"prod","extra":{"client_order_id":"cid-pend","outcome":"too_recent","placed_at":"2026-09-24T00:30:58Z","quantity":"100","reason":"送信から 5s 未満","side":"BUY","symbol":"7203","trade":""},"level":"info","msg":"送った直後なので次の実行で判定する","schema":1}
+{"app":"wbjp","code":"wbjp.crash","command":"run","env":"prod","extra":{"error":"送信結果不明の注文 1 件が届いたか分からない（注文一覧が空・反映待ち、または送った直後）ため、この回の発注を中止しました（二重発注を避けます）。次の回で判定し直します"},"level":"error","msg":"日次実行が異常終了","schema":1}
+--- ダイジェスト
+{"anomalies":["wbjp.pending_too_recent: 送信結果不明の注文 1 件が届いたか分からない（注文一覧が空・反映待ち、または送った直後）ため、この回の発注を中止しました（二重発注を避けます）。次の回で判定し直します","wbjp.crash: 送信結果不明の注文 1 件が届いたか分からない（注文一覧が空・反映待ち、または送った直後）ため、この回の発注を中止しました（二重発注を避けます）。次の回で判定し直します","wbjp.command_failed: 送信結果不明の注文 1 件が届いたか分からない（注文一覧が空・反映待ち、または送った直後）ため、この回の発注を中止しました（二重発注を避けます）。次の回で判定し直します"],"app":"wbjp","command":"run","env":"prod","outcome":"error","pending_ambiguous":0,"pending_attributed":0,"pending_too_recent":1,"pending_unsent":0,"schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳 runs
+{"accept_flat":"0","as_of":"2026-09-24","cash":null,"env":"prod","equity":null,"error":null,"finished_at":null,"mode":"live","run_id":"seed-1","started_at":"2026-09-23T23:31:00Z","status":"running"}
+{"accept_flat":"0","as_of":"2026-09-24","cash":"10000000","env":"prod","equity":"10000000","error":"送信結果不明の注文 1 件が届いたか分からない（注文一覧が空・反映待ち、または送った直後）ため、この回の発注を中止しました（二重発注を避けます）。次の回で判定し直します","finished_at":"2026-09-24T00:31:00Z","mode":"live","run_id":"<run 1>","started_at":"2026-09-24T00:31:00Z","status":"failed"}
+--- 台帳 orders
+{"avg_fill_price":null,"broker_order_id":null,"client_order_id":"cid-pend","filled_quantity":"0","limit_price":"1000","order_type":"LIMIT","placed_at":"2026-09-24T00:30:58Z","placed_on":"2026-09-24","quantity":"100","reason":"seed","run_id":"seed-1","side":"BUY","status":"PENDING","symbol":"7203","updated_at":null}
+--- 台帳 stops
+--- 台帳 risk_events
+--- 台帳 position_snapshots
+--- 台帳 targets
+--- 台帳 combined_signals
+--- 台帳 signals

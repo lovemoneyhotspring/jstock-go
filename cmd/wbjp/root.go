@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/settings"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
@@ -18,6 +19,12 @@ var (
 	// run はこの実行（run_id・ログ・ダイジェスト・通知）。入口で 1 回だけ起こす
 	run *cli.Run
 )
+
+// runBroker は run（日次実行）が繋ぐブローカーの差し替え口（試験用。流れのテストが偽の
+// ブローカーを渡す）。本番の値は run.ConnectBroker のまま（呼ぶ時点の run を使う）。
+var runBroker = func(name string, s *settings.AppSettings) (broker.Broker, error) {
+	return run.ConnectBroker(name, s)
+}
 
 // buildStrategies は設定ファイルの記述から戦略を組み立てる。
 //

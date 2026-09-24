@@ -1,0 +1,32 @@
+=== 実行 1: 2026-09-24 09:31 JST live=true accept_flat=false env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 0 回
+--- ブローカーの呼び出し
+--- 出した注文
+--- 通知
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: しない (緊急停止（kill_switch = true）が有効なため発注しません)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.daily_pnl","command":"run","env":"prod","level":"info","msg":"当日の損益: 実現 0 円・含み 0 円（上限 100000 円）","schema":1}
+{"app":"wbjp","code":"wbjp.risk_rejected","command":"run","env":"prod","level":"warn","msg":"7203 発注見送り: キルスイッチが有効（risk.kill_switch = true）","schema":1}
+--- ダイジェスト
+{"app":"wbjp","command":"run","dry_run_orders":0,"env":"prod","live":false,"orders":0,"outcome":"ok","phase":"run","risk_rejected":1,"schema":"wbjp.digest.v1","targets":1}
+=== 最後の状態
+--- 台帳 runs
+{"accept_flat":"0","as_of":"2026-09-24","cash":"1000000","env":"prod","equity":"1000000","error":null,"finished_at":"2026-09-24T00:31:00Z","mode":"dry_run","run_id":"<run 1>","started_at":"2026-09-24T00:31:00Z","status":"success"}
+--- 台帳 orders
+--- 台帳 stops
+--- 台帳 risk_events
+{"created_at":"2026-09-24T00:31:00Z","reason":"キルスイッチが有効（risk.kill_switch = true）","run_id":"<run 1>","symbol":"7203"}
+--- 台帳 position_snapshots
+--- 台帳 targets
+{"quantity":"100","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","symbol":"7203"}
+--- 台帳 combined_signals
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 1>","symbol":"7203"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"6758"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"9984"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"8306"}
+--- 台帳 signals
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 1>","strategy":"flow_fixed","symbol":"7203"}

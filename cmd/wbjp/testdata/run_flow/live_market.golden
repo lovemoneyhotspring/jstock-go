@@ -1,0 +1,37 @@
+=== 実行 1: 2026-09-24 09:31 JST live=true accept_flat=false env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 1 回
+--- ブローカーの呼び出し
+GetBalance
+PositionsBySymbol
+GetOpenOrders
+Place 7203 BUY 1600
+--- 出した注文
+{"client_order_id":"eed1f2a5d93a3742e9a7aefde01aef8e","quantity":"1600","reason":"atr_risk (強さ 1.00)","side":"BUY","symbol":"7203","tax":"SPECIFIC","trade":"CASH","type":"MARKET"}
+--- 通知
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.daily_pnl","command":"run","env":"prod","level":"info","msg":"当日の損益: 実現 0 円・含み 0 円（上限 100000 円）","schema":1}
+{"app":"wbjp","code":"wbjp.order","command":"run","env":"prod","level":"info","msg":"発注成功: 7203 BUY 1600株 (ID: eed1f2a5d93a3742e9a7aefde01aef8e)","schema":1}
+--- ダイジェスト
+{"app":"wbjp","command":"run","dry_run_orders":0,"env":"prod","live":true,"orders":1,"outcome":"ok","phase":"run","risk_rejected":0,"schema":"wbjp.digest.v1","targets":1}
+=== 最後の状態
+--- 台帳 runs
+{"accept_flat":"0","as_of":"2026-09-24","cash":"10000000","env":"prod","equity":"10000000","error":null,"finished_at":"2026-09-24T00:31:00Z","mode":"live","run_id":"<run 1>","started_at":"2026-09-24T00:31:00Z","status":"success"}
+--- 台帳 orders
+{"avg_fill_price":null,"broker_order_id":"B/7203","client_order_id":"eed1f2a5d93a3742e9a7aefde01aef8e","filled_quantity":"0","limit_price":null,"order_type":"MARKET","placed_at":"2026-09-24T00:31:00Z","placed_on":"2026-09-24","quantity":"1600","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","side":"BUY","status":"SUBMITTED","symbol":"7203","updated_at":"2026-09-24T00:31:00Z"}
+--- 台帳 stops
+--- 台帳 risk_events
+--- 台帳 position_snapshots
+--- 台帳 targets
+{"quantity":"1600","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","symbol":"7203"}
+--- 台帳 combined_signals
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 1>","symbol":"7203"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"6758"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"9984"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"8306"}
+--- 台帳 signals
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 1>","strategy":"flow_fixed","symbol":"7203"}
