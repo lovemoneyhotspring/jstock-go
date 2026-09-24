@@ -337,8 +337,13 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 #40 15 * * 1-5         cd $WBJP_HOME && WBJP_ENV=prod deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-verify-dryrun.log $WBJP_BIN/daytrade verify --config-dir config/daytrade_margin
 # 外の死活監視（Mackerel）。土日も回す——cron が止まったことは途切れ監視でしか分からない
 */5 * * * *           cd $WBJP_HOME && deploy/mackerel-alive.sh >> state/logs/mackerel-alive.log 2>&1
-# スイング売買（日足・大引け後 1 回で足りるが、固定間隔でも無害）
-#*/20 * * * *        cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/wbjp-run.lock  $WBJP_BIN/wbjp  run --config-dir config --live --yes >> state/logs/wbjp-run.log  2>&1
+# スイング売買（日足。判断は前営業日の足で、注文は当日限り）。平日の場中に 2 回: 9:31 と
+# 13:31（2 回目は 1 回目で出せなかった・約定しなかったぶん。同じ判断なら何も出さない）。
+# daytrade（snap・open・guard・protect・close）と秒がぶつからない分を選んだ: 9 時台の open・snap
+# は 9:13 まで、guard は :x6、protect は 12:31・13:20・15:10、close は 15:20〜。with-lock.sh の打ち切り
+# （170 秒＋10 秒）でも次の guard（9:36・13:36）より前に終わる。休場日は run 自身が見送る（東証カレンダー）。
+# 開けるときは HEALTHCHECK_URL_WBJP_RUN と deploy/mackerel-alive.sh の checks にも足す
+#31 9,13 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 deploy/with-lock.sh /tmp/wbjp-run.lock 30 state/logs/wbjp-run.log $WBJP_BIN/wbjp run --config-dir config --live --yes; deploy/ping.sh WBJP_RUN $? >> state/logs/ping.log 2>&1
 # 積立（発注時間帯 14:00〜15:00 の外では自動でスキップ）
 #7-59/20 * * * *     cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/accum-run.lock $WBJP_BIN/accum run --live --yes                     >> state/logs/accum-run.log 2>&1
 # state/ の全 SQLite（daytrade・accum・wbjp の台帳）を state/backup/ へ複製する。発注はしない。
