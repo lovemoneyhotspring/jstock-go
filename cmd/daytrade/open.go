@@ -180,138 +180,15 @@ func runOpen(opts openOptions) error {
 	s.sizeDay()
 	short := s.pickShort()
 
-	// ショートの余り（候補が無い・上限で頭打ち）をロングに回す。銘柄数は総予算 ÷ 1 注文の
-	// 予算（capital.max_positions が上限）。倍率 0 の日（ショック日）は回す元が無い。
-	// 余りは今日のショートの総予算から、今日建てた分と今回の選定を引いたもの（再実行で数え直さない）
-	long, spill, spillNotes := s.sizing.WithSpill(short.picks)
-	if s.corpStale != "" {
-		// 記録簿が使えずショートを見送った回は余りを回さない。回したまま後の回で記録簿が読めると、
-		// ショートは建てた金額 0 として満額で建ち、ロングに回した分と合わせて資金を超える
-		long, spill, spillNotes = s.sizing.Long, decimal.Zero, nil
-	}
+	long, spill, spillNotes := s.spillToLong(short)
 	n, budget := long.N, long.Budget
 
-	// 並べるのは**落とす前の**気配で。建て済みを落としてから採点すると、機械学習の特徴量
-	// （候補の中での百分位）が 1 回目と変わる。落とすのは順位を付けた後（selection.Keep）
-	ranking, err := selection.TryRank(s.eligible, s.quotes, s.cfg.Signal)
-	if err != nil {
-		// 試し並べ（resolveRankBy）は通ったのに、候補を絞った後で失敗した。寄付の判定は済んでいるので
-		// gap_vol で並べて続ける。米国小幅高で「ショートだけ休む」と判定した日は、gap_vol なら
-		// ロングも休む日なので建てない（順位表は残す）
-		logWarn("daytrade.rerank", "LightGBM で並べられないため gap_vol で並べる（寄付の判定の後）",
-			map[string]any{"error": err.Error(), "short_off": s.verdict.ShortOff})
-		digest.Anomaly("daytrade.rerank", "LightGBM で並べられず gap_vol で取引（判定の後）: "+err.Error())
-		fmt.Printf("LightGBM で並べられないため gap_vol で並べます: %v\n", err)
-		s.cfg = s.cfg.FallbackToGapVol()
-		s.summary["rank_by"] = s.cfg.Signal.RankBy
-		ranking = selection.Rank(s.eligible, s.quotes, s.cfg.Signal)
-		if s.verdict.ShortOff {
-			// gap_vol はこの日を両脚とも休む（us_skip_legs = "all"）。危険信号で見送った日と
-			// 同じ形で終える——余りをロングに回した通知だけ出して no_picks で終わると、
-			// 見送りの印の無い順位表が残り、評価が「候補なし」と読む
-			fmt.Printf("gap_vol の米国小幅高の日なのでロングも休みます（%s）\n", s.verdict.ShortOffReason)
-			logInfo("daytrade.skip", "gap_vol に戻して見送り",
-				map[string]any{"reason": "regime", "reasons": s.verdict.ShortOffReason})
-			digest.Note(map[string]any{"regime_skip": s.verdict.ShortOffReason})
-			appendSkippedRanking(s.cfg, s.p, s.rankQuotes, s.day)
-			s.finish("regime", map[string]any{"trade": false, "reasons": s.verdict.ShortOffReason})
-			return nil
-		}
+	ranking, done := s.rankLong(spill, spillNotes)
+	if done {
+		return nil
 	}
-	// 余りをロングに回す通知は、並べ替えの失敗で見送る日を除いてから出す
-	if spill.IsPositive() {
-		execute.EmitNotes(s.env, spillNotes)
-		s.summary["spill"] = spill
-	}
-	// 今日すでに建てた銘柄・返済に回した銘柄（と signal.skip_opened なら寄った銘柄）を、
-	// 順位を付けた後に落とす
-	ranking = selection.Keep(ranking, s.rankQuotes)
-	// 業種の上限を掛ける設定なのに業種が取れていないと、判定は黙って素通りする
-	// （2026-09-12 に発覚：plan の parquet に sector 列が無く、本番だけ無制限だった）。
-	// 古い plan を読んだときも気付けるように、ここで鳴らす。
-	if s.cfg.Signal.MaxPerSector > 0 {
-		noSector := 0
-		for _, r := range ranking {
-			if r.Sector == "" {
-				noSector++
-			}
-		}
-		if noSector > 0 {
-			logWarn("daytrade.sector", "業種が取れない候補があるため max_per_sector が効かない",
-				map[string]any{"no_sector": noSector, "ranked": len(ranking), "max_per_sector": s.cfg.Signal.MaxPerSector})
-			fmt.Printf("業種の取れない候補 %d/%d 件——max_per_sector=%d はその分効きません\n",
-				noSector, len(ranking), s.cfg.Signal.MaxPerSector)
-		}
-	}
-	longOpts := selection.PickOptions{
-		N: n, Budget: budget, Weighting: s.sizing.Long.Weighting, Side: domain.SideBuy,
-		MaxAmount: s.cfg.Capital.MaxOrder, ValuePool: s.cfg.Signal.ValuePool,
-		MaxPerSector: s.cfg.Signal.MaxPerSector,
-	}
-	picks := selection.PickFrom(ranking, longOpts)
-	longReasons := selection.PickReasons(ranking, longOpts, picks)
-	longPicks := len(picks)
-	rulePicks := selection.RulePicks(ranking, longOpts, picks)
-	// 既存規則（gap_vol）は米国小幅高の日を両脚とも休む（us_skip_legs = "all"）。LightGBM だけが
-	// 取引するこの日に同じ N で選んだことにすると、gap_vol が建てない日の成績が比べに混ざるので
-	// 比べる相手を 0 件にして、候補なしと区別する印（rule_off）を残す
-	ruleOff := s.verdict.ShortOff && s.cfg.Signal.RankBy == dtconfig.RankByLGBM
-	if ruleOff {
-		rulePicks = nil
-	}
-	s.summary["rule_off"] = ruleOff
-	longFrame := dthistory.RankingFrame(ranking, picks, rulePicks, "BUY", n, budget, longReasons)
-	if ruleOff {
-		longFrame = dthistory.MarkRuleOff(longFrame)
-	}
-	frames := []history.Frame{longFrame}
-	s.summary["n"], s.summary["budget"], s.summary["weighting"], s.summary["weak"] = n, budget, s.sizing.Long.Weighting, s.sizing.Weak
-	printPicks(picks, len(s.rankQuotes), s.p, s.watchOnly, "")
-	if s.cfg.Signal.RankBy == dtconfig.RankByLGBM && len(ranking) > 0 && ranking[0].Score != nil {
-		// 既存規則は参考として並べて出す（発注はしない。順位表の rule_picked にも残る）
-		names := make([]string, 0, len(rulePicks))
-		for _, rp := range rulePicks {
-			names = append(names, rp.Symbol)
-		}
-		fmt.Printf("  参考: 既存規則（gap_vol）なら %s\n", strings.Join(names, " "))
-	}
-	logRanking(s.day, "BUY", ranking, picks, longReasons, n, budget, s.verdict.Scale, s.sizing.Long.Weighting, len(s.rankQuotes))
-
-	switch {
-	case s.cfg.Margin.Enabled && !s.watchOnly && s.cfg.Margin.Paused:
-		// 一時停止中は倍率を 1 のまま残して枠をロングへ回す（execute.SizeDay）。ショートの候補も
-		// 取らないので SELL の順位表は積まない——0 件の SELL を「候補なし」と読ませないため。
-		// 倍率 0 のショック日は回す枠が無いので、そのことも書き分ける
-		if spill.IsPositive() {
-			fmt.Printf("ショート: 一時停止中（margin.paused）。枠 %s 円はロングに回しました\n", yen(spill))
-		} else {
-			fmt.Println("ショート: 一時停止中（margin.paused）。この回にロングへ回す枠はありません")
-		}
-		s.summary["short_paused"] = true
-	case short.multiplier.GreaterThan(decimal.Zero):
-		label := "通常日"
-		if s.sizing.Weak {
-			label = "弱い日"
-		}
-		fmt.Printf("ショート: %sの倍率 %s × 1 注文 %s 円 = %s 円  対象 %d 銘柄\n",
-			label, short.multiplier.String(), yen(s.cfg.Margin.BudgetPerOrder()), yen(short.budget), len(s.shortUniverse))
-		printPicks(short.picks, len(s.rankQuotes), s.p, false, "寄付の売建（信用）")
-		frames = append(frames, dthistory.RankingFrame(short.ranking, short.picks, short.picks, "SELL", short.n, short.budget, short.reasons))
-		s.summary["short_n"] = short.n
-		s.summary["short_budget"] = short.budget
-		s.summary["short_multiplier"] = short.multiplier
-		logRanking(s.day, "SELL", short.ranking, short.picks, short.reasons, short.n, short.budget, s.verdict.Scale, s.cfg.Margin.Weighting, len(s.rankQuotes))
-		picks = append(picks, short.picks...)
-	case s.cfg.Margin.Enabled && !s.watchOnly && s.remainingShort <= 0 && s.placed.Short > 0:
-		fmt.Printf("ショート: 発注済み（%d 件）\n", s.placed.Short)
-	case s.cfg.Margin.Enabled && !s.watchOnly:
-		fmt.Println("ショート: この日は建てない（倍率 0）")
-	}
-	if path := appendHistory(dthistory.KindRanking, concatFrames(frames), s.day); path != "" {
-		fmt.Printf("履歴に追記 %s\n", path)
-	}
-	s.summary["long_picks"] = longPicks
-	s.summary["short_picks"] = len(picks) - longPicks
+	picks, frames := s.pickLong(ranking, n, budget)
+	picks = s.recordRanking(short, spill, picks, frames)
 
 	if len(picks) == 0 {
 		logInfo("daytrade.skip", "条件に合う銘柄なし", map[string]any{"reason": "no_picks", "quotes": len(s.quotes)})
@@ -378,6 +255,163 @@ func runOpen(opts openOptions) error {
 		"phase": "open", "live": s.allowed, "picks": len(picks), "failures": len(failures),
 	})
 	return nil
+}
+
+// spillToLong はショートの余りをロングに回した後のロングの件数と予算を決める（margin.spill_to_long）。
+func (s *openState) spillToLong(short openShortLeg) (long execute.Sizing, spill decimal.Decimal, notes []execute.SizingNote) {
+	// ショートの余り（候補が無い・上限で頭打ち）をロングに回す。銘柄数は総予算 ÷ 1 注文の
+	// 予算（capital.max_positions が上限）。倍率 0 の日（ショック日）は回す元が無い。
+	// 余りは今日のショートの総予算から、今日建てた分と今回の選定を引いたもの（再実行で数え直さない）
+	long, spill, notes = s.sizing.WithSpill(short.picks)
+	if s.corpStale != "" {
+		// 記録簿が使えずショートを見送った回は余りを回さない。回したまま後の回で記録簿が読めると、
+		// ショートは建てた金額 0 として満額で建ち、ロングに回した分と合わせて資金を超える
+		long, spill, notes = s.sizing.Long, decimal.Zero, nil
+	}
+	return long, spill, notes
+}
+
+// rankLong はロングの候補を並べる。LightGBM で並べられなければ gap_vol に戻し、その日が米国小幅高で
+// ショートだけ休む日なら（gap_vol では両脚とも休む日）見送りを記録して done を返す。
+// 余りをロングに回した通知を出し、建て済み・返済に回した銘柄を順位の後で落とす。
+func (s *openState) rankLong(spill decimal.Decimal, spillNotes []execute.SizingNote) (ranking []selection.Ranked, done bool) {
+	// 並べるのは**落とす前の**気配で。建て済みを落としてから採点すると、機械学習の特徴量
+	// （候補の中での百分位）が 1 回目と変わる。落とすのは順位を付けた後（selection.Keep）
+	var err error
+	ranking, err = selection.TryRank(s.eligible, s.quotes, s.cfg.Signal)
+	if err != nil {
+		// 試し並べ（resolveRankBy）は通ったのに、候補を絞った後で失敗した。寄付の判定は済んでいるので
+		// gap_vol で並べて続ける。米国小幅高で「ショートだけ休む」と判定した日は、gap_vol なら
+		// ロングも休む日なので建てない（順位表は残す）
+		logWarn("daytrade.rerank", "LightGBM で並べられないため gap_vol で並べる（寄付の判定の後）",
+			map[string]any{"error": err.Error(), "short_off": s.verdict.ShortOff})
+		digest.Anomaly("daytrade.rerank", "LightGBM で並べられず gap_vol で取引（判定の後）: "+err.Error())
+		fmt.Printf("LightGBM で並べられないため gap_vol で並べます: %v\n", err)
+		s.cfg = s.cfg.FallbackToGapVol()
+		s.summary["rank_by"] = s.cfg.Signal.RankBy
+		ranking = selection.Rank(s.eligible, s.quotes, s.cfg.Signal)
+		if s.verdict.ShortOff {
+			// gap_vol はこの日を両脚とも休む（us_skip_legs = "all"）。危険信号で見送った日と
+			// 同じ形で終える——余りをロングに回した通知だけ出して no_picks で終わると、
+			// 見送りの印の無い順位表が残り、評価が「候補なし」と読む
+			fmt.Printf("gap_vol の米国小幅高の日なのでロングも休みます（%s）\n", s.verdict.ShortOffReason)
+			logInfo("daytrade.skip", "gap_vol に戻して見送り",
+				map[string]any{"reason": "regime", "reasons": s.verdict.ShortOffReason})
+			digest.Note(map[string]any{"regime_skip": s.verdict.ShortOffReason})
+			appendSkippedRanking(s.cfg, s.p, s.rankQuotes, s.day)
+			s.finish("regime", map[string]any{"trade": false, "reasons": s.verdict.ShortOffReason})
+			return nil, true
+		}
+	}
+	// 余りをロングに回す通知は、並べ替えの失敗で見送る日を除いてから出す
+	if spill.IsPositive() {
+		execute.EmitNotes(s.env, spillNotes)
+		s.summary["spill"] = spill
+	}
+	// 今日すでに建てた銘柄・返済に回した銘柄（と signal.skip_opened なら寄った銘柄）を、
+	// 順位を付けた後に落とす
+	ranking = selection.Keep(ranking, s.rankQuotes)
+	s.warnNoSector(ranking)
+	return ranking, false
+}
+
+// warnNoSector は業種の取れない候補があれば鳴らす。業種の上限（signal.max_per_sector）を
+// 掛ける設定なのに業種が取れていないと、判定は黙って素通りする
+// （2026-09-12 に発覚：plan の parquet に sector 列が無く、本番だけ無制限だった）。
+// 古い plan を読んだときも気付けるように、ここで鳴らす。
+func (s *openState) warnNoSector(ranking []selection.Ranked) {
+	if s.cfg.Signal.MaxPerSector > 0 {
+		noSector := 0
+		for _, r := range ranking {
+			if r.Sector == "" {
+				noSector++
+			}
+		}
+		if noSector > 0 {
+			logWarn("daytrade.sector", "業種が取れない候補があるため max_per_sector が効かない",
+				map[string]any{"no_sector": noSector, "ranked": len(ranking), "max_per_sector": s.cfg.Signal.MaxPerSector})
+			fmt.Printf("業種の取れない候補 %d/%d 件——max_per_sector=%d はその分効きません\n",
+				noSector, len(ranking), s.cfg.Signal.MaxPerSector)
+		}
+	}
+}
+
+// pickLong はロングの脚を選び、順位表（BUY）を作って表示・ログに残す。
+func (s *openState) pickLong(ranking []selection.Ranked, n int, budget decimal.Decimal) (picks []selection.Pick, frames []history.Frame) {
+	longOpts := selection.PickOptions{
+		N: n, Budget: budget, Weighting: s.sizing.Long.Weighting, Side: domain.SideBuy,
+		MaxAmount: s.cfg.Capital.MaxOrder, ValuePool: s.cfg.Signal.ValuePool,
+		MaxPerSector: s.cfg.Signal.MaxPerSector,
+	}
+	picks = selection.PickFrom(ranking, longOpts)
+	longReasons := selection.PickReasons(ranking, longOpts, picks)
+	rulePicks := selection.RulePicks(ranking, longOpts, picks)
+	// 既存規則（gap_vol）は米国小幅高の日を両脚とも休む（us_skip_legs = "all"）。LightGBM だけが
+	// 取引するこの日に同じ N で選んだことにすると、gap_vol が建てない日の成績が比べに混ざるので
+	// 比べる相手を 0 件にして、候補なしと区別する印（rule_off）を残す
+	ruleOff := s.verdict.ShortOff && s.cfg.Signal.RankBy == dtconfig.RankByLGBM
+	if ruleOff {
+		rulePicks = nil
+	}
+	s.summary["rule_off"] = ruleOff
+	longFrame := dthistory.RankingFrame(ranking, picks, rulePicks, "BUY", n, budget, longReasons)
+	if ruleOff {
+		longFrame = dthistory.MarkRuleOff(longFrame)
+	}
+	frames = []history.Frame{longFrame}
+	s.summary["n"], s.summary["budget"], s.summary["weighting"], s.summary["weak"] = n, budget, s.sizing.Long.Weighting, s.sizing.Weak
+	printPicks(picks, len(s.rankQuotes), s.p, s.watchOnly, "")
+	if s.cfg.Signal.RankBy == dtconfig.RankByLGBM && len(ranking) > 0 && ranking[0].Score != nil {
+		// 既存規則は参考として並べて出す（発注はしない。順位表の rule_picked にも残る）
+		names := make([]string, 0, len(rulePicks))
+		for _, rp := range rulePicks {
+			names = append(names, rp.Symbol)
+		}
+		fmt.Printf("  参考: 既存規則（gap_vol）なら %s\n", strings.Join(names, " "))
+	}
+	logRanking(s.day, "BUY", ranking, picks, longReasons, n, budget, s.verdict.Scale, s.sizing.Long.Weighting, len(s.rankQuotes))
+	return picks, frames
+}
+
+// recordRanking はショートの脚を表示・ログに残して発注の候補に足し、順位表（BUY と SELL）を履歴に積む。
+func (s *openState) recordRanking(short openShortLeg, spill decimal.Decimal, picks []selection.Pick, frames []history.Frame) []selection.Pick {
+	longPicks := len(picks)
+	switch {
+	case s.cfg.Margin.Enabled && !s.watchOnly && s.cfg.Margin.Paused:
+		// 一時停止中は倍率を 1 のまま残して枠をロングへ回す（execute.SizeDay）。ショートの候補も
+		// 取らないので SELL の順位表は積まない——0 件の SELL を「候補なし」と読ませないため。
+		// 倍率 0 のショック日は回す枠が無いので、そのことも書き分ける
+		if spill.IsPositive() {
+			fmt.Printf("ショート: 一時停止中（margin.paused）。枠 %s 円はロングに回しました\n", yen(spill))
+		} else {
+			fmt.Println("ショート: 一時停止中（margin.paused）。この回にロングへ回す枠はありません")
+		}
+		s.summary["short_paused"] = true
+	case short.multiplier.GreaterThan(decimal.Zero):
+		label := "通常日"
+		if s.sizing.Weak {
+			label = "弱い日"
+		}
+		fmt.Printf("ショート: %sの倍率 %s × 1 注文 %s 円 = %s 円  対象 %d 銘柄\n",
+			label, short.multiplier.String(), yen(s.cfg.Margin.BudgetPerOrder()), yen(short.budget), len(s.shortUniverse))
+		printPicks(short.picks, len(s.rankQuotes), s.p, false, "寄付の売建（信用）")
+		frames = append(frames, dthistory.RankingFrame(short.ranking, short.picks, short.picks, "SELL", short.n, short.budget, short.reasons))
+		s.summary["short_n"] = short.n
+		s.summary["short_budget"] = short.budget
+		s.summary["short_multiplier"] = short.multiplier
+		logRanking(s.day, "SELL", short.ranking, short.picks, short.reasons, short.n, short.budget, s.verdict.Scale, s.cfg.Margin.Weighting, len(s.rankQuotes))
+		picks = append(picks, short.picks...)
+	case s.cfg.Margin.Enabled && !s.watchOnly && s.remainingShort <= 0 && s.placed.Short > 0:
+		fmt.Printf("ショート: 発注済み（%d 件）\n", s.placed.Short)
+	case s.cfg.Margin.Enabled && !s.watchOnly:
+		fmt.Println("ショート: この日は建てない（倍率 0）")
+	}
+	if path := appendHistory(dthistory.KindRanking, concatFrames(frames), s.day); path != "" {
+		fmt.Printf("履歴に追記 %s\n", path)
+	}
+	s.summary["long_picks"] = longPicks
+	s.summary["short_picks"] = len(picks) - longPicks
+	return picks
 }
 
 // sizeDay はその日の件数と 1 注文の予算を決め（execute.SizeDay）、順位付けに使う気配から今日建てた銘柄・
