@@ -18,8 +18,13 @@ import (
 // 「昨日の異常通知は何だった？」に答えるには手元に控えが要る。送れなかったときも
 // 残す——配達に失敗したものこそ後から拾いたい。
 //
-// 置き場は state/notify/<YYYY-MM-DD>.jsonl（1 投稿 1 行、UTC の日付で 1 ファイル）。
+// 置き場は state/notify/<YYYY-MM-DD>.jsonl（1 投稿 1 行、JST の日付で 1 ファイル）。
 // 日付でファイルが分かれるので、期間を絞れば必要な日だけ開く（ReadArchive）。
+//
+// JST で切るのは digest.DayOf と同じ理由。読む側（deploy/report.sh の週次・月次、日報の
+// エージェント）は JST の日付でファイルを選ぶので、UTC で切ると 09:00 JST より前の通知
+// （6:00 の night-repair、8:42 の自動復旧、寄る前の open の警告）が前日のファイルに入り、
+// 期間の境目で漏れる。2026-09-24 までのファイルは UTC の日付で切られている（移し替えていない）。
 // 日次レポートの本文そのものは state/reports/daily-<日付>.md にも残る
 // （deploy/report.sh が書く）。
 
@@ -79,7 +84,7 @@ func archive(rec Record) {
 		fmt.Fprintf(os.Stderr, "通知の控えを組み立てられません: %v\n", err)
 		return
 	}
-	path := filepath.Join(dir, rec.At.UTC().Format(archiveDayLayout)+".jsonl")
+	path := filepath.Join(dir, archiveDay(rec.At)+".jsonl")
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "通知の控えを書けません: %v\n", err)
@@ -99,10 +104,15 @@ func archive(rec Record) {
 
 const archiveDayLayout = "2006-01-02"
 
+// archiveDay は控えのファイルの日付（YYYY-MM-DD、JST）。
+func archiveDay(at time.Time) string {
+	return at.In(clock.Tokyo).Format(archiveDayLayout)
+}
+
 // pruneArchive は保持日数を過ぎた控えを消す。
 // 日付として読めない名前のファイルは触らない（人が置いたものかもしれない）。
 func pruneArchive(dir string, now time.Time) {
-	cutoff := now.UTC().AddDate(0, 0, -ArchiveRetainDays).Format(archiveDayLayout)
+	cutoff := archiveDay(now.AddDate(0, 0, -ArchiveRetainDays))
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -122,7 +132,7 @@ func pruneArchive(dir string, now time.Time) {
 	}
 }
 
-// ReadArchive は日付（UTC、両端を含む）の範囲の控えを古い順に読む。
+// ReadArchive は日付（JST、両端を含む）の範囲の控えを古い順に読む。
 // 空文字は端を切らない。壊れた行は飛ばす（1 行の破損で全部読めなくしない）。
 func ReadArchive(from, to string) ([]Record, error) {
 	dir := ArchiveDir()
