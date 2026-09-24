@@ -632,9 +632,18 @@ func RunAccumulation(
 		logger.Warn("accum.balance_failed",
 			fmt.Sprintf("買付余力を照会できないため、この回は発注しません: %v", err))
 		for _, po := range planned {
-			if po.Failed {
+			switch {
+			case po.Failed:
 				fail(po.Symbol, po.Note)
-			} else if po.Request != nil {
+			case po.Request != nil && len(pendingBySymbol[po.Symbol]) > 0:
+				// 送信結果不明の注文はこの失敗の行で知らせる（下の本流と同じ）。印を付けないと
+				// alertHeld が「照会できません」を別に送り、1 件の PENDING で 2 通になる
+				ids := pendingBySymbol[po.Symbol]
+				for _, id := range ids {
+					coveredByFailure[id] = true
+				}
+				fail(po.Symbol, pendingFailureNote(ids))
+			case po.Request != nil:
 				fail(po.Symbol, fmt.Sprintf("買付余力を照会できないため発注しません: %v", err))
 			}
 		}
@@ -658,10 +667,7 @@ func RunAccumulation(
 			for _, id := range ids {
 				coveredByFailure[id] = true
 			}
-			fail(po.Symbol, fmt.Sprintf(
-				"送信結果不明の注文 %s が残っているため発注しません（届いていれば二重買付になる。"+
-					"口座の約定履歴で確かめて `accum pending resolve <client_order_id> --attribute … | --unsent` で確定する）",
-				strings.Join(ids, ", ")))
+			fail(po.Symbol, pendingFailureNote(ids))
 			continue
 		}
 		placed, err := led.WasPlaced(req.ClientOrderID)
@@ -939,6 +945,14 @@ func UnrecordedFills(
 		found[o.Symbol] = found[o.Symbol].Add(o.FilledQuantity.Mul(price))
 	}
 	return found, nil
+}
+
+// pendingFailureNote は送信結果不明の注文が残る銘柄を発注しない理由。
+func pendingFailureNote(ids []string) string {
+	return fmt.Sprintf(
+		"送信結果不明の注文 %s が残っているため発注しません（届いていれば二重買付になる。"+
+			"口座の約定履歴で確かめて `accum pending resolve <client_order_id> --attribute … | --unsent` で確定する）",
+		strings.Join(ids, ", "))
 }
 
 // placeRecorded は台帳に先に記録してから発注する。

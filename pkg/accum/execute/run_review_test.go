@@ -232,6 +232,28 @@ func TestRunAccumulationAlertsEarlierPendingOnce(t *testing.T) {
 	}
 }
 
+// 6 の 2 の 2. 買付余力を照会できない回も同じ。PENDING の銘柄は失敗の行で知らせ、
+// 保留の通知を別に送らない（以前はこの分岐だけ印を付けずに返り、2 通になった）。
+func TestRunAccumulationAlertsEarlierPendingOnceWhenBalanceFails(t *testing.T) {
+	e := newReviewEnv(t)
+	alerts := stubAlerts(t)
+	recordOrder(t, e.led, "前日の不明", string(domain.OrderStatusPending), &e.thisMonth, 0)
+	backdate(t, e.led, "前日の不明")
+	b := &runBroker{balanceErr: errors.New("余力照会がタイムアウト"), cost: dec(101_000)}
+
+	err := e.run(b, true)
+	var failed *OrdersFailedError
+	if !errors.As(err, &failed) || !strings.Contains(err.Error(), "送信結果不明の注文 前日の不明") {
+		t.Fatalf("OrdersFailedError（送信結果不明が残る）を返すべき: %v", err)
+	}
+	if len(*alerts) != 0 {
+		t.Errorf("失敗の通知とは別に保留の通知を送った（2 通になる）: %v", *alerts)
+	}
+	if len(b.placed) != 0 {
+		t.Errorf("余力が分からないのに発注した: %d 件", len(b.placed))
+	}
+}
+
 // 6 の 3. 前日以前と今日の保留が混ざるときのダイジェストの文。前日以前を「次の run で再判定」と書かない。
 func TestDescribeHeld(t *testing.T) {
 	pending, other := describeHeld([]UnresolvedOrder{
