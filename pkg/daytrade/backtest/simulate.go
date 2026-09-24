@@ -481,6 +481,9 @@ func Simulate(panel *Panel, cfg config.Config, signals *Inputs) (*Result, error)
 }
 
 // SimulateWith は約定モデルを指定して検証する。
+//
+// 倍率は選んだ後に掛ける（等金額なら選ぶ前と同じ）。規則 R（turnover）は選ぶ前に掛けないと本番と
+// 食い違うので信用版（SimulateMargin の preScale）だけに置ける（config.Validate が現物との組を塞ぐ）。
 func SimulateWith(panel *Panel, cfg config.Config, signals *Inputs, opts Options) (*Result, error) {
 	n := cfg.Capital.Positions()
 	if n == 0 {

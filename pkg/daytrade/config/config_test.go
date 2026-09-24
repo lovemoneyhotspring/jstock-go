@@ -377,6 +377,10 @@ func TestValidateTurnoverAndCapacity(t *testing.T) {
 		{"name_divisor が 0", func(c *Config) { c.Capital.NameDivisor = 0 }},
 		{"max_positions が name_divisor より小さい", func(c *Config) { c.Capital.MaxPositions = 5 }},
 		{"ショートに turnover", func(c *Config) { c.Margin.Weighting = WeightingTurnover }},
+		{"現物（margin 無効）に turnover", func(c *Config) {
+			c.Margin.Enabled = false
+			c.Margin.CapacityRatio, c.Margin.ShockCapacityRatio, c.Margin.CapacityCeiling = decimal.Zero, decimal.Zero, decimal.Zero
+		}},
 		{"ショートの倍率が 1 を超える", func(c *Config) { c.Margin.MultiplierNormal = decimal.RequireFromString("1.5") }},
 	} {
 		t.Run(c.name, func(t *testing.T) {

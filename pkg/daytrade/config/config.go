@@ -854,6 +854,12 @@ func (c Config) Validate() error {
 	if err := validateLongWeighting(c.Capital); err != nil {
 		return err
 	}
+	// 規則 R（turnover）は信用版だけ。現物の検証（backtest.SimulateWith）は倍率を選んだ後に掛けるので、
+	// ショック日・縮小の日に売買代金の上限を倍率ぶん破り、本番（execute.SizeDay は選ぶ前に掛ける）と
+	// 食い違う。使う予定の無い組なので検証で塞ぐ（2026-09-25 のレビュー）
+	if c.Capital.Weighting == WeightingTurnover && !c.Margin.Enabled {
+		return fmt.Errorf("capital.weighting = turnover は margin.enabled = true のときだけ使える")
+	}
 	if err := validateCapacity(c); err != nil {
 		return err
 	}
