@@ -51,6 +51,13 @@ type guardState struct {
 	reason  string
 	// deadline は時間帯の終わり（live で --ignore-window でないとき）と開始 + max_run_seconds の早い方
 	deadline time.Time
+
+	env execute.Env
+	// shorts は今日の売建（生きているか約定のある）の銘柄、ev は記録簿から読んだ材料、
+	// marks は材料の出た売建（銘柄 → 材料の種類）
+	shorts map[string]bool
+	ev     corpEvents
+	marks  map[string]string
 }
 
 func runGuard(live, yes, ignoreWindow bool, date string) error {
@@ -58,7 +65,7 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 	if done || err != nil {
 		return err
 	}
-	cfg, day, now, cal := s.cfg, s.day, s.now, s.cal
+	cfg, day := s.cfg, s.day
 	allowed, reason, started, deadline := s.allowed, s.reason, s.started, s.deadline
 
 	led, err := dtledger.Open(appSettings.DaytradeDBPath())
@@ -78,57 +85,14 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 		RetryWait: execute.DefaultRetryWait, Deadline: deadline,
 	}
 
-	// 売建が無ければブローカーにも記録簿にも触らない（10 分おきに回るので、ログインを増やさない）
-	entries, _, err := execute.LiveEntries(env)
-	if err != nil {
+	s.env = env
+	if done, err := s.findShorts(); done || err != nil {
 		return err
 	}
-	shorts := map[string]bool{}
-	for _, o := range entries {
-		if execute.IsShortEntry(o) && !o.IsDead() {
-			shorts[o.Symbol] = true
-		}
-	}
-	if len(shorts) == 0 {
-		fmt.Println("今日の売建はありません")
-		logInfo("daytrade.skip", "材料の点検の対象なし", map[string]any{"reason": "no_shorts", "phase": "guard"})
-		return nil
-	}
-
-	ev, err := loadCorpEvents(context.Background(), cfg.Margin, day, now, cal.Closed)
-	if err != nil {
-		logError("daytrade.news_stale", "ニュースの記録簿を読めず売建の材料を点検できない", map[string]any{"error": err.Error()})
-		digest.Anomaly("daytrade.news_stale", "売建の材料を点検できない: "+err.Error())
-		alert("デイトレ: ニュースの記録簿を読めず、売建の材料（TOB など）を点検できません", err.Error())
+	if done, err := s.markShorts(); done || err != nil {
 		return err
 	}
-	if detail := ev.staleness(now, cfg.Margin.CorpEventMaxStalenessMinutes); detail != "" {
-		// 古くても手元の分では点検する。取り込み（news sync）が止まっていることは知らせる
-		fmt.Println("ニュースの記録簿が古いまま点検します: " + detail)
-		logWarn("daytrade.news_stale", "ニュースの記録簿が古いまま売建を点検", map[string]any{"reason": detail, "phase": "guard"})
-		digest.Anomaly("daytrade.news_stale", "売建の点検の記録簿が古い: "+detail)
-	}
-
-	marks := map[string]string{}
-	for symbol := range shorts {
-		m, ok := ev.marks[symbol]
-		if !ok {
-			continue
-		}
-		marks[symbol] = m.Kind
-		fmt.Printf("材料の出た売建: %s（%s）%s %s\n", symbol, m.Kind, m.At, m.Headline)
-		logInfo("daytrade.corp_guard", "材料の出た売建", map[string]any{
-			"symbol": symbol, "kind": m.Kind, "at": m.At, "headline": m.Headline,
-		})
-	}
-	if len(marks) == 0 {
-		fmt.Printf("材料の出た売建はありません（%d 銘柄を点検）\n", len(shorts))
-		logInfo("daytrade.run", "材料の点検を終了", map[string]any{
-			"phase": "guard", "live": allowed, "shorts": len(shorts), "marked": 0,
-			"elapsed_ms": clock.NowUTC().Sub(started).Milliseconds(),
-		})
-		return nil
-	}
+	shorts, ev, marks := s.shorts, s.ev, s.marks
 	// 取消・返済の済んだ売建だけなら接続しない（10 分ごとにログインしない）
 	pending, err := execute.GuardPending(env, marks)
 	if err != nil {
@@ -258,4 +222,67 @@ func prepareGuard(live, yes, ignoreWindow bool, date string) (s *guardState, don
 		live: live, yes: yes, cfg: cfg, now: now, day: day, started: now, cal: cal,
 		allowed: allowed, reason: reason, deadline: deadline,
 	}, false, nil
+}
+
+// findShorts は今日の売建（約定なしで終わったものを除く）を集める。無ければ done を返す
+// ——ブローカーにも記録簿にも触らない（10 分おきに回るので、ログインを増やさない）。
+func (s *guardState) findShorts() (done bool, err error) {
+	entries, _, err := execute.LiveEntries(s.env)
+	if err != nil {
+		return false, err
+	}
+	shorts := map[string]bool{}
+	for _, o := range entries {
+		if execute.IsShortEntry(o) && !o.IsDead() {
+			shorts[o.Symbol] = true
+		}
+	}
+	if len(shorts) == 0 {
+		fmt.Println("今日の売建はありません")
+		logInfo("daytrade.skip", "材料の点検の対象なし", map[string]any{"reason": "no_shorts", "phase": "guard"})
+		return true, nil
+	}
+	s.shorts = shorts
+	return false, nil
+}
+
+// markShorts は記録簿を読み、材料（TOB・MBO など）の出た売建に印を付ける。記録簿を読めなければ
+// 知らせてエラー、古ければ知らせたうえで手元の分で点検する。印が 1 つも無ければ done を返す。
+func (s *guardState) markShorts() (done bool, err error) {
+	ev, err := loadCorpEvents(context.Background(), s.cfg.Margin, s.day, s.now, s.cal.Closed)
+	if err != nil {
+		logError("daytrade.news_stale", "ニュースの記録簿を読めず売建の材料を点検できない", map[string]any{"error": err.Error()})
+		digest.Anomaly("daytrade.news_stale", "売建の材料を点検できない: "+err.Error())
+		alert("デイトレ: ニュースの記録簿を読めず、売建の材料（TOB など）を点検できません", err.Error())
+		return false, err
+	}
+	if detail := ev.staleness(s.now, s.cfg.Margin.CorpEventMaxStalenessMinutes); detail != "" {
+		// 古くても手元の分では点検する。取り込み（news sync）が止まっていることは知らせる
+		fmt.Println("ニュースの記録簿が古いまま点検します: " + detail)
+		logWarn("daytrade.news_stale", "ニュースの記録簿が古いまま売建を点検", map[string]any{"reason": detail, "phase": "guard"})
+		digest.Anomaly("daytrade.news_stale", "売建の点検の記録簿が古い: "+detail)
+	}
+
+	marks := map[string]string{}
+	for symbol := range s.shorts {
+		m, ok := ev.marks[symbol]
+		if !ok {
+			continue
+		}
+		marks[symbol] = m.Kind
+		fmt.Printf("材料の出た売建: %s（%s）%s %s\n", symbol, m.Kind, m.At, m.Headline)
+		logInfo("daytrade.corp_guard", "材料の出た売建", map[string]any{
+			"symbol": symbol, "kind": m.Kind, "at": m.At, "headline": m.Headline,
+		})
+	}
+	if len(marks) == 0 {
+		fmt.Printf("材料の出た売建はありません（%d 銘柄を点検）\n", len(s.shorts))
+		logInfo("daytrade.run", "材料の点検を終了", map[string]any{
+			"phase": "guard", "live": s.allowed, "shorts": len(s.shorts), "marked": 0,
+			"elapsed_ms": clock.NowUTC().Sub(s.started).Milliseconds(),
+		})
+		return true, nil
+	}
+	s.ev, s.marks = ev, marks
+	return false, nil
 }
