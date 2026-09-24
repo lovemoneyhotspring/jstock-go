@@ -265,3 +265,90 @@ func TestWriteCSV(t *testing.T) {
 		t.Fatalf("CSV 書き出しの案内が出ていない: %s", buf.String())
 	}
 }
+
+// Head と表の出力は、全部読んでから新しい順に並べて切ったとき（以前の Show）と同じであること。
+// 列の増えたファイル・同じ日の複数回・同じ秒の別の実行・0 行のファイル・判定日と記録日の前後を混ぜる。
+func TestHeadMatchesReadSortHead(t *testing.T) {
+	store := NewStore(t.TempDir())
+	base := time.Date(2026, 9, 3, 23, 59, 0, 0, time.UTC)
+	old := NewFrame([]Column{{Name: "symbol", Type: TypeString}}, []map[string]any{{"symbol": "a"}, {"symbol": "b"}})
+	appends := []struct {
+		day   string
+		frame Frame
+		at    time.Time
+		run   string
+	}{
+		{"2026-09-04", sampleFrame(), base.Add(2 * time.Minute), "r3"}, // UTC の日付を跨いだ後（名前は 000100Z で前に並ぶ）
+		{"2026-09-04", sampleFrame(), base, "r2"},
+		{"2026-09-04", sampleFrame(), base.Add(500 * time.Millisecond), "r1"}, // 同じ秒の別の実行（名前は r1 が前）
+		{"2026-09-04", NewFrame(sampleFrame().Columns, nil), base.Add(time.Minute), "empty"},
+		{"2026-09-03", old, base.Add(-24 * time.Hour), "old"},
+		{"2026-09-05", sampleFrame(), base.Add(-48 * time.Hour), "early"}, // 判定日より前に記録（前夜の plan）
+	}
+	for _, a := range appends {
+		if _, err := store.Append("plan", a.frame, day(a.day), AppendOptions{RunID: a.run, At: a.at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, window := range []Range{{}, {Start: day("2026-09-04"), End: day("2026-09-04")}, {Start: day("2026-09-04")}} {
+		all, err := store.Read("plan", window)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []int{1, 3, 5, 50} {
+			want := all.SortBy([]string{"day", "recorded_at"}, []bool{true, true}).Head(n)
+			got, total, err := store.Head("plan", window, n)
+			if err != nil {
+				t.Fatalf("Head: %v", err)
+			}
+			if total != all.Height() {
+				t.Errorf("window %v n %d: total = %d, want %d", window, n, total, all.Height())
+			}
+			var wantBuf, gotBuf bytes.Buffer
+			_ = writeTable(&wantBuf, want)
+			_ = writeTable(&gotBuf, got)
+			if wantBuf.String() != gotBuf.String() {
+				t.Errorf("window %v n %d:\n got\n%s\nwant\n%s", window, n, gotBuf.String(), wantBuf.String())
+			}
+		}
+	}
+	var buf bytes.Buffer
+	if err := Show(&buf, store, "plan", ShowOptions{Window: Range{Start: day("2026-09-06")}}); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != "plan: 該当する行はありません\n" {
+		t.Errorf("該当なし = %q", buf.String())
+	}
+}
+
+// Latest は最後の実行のファイルだけを読んでも、全部読んでから絞ったときと同じ行・同じ列を返すこと。
+func TestLatestMatchesReadThenFilter(t *testing.T) {
+	store := NewStore(t.TempDir())
+	base := time.Date(2026, 9, 3, 23, 59, 59, 0, time.UTC)
+	withExtra := NewFrame(
+		append(sampleFrame().Columns, Column{Name: "extra", Type: TypeString}),
+		[]map[string]any{{"symbol": "1", "extra": "x"}},
+	)
+	if _, err := store.Append("plan", withExtra, day("2026-09-04"), AppendOptions{RunID: "first", At: base}); err != nil {
+		t.Fatal(err)
+	}
+	// 名前（000000Z）は先に並ぶが、記録は後
+	if _, err := store.Append("plan", sampleFrame(), day("2026-09-04"), AppendOptions{RunID: "last", At: base.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Latest("plan", day("2026-09-04"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Height() != 2 || got.Rows[0]["run_id"] != "last" {
+		t.Fatalf("Latest = %d 行 %v", got.Height(), got.Rows)
+	}
+	all, _ := store.Read("plan", Range{Start: day("2026-09-04"), End: day("2026-09-04")})
+	if strings.Join(got.Names(), ",") != strings.Join(all.Names(), ",") {
+		t.Errorf("列 = %v, want %v（その日の全ファイルの和）", got.Names(), all.Names())
+	}
+	empty, err := store.Latest("plan", day("2026-09-09"))
+	if err != nil || empty.Height() != 0 {
+		t.Errorf("記録の無い日 = %d 行, %v", empty.Height(), err)
+	}
+}

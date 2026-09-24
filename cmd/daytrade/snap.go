@@ -72,7 +72,8 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string, maxRun int) error {
 
 	slot := slotFlag
 	if slot == "" {
-		slot = now.In(clock.MustZone(appSettings.Timezone)).Format("1504")
+		// 時刻帯の名前は東証の時刻（0859・0900 …）。表示の時間帯（WBJP_TIMEZONE）には寄せない
+		slot = now.In(jst).Format("1504")
 	}
 	columns := columnsFlag
 	if columns == "" {

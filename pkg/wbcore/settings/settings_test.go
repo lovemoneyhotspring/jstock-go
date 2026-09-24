@@ -156,3 +156,16 @@ func TestLoadAppSettingsWithoutDotenvUsesWorkingDir(t *testing.T) {
 		t.Errorf("StateDir = %q, want %q", app.StateDir, filepath.Join(cwd, "state"))
 	}
 }
+
+// .env にも環境変数にも無ければ、表示の時間帯は東証の時間帯
+func TestTimezoneDefaultsToTokyo(t *testing.T) {
+	t.Setenv("WBJP_ENV_FILE", filepath.Join(t.TempDir(), "none.env"))
+	t.Setenv("WBJP_TIMEZONE", "")
+	if got := LoadAppSettings().Timezone; got != "Asia/Tokyo" {
+		t.Errorf("Timezone = %q, want Asia/Tokyo", got)
+	}
+	t.Setenv("WBJP_TIMEZONE", "UTC")
+	if got := LoadAppSettings().Timezone; got != "UTC" {
+		t.Errorf("Timezone = %q, want UTC（指定があればそれ）", got)
+	}
+}

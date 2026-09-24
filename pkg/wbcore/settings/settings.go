@@ -81,7 +81,9 @@ func LoadAppSettings() *AppSettings {
 	logDir := absFrom(base, lookup("WBJP_LOG_DIR", filepath.Join(stateDir, "logs")))
 	logLevel := lookup("WBJP_LOG_LEVEL", "INFO")
 	logJSON := lookup("WBJP_LOG_JSON", "false") == "true"
-	timezone := lookup("WBJP_TIMEZONE", "UTC")
+	// 表示の時間帯。既定は東証の時間帯（以前は UTC で、.env に書き忘れた環境——作業コピー・
+	// go test——では snap の時刻帯の名前や画面の時刻が 9 時間ずれた）。保存と演算は常に UTC
+	timezone := lookup("WBJP_TIMEZONE", "Asia/Tokyo")
 
 	return &AppSettings{
 		Env:       env,

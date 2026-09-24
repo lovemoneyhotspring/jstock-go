@@ -16,11 +16,17 @@
 # 過ぎたら TERM、さらに 10 秒で KILL する。打ち切りは [error] [timeout] として log に残す。
 # daytrade open は TERM を受けたら実行品質（滑り）の記録を書き出してから終える。
 #
-# WITH_LOCK_NOTIFY=1 を立てた行は、打ち切りと見送りを Discord にも知らせる（bin/discord-post）。
+# 打ち切りと、外からの SIGKILL（メモリ不足の OOM killer など）は分けて記録する。timeout(1) は
+# TERM で終われば 124、TERM で終わらず -k の KILL まで行けば 137 を返すが、上限の前に OOM で
+# 殺されたときも 137（128+9）になる。137 は実行時間で見分ける——上限（limit 秒）より前に終わった
+# 137 は打ち切りではないので [error] [killed] として残し、137 のまま返す。
+#
+# WITH_LOCK_NOTIFY=1 を立てた行は、打ち切り・SIGKILL・見送りを Discord にも知らせる（bin/discord-post）。
 # ログに書くだけだと、読むのは朝の点検（open と snap だけ）で、close・guard・verify が打ち切られても
 # 誰も気づかない。snap のように「打ち切り・見送りが設計のうち」の行には立てない。
 #
-# 終了コード: cmd のもの。ロックを取れなかったときは 75（EX_TEMPFAIL）、打ち切ったときは 124。
+# 終了コード: cmd のもの。ロックを取れなかったときは 75（EX_TEMPFAIL）、打ち切ったときは 124、
+# 打ち切り以外の SIGKILL（OOM など）は 137。
 #
 # 見送りの判定は flock -E の番兵 251 で行う。以前は 75 を番兵にしていたが、それだと
 # cmd 自身の exit 75 と区別できず、走って失敗した回が [lock_busy] として記録され、
@@ -65,17 +71,31 @@ else
 fi
 
 busy=251
-# 子は sh -c で包み、cmd 自身の 251 だけ 250 に写す（"$@" は sh -c の位置引数）
+# 子は sh -c で包み、cmd 自身の 251 だけ 250 に写す（"$@" は sh -c の位置引数）。
+# 137 は実行時間を測って、上限まで走っていれば（-k の KILL で終わった打ち切り）124 に写す。
+# ロックを待った時間を含めないよう、測るのはロックを取った後（この sh の中）
 if flock -w "$wait" -E "$busy" "$lock" \
-    sh -c '"$@"; rc=$?; [ "$rc" -eq 251 ] && exit 250; exit "$rc"' with-lock "$@" >> "$log" 2>&1; then
+    env WITH_LOCK_LIMIT="$limit" sh -c '
+      t0=$(date +%s); "$@"; rc=$?
+      [ "$rc" -eq 251 ] && exit 250
+      if [ "$rc" -eq 137 ] && [ "$WITH_LOCK_LIMIT" -gt 0 ] && [ $(($(date +%s) - t0)) -ge "$WITH_LOCK_LIMIT" ]; then
+        exit 124
+      fi
+      exit "$rc"' with-lock "$@" >> "$log" 2>&1; then
   rc=0
 else
   rc=$?
 fi
-if [ "$limit" -gt 0 ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; }; then
+if [ "$limit" -gt 0 ] && [ "$rc" -eq 124 ]; then
   echo "$(date '+%Y-%m-%d %H:%M:%S') [error] [timeout] ${limit} 秒で終わらず打ち切り（ロック $lock を手放した）: $*" >> "$log"
   notify "[timeout] ${limit} 秒で打ち切り" "$cmdline（ログ: $log）。建玉・注文が残っていないか口座を確認してください"
   exit 124
+fi
+if [ "$rc" -eq 137 ]; then
+  # 上限の前に SIGKILL で終わった。打ち切りではなく、たいていメモリ不足（OOM killer）
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [error] [killed] SIGKILL で終わった（打ち切りではない。メモリ不足の疑い。journalctl -k | grep -i oom で確かめる）: $*" >> "$log"
+  notify "[killed] SIGKILL で終了（メモリ不足の疑い）" "$cmdline（ログ: $log）。journalctl -k | grep -i oom で確かめ、建玉・注文が残っていないか口座を確認してください"
+  exit 137
 fi
 if [ "$rc" -eq "$busy" ]; then
   echo "$(date '+%Y-%m-%d %H:%M:%S') [warn] [lock_busy] ロック $lock を ${wait} 秒待っても取れず見送り: $*" >> "$log"

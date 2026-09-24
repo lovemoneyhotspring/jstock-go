@@ -38,6 +38,9 @@
 | `state/<app>/history/<種類>/*.parquet` | 1 実行（名前の先頭 10 文字が判定日） | `history.Store.Files(kind, Range)` が**開く前に**名前で選ぶ。SQL なら `WHERE day BETWEEN …` |
 | `state/reports/*.md` | 1 レポート | ファイル名 |
 
+保持: `state/logs/*.jsonl` の退避は 90 日（Go が消す）、`state/notify` は 45 日（Go が消す）、`state/digest` は 400 日（日曜の
+`deploy/prune-state.sh` が消す）。cron の素のログ `state/logs/*.log` は 10MB を超えたら `.log.1` へ退避する（`docs/DEPLOY.md`「置き場の掃除」）。
+
 ```console
 # 期間を絞る（必要な日のファイルしか開かない）
 jq -c 'select(.anomalies)' state/digest/prod-2026-09-{01..07}.jsonl

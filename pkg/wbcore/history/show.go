@@ -44,6 +44,21 @@ func Show(w io.Writer, store *Store, kind string, opts ShowOptions) error {
 		limit = DefaultLimit
 	}
 
+	// 表だけを見せるとき（JSON・CSV でも --latest でもない）は、先頭 limit 行と行数だけを読む。
+	// 全行を展開してから並べて切ると、板の記録のような大きい種類で重い
+	if !opts.LatestOnly && !opts.AsJSON && opts.CSVPath == "" {
+		shown, total, err := store.Head(kind, opts.Window, limit)
+		if err != nil {
+			return err
+		}
+		if total == 0 {
+			_, err := fmt.Fprintf(w, "%s: 該当する行はありません\n", kind)
+			return err
+		}
+		fmt.Fprintf(w, "%s  %d 行（表示 %d）\n", kind, total, shown.Height())
+		return writeTable(w, shown)
+	}
+
 	var frame Frame
 	var err error
 	if opts.LatestOnly {
