@@ -97,6 +97,7 @@ func checkOpenOrders(cfg *accumcfg.AccumConfig, led *ledger.Ledger) error {
 	if err != nil {
 		return err
 	}
+	defer flushExecution()
 	synced, err := execute.SyncOrderStatus(led, b, clock.NowUTC())
 	for _, change := range synced.Changes {
 		fmt.Println("更新: " + change.Describe())
