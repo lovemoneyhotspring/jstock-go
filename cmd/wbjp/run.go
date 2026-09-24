@@ -79,47 +79,10 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	// 途中で返っても実行の終わりを残す（runs.status が running のまま残らないように）
 	defer func() { d.finishRun(err) }()
 
-	// 判断の前に足を更新する。cron の data sync とは独立に、
-	// この実行が見る足を自分で最新にしてから判断する
-	// （--no-sync で抑止。取得元が不調な日に保存済みだけで回すため）。
-	if !d.noSync {
-		if failures := syncUniverseBars(setCfg, logger, runSyncDays, false, false); failures > 0 {
-			logger.Warn("run.sync_failed",
-				fmt.Sprintf("%d 銘柄の足を更新できませんでした（保存済みの足で続けます）", failures))
-		}
-	}
-
-	barStore := data.NewBarStore(appSettings.BarsDir())
-
-	// ブローカー初期化。dry-run は常にメモリ上の模型
-	var b broker.Broker
-	if !canLive {
-		b = broker.NewPaperBroker(decimal.Zero, "open")
-	} else if b, err = runBroker(setCfg.Execution.Broker, appSettings); err != nil {
+	if err := d.connect(); err != nil {
 		return err
 	}
-
-	bal, err := b.GetBalance()
-	if err != nil {
-		return err
-	}
-	equity := bal.CashBalance.Add(bal.MarketValue)
-	d.finishEquity, d.finishCash = &equity, &bal.CashBalance
-	// 建玉が見えないまま進むと、保有中の銘柄を「未保有」として買い足し、ストップも
-	// 現値で作り直してしまう。発注する回は照会に失敗した時点で止める
-	posMap, err := b.PositionsBySymbol()
-	if err != nil {
-		if canLive {
-			return fmt.Errorf("建玉を照会できないため発注を中止しました（二重に建てないため）: %w", err)
-		}
-		logger.Warn("run.positions_failed",
-			fmt.Sprintf("建玉を照会できません（dry-run のため未保有として続行）: %v", err))
-		posMap = map[string]domain.Position{}
-	}
-	// その時点の建玉を残す（explain / 事後の検証で「何を持っていたか」を引く）
-	if err := rep.RecordSnapshot(runID, todayJST, positionList(posMap)); err != nil {
-		logger.Warn("wbjp.ledger", fmt.Sprintf("建玉の記録を残せません: %v", err))
-	}
+	barStore, b, bal, equity, posMap := d.barStore, d.b, d.bal, d.equity, d.posMap
 
 	// 送信結果が分からなかった注文を判定する。決められないものがあれば発注しない
 	//（同じ銘柄に二重に出しうる）。dry-run は台帳に PENDING を作らないので飛ばす。
@@ -531,6 +494,13 @@ type dailyRun struct {
 
 	// 実行の終わりに残す評価額・現金（照会できた時点で埋まる）
 	finishEquity, finishCash *decimal.Decimal
+
+	// 接続（connect）
+	barStore *data.BarStore
+	b        broker.Broker
+	bal      *domain.Balance
+	equity   decimal.Decimal
+	posMap   map[string]domain.Position
 }
 
 // prepareDaily は設定を読み、発注するかを決めて口座を表示し、本番発注なら確認を取る。
@@ -598,6 +568,57 @@ func (d *dailyRun) mode() string {
 		return "live"
 	}
 	return "dry_run"
+}
+
+// connect は判断の前に足を更新し、ブローカーに繋いで残高と建玉を照会し、その時点の建玉を残す。
+// 発注する回は建玉を照会できなければ止める（二重に建てないため）。
+func (d *dailyRun) connect() error {
+	// 判断の前に足を更新する。cron の data sync とは独立に、
+	// この実行が見る足を自分で最新にしてから判断する
+	// （--no-sync で抑止。取得元が不調な日に保存済みだけで回すため）。
+	if !d.noSync {
+		if failures := syncUniverseBars(d.setCfg, d.logger, runSyncDays, false, false); failures > 0 {
+			d.logger.Warn("run.sync_failed",
+				fmt.Sprintf("%d 銘柄の足を更新できませんでした（保存済みの足で続けます）", failures))
+		}
+	}
+
+	d.barStore = data.NewBarStore(appSettings.BarsDir())
+
+	// ブローカー初期化。dry-run は常にメモリ上の模型
+	var b broker.Broker
+	var err error
+	if !d.canLive {
+		b = broker.NewPaperBroker(decimal.Zero, "open")
+	} else if b, err = runBroker(d.setCfg.Execution.Broker, appSettings); err != nil {
+		return err
+	}
+	d.b = b
+
+	bal, err := b.GetBalance()
+	if err != nil {
+		return err
+	}
+	equity := bal.CashBalance.Add(bal.MarketValue)
+	d.bal, d.equity = bal, equity
+	d.finishEquity, d.finishCash = &equity, &bal.CashBalance
+	// 建玉が見えないまま進むと、保有中の銘柄を「未保有」として買い足し、ストップも
+	// 現値で作り直してしまう。発注する回は照会に失敗した時点で止める
+	posMap, err := b.PositionsBySymbol()
+	if err != nil {
+		if d.canLive {
+			return fmt.Errorf("建玉を照会できないため発注を中止しました（二重に建てないため）: %w", err)
+		}
+		d.logger.Warn("run.positions_failed",
+			fmt.Sprintf("建玉を照会できません（dry-run のため未保有として続行）: %v", err))
+		posMap = map[string]domain.Position{}
+	}
+	// その時点の建玉を残す（explain / 事後の検証で「何を持っていたか」を引く）
+	d.posMap = posMap
+	if err := d.rep.RecordSnapshot(d.runID, d.todayJST, positionList(posMap)); err != nil {
+		d.logger.Warn("wbjp.ledger", fmt.Sprintf("建玉の記録を残せません: %v", err))
+	}
+	return nil
 }
 
 // finishRun は実行の終わりを台帳に残す（err があれば failed）。評価額・現金は照会できた時点で
