@@ -429,6 +429,40 @@ def part_ext(i0s, seeds, slot):
             print(f"  I0 {i0:>4.0f} 資金 {C/1e4:5.0f} 万: " + "  ".join(line))
 
 
+def part_now(i0s, seeds, slot, caps):
+    """今の資金（ロング 500〜700 万）で規則 R（p 0.2%、Rmax 20 に固定）と N=3 逆ボラを比べる。"""
+    from dt_preopen_sim import error_pools
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet")
+    te = te[te["d"] >= SINCE].copy()
+    pools = error_pools(slot, "2026-09-11")
+    rules = day_rules(te)
+    acc = {}
+    for seed in range(seeds):
+        g = seen_ranked(te, pools, seed)
+        days = [(d, x) for d, x in g.groupby("d") if not rules.loc[d, "skip"]]
+        for i0 in i0s:
+            kappa = calib_kappa(g, i0 * 1e-4)
+            for C in caps:
+                acc.setdefault((i0, C, "N3"), []).append(pd.Series(
+                    {d: pnl_day(x, *alloc_fixed_iv(x, 3, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+                acc.setdefault((i0, C, "R"), []).append(pd.Series(
+                    {d: pnl_day(x, *alloc_rule(x, 0.002, 20, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+                acc.setdefault((i0, C, "n"), []).append(pd.Series(
+                    {d: len(alloc_rule(x, 0.002, 20, C * rules.loc[d, "mult"])[0]) for d, x in days}))
+    alld = pd.DatetimeIndex(sorted(te["d"].unique()))
+    print(f"\n## J. 今の資金で規則 R と N=3（{seeds} シード平均、休みの日は 0）")
+    for i0 in i0s:
+        for C in caps:
+            r = pd.concat(acc[(i0, C, "R")], axis=1).reindex(alld).fillna(0.0).mean(axis=1)
+            n = pd.concat(acc[(i0, C, "N3")], axis=1).reindex(alld).fillna(0.0).mean(axis=1)
+            k = pd.concat(acc[(i0, C, "n")], axis=1).mean(axis=1)
+            for lab, sl in [("IS ", r.index <= IS_END), ("OOS", r.index > IS_END)]:
+                dd = (r - n)[sl]
+                print(f"  I0 {i0:>3.0f} 資金 {C/1e4:4.0f} 万 {lab}: N=3 {n[sl].mean()*245/C*100:5.1f}% / 規則 R "
+                      f"{r[sl].mean()*245/C*100:5.1f}%  差 {dd.mean()*245/1e4:6.1f} 万円/年 (t {tstat(dd):5.2f})"
+                      f"  規則 R の銘柄数 平均 {k.mean():.1f}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--part", default="all")
@@ -442,6 +476,9 @@ def main():
         part_rank(c)
     if a.part in ("keybin", "all"):
         part_keybin(c)
+    if a.part == "now":
+        part_now(a.i0, a.seeds, a.slot, [5e6, 7e6])
+        return
     if a.part == "sector":
         part_sector(a.i0, a.seeds, a.slot)
         return
