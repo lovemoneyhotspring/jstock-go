@@ -85,16 +85,27 @@ func RunBacktest(
 		return nil, fmt.Errorf("約定モデルは open / intrabar のいずれか: %q", opts.FillModel)
 	}
 
-	pb := broker.NewPaperBroker(initialCash, opts.FillModel)
-
-	// 待機資金の年利（%）を日付で引けるようにする。営業日が飛んでも
-	// 直前の値を持ち越す（金利は毎日公表されるわけではない）。
-	yields := make(map[string]decimal.Decimal, len(opts.CashYield))
-	for _, b := range opts.CashYield {
-		yields[b.Date] = b.Close.Div(decimal.NewFromInt(100))
+	dates, err := backtestDates(allBars, opts)
+	if err != nil {
+		return nil, err
 	}
 
-	// 全日付のユニオンを昇順で作成
+	sim, err := newBacktestSim(setCfg, stratCfg, strats, weights, combineFunc, allBars, initialCash, opts)
+	if err != nil {
+		return nil, err
+	}
+	sim.equityHistory = make([]decimal.Decimal, 0, len(dates))
+
+	// 各日をシミュレーション
+	for dayIdx, today := range dates {
+		sim.runDay(today, dayIdx == len(dates)-1)
+	}
+
+	return sim.stats(initialCash, len(dates)), nil
+}
+
+// backtestDates は売買の対象日（全銘柄の日付の和集合を期間で絞り、昇順）。
+func backtestDates(allBars map[string][]domain.Bar, opts BacktestOptions) ([]string, error) {
 	dateSet := make(map[string]struct{})
 	for _, bars := range allBars {
 		for _, b := range bars {
@@ -122,26 +133,79 @@ func RunBacktest(
 		}
 		return nil, fmt.Errorf("バックテスト用の足データがありません")
 	}
+	return dates, nil
+}
 
-	// 銘柄ごとの日付インデックス
-	barByDate := make(map[string]map[string]domain.Bar)
+// backtestSim はバックテストの 1 回分の状態（模型のブローカー・ストップ・日々の資産）。
+type backtestSim struct {
+	setCfg      *wbjpcfg.SettingsFile
+	stratCfg    *wbjpcfg.StrategiesConfig
+	strats      []strategy.Strategy
+	weights     map[string]float64
+	combineFunc strategy.Combiner
+	allBars     map[string][]domain.Bar
+	opts        BacktestOptions
+
+	pb        *broker.PaperBroker
+	barByDate map[string]map[string]domain.Bar // 銘柄ごとの日付インデックス
+	lotSizes  map[string]decimal.Decimal
+	riskMgr   *risk.RiskManager
+	stopBook  *risk.StopBook
+	sizer     *portfolio.Sizer
+	universe  *strategy.Universe
+	// yields は待機資金の年利（小数）を日付で引く。営業日が飛んでも直前の値を持ち越す
+	yields map[string]decimal.Decimal
+
+	allFills      []domain.Fill
+	equityHistory []decimal.Decimal
+	totalInterest decimal.Decimal
+	lastYield     decimal.Decimal
+	previousDay   string
+}
+
+func newBacktestSim(
+	setCfg *wbjpcfg.SettingsFile,
+	stratCfg *wbjpcfg.StrategiesConfig,
+	strats []strategy.Strategy,
+	weights map[string]float64,
+	combineFunc strategy.Combiner,
+	allBars map[string][]domain.Bar,
+	initialCash decimal.Decimal,
+	opts BacktestOptions,
+) (*backtestSim, error) {
+	s := &backtestSim{
+		setCfg: setCfg, stratCfg: stratCfg, strats: strats, weights: weights,
+		combineFunc: combineFunc, allBars: allBars, opts: opts,
+		pb:            broker.NewPaperBroker(initialCash, opts.FillModel),
+		totalInterest: decimal.Zero,
+		lastYield:     decimal.Zero,
+	}
+
+	// 待機資金の年利（%）を日付で引けるようにする。営業日が飛んでも
+	// 直前の値を持ち越す（金利は毎日公表されるわけではない）。
+	s.yields = make(map[string]decimal.Decimal, len(opts.CashYield))
+	for _, b := range opts.CashYield {
+		s.yields[b.Date] = b.Close.Div(decimal.NewFromInt(100))
+	}
+
+	s.barByDate = make(map[string]map[string]domain.Bar)
 	for sym, bars := range allBars {
-		barByDate[sym] = make(map[string]domain.Bar)
+		s.barByDate[sym] = make(map[string]domain.Bar)
 		for _, b := range bars {
-			barByDate[sym][b.Date] = b
+			s.barByDate[sym][b.Date] = b
 		}
 	}
 
-	lotSizes := make(map[string]decimal.Decimal)
+	s.lotSizes = make(map[string]decimal.Decimal)
 	for _, sym := range setCfg.Universe.Symbols {
-		lotSizes[sym] = decimal.NewFromInt(100)
+		s.lotSizes[sym] = decimal.NewFromInt(100)
 		if ov, ok := setCfg.Universe.LotSizeOverrides[sym]; ok && ov > 0 {
-			lotSizes[sym] = decimal.NewFromInt(int64(ov))
+			s.lotSizes[sym] = decimal.NewFromInt(int64(ov))
 		}
 	}
 
-	riskMgr := risk.NewRiskManager(setCfg.Risk, setCfg.Universe.Symbols)
-	stopBook := risk.NewStopBook(nil)
+	s.riskMgr = risk.NewRiskManager(setCfg.Risk, setCfg.Universe.Symbols)
+	s.stopBook = risk.NewStopBook(nil)
 
 	// サイジングはライブと同じ実装を使う。保有上限・手仕舞い閾値・
 	// 再サイジング抑制が検証側だけ効かない状態を作らない。
@@ -149,200 +213,276 @@ func RunBacktest(
 	if err != nil {
 		return nil, err
 	}
+	s.sizer = sizer
 
 	// 指標は全履歴に対して一度だけ計算し、日ごとに切り詰めて見せる。
 	// 日ごとに足を切り出して計算し直すと、日数の二乗に比例して遅くなる。
-	universe := strategy.NewUniverse(allBars).SetMargin(opts.Margin)
+	s.universe = strategy.NewUniverse(allBars).SetMargin(opts.Margin)
+	return s, nil
+}
 
-	var allFills []domain.Fill
-	equityHistory := make([]decimal.Decimal, 0, len(dates))
-	totalInterest := decimal.Zero
-	lastYield := decimal.Zero
-	previousDay := ""
+// dayPrices は今日の足（寄付・高値・安値・終値）と、今日立ち会った銘柄。
+type dayPrices struct {
+	open, close, high, low map[string]decimal.Decimal
+	traded                 map[string]struct{}
+}
 
-	// 各日をシミュレーション
-	for dayIdx, today := range dates {
-		// 1. 今日の寄付・高値・安値・終値マップ
-		openPrices := make(map[string]decimal.Decimal)
-		closePrices := make(map[string]decimal.Decimal)
-		highs := make(map[string]decimal.Decimal)
-		lows := make(map[string]decimal.Decimal)
-		traded := make(map[string]struct{})
-		for sym := range allBars {
-			if b, ok := barByDate[sym][today]; ok {
-				openPrices[sym] = b.Open
-				closePrices[sym] = b.Close
-				highs[sym] = b.High
-				lows[sym] = b.Low
-				traded[sym] = struct{}{}
+func (s *backtestSim) pricesOn(today string) dayPrices {
+	p := dayPrices{
+		open:   make(map[string]decimal.Decimal),
+		close:  make(map[string]decimal.Decimal),
+		high:   make(map[string]decimal.Decimal),
+		low:    make(map[string]decimal.Decimal),
+		traded: make(map[string]struct{}),
+	}
+	for sym := range s.allBars {
+		if b, ok := s.barByDate[sym][today]; ok {
+			p.open[sym] = b.Open
+			p.close[sym] = b.Close
+			p.high[sym] = b.High
+			p.low[sym] = b.Low
+			p.traded[sym] = struct{}{}
+		}
+	}
+	return p
+}
+
+// accrueInterest は待機資金に利息を付ける。暦日の差で日割りするので、
+// 連休を挟んだ日はその日数ぶんまとめて付く。
+func (s *backtestSim) accrueInterest(today string) {
+	if len(s.yields) > 0 {
+		if y, ok := s.yields[today]; ok {
+			s.lastYield = y
+		}
+		if s.previousDay != "" {
+			if days := calendarDaysBetween(s.previousDay, today); days > 0 {
+				s.totalInterest = s.totalInterest.Add(s.pb.AccrueInterest(s.lastYield, days))
 			}
 		}
+	}
+	s.previousDay = today
+}
 
-		// 2. 待機資金に利息を付ける。暦日の差で日割りするので、
-		//    連休を挟んだ日はその日数ぶんまとめて付く。
-		if len(yields) > 0 {
-			if y, ok := yields[today]; ok {
-				lastYield = y
-			}
-			if previousDay != "" {
-				if days := calendarDaysBetween(previousDay, today); days > 0 {
-					totalInterest = totalInterest.Add(pb.AccrueInterest(lastYield, days))
-				}
-			}
+// settleOpen は前日出した注文を当日の寄付で約定させ、当日の実現損益を返す。
+// intrabar はその足の高安でも指値を約定させる（楽観的な第 2 の見立て）。
+func (s *backtestSim) settleOpen(p dayPrices) (realizedToday decimal.Decimal) {
+	s.pb.Mark(p.open)
+	s.pb.BeginDay()
+	realizedBefore := s.pb.RealizedPnL()
+	var fills []domain.Fill
+	if s.opts.FillModel == "intrabar" {
+		fills = s.pb.Settle(p.open, p.high, p.low, nil)
+	} else {
+		fills = s.pb.Settle(p.open, nil, nil, nil)
+	}
+	s.allFills = append(s.allFills, fills...)
+	// 日付の軸は全銘柄の和集合なので、ベンチマークだけが立ち会った日（東証の休場日）が
+	// 混ざりうる。その日に足の無い銘柄の注文は失効させず、次の立会いで約定させる
+	s.pb.ExpireOpenOrdersFor(p.traded)
+	return s.pb.RealizedPnL().Sub(realizedBefore)
+}
+
+// runDay は 1 日分を進める（寄付の約定 → 終値のマーク → ストップ → シグナル → 発注）。
+// last は最終日（新規建てのシグナルを出さない）。
+func (s *backtestSim) runDay(today string, last bool) {
+	// 1. 今日の寄付・高値・安値・終値マップ
+	p := s.pricesOn(today)
+
+	// 2. 待機資金に利息を付ける。
+	s.accrueInterest(today)
+
+	// 3. 前日出した注文を当日の寄付で約定。
+	realizedToday := s.settleOpen(p)
+
+	// 4. 当日の終値でマーク
+	s.pb.Mark(p.close)
+	bal, _ := s.pb.GetBalance()
+	equity := bal.CashBalance.Add(bal.MarketValue)
+	s.equityHistory = append(s.equityHistory, equity)
+	posMap, _ := s.pb.PositionsBySymbol()
+
+	// 5. 当日までの確定足を戦略に見せる眺めを作る。
+	//
+	// 未来の足は構造として見えない（Context が as_of で切り詰める）ので、
+	// 先読みバイアスは規律ではなく仕組みで防がれる。
+	stratCtx := s.universe.At(today, posMap, equity)
+	atrMap := atrBySymbol(stratCtx)
+
+	// 6. ストップロスの管理と手仕舞い判定
+	//
+	// ライブ（cmd/wbjp/run.go）と同じ順序・同じ設定で処理する（発注の審査も売りを先に: placeReviewed）。
+	// ここが食い違うと、検証結果が実運用を予測しなくなる。
+	// 手仕舞った銘柄のストップを外すのは RetainHeld だけ（模型の建玉は常に確か）
+	s.stopBook.RetainHeld(posMap)
+	s.stopBook.EnsureWithOptions(posMap, atrMap, today,
+		risk.EnsureOptionsFrom(s.setCfg.Stops, s.setCfg.Sizing.ATRStopMultiple))
+	s.stopBook.UpdateTrailing(p.close, atrMap)
+	s.stopBook.UpdateBreakeven(p.close, s.setCfg.Stops.BreakevenAfterR)
+
+	// 7. 戦略のシグナル評価とサイジング
+	targets := s.targets(today, last, stratCtx, bal, equity, posMap, p.close, atrMap)
+
+	// 8. リコンサイル
+	//
+	// ここで出す注文は翌営業日の寄付で約定する。当日の寄付で買った銘柄を翌日に売るのは
+	// 差金決済にならないので、当日買付の銘柄は渡さない（渡すと手仕舞いが常に 1 日遅れる）。
+	// 差金決済の判定そのもの（BlocksSameDaySale）はライブと同じく有効のまま。
+	openOrders, _ := s.pb.GetOpenOrders()
+	plan, err := Reconcile(targets, posMap, openOrders, p.close, s.lotSizes,
+		ReconcileSettings{
+			OrderType:         domain.OrderTypeMarket,
+			LimitOffset:       decimal.Zero,
+			TaxType:           domain.TaxAccountSpecific,
+			BlocksSameDaySale: true,
+		},
+		nil, today)
+	if err != nil {
+		return
+	}
+
+	// 9. リスク検査と発注。当日の実現損益は寄付の約定から出す（日次の損失上限を効かせる）
+	riskCtx := risk.RiskContext{
+		Equity:           equity,
+		Balance:          *bal,
+		Positions:        posMap,
+		BasePrices:       p.close,
+		PendingValue:     make(map[string]decimal.Decimal),
+		OrdersToday:      0,
+		RealizedPnLToday: realizedToday,
+	}
+
+	placeReviewed(plan.Orders, s.riskMgr, &riskCtx, func(req domain.OrderRequest) { _, _ = s.pb.Place(req) })
+}
+
+// atrBySymbol は 14 本以上の足がある銘柄の ATR(14)。
+func atrBySymbol(stratCtx *strategy.Context) map[string]decimal.Decimal {
+	atrMap := make(map[string]decimal.Decimal)
+	for _, sym := range stratCtx.Symbols() {
+		v, ok := stratCtx.Bars(sym)
+		if !ok || v.Len() < 14 {
+			continue
 		}
-		previousDay = today
-
-		// 3. 前日出した注文を当日の寄付で約定。
-		//    intrabar はその足の高安でも指値を約定させる（楽観的な第 2 の見立て）。
-		pb.Mark(openPrices)
-		pb.BeginDay()
-		realizedBefore := pb.RealizedPnL()
-		var fills []domain.Fill
-		if opts.FillModel == "intrabar" {
-			fills = pb.Settle(openPrices, highs, lows, nil)
-		} else {
-			fills = pb.Settle(openPrices, nil, nil, nil)
+		if value := lastFiniteOf(v.ATR(14)); !math.IsNaN(value) {
+			atrMap[sym] = decimal.NewFromFloat(value)
 		}
-		allFills = append(allFills, fills...)
-		// 日付の軸は全銘柄の和集合なので、ベンチマークだけが立ち会った日（東証の休場日）が
-		// 混ざりうる。その日に足の無い銘柄の注文は失効させず、次の立会いで約定させる
-		pb.ExpireOpenOrdersFor(traded)
-		realizedToday := pb.RealizedPnL().Sub(realizedBefore)
+	}
+	return atrMap
+}
 
-		// 4. 当日の終値でマーク
-		pb.Mark(closePrices)
-		bal, _ := pb.GetBalance()
-		equity := bal.CashBalance.Add(bal.MarketValue)
-		equityHistory = append(equityHistory, equity)
-		posMap, _ := pb.PositionsBySymbol()
-
-		// 5. 当日までの確定足を戦略に見せる眺めを作る。
-		//
-		// 未来の足は構造として見えない（Context が as_of で切り詰める）ので、
-		// 先読みバイアスは規律ではなく仕組みで防がれる。
-		stratCtx := universe.At(today, posMap, equity)
-
-		atrMap := make(map[string]decimal.Decimal)
-		for _, sym := range stratCtx.Symbols() {
-			v, ok := stratCtx.Bars(sym)
-			if !ok || v.Len() < 14 {
-				continue
-			}
-			if value := lastFiniteOf(v.ATR(14)); !math.IsNaN(value) {
-				atrMap[sym] = decimal.NewFromFloat(value)
-			}
-		}
-
-		// 6. ストップロスの管理と手仕舞い判定
-		//
-		// ライブ（cmd/wbjp/run.go）と同じ順序・同じ設定で処理する（発注の審査も売りを先に: placeReviewed）。
-		// ここが食い違うと、検証結果が実運用を予測しなくなる。
-		// 手仕舞った銘柄のストップを外すのは RetainHeld だけ（模型の建玉は常に確か）
-		stopBook.RetainHeld(posMap)
-		stopBook.EnsureWithOptions(posMap, atrMap, today,
-			risk.EnsureOptionsFrom(setCfg.Stops, setCfg.Sizing.ATRStopMultiple))
-		stopBook.UpdateTrailing(closePrices, atrMap)
-		stopBook.UpdateBreakeven(closePrices, setCfg.Stops.BreakevenAfterR)
-
-		// 7. 戦略のシグナル評価とサイジング
-		//
-		// ライブ（cmd/wbjp/run.go）と同じく、戦略には全銘柄をまとめて渡す。
-		signalMap := make(map[string]domain.CombinedSignal)
-		if dayIdx < len(dates)-1 { // 最終日は新規建て不要
-			signalsBySymbol := make(map[string][]domain.Signal)
-			for _, s := range strats {
-				sigs, err := s.OnBars(stratCtx)
-				if err != nil {
-					continue
-				}
-				for _, sig := range sigs {
-					signalsBySymbol[sig.Symbol] = append(signalsBySymbol[sig.Symbol], sig)
-				}
-			}
-			for _, sym := range setCfg.Universe.Symbols {
-				if !stratCtx.HasBars(sym, 1) {
-					continue
-				}
-				signalMap[sym] = combineFunc(sym, signalsBySymbol[sym], weights)
-			}
-		}
-
-		sizingEquity := equity
-		if setCfg.Regime.Enabled {
-			regimeName, exposure := risk.RegimeExposure(setCfg.Regime, benchmarkInput(stratCtx, setCfg.Regime))
-			signalMap, sizingEquity = risk.ApplyRegime(regimeName, exposure, signalMap, posMap, equity)
-		}
-
-		strategyTargets := sizer.Size(signalMap, portfolio.SizingContext{
-			Equity:      sizingEquity,
-			BuyingPower: bal.BuyingPower,
-			Prices:      closePrices,
-			ATR:         atrMap,
-			LotSizes:    lotSizes,
-			Positions:   posMap,
-		}, stratCfg.EntryThreshold, stratCfg.ExitThreshold)
-
-		quantities := make(map[string]decimal.Decimal, len(posMap))
-		for sym, pos := range posMap {
-			quantities[sym] = pos.Quantity
-		}
-		// ストップ由来の目標は本番と同じ risk.ExitPlan を通す（損切り・時間切れ・利確・残り玉）。
-		// 出した売りは翌寄りで必ず約定するので、利確は決めた時点で確定する（AssumeFilled）。
-		// 本番は保有が減ったのを見てから確定する（約定しなかった利確を出し直すため）
-		stopTargets := stopBook.ExitPlan(setCfg.Stops, risk.ExitInputs{
-			Closes: closePrices, Quantities: quantities, LotSizes: lotSizes, AsOf: today,
-			AssumeFilled: true, TradingDay: opts.TradingDay,
-			Bars: func(sym string) []domain.Bar {
-				v, ok := stratCtx.Bars(sym)
-				if !ok {
-					return nil
-				}
-				return v.Bars()
-			},
-		})
-
-		targets := make(map[string]domain.TargetPosition)
-		for _, t := range risk.ApplyStopPriority(strategyTargets, stopTargets) {
-			targets[t.Symbol] = t
-		}
-
-		// 8. リコンサイル
-		//
-		// ここで出す注文は翌営業日の寄付で約定する。当日の寄付で買った銘柄を翌日に売るのは
-		// 差金決済にならないので、当日買付の銘柄は渡さない（渡すと手仕舞いが常に 1 日遅れる）。
-		// 差金決済の判定そのもの（BlocksSameDaySale）はライブと同じく有効のまま。
-		openOrders, _ := pb.GetOpenOrders()
-		plan, err := Reconcile(targets, posMap, openOrders, closePrices, lotSizes,
-			ReconcileSettings{
-				OrderType:         domain.OrderTypeMarket,
-				LimitOffset:       decimal.Zero,
-				TaxType:           domain.TaxAccountSpecific,
-				BlocksSameDaySale: true,
-			},
-			nil, today)
+// signals は戦略のシグナルを銘柄ごとにまとめる。
+//
+// ライブ（cmd/wbjp/run.go）と同じく、戦略には全銘柄をまとめて渡す。
+func (s *backtestSim) signals(stratCtx *strategy.Context) map[string]domain.CombinedSignal {
+	signalMap := make(map[string]domain.CombinedSignal)
+	signalsBySymbol := make(map[string][]domain.Signal)
+	for _, st := range s.strats {
+		sigs, err := st.OnBars(stratCtx)
 		if err != nil {
 			continue
 		}
-
-		// 9. リスク検査と発注。当日の実現損益は寄付の約定から出す（日次の損失上限を効かせる）
-		riskCtx := risk.RiskContext{
-			Equity:           equity,
-			Balance:          *bal,
-			Positions:        posMap,
-			BasePrices:       closePrices,
-			PendingValue:     make(map[string]decimal.Decimal),
-			OrdersToday:      0,
-			RealizedPnLToday: realizedToday,
+		for _, sig := range sigs {
+			signalsBySymbol[sig.Symbol] = append(signalsBySymbol[sig.Symbol], sig)
 		}
+	}
+	for _, sym := range s.setCfg.Universe.Symbols {
+		if !stratCtx.HasBars(sym, 1) {
+			continue
+		}
+		signalMap[sym] = s.combineFunc(sym, signalsBySymbol[sym], s.weights)
+	}
+	return signalMap
+}
 
-		placeReviewed(plan.Orders, riskMgr, &riskCtx, func(req domain.OrderRequest) { _, _ = pb.Place(req) })
+// targets は戦略の目標（地合いとサイジングを通したもの）とストップ由来の目標を合わせる。
+func (s *backtestSim) targets(
+	today string,
+	last bool,
+	stratCtx *strategy.Context,
+	bal *domain.Balance,
+	equity decimal.Decimal,
+	posMap map[string]domain.Position,
+	closePrices, atrMap map[string]decimal.Decimal,
+) map[string]domain.TargetPosition {
+	signalMap := make(map[string]domain.CombinedSignal)
+	if !last { // 最終日は新規建て不要
+		signalMap = s.signals(stratCtx)
 	}
 
-	finalBal, _ := pb.GetBalance()
+	sizingEquity := equity
+	if s.setCfg.Regime.Enabled {
+		regimeName, exposure := risk.RegimeExposure(s.setCfg.Regime, benchmarkInput(stratCtx, s.setCfg.Regime))
+		signalMap, sizingEquity = risk.ApplyRegime(regimeName, exposure, signalMap, posMap, equity)
+	}
+
+	strategyTargets := s.sizer.Size(signalMap, portfolio.SizingContext{
+		Equity:      sizingEquity,
+		BuyingPower: bal.BuyingPower,
+		Prices:      closePrices,
+		ATR:         atrMap,
+		LotSizes:    s.lotSizes,
+		Positions:   posMap,
+	}, s.stratCfg.EntryThreshold, s.stratCfg.ExitThreshold)
+
+	quantities := make(map[string]decimal.Decimal, len(posMap))
+	for sym, pos := range posMap {
+		quantities[sym] = pos.Quantity
+	}
+	// ストップ由来の目標は本番と同じ risk.ExitPlan を通す（損切り・時間切れ・利確・残り玉）。
+	// 出した売りは翌寄りで必ず約定するので、利確は決めた時点で確定する（AssumeFilled）。
+	// 本番は保有が減ったのを見てから確定する（約定しなかった利確を出し直すため）
+	stopTargets := s.stopBook.ExitPlan(s.setCfg.Stops, risk.ExitInputs{
+		Closes: closePrices, Quantities: quantities, LotSizes: s.lotSizes, AsOf: today,
+		AssumeFilled: true, TradingDay: s.opts.TradingDay,
+		Bars: func(sym string) []domain.Bar {
+			v, ok := stratCtx.Bars(sym)
+			if !ok {
+				return nil
+			}
+			return v.Bars()
+		},
+	})
+
+	targets := make(map[string]domain.TargetPosition)
+	for _, t := range risk.ApplyStopPriority(strategyTargets, stopTargets) {
+		targets[t.Symbol] = t
+	}
+	return targets
+}
+
+// stats は最終日までの結果をまとめる。
+func (s *backtestSim) stats(initialCash decimal.Decimal, days int) *BacktestStats {
+	finalBal, _ := s.pb.GetBalance()
 	finalEquity := finalBal.CashBalance.Add(finalBal.MarketValue)
 	totalReturn := finalEquity.Sub(initialCash).Div(initialCash)
 
-	// 最大ドローダウン計算
+	// 勝率は約定を FIFO で往復に突き合わせないと出せない（analysis.go）
+	winning, losing, winRate := TradeStats(s.allFills)
+
+	sells := 0
+	for _, f := range s.allFills {
+		if f.Side == domain.SideSell {
+			sells++
+		}
+	}
+
+	return &BacktestStats{
+		InitialEquity: initialCash,
+		FinalEquity:   finalEquity,
+		TotalReturn:   totalReturn,
+		MaxDrawdown:   maxDrawdown(initialCash, s.equityHistory),
+		TotalFills:    len(s.allFills),
+		SellFills:     sells,
+		Days:          days,
+		WinningTrades: winning,
+		LosingTrades:  losing,
+		WinRate:       winRate,
+		Interest:      s.totalInterest,
+		Analysis:      Analyze(s.equityHistory, s.allFills),
+	}
+}
+
+// maxDrawdown は資産の推移の最大ドローダウン（初期資産を最初の山とする）。
+func maxDrawdown(initialCash decimal.Decimal, equityHistory []decimal.Decimal) decimal.Decimal {
 	maxPeak := initialCash
 	maxDD := decimal.Zero
 	for _, eq := range equityHistory {
@@ -356,31 +496,7 @@ func RunBacktest(
 			}
 		}
 	}
-
-	// 勝率は約定を FIFO で往復に突き合わせないと出せない（analysis.go）
-	winning, losing, winRate := TradeStats(allFills)
-
-	sells := 0
-	for _, f := range allFills {
-		if f.Side == domain.SideSell {
-			sells++
-		}
-	}
-
-	return &BacktestStats{
-		InitialEquity: initialCash,
-		FinalEquity:   finalEquity,
-		TotalReturn:   totalReturn,
-		MaxDrawdown:   maxDD,
-		TotalFills:    len(allFills),
-		SellFills:     sells,
-		Days:          len(dates),
-		WinningTrades: winning,
-		LosingTrades:  losing,
-		WinRate:       winRate,
-		Interest:      totalInterest,
-		Analysis:      Analyze(equityHistory, allFills),
-	}, nil
+	return maxDD
 }
 
 // orDash は空文字を "—" にする（期間の片側だけ指定されたときの表示用）。
