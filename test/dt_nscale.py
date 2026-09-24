@@ -323,10 +323,10 @@ def part_prod(i0s, seeds, slot):
               f"  N=3 との日次差 t {tstat(diff) if name != 'N=3 逆ボラ' else 0:5.2f}")
 
 
-def alloc_rule(g, p, rmax, cap_total):
-    """規則 R: 順位順に w = min(p × 売買代金, 資金 ÷ 3) を割り当て、資金か順位 rmax で止める。"""
+def alloc_rule(g, p, rmax, cap_total, cap_name=np.inf):
+    """規則 R: 順位順に w = min(p × 売買代金, 資金 ÷ 3, cap_name) を割り当て、資金か順位 rmax で止める。"""
     sel = g[g["rank"] <= rmax]
-    w = np.minimum(p * sel["turnover_med"].values, cap_total / 3)
+    w = np.minimum(np.minimum(p * sel["turnover_med"].values, cap_total / 3), cap_name)
     cum = np.cumsum(w)
     w = np.where(cum <= cap_total, w, np.maximum(cap_total - (cum - w), 0.0))
     m = w > 0
@@ -486,6 +486,79 @@ def part_cap200(i0s, seeds, slot, caps, cap_name=2e6):
                 print(f"  I0 {i0:>3.0f} 資金 {C/1e4:4.0f} 万 {lab}: " + " | ".join(out))
 
 
+def part_rvc(i0s, seeds, slot, caps, cap_name=2e6):
+    """規則 R（p 0.2%・20 位）と C（N=3 逆ボラ・1 銘柄 200 万・余りは 4 位以降）を同じ条件で直接比べる。"""
+    from dt_preopen_sim import error_pools
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet")
+    te = te[te["d"] >= SINCE].copy()
+    pools = error_pools(slot, "2026-09-11")
+    rules = day_rules(te)
+    acc = {}
+    fns = [("A", lambda x, c: alloc_fixed_iv(x, 3, c)),
+           ("C", lambda x, c: alloc_iv_cap(x, 3, c, cap_name, True)),
+           ("R", lambda x, c: alloc_rule(x, 0.002, 20, c))]
+    for seed in range(seeds):
+        g = seen_ranked(te, pools, seed)
+        days = [(d, x) for d, x in g.groupby("d") if not rules.loc[d, "skip"]]
+        for i0 in i0s:
+            kappa = calib_kappa(g, i0 * 1e-4)
+            for C in caps:
+                for lab, fn in fns:
+                    acc.setdefault((i0, C, lab), []).append(pd.Series(
+                        {d: pnl_day(x, *fn(x, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+    alld = pd.DatetimeIndex(sorted(te["d"].unique()))
+    print(f"\n## L. 規則 R と C（1 銘柄 {cap_name/1e4:.0f} 万・余りは次点）の直接比較（{seeds} シード平均）")
+    for i0 in i0s:
+        for C in caps:
+            v = {lab: pd.concat(acc[(i0, C, lab)], axis=1).reindex(alld).fillna(0.0).mean(axis=1) for lab, _ in fns}
+            out = []
+            for pl, sl in [("IS", alld <= IS_END), ("OOS", alld > IS_END)]:
+                dd = (v["R"] - v["C"])[sl]
+                out.append(f"{pl} A {v['A'][sl].mean()*245/C*100:5.1f}% C {v['C'][sl].mean()*245/C*100:5.1f}% "
+                           f"R {v['R'][sl].mean()*245/C*100:5.1f}% R−C {dd.mean()*245/1e4:+6.1f} 万円/年 (t {tstat(dd):5.2f})")
+            print(f"  I0 {i0:>3.0f} 資金 {C/1e4:4.0f} 万: " + " | ".join(out))
+
+
+def part_r200(i0s, seeds, slot, caps, cap_name=2e6):
+    """規則 R（p 0.2%・20 位）と、規則 R に 1 銘柄 200 万の上限を重ねた R200 を同じ条件で比べる。"""
+    from dt_preopen_sim import error_pools
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet")
+    te = te[te["d"] >= SINCE].copy()
+    pools = error_pools(slot, "2026-09-11")
+    rules = day_rules(te)
+    acc = {}
+    fns = [("A", lambda x, c: alloc_fixed_iv(x, 3, c)),
+           ("R", lambda x, c: alloc_rule(x, 0.002, 20, c)),
+           ("R200", lambda x, c: alloc_rule(x, 0.002, 20, c, cap_name))]
+    for seed in range(seeds):
+        g = seen_ranked(te, pools, seed)
+        days = [(d, x) for d, x in g.groupby("d") if not rules.loc[d, "skip"]]
+        for i0 in i0s:
+            kappa = calib_kappa(g, i0 * 1e-4)
+            for C in caps:
+                for lab, fn in fns:
+                    acc.setdefault((i0, C, lab), []).append(pd.Series(
+                        {d: pnl_day(x, *fn(x, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+                    if seed == 0 and i0 == i0s[0]:
+                        acc[(C, lab, "use")] = np.mean([fn(x, C * rules.loc[d, "mult"])[1].sum() / (C * rules.loc[d, "mult"])
+                                                        for d, x in days])
+                        acc[(C, lab, "n")] = np.mean([len(fn(x, C * rules.loc[d, "mult"])[0]) for d, x in days])
+    alld = pd.DatetimeIndex(sorted(te["d"].unique()))
+    print(f"\n## M. 規則 R と、規則 R ＋ 1 銘柄 {cap_name/1e4:.0f} 万（{seeds} シード平均、休みの日は 0）")
+    for C in caps:
+        print(f"  資金 {C/1e4:.0f} 万: 資金の使用率 R {acc[(C, 'R', 'use')]:.0%} R200 {acc[(C, 'R200', 'use')]:.0%}、"
+              f"銘柄数 R {acc[(C, 'R', 'n')]:.1f} R200 {acc[(C, 'R200', 'n')]:.1f}")
+    for i0 in i0s:
+        for C in caps:
+            v = {lab: pd.concat(acc[(i0, C, lab)], axis=1).reindex(alld).fillna(0.0).mean(axis=1) for lab, _ in fns}
+            out = []
+            for pl, sl in [("IS", alld <= IS_END), ("OOS", alld > IS_END)]:
+                dd = (v["R200"] - v["R"])[sl]
+                out.append(f"{pl} A {v['A'][sl].mean()*245/C*100:5.1f}% R {v['R'][sl].mean()*245/C*100:5.1f}% "
+                           f"R200 {v['R200'][sl].mean()*245/C*100:5.1f}% 差 {dd.mean()*245/1e4:+6.1f} 万円/年 (t {tstat(dd):5.2f})")
+            print(f"  I0 {i0:>3.0f} 資金 {C/1e4:4.0f} 万: " + " | ".join(out))
+
+
 def part_now(i0s, seeds, slot, caps):
     """今の資金（ロング 500〜700 万）で規則 R（p 0.2%、Rmax 20 に固定）と N=3 逆ボラを比べる。"""
     from dt_preopen_sim import error_pools
@@ -533,6 +606,12 @@ def main():
         part_rank(c)
     if a.part in ("keybin", "all"):
         part_keybin(c)
+    if a.part == "rvc":
+        part_rvc(a.i0, a.seeds, a.slot, [5e6, 7e6, 1e7, 3e7])
+        return
+    if a.part == "r200":
+        part_r200(a.i0, a.seeds, a.slot, [7e6, 1e7, 3e7, 5e7])
+        return
     if a.part == "cap200":
         part_cap200(a.i0, a.seeds, a.slot, [5e6, 7e6, 1e7])
         return
