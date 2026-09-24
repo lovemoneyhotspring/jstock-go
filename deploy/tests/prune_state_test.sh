@@ -38,6 +38,12 @@ for d in 20260910 20260916 20260917 20260924; do
 done
 : > "$S/tachibana/session-uat-20260911.json.lock"   # ロックだけ残った組
 echo x > "$S/tachibana/session-notes.json"          # 日付の無い名前は触らない
+# test/out: 更新時刻で見る（名前に日付が無い）。31 日前は消し、29 日前・.gitkeep は残す
+mkdir -p "$T/test/out/sub"
+echo o > "$T/test/out/old.parquet"; touch -d "31 days ago" "$T/test/out/old.parquet"
+echo o > "$T/test/out/sub/old.csv"; touch -d "31 days ago" "$T/test/out/sub/old.csv"
+echo n > "$T/test/out/recent.parquet"; touch -d "29 days ago" "$T/test/out/recent.parquet"
+: > "$T/test/out/.gitkeep"; touch -d "100 days ago" "$T/test/out/.gitkeep"
 flock "$S/tachibana/session-prod-20260910.json.lock" sleep 30 &
 holder=$!
 trap 'kill "$holder" 2>/dev/null; rm -rf "$T"' EXIT
@@ -47,7 +53,7 @@ before=$(find "$T" -type f | sort | xargs -I{} sh -c 'echo "{} $(stat -c %s {})"
 out=$(WBJP_HOME="$T" PRUNE_TODAY=2026-09-24 PRUNE_LOG_MAX_MB=1 "$REPO/deploy/prune-state.sh" --dry-run); rc=$?
 after=$(find "$T" -type f | sort | xargs -I{} sh -c 'echo "{} $(stat -c %s {})"')
 check "--dry-run は何も変えない（exit 0）" '[ "$rc" = 0 ] && [ "$before" = "$after" ]'
-check "--dry-run は数を出す" 'printf "%s\n" "$out" | tail -1 | grep -q "logs（1MB 超を退避）1 本.*digest（400 日より前）2 件.*crontab の控え（90 日より前・新しい 20 世代は残す）11 件.*立花のセッション（7 日より前）3 件"'
+check "--dry-run は数を出す" 'printf "%s\n" "$out" | tail -1 | grep -q "logs（1MB 超を退避）1 本.*digest（400 日より前）2 件.*crontab の控え（90 日より前・新しい 20 世代は残す）11 件.*立花のセッション（7 日より前）3 件.*test/out（30 日より前）2 件"'
 
 out=$(WBJP_HOME="$T" PRUNE_TODAY=2026-09-24 PRUNE_LOG_MAX_MB=1 "$REPO/deploy/prune-state.sh"); rc=$?
 check "本番の回も exit 0" '[ "$rc" = 0 ]'
@@ -67,6 +73,8 @@ check "立花のセッションは 7 日より前の組を消す（境目の日�
 check "ロックを握られている組は古くても残す" \
   '[ -f "$S/tachibana/session-prod-20260910.json" ] && [ -f "$S/tachibana/session-prod-20260910.json.lock" ] && printf "%s\n" "$out" | grep -q "使用中のため残す"'
 check "日付の無いセッションの名前は触らない" '[ -f "$S/tachibana/session-notes.json" ]'
+check "test/out は 30 日より前だけ消す（下のディレクトリも・.gitkeep とディレクトリは残す）" \
+  '[ ! -e "$T/test/out/old.parquet" ] && [ ! -e "$T/test/out/sub/old.csv" ] && [ -f "$T/test/out/recent.parquet" ] && [ -f "$T/test/out/.gitkeep" ] && [ -d "$T/test/out/sub" ]'
 check "data/jquants/_raw は消さない" '[ -f "$T/data/jquants/_raw/equities_bars_daily/x_201608.csv.gz" ]'
 
 "$REPO/deploy/prune-state.sh" --bogus >/dev/null 2>&1; rc=$?
