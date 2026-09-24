@@ -448,8 +448,9 @@ func validateRisk(r RiskConfig) error {
 	if r.MaxPreviewDeviation.IsNegative() {
 		return fmt.Errorf("risk.max_preview_deviation は 0 以上: %s", r.MaxPreviewDeviation)
 	}
-	if r.MaxOrdersPerDay < 0 {
-		return fmt.Errorf("risk.max_orders_per_day は 0 以上: %d", r.MaxOrdersPerDay)
+	// 0 は「1 件も出さない」と同じで、損切りも含め全注文が止まる（書き忘れも 0 になる）
+	if r.MaxOrdersPerDay <= 0 {
+		return fmt.Errorf("risk.max_orders_per_day は 1 以上（0 だと損切りも含め全注文が止まる）: %d", r.MaxOrdersPerDay)
 	}
 	return nil
 }

@@ -3,12 +3,27 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/shopspring/decimal"
 )
 
+// writeSettings は settings.toml を書く。必須の risk.max_orders_per_day が無ければ足す
+// （各テストが見たい項目だけを書けるように）。必須項目そのものは writeSettingsRaw で試す。
 func writeSettings(t *testing.T, body string) string {
+	t.Helper()
+	if !strings.Contains(body, "max_orders_per_day") {
+		if strings.Contains(body, "[risk]\n") {
+			body = strings.Replace(body, "[risk]\n", "[risk]\nmax_orders_per_day = 20\n", 1)
+		} else {
+			body += "\n[risk]\nmax_orders_per_day = 20\n"
+		}
+	}
+	return writeSettingsRaw(t, body)
+}
+
+func writeSettingsRaw(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "settings.toml"), []byte(body), 0o644); err != nil {
@@ -320,5 +335,25 @@ func TestLoadStrategiesConfigStrict(t *testing.T) {
 	}
 	if cfg.Combiner != "majority" || len(cfg.Strategies) != 1 || cfg.Strategies[0].Fast != 5 {
 		t.Errorf("読めていない: %+v", cfg)
+	}
+}
+
+// TestLoadSettingsFileRequiresMaxOrdersPerDay は 2026-09-24 のレビューの再現。
+// max_orders_per_day が 0（書き忘れも 0 になる）だと損切りも含め全注文が止まるので、読み込みで止める。
+func TestLoadSettingsFileRequiresMaxOrdersPerDay(t *testing.T) {
+	for name, body := range map[string]string{
+		"書き忘れ": "[universe]\nsymbols = [\"7203\"]\n",
+		"0":    "[risk]\nmax_orders_per_day = 0\n",
+		"負":    "[risk]\nmax_orders_per_day = -1\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadSettingsFile(writeSettingsRaw(t, body)); err == nil {
+				t.Error("通ってしまった")
+			}
+		})
+	}
+	cfg, err := LoadSettingsFile(writeSettingsRaw(t, "[risk]\nmax_orders_per_day = 1\n"))
+	if err != nil || cfg.Risk.MaxOrdersPerDay != 1 {
+		t.Errorf("1 は通る: %+v err=%v", cfg, err)
 	}
 }
