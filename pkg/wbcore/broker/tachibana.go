@@ -113,22 +113,12 @@ func SetDeadline(b Broker, deadline time.Time) {
 type ErrDeadline struct {
 	CLMID    string
 	Deadline time.Time
-	// Margin は 0 でなければ、締め切りの前でも残りがこれ未満だったので送らなかった（新規注文）。
-	Margin time.Duration
 }
 
 func (e *ErrDeadline) Error() string {
-	at := clock.ToZone(e.Deadline, clock.Tokyo).Format("15:04:05")
-	if e.Margin > 0 {
-		return fmt.Sprintf("%s: 締め切り（%s）まで %s を切っていたため送りませんでした（応答を待てず結果不明になるため）",
-			e.CLMID, at, e.Margin)
-	}
-	return fmt.Sprintf("%s: 締め切り（%s）を過ぎたため送りませんでした", e.CLMID, at)
+	return fmt.Sprintf("%s: 締め切り（%s）を過ぎたため送りませんでした",
+		e.CLMID, clock.ToZone(e.Deadline, clock.Tokyo).Format("15:04:05"))
 }
-
-// minOrderWindow は新規注文を送るのに要る締め切りまでの残り。発注の往復は本番で
-// p50 0.09 秒・最大 0.15 秒（2026-09-25 までの 48 件）なので、1 秒あれば応答まで待てる。
-const minOrderWindow = time.Second
 
 // ErrNotSent は注文の電文を**送る前に**失敗した（返済する建玉の照会が落ちた等）。
 //
@@ -208,19 +198,11 @@ func (t *TachibanaBroker) canWait(d time.Duration) bool {
 
 // requestContext は 1 電文の context。timeout と締め切りの近い方で切れる。
 // 締め切りを過ぎていれば送らずに ErrDeadline。
-//
-// 新規注文は締め切りまで minOrderWindow を切っていれば送らない。timeout が数十 ms に
-// 縮んだ電文は、届いたのに応答を待てずに結果不明（PENDING）になりやすい。結果不明は
-// 一覧で判定するまで送り直せず、判定を誤れば二重発注になる。送らなければ ErrDeadline で、
-// 呼び出し側（daytrade・wbjp）はこれを「送っていない」（UNSENT）として扱う。
 func (t *TachibanaBroker) requestContext(clmID string, timeout time.Duration) (context.Context, context.CancelFunc, error) {
 	if !t.deadline.IsZero() {
 		remaining := time.Until(t.deadline)
 		if remaining <= 0 {
 			return nil, nil, &ErrDeadline{CLMID: clmID, Deadline: t.deadline}
-		}
-		if clmID == clmNewOrder && remaining < minOrderWindow {
-			return nil, nil, &ErrDeadline{CLMID: clmID, Deadline: t.deadline, Margin: minOrderWindow}
 		}
 		if remaining < timeout {
 			timeout = remaining

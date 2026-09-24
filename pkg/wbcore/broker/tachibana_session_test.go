@@ -428,28 +428,6 @@ func TestDeadlinePreventsSending(t *testing.T) {
 	}
 }
 
-// 締め切りまで minOrderWindow を切っていれば新規注文は送らない（timeout が縮んで結果不明に
-// なりやすい）。照会は締め切りまで送る
-func TestNewOrderNeedsMinimumWindow(t *testing.T) {
-	b, fake := newFixtureBroker(t)
-	if _, err := b.postRequest(clmOrderList, map[string]any{}); err != nil {
-		t.Fatal(err)
-	}
-	b.SetDeadline(time.Now().Add(minOrderWindow / 2))
-	sent := fake.countCLM(clmNewOrder)
-	_, err := b.Place(cashOrderRequest("c1"))
-	var deadline *ErrDeadline
-	if !errors.As(err, &deadline) || deadline.Margin != minOrderWindow {
-		t.Fatalf("締め切り間際の新規注文が ErrDeadline（Margin 付き）でない: %v", err)
-	}
-	if fake.countCLM(clmNewOrder) != sent {
-		t.Fatal("締め切り間際に新規注文を送った")
-	}
-	if _, err := b.postRequest(clmOrderList, map[string]any{}); err != nil {
-		t.Fatalf("締め切り前の照会まで止めた: %v", err)
-	}
-}
-
 // 立花証券が配る秘密鍵は DER（e_api_private_key.der）。PEM に変換しなくても読めること。
 func TestParseRSAPrivateKeyAcceptsPEMAndDER(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
