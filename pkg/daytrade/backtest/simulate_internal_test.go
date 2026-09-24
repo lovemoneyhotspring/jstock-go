@@ -149,3 +149,36 @@ func TestSeesawScalesPausedKeepsShortOffBudget(t *testing.T) {
 		t.Errorf("ショック日: long=%v short=%v, want 1.5 / 0", long, short)
 	}
 }
+
+// 規則 R（capacity_ratio）の検証のショック日は、本番の保証金が読めない朝と同じく長短の固定合計で
+// 頭打ちにする（2026-09-25 のレビュー。従来はロング 500 万 × 1.5 = 750 万で、本番の 700 万を超えていた）
+func TestShockTotalCapMatchesLiveFallback(t *testing.T) {
+	cfg, err := config.Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	if !cfg.Margin.CapacityRatio.IsPositive() {
+		t.Skip("capacity_ratio を置かない設定")
+	}
+	fixed := cfg.Capital.MaxCapital.Add(cfg.Margin.MaxCapital)
+	limit := shockTotalCap(cfg)
+	if !limit.Equal(fixed) {
+		t.Fatalf("ショック日の上限 %s, want 長短の固定合計 %s", limit, fixed)
+	}
+	n := cfg.Capital.Positions()
+	shockLong, _ := cfg.Regime.ShockLongScale.Float64()
+	b := preScaledBudget(cfg.Capital.BudgetPerOrder(), shockLong, true, n, limit)
+	if total := b.Mul(decimal.NewFromInt(int64(n))); total.GreaterThan(fixed) {
+		t.Errorf("ショック日の総額 %s が固定合計 %s を超えた", total, fixed)
+	}
+	// 平日は頭打ちしない
+	if b := preScaledBudget(cfg.Capital.BudgetPerOrder(), 1, false, n, limit); !b.Equal(cfg.Capital.BudgetPerOrder()) {
+		t.Errorf("平日の予算 %s, want %s", b, cfg.Capital.BudgetPerOrder())
+	}
+	// 比を置かない設定は上限なし（本番も ShockTotalCap を入れない）
+	plain := cfg
+	plain.Margin.CapacityRatio = decimal.Zero
+	if got := shockTotalCap(plain); !got.IsZero() {
+		t.Errorf("比の無い設定の上限 %s, want 0", got)
+	}
+}

@@ -104,6 +104,7 @@ func SimulateMarginWith(panel *Panel, cfg config.Config, signals *Inputs, opts O
 			longParams: longParams, longRows: longRows, shortTrades: shortTrades, byKey: byKey,
 			shortTotal: cfg.Margin.BudgetPerOrder().Mul(decimal.NewFromInt(int64(nShort))).InexactFloat64(), carryPenalty: carryPenalty,
 			longCapital: longCapital, shortCapital: shortCapital,
+			shockTotalCap: shockTotalCap(cfg),
 		})
 	}
 
@@ -252,6 +253,39 @@ type spillInputs struct {
 	carryPenalty float64
 	longCapital  float64
 	shortCapital float64
+	// shockTotalCap はショック日のロングの総額の上限（0 なら上限なし。shockTotalCap）。
+	shockTotalCap decimal.Decimal
+}
+
+// preScaledBudget は規則 R の選ぶ前の 1 注文の予算: 倍率を掛け、ショック日は総額を limit で頭打ち
+// （本番の execute.SizeDay と同じ順序: 倍率の後、余りの前）。limit 0 は上限なし。
+func preScaledBudget(budget decimal.Decimal, longScale float64, shock bool, n int, limit decimal.Decimal) decimal.Decimal {
+	b := budget.Mul(decimal.NewFromFloat(longScale)).Floor()
+	if shock && limit.IsPositive() && n > 0 {
+		if b.Mul(decimal.NewFromInt(int64(n))).GreaterThan(limit) {
+			b = limit.Div(decimal.NewFromInt(int64(n))).Floor()
+		}
+	}
+	return b
+}
+
+// shockTotalCap はショック日のロングの総額の上限。本番は margincap が朝の建可能額 × shock_capacity_ratio
+// を capital.ShockTotalCap に入れ（execute.SizeDay が頭打ち）、保証金が読めない朝は長短の固定合計
+// （capital.max_capital + margin.max_capital）にする（cmd/daytrade の ratioFallbackConfig）。
+// 検証は資金を固定値で回すので、後者と同じ値で頭打ちにする。比を置かない設定は上限なし（本番と同じ）。
+func shockTotalCap(cfg config.Config) decimal.Decimal {
+	limit := cfg.Capital.ShockTotalCap
+	if !cfg.Margin.CapacityRatio.IsPositive() {
+		return limit
+	}
+	fixed := cfg.Capital.MaxCapital
+	if cfg.Margin.Enabled {
+		fixed = fixed.Add(cfg.Margin.MaxCapital)
+	}
+	if !limit.IsPositive() || limit.GreaterThan(fixed) {
+		limit = fixed
+	}
+	return limit
 }
 
 // simulateMarginSpill は margin.spill_to_long の検証。ショートで使わなかった資金をその日の
@@ -294,7 +328,7 @@ func simulateMarginSpill(panel *Panel, cfg config.Config, signals *Inputs, in sp
 		// 余りが下の順位へ回らない（本番と銘柄数も金額も変わる）。等金額は後から掛けても同じなので従来どおり
 		pickBudget, longMul := budget, longScale
 		if in.preScale {
-			pickBudget, longMul = budget.Mul(decimal.NewFromFloat(longScale)).Floor(), 1
+			pickBudget, longMul = preScaledBudget(budget, longScale, verdict.Shock, nLong, in.shockTotalCap), 1
 			if longScale <= 0 {
 				longMul = 0
 			}
