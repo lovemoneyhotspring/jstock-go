@@ -8,6 +8,47 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/storage"
 )
 
+// 約定の状態は約定数量が必須（0 より大きく注文数量以下）。UPDATE が 0 行ならエラー
+func TestResolvePendingOrderValidatesFilledAndRowsAffected(t *testing.T) {
+	db, err := storage.OpenSQLite(filepath.Join(t.TempDir(), "x.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`CREATE TABLE orders (client_order_id TEXT PRIMARY KEY, broker_order_id TEXT, symbol TEXT,
+		quantity TEXT, filled_quantity TEXT DEFAULT '0', status TEXT, avg_fill_price TEXT, placed_at TEXT, updated_at TEXT)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"c", "d"} {
+		if _, err := db.Exec("INSERT INTO orders (client_order_id, symbol, quantity, status, placed_at) VALUES (?, '7203', '100', 'PENDING', '2026-09-04T00:00:00Z')", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, fix := range []Fix{
+		{Status: domain.OrderStatusFilled, BrokerOrderID: "1/x"},                // --filled なし
+		{Status: domain.OrderStatusFilled, BrokerOrderID: "1/x", Filled: "0"},   // 0
+		{Status: domain.OrderStatusFilled, BrokerOrderID: "1/x", Filled: "200"}, // 注文数量超え
+		{Status: domain.OrderStatusPartiallyFilled, BrokerOrderID: "1/x", Filled: "abc"},
+	} {
+		if _, err := ResolvePendingOrder(db, "c", fix); err == nil {
+			t.Errorf("通ってはいけない: %+v", fix)
+		}
+	}
+	if _, err := ResolvePendingOrder(db, "c", Fix{Status: domain.OrderStatusPartiallyFilled, BrokerOrderID: "1/x", Filled: "50"}); err != nil {
+		t.Fatalf("一部約定 50/100 が通らない: %v", err)
+	}
+
+	// 読んだ後に別の書き手が確定させた（UPDATE が 0 行）ことを、行を飛ばすトリガーで作る
+	if _, err := db.Exec(`CREATE TRIGGER skip_d BEFORE UPDATE ON orders WHEN OLD.client_order_id = 'd'
+		BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolvePendingOrder(db, "d", Fix{Status: domain.OrderStatusUnsent}); err == nil {
+		t.Error("0 行の更新がエラーにならない")
+	}
+}
+
 func TestResolvePendingOrder(t *testing.T) {
 	db, err := storage.OpenSQLite(filepath.Join(t.TempDir(), "x.db"))
 	if err != nil {
