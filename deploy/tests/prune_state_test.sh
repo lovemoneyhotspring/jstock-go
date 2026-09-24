@@ -31,12 +31,23 @@ echo c > "$S/logs/crontab.backup.20250101-000000"
 echo c > "$S/logs/crontab.backup.20260920-083208"
 echo c > "$S/backup/crontab/handmade.txt"
 echo raw > "$T/data/jquants/_raw/equities_bars_daily/x_201608.csv.gz"
+# 立花のセッション: 今日を 2026-09-24 として 7 日前は 2026-09-17。0910 の組はロックを握られている
+mkdir -p "$S/tachibana"
+for d in 20260910 20260916 20260917 20260924; do
+  echo '{}' > "$S/tachibana/session-prod-$d.json"; : > "$S/tachibana/session-prod-$d.json.lock"
+done
+: > "$S/tachibana/session-uat-20260911.json.lock"   # ロックだけ残った組
+echo x > "$S/tachibana/session-notes.json"          # 日付の無い名前は触らない
+flock "$S/tachibana/session-prod-20260910.json.lock" sleep 30 &
+holder=$!
+trap 'kill "$holder" 2>/dev/null; rm -rf "$T"' EXIT
+sleep 0.3
 
 before=$(find "$T" -type f | sort | xargs -I{} sh -c 'echo "{} $(stat -c %s {})"')
 out=$(WBJP_HOME="$T" PRUNE_TODAY=2026-09-24 PRUNE_LOG_MAX_MB=1 "$REPO/deploy/prune-state.sh" --dry-run); rc=$?
 after=$(find "$T" -type f | sort | xargs -I{} sh -c 'echo "{} $(stat -c %s {})"')
 check "--dry-run は何も変えない（exit 0）" '[ "$rc" = 0 ] && [ "$before" = "$after" ]'
-check "--dry-run は数を出す" 'printf "%s\n" "$out" | tail -1 | grep -q "logs（1MB 超を退避）1 本.*digest（400 日より前）2 件.*crontab の控え（90 日より前・新しい 20 世代は残す）11 件"'
+check "--dry-run は数を出す" 'printf "%s\n" "$out" | tail -1 | grep -q "logs（1MB 超を退避）1 本.*digest（400 日より前）2 件.*crontab の控え（90 日より前・新しい 20 世代は残す）11 件.*立花のセッション（7 日より前）3 件"'
 
 out=$(WBJP_HOME="$T" PRUNE_TODAY=2026-09-24 PRUNE_LOG_MAX_MB=1 "$REPO/deploy/prune-state.sh"); rc=$?
 check "本番の回も exit 0" '[ "$rc" = 0 ]'
@@ -51,6 +62,11 @@ check "crontab の控えは新しい 20 世代を残し、残りのうち 90 日
   '[ "$(ls "$S/backup/crontab" | grep -c "^crontab-")" = 19 ] && [ -f "$S/backup/crontab/crontab-20260125-120000.txt" ] && [ -f "$S/backup/crontab/crontab-20260110-130000-before-restore.txt" ] && [ ! -e "$S/backup/crontab/crontab-20260101-120000.txt" ]'
 check "以前の置き場（state/logs/crontab.backup.*）も同じ並びで数える" \
   '[ ! -e "$S/logs/crontab.backup.20250101-000000" ] && [ -f "$S/logs/crontab.backup.20260920-083208" ]'
+check "立花のセッションは 7 日より前の組を消す（境目の日と当日は残す・ロックだけの組も消す）" \
+  '[ ! -e "$S/tachibana/session-prod-20260916.json" ] && [ ! -e "$S/tachibana/session-prod-20260916.json.lock" ] && [ ! -e "$S/tachibana/session-uat-20260911.json.lock" ] && [ -f "$S/tachibana/session-prod-20260917.json" ] && [ -f "$S/tachibana/session-prod-20260924.json.lock" ]'
+check "ロックを握られている組は古くても残す" \
+  '[ -f "$S/tachibana/session-prod-20260910.json" ] && [ -f "$S/tachibana/session-prod-20260910.json.lock" ] && printf "%s\n" "$out" | grep -q "使用中のため残す"'
+check "日付の無いセッションの名前は触らない" '[ -f "$S/tachibana/session-notes.json" ]'
 check "data/jquants/_raw は消さない" '[ -f "$T/data/jquants/_raw/equities_bars_daily/x_201608.csv.gz" ]'
 
 "$REPO/deploy/prune-state.sh" --bogus >/dev/null 2>&1; rc=$?

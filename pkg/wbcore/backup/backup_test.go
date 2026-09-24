@@ -101,6 +101,44 @@ func TestBackupStateIsIdempotentWithinADay(t *testing.T) {
 	}
 }
 
+// 1 つの DB が壊れていても残りは取り、エラーは最後に返す。壊れた DB の当日の世代
+// （先に取れていたもの）は消えず、一時ファイルも残らない
+func TestBackupStateContinuesPastBrokenDB(t *testing.T) {
+	s := newSettings(t)
+	if err := os.MkdirAll(s.StateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeLedger(t, filepath.Join(s.StateDir, "a-uat.db"), 1)
+	makeLedger(t, filepath.Join(s.StateDir, "b-uat.db"), 2)
+	makeLedger(t, filepath.Join(s.StateDir, "c-uat.db"), 3)
+	today := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
+	if _, err := BackupState(s, Options{Keep: 30, Today: today}); err != nil {
+		t.Fatal(err)
+	}
+
+	// b を壊して同じ日に取り直す
+	if err := os.WriteFile(filepath.Join(s.StateDir, "b-uat.db"), []byte("not a database, just garbage bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := BackupState(s, Options{Keep: 30, Today: today})
+	if err == nil {
+		t.Fatal("壊れた DB のエラーが返らない")
+	}
+	if len(result.Copied) != 2 {
+		t.Errorf("壊れていない 2 つは取るはず: %v", result.Copied)
+	}
+	if n := countRows(t, filepath.Join(s.BackupDir(), "b-uat-20260903.db")); n != 2 {
+		t.Errorf("壊れた DB の当日の世代が失われた: 行数 %d", n)
+	}
+	if n := countRows(t, filepath.Join(s.BackupDir(), "c-uat-20260903.db")); n != 3 {
+		t.Errorf("壊れた DB の後ろが取られていない: 行数 %d", n)
+	}
+	tmps, _ := filepath.Glob(filepath.Join(s.BackupDir(), "*.tmp"))
+	if len(tmps) != 0 {
+		t.Errorf("一時ファイルが残っている: %v", tmps)
+	}
+}
+
 func TestBackupStatePrunesOldGenerations(t *testing.T) {
 	s := newSettings(t)
 	if err := os.MkdirAll(s.StateDir, 0o755); err != nil {

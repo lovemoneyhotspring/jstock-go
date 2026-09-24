@@ -862,7 +862,8 @@ func TestUnconfirmedIsResentWhenBrokerHasNoOrder(t *testing.T) {
 		id := "N/" + req.Symbol
 		return &domain.OrderAck{ClientOrderID: req.ClientOrderID, BrokerOrderID: &id, Status: domain.OrderStatusSubmitted}, nil
 	}
-	// 一覧に無い → 届いていない → 種を変えて同じ実行の中で送り直す
+	// 一覧は生きている（別の注文が載っている）のに無い → 届いていない → 種を変えて同じ実行の中で送り直す
+	b.history = []domain.Order{brokerOrderOf("5/x", "9984", domain.SideBuy, 100, domain.TradeTypeCash, domain.OrderStatusFilled)}
 	orders, failures, err := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
 	if err != nil || orders != 1 || len(failures) != 0 {
 		t.Fatalf("orders=%d failures=%v err=%v", orders, failures, err)
@@ -878,6 +879,21 @@ func TestUnconfirmedIsResentWhenBrokerHasNoOrder(t *testing.T) {
 	if statuses[b.placed[0].ClientOrderID] != string(domain.OrderStatusUnsent) ||
 		statuses[b.placed[1].ClientOrderID] != string(domain.OrderStatusSubmitted) {
 		t.Errorf("台帳: %v", statuses)
+	}
+}
+
+// 当日最初の注文が結果不明で一覧が 0 件なら、反映の遅れと区別できないので送り直さない
+// （reconcile.EmptyListGrace）。PENDING のまま次の実行に渡す
+func TestUnconfirmedFirstOrderWithEmptyListIsNotResent(t *testing.T) {
+	env, _ := todayEnv(t)
+	b := &stubBroker{balance: richBalance()}
+	b.place = func(domain.OrderRequest) (*domain.OrderAck, error) { return nil, errors.New("timeout") }
+	_, failures, _ := PlacePicks(env, b, []selection.Pick{pick("7203", domain.SideBuy)})
+	if len(failures) != 1 || len(b.placed) != 1 {
+		t.Fatalf("空の一覧を信じて送り直した: failures=%v placed=%d", failures, len(b.placed))
+	}
+	if o := statusOf(t, env, "7203"); o.Status != string(domain.OrderStatusPending) {
+		t.Errorf("PENDING のまま次の実行に渡す: %s", o.Status)
 	}
 }
 
@@ -910,8 +926,9 @@ func TestUnconfirmedStaysPendingWhenHistoryUnavailable(t *testing.T) {
 	if o := statusOf(t, env, "7203"); o.Status != string(domain.OrderStatusPending) {
 		t.Errorf("PENDING のまま次の実行に渡す: %s", o.Status)
 	}
-	// 次の実行の冒頭: 一覧が取れれば判定できる
+	// 次の実行の冒頭: 一覧が取れれば判定できる（一覧には別の注文が載っていて生きている）
 	b.historyErr = nil
+	b.history = []domain.Order{brokerOrderOf("5/x", "9984", domain.SideBuy, 100, domain.TradeTypeCash, domain.OrderStatusFilled)}
 	summary, err := ResolvePending(env, b, 0)
 	if err != nil || summary.NotSent != 1 {
 		t.Fatalf("summary=%+v err=%v", summary, err)

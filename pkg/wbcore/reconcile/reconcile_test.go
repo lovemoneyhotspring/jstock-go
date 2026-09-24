@@ -102,9 +102,17 @@ func TestResolveEmptyListWithKnownOrdersIsNotTrusted(t *testing.T) {
 		t.Errorf("生きている一覧で NotSent にならない: %+v", got[0])
 	}
 
-	// 今日の注文を 1 つも知らなければ（今日の最初の注文）、空の一覧は従来どおり NotSent
-	if got = Resolve(pendings, nil, Options{Now: now}); got[0].Outcome != NotSent {
-		t.Errorf("Expected なしの空の一覧: %+v", got[0])
+	// 今日の注文を 1 つも知らなければ（今日の最初の注文）、送信から EmptyListGrace 経てば
+	// 空の一覧は NotSent。それより前は反映の遅れと区別できないので TooRecent
+	if got = Resolve(pendings, nil, Options{Now: t0.Add(EmptyListGrace)}); got[0].Outcome != NotSent {
+		t.Errorf("Expected なしの空の一覧（猶予の後）: %+v", got[0])
+	}
+	if got = Resolve(pendings, nil, Options{Now: t0.Add(5 * time.Second)}); got[0].Outcome != TooRecent {
+		t.Errorf("Expected なしの空の一覧（送信の 5 秒後）: %+v", got[0])
+	}
+	// 一覧に何か載っていれば一覧は生きている → 猶予の内でも NotSent（daytrade の 5 秒後の送り直しは従来どおり）
+	if got = Resolve(pendings, other, Options{Now: t0.Add(5 * time.Second)}); got[0].Outcome != NotSent {
+		t.Errorf("Expected なしで一覧に他の注文がある: %+v", got[0])
 	}
 
 	// 一覧に完全一致があれば、一覧の信用とは関係なく帰属する

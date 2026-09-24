@@ -407,6 +407,52 @@ func (e *ErrSession) Error() string {
 		e.CLMID, e.Errno, strings.TrimSpace(e.Text))
 }
 
+// ErrLoginRejected はログインが拒否された応答（p_errno が 0 でない、または sResultCode の業務エラー）。
+//
+// パスワード誤りや口座側の停止では、送り直しても同じ答えしか返らず、失敗ログインを重ねると
+// 口座がロックされうる。だから通信エラーの再試行（retryNet）に掛けず、Sticky なら
+// 同じプロセスではもうログインしない（loginRejection が同じエラーを返す）。直すには設定を
+// 直してプロセスを起こし直す。時間外（p_errno=-62）だけは時間が解決するので Sticky にしない。
+type ErrLoginRejected struct {
+	Errno      string
+	ResultCode string
+	Text       string
+	Sticky     bool
+}
+
+func (e *ErrLoginRejected) Error() string {
+	if e.ResultCode != "" {
+		return fmt.Sprintf("立花証券ログインエラー sResultCode=%s %s", e.ResultCode, e.Text)
+	}
+	return fmt.Sprintf("立花証券ログインエラー p_errno=%s %s", e.Errno, e.Text)
+}
+
+// loginRejections はプロセス内で拒否されたログインの控え（接続先と認証 ID ごと）。
+var (
+	loginRejectionsMu sync.Mutex
+	loginRejections   = map[string]*ErrLoginRejected{}
+)
+
+func (t *TachibanaBroker) loginKey() string {
+	authID := ""
+	if t.creds != nil {
+		authID = t.creds.AuthID
+	}
+	return t.baseURL + "\x00" + authID
+}
+
+func loginRejection(key string) *ErrLoginRejected {
+	loginRejectionsMu.Lock()
+	defer loginRejectionsMu.Unlock()
+	return loginRejections[key]
+}
+
+func rememberLoginRejection(key string, err *ErrLoginRejected) {
+	loginRejectionsMu.Lock()
+	defer loginRejectionsMu.Unlock()
+	loginRejections[key] = err
+}
+
 // ErrPlatform は基盤が電文を弾いた応答（p_errno = -1 引数エラー / -62 時間外 / 6 p_no の逆転）。
 // セッションは生きているので捨てていない。ここでは送り直しもしない。
 type ErrPlatform struct {
@@ -571,7 +617,11 @@ func (t *TachibanaBroker) login() (*TachibanaSession, error) {
 	if pErrno != "0" {
 		fields["p_err"] = strings.TrimSpace(text(res["p_err"]))
 		t.logWarn("broker.request_failed", "立花証券ログインが拒否された", fields)
-		return nil, fmt.Errorf("立花証券ログインエラー p_errno=%s %s", pErrno, strings.TrimSpace(text(res["p_err"])))
+		return nil, &ErrLoginRejected{
+			Errno: pErrno, Text: strings.TrimSpace(text(res["p_err"])),
+			// 時間外（-62）は口座の問題ではなく、時間が経てば通る。プロセスに固定しない
+			Sticky: pErrno != pErrnoOutsideHours,
+		}
 	}
 	// 業務エラー（認証失敗など）は sResultCode に載る。先に見ないと、仮想URL が空のまま
 	// 復号に進んで「RSA OAEP decrypt error」という無関係なエラーになる
@@ -579,7 +629,7 @@ func (t *TachibanaBroker) login() (*TachibanaSession, error) {
 		fields["result_code"] = code
 		fields["result_text"] = strings.TrimSpace(text(res["sResultText"]))
 		t.logWarn("broker.request_failed", "立花証券ログインが業務エラー", fields)
-		return nil, fmt.Errorf("立花証券ログインエラー sResultCode=%s %s", code, strings.TrimSpace(text(res["sResultText"])))
+		return nil, &ErrLoginRejected{ResultCode: code, Text: strings.TrimSpace(text(res["sResultText"])), Sticky: true}
 	}
 	t.logInfo("broker.request", "立花証券API 電文（ログイン）", fields)
 
@@ -620,8 +670,16 @@ func (t *TachibanaBroker) ensureSessionLocked(path string) error {
 		t.session = saved
 		return nil
 	}
+	key := t.loginKey()
+	if rejected := loginRejection(key); rejected != nil {
+		return rejected
+	}
 	session, err := t.login()
 	if err != nil {
+		var rejected *ErrLoginRejected
+		if errors.As(err, &rejected) && rejected.Sticky {
+			rememberLoginRejection(key, rejected)
+		}
 		return err
 	}
 	if err := writeSessionFile(path, session); err != nil {
@@ -677,7 +735,9 @@ func (t *TachibanaBroker) postTo(iface string, clmID string, params map[string]a
 	netRetried, sessionRetried := false, false
 	retryNet := func(stage string, err error) bool {
 		var deadline *ErrDeadline
-		if netRetried || !resendable(clmID) || errors.As(err, &deadline) || !t.canWait(netRetryBackoff) {
+		// 認証の拒否は通信エラーではない。送り直しても同じ答えで、失敗ログインを重ねるだけ
+		var rejected *ErrLoginRejected
+		if netRetried || !resendable(clmID) || errors.As(err, &deadline) || errors.As(err, &rejected) || !t.canWait(netRetryBackoff) {
 			return false
 		}
 		netRetried = true

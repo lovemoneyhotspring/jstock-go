@@ -12,6 +12,7 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/output"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/storage"
+	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 )
 
@@ -138,7 +139,7 @@ func newPendingResolveCmd(app string, dbPath func() string) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&brokerOrderID, "attribute", "", "届いていた: ブローカーの注文番号（立花は 番号/営業日）")
 	cmd.Flags().StringVar(&status, "status", "SUBMITTED", "--attribute のときの状態（FILLED など。ブローカーの一覧に合わせる）")
-	cmd.Flags().StringVar(&filled, "filled", "", "--attribute のときの約定数量（省略で 0）")
+	cmd.Flags().StringVar(&filled, "filled", "", "--attribute のときの約定数量。--status FILLED / PARTIALLY_FILLED では必須（0 より大きく注文数量以下）")
 	cmd.Flags().StringVar(&price, "price", "", "--attribute のときの約定単価（省略で未設定）")
 	cmd.Flags().BoolVar(&unsent, "unsent", false, "届いていなかった: UNSENT にして送り直せるようにする")
 	return cmd
@@ -174,8 +175,8 @@ type Fix struct {
 // ResolvePendingOrder は PENDING の 1 件を確定する。PENDING でない行は触らない
 // （自動判定や約定が先に入っていたら、その結果を壊さない）。前の状態を返す。
 func ResolvePendingOrder(db *sql.DB, clientOrderID string, fix Fix) (string, error) {
-	var before string
-	if err := db.QueryRow("SELECT status FROM orders WHERE client_order_id = ?", clientOrderID).Scan(&before); err != nil {
+	var before, quantity string
+	if err := db.QueryRow("SELECT status, quantity FROM orders WHERE client_order_id = ?", clientOrderID).Scan(&before, &quantity); err != nil {
 		if err == sql.ErrNoRows {
 			return "", fmt.Errorf("台帳に %s がありません", clientOrderID)
 		}
@@ -188,6 +189,13 @@ func ResolvePendingOrder(db *sql.DB, clientOrderID string, fix Fix) (string, err
 	if strings.TrimSpace(fix.Filled) != "" {
 		filled = strings.TrimSpace(fix.Filled)
 	}
+	// 約定した状態で約定数量を省くと「約定 0 の FILLED」になり、建玉・損益の計算が黙って狂う。
+	// 約定の状態は約定数量（0 より大きく注文数量以下）を必須にする
+	if fix.Status == domain.OrderStatusFilled || fix.Status == domain.OrderStatusPartiallyFilled {
+		if err := checkFilled(filled, quantity, fix.Status); err != nil {
+			return before, fmt.Errorf("%s: %w", clientOrderID, err)
+		}
+	}
 	var brokerID, price *string
 	if fix.BrokerOrderID != "" {
 		id := fix.BrokerOrderID
@@ -197,7 +205,7 @@ func ResolvePendingOrder(db *sql.DB, clientOrderID string, fix Fix) (string, err
 		p := strings.TrimSpace(fix.Price)
 		price = &p
 	}
-	_, err := db.Exec(`UPDATE orders SET status = ?, filled_quantity = ?,
+	res, err := db.Exec(`UPDATE orders SET status = ?, filled_quantity = ?,
 		avg_fill_price = COALESCE(?, avg_fill_price), broker_order_id = COALESCE(?, broker_order_id),
 		updated_at = ? WHERE client_order_id = ? AND status = ?`,
 		string(fix.Status), filled, price, brokerID, clock.NowUTC().Format(time.RFC3339),
@@ -205,5 +213,33 @@ func ResolvePendingOrder(db *sql.DB, clientOrderID string, fix Fix) (string, err
 	if err != nil {
 		return before, fmt.Errorf("台帳を更新できません: %w", err)
 	}
+	// 読んでから書くまでの間に自動判定や約定の取り込みが先に確定させていれば 0 行。
+	// 「直した」と表示すると、人は台帳が自分の指定どおりになったと思い込む
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return before, fmt.Errorf("台帳の更新を確かめられません: %w", err)
+	}
+	if affected == 0 {
+		return before, fmt.Errorf("%s は更新されませんでした（読んだ後に PENDING でなくなった。status を見直してください）", clientOrderID)
+	}
 	return before, nil
+}
+
+// checkFilled は約定数量が 0 より大きく注文数量以下か。
+func checkFilled(filled, quantity string, status domain.OrderStatus) error {
+	f, err := decimal.NewFromString(filled)
+	if err != nil {
+		return fmt.Errorf("--filled %q を数として読めません", filled)
+	}
+	if !f.IsPositive() {
+		return fmt.Errorf("--status %s には --filled（0 より大きい約定数量）が要ります", status)
+	}
+	q, err := decimal.NewFromString(strings.TrimSpace(quantity))
+	if err != nil {
+		return fmt.Errorf("台帳の注文数量 %q を読めません", quantity)
+	}
+	if f.GreaterThan(q) {
+		return fmt.Errorf("--filled %s が注文数量 %s を超えています", f, q)
+	}
+	return nil
 }

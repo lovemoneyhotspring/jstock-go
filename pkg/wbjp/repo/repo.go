@@ -174,7 +174,7 @@ func OpenRepo(dbPath string) (*Repo, error) {
 		// placed_at は UTC。JST の日付で数える（当日の発注件数・当日買付）のに
 		// substr(placed_at) を使うと 00:00〜08:59 JST の注文が前日に落ちる。
 		// JST の日付を別の列に持ち、既存行は placed_at から埋める
-		{Name: "orders.placed_on", Up: func(tx *sql.Tx) error {
+		{Name: "orders.placed_on", Up: func(tx storage.Tx) error {
 			if err := storage.AddColumn(tx, "orders", "placed_on", "TEXT"); err != nil {
 				return err
 			}

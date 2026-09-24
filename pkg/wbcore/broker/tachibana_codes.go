@@ -72,6 +72,9 @@ var (
 		tachibanaSideSell: domain.SideSell,
 		tachibanaSideBuy:  domain.SideBuy,
 	}
+	// unsupportedSideCodes は売買区分のうち、既知だがこのシステムが出さない種類（5 現渡・7 現引）。
+	// 注文一覧でこの行は読み飛ばしてよい（送信結果不明の注文である見込みが無い）。
+	unsupportedSideCodes = map[string]bool{"5": true, "7": true}
 
 	taxCode = map[domain.TaxAccountType]string{
 		domain.TaxAccountSpecific: zeiSpecific,
