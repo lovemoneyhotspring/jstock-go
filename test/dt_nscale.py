@@ -93,6 +93,7 @@ FEE = 0.7e-4   # 往復 5.7 bp のうち滑り 5 bp を除いた残り（貸株�
 BASE_W = 1e6
 ALPHAS = ["alpha_rank", "alpha_rt"]
 CAPS = [3e6, 1e7, 2e7, 3e7, 5e7]
+CAPS_PROD = [3e6, 1e7, 3e7, 5e7]
 
 
 def calib_kappa(c, i0):
@@ -202,10 +203,238 @@ def part_tail(c, lo=4, hi=30):
         print(f"   {rb:5s} 代金{'低中高'[int(tq)]}: {split(s)}  中央値 {g['turnover_med'].median()/1e8:5.1f} 億")
 
 
+def day_rules(te):
+    """日の規則の近似: ショック（候補表の全銘柄のギャップの中央値 ≤ −2%）で資金 ×1.5、米国小幅高（ナスダック 0〜+1%）で休み。
+    本番は 9:00 の市場ギャップと S&P500・VIX で判定するが、手元の ^TOPIX は始値が前日終値のままで使えず、
+    S&P・VIX の履歴も無いので代用する（VIX の例外も無し）。"""
+    days = te["d"].unique()
+    tp = te.groupby("d")["gap"].median().rename("tgap").reset_index().rename(columns={"d": "date"})
+    tp["date"] = tp["date"].astype("datetime64[ns]")
+    us = pd.read_parquet("data/bars/^IXIC.parquet")
+    us["date"] = pd.to_datetime(us["date"]).dt.tz_localize(None).dt.normalize().astype("datetime64[ns]")
+    us["r"] = us["close"] / us["close"].shift(1) - 1
+    d = pd.DataFrame({"d": pd.to_datetime(sorted(days)).astype("datetime64[ns]")})
+    d = pd.merge_asof(d, us[["date", "r"]].rename(columns={"date": "ud"}), left_on="d", right_on="ud",
+                      allow_exact_matches=False)
+    d = d.merge(tp[["date", "tgap"]], left_on="d", right_on="date", how="left")
+    d["mult"] = np.where(d["tgap"] <= -0.02, 1.5, 1.0)
+    d["skip"] = (d["r"] >= 0) & (d["r"] <= 0.01) & (d["mult"] == 1.0)
+    return d.set_index("d")[["mult", "skip"]]
+
+
+def alloc_fixed_iv(g, n, cap_total):
+    """順位 1..n に 20 日ボラの逆数で配分（本番の sizing）。"""
+    sel = g[g["rank"] <= n]
+    iv = 1 / np.maximum(sel["vol20"].fillna(0.02).values, 0.02)
+    return sel.index, cap_total * iv / iv.sum() if len(sel) else np.array([])
+
+
+def seen_ranked(te, pools, seed, sector_cap=True):
+    """気配の誤差を入れて見えるギャップで並べ直し、業種の上限を掛ける（y_raw は真の値）。"""
+    from dt_preopen_sim import BANDS, seen
+    band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
+    rng = np.random.default_rng(seed)
+    e = np.zeros(len(te))
+    for b, pool in enumerate(pools):
+        if (band == b).any():
+            e[band == b] = rng.choice(pool, size=int((band == b).sum()))
+    g = seen(te, e)
+    g = g.sort_values(["d", "key_sort", "code"], kind="mergesort")
+    if sector_cap:
+        g = g[~g.duplicated(["d", "sector"])]
+    g = g.copy()
+    g["rank"] = g.groupby("d").cumcount() + 1
+    g["net"] = (g["y_raw"] - COST) * 1e4
+    return g.reset_index(drop=True)
+
+
+def part_sector(i0s, seeds, slot):
+    """次の検証 5: 規則 R（p 0.2%、Rmax 20）で業種の上限を外すと容量の足しになるか。"""
+    from dt_preopen_sim import error_pools
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet")
+    te = te[te["d"] >= SINCE].copy()
+    pools = error_pools(slot, "2026-09-11")
+    rules = day_rules(te)
+    caps = [1e7, 3e7, 5e7]
+    acc = {}
+    for seed in range(seeds):
+        for cap_on in [True, False]:
+            g = seen_ranked(te, pools, seed, sector_cap=cap_on)
+            days = [(d, x) for d, x in g.groupby("d") if not rules.loc[d, "skip"]]
+            for i0 in i0s:
+                if cap_on:
+                    acc[("kappa", i0, seed)] = calib_kappa(g, i0 * 1e-4)
+                kappa = acc[("kappa", i0, seed)]
+                for C in caps:
+                    acc.setdefault((i0, C, cap_on), []).append(pd.Series(
+                        {d: pnl_day(x, *alloc_rule(x, 0.002, 20, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+    alld = pd.DatetimeIndex(sorted(te["d"].unique()))
+    print(f"\n## I. 規則 R の業種の上限あり／なし（{seeds} シード平均）")
+    for i0 in i0s:
+        for C in caps:
+            on = pd.concat(acc[(i0, C, True)], axis=1).reindex(alld).fillna(0.0).mean(axis=1)
+            off = pd.concat(acc[(i0, C, False)], axis=1).reindex(alld).fillna(0.0).mean(axis=1)
+            dd = off - on
+            ann = lambda v: v.mean() * 245 / C * 100
+            print(f"  I0 {i0:>4.0f} 資金 {C/1e4:5.0f} 万: 上限あり IS {ann(on[on.index <= IS_END]):5.1f}% OOS {ann(on[on.index > IS_END]):5.1f}%"
+                  f" | 上限なし IS {ann(off[off.index <= IS_END]):5.1f}% OOS {ann(off[off.index > IS_END]):5.1f}%"
+                  f" | 差の t IS {tstat(dd[dd.index <= IS_END]):5.2f} OOS {tstat(dd[dd.index > IS_END]):5.2f}")
+
+
+def part_prod(i0s, seeds, slot):
+    """次の検証 2: 本番の形（気配の誤差・業種の上限・逆ボラ・ショック日 ×1.5・米国小幅高の休み）で D を測り直す。"""
+    from dt_preopen_sim import error_pools
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet")
+    te = te[te["d"] >= SINCE].copy()
+    pools = error_pools(slot, "2026-09-11")
+    rules = day_rules(te)
+    print(f"\n## E. 本番の形で測り直す（OOS 2022〜、気配の誤差 {seeds} シード、ショック日 {int((rules['mult'] > 1).sum())} 日、"
+          f"休み {int(rules['skip'].sum())} 日）")
+    acc = {}
+    for seed in range(seeds):
+        g = seen_ranked(te, pools, seed)
+        g["rb"] = pd.cut(g["rank"], [0, 3, 10, 20, 40, 1e9], labels=["1-3", "4-10", "11-20", "21-40", "41+"])
+        ins = g[g["d"] <= IS_END]
+        tq_edges = ins["turnover_med"].quantile([1 / 3, 2 / 3]).values
+        g["tq"] = np.searchsorted(tq_edges, g["turnover_med"].values)
+        ins = g[g["d"] <= IS_END]
+        a_rank = ins.groupby("rb", observed=True)["y_raw"].mean() - FEE
+        a_rt = ins.groupby(["rb", "tq"], observed=True)["y_raw"].mean() - FEE
+        g["alpha_rank"] = g["rb"].map(a_rank).astype(float)
+        g["alpha_rt"] = [a_rt.get((r, q), np.nan) for r, q in zip(g["rb"], g["tq"])]
+        g["alpha_rt"] = g["alpha_rt"].fillna(g["alpha_rank"])
+        oos = g[g["d"] > IS_END]
+        days = [(d, x) for d, x in oos.groupby("d") if not rules.loc[d, "skip"]]
+        for i0 in i0s:
+            kappa = calib_kappa(g, i0 * 1e-4)
+            for C in CAPS_PROD:
+                for n in [3, 9, 20]:
+                    acc.setdefault((i0, C, f"N={n} 逆ボラ"), []).append(pd.Series(
+                        {d: pnl_day(x, *alloc_fixed_iv(x, n, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+                for name in ALPHAS:
+                    acc.setdefault((i0, C, f"最適 {name}"), []).append(pd.Series(
+                        {d: pnl_day(x, *alloc_opt(x, x[name], kappa, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+    alld = sorted(set(te[te["d"] > IS_END]["d"]))
+    for (i0, C, name), ss in acc.items():
+        v = pd.concat(ss, axis=1).reindex(alld).fillna(0.0).mean(axis=1)   # 休みの日は 0、シードは平均
+        base = pd.concat(acc[(i0, C, "N=3 逆ボラ")], axis=1).reindex(alld).fillna(0.0).mean(axis=1)
+        diff = v - base
+        print(f"  I0 {i0:>4.0f} 資金 {C/1e4:5.0f} 万 {name:18s} 年率 {v.mean()*245/C*100:5.1f}% (t {tstat(v):4.1f})"
+              f"  N=3 との日次差 t {tstat(diff) if name != 'N=3 逆ボラ' else 0:5.2f}")
+
+
+def alloc_rule(g, p, rmax, cap_total):
+    """規則 R: 順位順に w = min(p × 売買代金, 資金 ÷ 3) を割り当て、資金か順位 rmax で止める。"""
+    sel = g[g["rank"] <= rmax]
+    w = np.minimum(p * sel["turnover_med"].values, cap_total / 3)
+    cum = np.cumsum(w)
+    w = np.where(cum <= cap_total, w, np.maximum(cap_total - (cum - w), 0.0))
+    m = w > 0
+    return sel.index[m], w[m]
+
+
+def part_rule(i0s, seeds, slot):
+    """次の検証 3（事前登録済み）: 規則 R のつまみを IS で選び、OOS で N=3 逆ボラと比べる。"""
+    from dt_preopen_sim import error_pools
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet")
+    te = te[te["d"] >= SINCE].copy()
+    pools = error_pools(slot, "2026-09-11")
+    rules = day_rules(te)
+    grid = [(p, r) for p in [0.001, 0.002, 0.005, 0.01] for r in [10, 20]]
+    caps = [1e7, 3e7, 5e7]
+    acc = {}
+    for seed in range(seeds):
+        g = seen_ranked(te, pools, seed)
+        days = [(d, x) for d, x in g.groupby("d") if not rules.loc[d, "skip"]]
+        for i0 in i0s:
+            kappa = calib_kappa(g, i0 * 1e-4)
+            for C in caps:
+                acc.setdefault((i0, C, "N3"), []).append(pd.Series(
+                    {d: pnl_day(x, *alloc_fixed_iv(x, 3, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+                for p, r in grid:
+                    acc.setdefault((i0, C, (p, r)), []).append(pd.Series(
+                        {d: pnl_day(x, *alloc_rule(x, p, r, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+    alld = pd.DatetimeIndex(sorted(te["d"].unique()))
+    avg = {k: pd.concat(v, axis=1).reindex(alld).fillna(0.0).mean(axis=1) for k, v in acc.items()}
+    print(f"\n## F. 規則 R（事前登録）: IS で選んだつまみの OOS（{seeds} シード平均）")
+    for i0 in i0s:
+        for C in caps:
+            ann = lambda v: v.mean() * 245 / C * 100
+            isb = {k[2]: ann(v[v.index <= IS_END]) for k, v in avg.items() if k[0] == i0 and k[1] == C and k[2] != "N3"}
+            best = max(isb, key=isb.get)
+            v, b = avg[(i0, C, best)], avg[(i0, C, "N3")]
+            vo, bo = v[v.index > IS_END], b[b.index > IS_END]
+            print(f"  I0 {i0:>4.0f} 資金 {C/1e4:5.0f} 万: IS 最良 p {best[0]*100:.1f}% Rmax {best[1]}"
+                  f"（IS {isb[best]:5.1f}% / N3 {ann(b[b.index <= IS_END]):5.1f}%）→ OOS {ann(vo):5.1f}% 対 N3 {ann(bo):5.1f}%"
+                  f"、日次差 t {tstat(vo - bo):5.2f}")
+
+
+EXT = "test/out/dt_candidates_ext.parquet"
+
+
+def pool_of(c):
+    return np.select([(c["segment"] == "prime") & (c["cap_tercile"] > 1), c["segment"] == "prime"],
+                     ["a:プライム中上", "b:プライム小型"], "c:スタンダード")
+
+
+def part_ext(i0s, seeds, slot):
+    """次の検証 4 ①②（事前登録済み）: 母集団を広げて規則 R（p 0.2%、Rmax 20）で比べる。"""
+    from dt_preopen_sim import error_pools
+    te = pd.read_parquet(EXT)
+    te = te[(te["d"] >= SINCE) & (te["d"] <= "2026-09-18")].copy()
+    te["pool"] = pool_of(te)
+    # 記述: 母集団ごとに（真の始値で）並べたときの順位の帯の成績と売買代金
+    print("\n## G. 母集団ごとの順位の帯（真の始値のギャップ < 0、各母集団の中で業種の上限）")
+    d0 = te[te["gap"] < 0].sort_values(["d", "key_sort", "code"], kind="mergesort")
+    for pool, g in d0.groupby("pool"):
+        g = g[~g.duplicated(["d", "sector"])].copy()
+        g["rank"] = g.groupby("d").cumcount() + 1
+        g["net"] = (g["y_raw"] - COST) * 1e4
+        for lo, hi in [(1, 3), (4, 10), (11, 20)]:
+            x = g[(g["rank"] >= lo) & (g["rank"] <= hi)]
+            s_ = daily_mean(x)
+            print(f"  {pool} {lo:2d}-{hi:2d} 位: {split(s_)}  代金 中央値 {x['turnover_med'].median()/1e8:5.1f} 億")
+    pools_e = error_pools(slot, "2026-09-11")
+    rules = day_rules(te)
+    variants = {"a": ["a:プライム中上"], "b": ["a:プライム中上", "b:プライム小型"],
+                "c": ["a:プライム中上", "b:プライム小型", "c:スタンダード"]}
+    caps = [1e7, 3e7, 5e7]
+    acc = {}
+    for seed in range(seeds):
+        for v, pl in variants.items():
+            g = seen_ranked(te[te["pool"].isin(pl)], pools_e, seed)
+            days = [(d, x) for d, x in g.groupby("d") if not rules.loc[d, "skip"]]
+            for i0 in i0s:
+                # kappa は母集団によらず同じ値にする（(a) の N=3 で I0 に合わせる）
+                if v == "a":
+                    acc[("kappa", i0, seed)] = calib_kappa(g, i0 * 1e-4)
+                kappa = acc[("kappa", i0, seed)]
+                for C in caps:
+                    acc.setdefault((i0, C, v), []).append(pd.Series(
+                        {d: pnl_day(x, *alloc_rule(x, 0.002, 20, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+                    if v == "a":
+                        acc.setdefault((i0, C, "a N=3"), []).append(pd.Series(
+                            {d: pnl_day(x, *alloc_fixed_iv(x, 3, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+    alld = pd.DatetimeIndex(sorted(te["d"].unique()))
+    alld = alld[alld > IS_END]
+    print(f"\n## H. 母集団を広げた規則 R（OOS、{seeds} シード平均、日次差は (a) の規則 R と比べる）")
+    for i0 in i0s:
+        for C in caps:
+            base = pd.concat(acc[(i0, C, "a")], axis=1).reindex(alld).fillna(0.0).mean(axis=1)
+            line = []
+            for v in ["a N=3", "a", "b", "c"]:
+                x = pd.concat(acc[(i0, C, v)], axis=1).reindex(alld).fillna(0.0).mean(axis=1)
+                t = tstat(x - base) if v not in ("a",) else 0.0
+                line.append(f"{v} {x.mean()*245/C*100:5.1f}%(t{t:5.2f})")
+            print(f"  I0 {i0:>4.0f} 資金 {C/1e4:5.0f} 万: " + "  ".join(line))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--part", default="all")
     ap.add_argument("--i0", type=float, nargs="+", default=[10.0])
+    ap.add_argument("--seeds", type=int, default=3)
+    ap.add_argument("--slot", default="0859")
     a = ap.parse_args()
     c = load()
     print(f"候補 {len(c):,} 行 / {c['d'].nunique():,} 日（{c['d'].min():%Y-%m-%d}〜{c['d'].max():%Y-%m-%d}）")
@@ -213,6 +442,18 @@ def main():
         part_rank(c)
     if a.part in ("keybin", "all"):
         part_keybin(c)
+    if a.part == "sector":
+        part_sector(a.i0, a.seeds, a.slot)
+        return
+    if a.part == "ext":
+        part_ext(a.i0, a.seeds, a.slot)
+        return
+    if a.part == "rule":
+        part_rule(a.i0, a.seeds, a.slot)
+        return
+    if a.part == "prod":
+        part_prod(a.i0, a.seeds, a.slot)
+        return
     if a.part in ("tail", "all"):
         part_tail(c)
     if a.part in ("capacity", "all"):
