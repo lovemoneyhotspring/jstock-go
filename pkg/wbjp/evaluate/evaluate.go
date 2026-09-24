@@ -247,11 +247,56 @@ func orderGroups(seen []string) []string {
 	return out
 }
 
+// LatestPerDay は (判断日, horizon) ごとに最後に記録した回の行だけを残す。
+//
+// 評価の履歴は追記で積むので、同じ判断日を評価し直すと行が重なる。重なったまま集計すると
+// 件数が晩ごとに増え、平均も最新の評価を映さない（2026-09-24 のレビュー）。
+// recorded_at の無い行（古い履歴）はそのまま残す。
+func LatestPerDay(evaluations corehistory.Frame) corehistory.Frame {
+	if !evaluations.Has("recorded_at") {
+		return evaluations
+	}
+	type key struct {
+		day     time.Time
+		horizon any
+	}
+	last := map[key]time.Time{}
+	keyOf := func(row map[string]any) key {
+		day, _ := row["day"].(time.Time)
+		return key{day: day, horizon: corehistory.ToInt(row["horizon"])}
+	}
+	for _, row := range evaluations.Rows {
+		if t, ok := row["recorded_at"].(time.Time); ok && t.After(last[keyOf(row)]) {
+			last[keyOf(row)] = t
+		}
+	}
+	return evaluations.Filter(func(row map[string]any) bool {
+		t, ok := row["recorded_at"].(time.Time)
+		return !ok || t.Equal(last[keyOf(row)])
+	})
+}
+
+// EvaluatedDays は、その horizon で実績の出た評価が既にある判断日。
+func EvaluatedDays(evaluations corehistory.Frame, horizon int) map[time.Time]bool {
+	out := map[time.Time]bool{}
+	for _, row := range Scored(evaluations).Rows {
+		day, ok := row["day"].(time.Time)
+		if !ok {
+			continue
+		}
+		if h, _ := corehistory.ToInt(row["horizon"]).(int64); h == int64(horizon) {
+			out[time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)] = true
+		}
+	}
+	return out
+}
+
 // Review は日ごとに adopted / passed / rest の平均リターンを横に並べる。
 //
 // adopted_bp が rest_bp を上回る日が多いほど、順位付けが効いている。
+// 同じ判断日を何度評価しても、最後の評価だけを数える（LatestPerDay）。
 func Review(evaluations corehistory.Frame) corehistory.Frame {
-	scored := Scored(evaluations)
+	scored := Scored(LatestPerDay(evaluations))
 	rows := []map[string]any{}
 	if scored.IsEmpty() {
 		return corehistory.NewFrame(ReviewColumns, rows)
