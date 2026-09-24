@@ -72,7 +72,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	if done, err := d.openDay(); done || err != nil {
 		return err
 	}
-	todayJST, today, cal := d.todayJST, d.today, d.cal
+	todayJST, cal := d.todayJST, d.cal
 	if err := rep.StartRun(runID, todayJST, string(appSettings.Env), d.mode()); err != nil {
 		return fmt.Errorf("実行の記録を始められません: %w", err)
 	}
@@ -88,94 +88,12 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 		return err
 	}
 
-	// 1. 日足の収集と ATR / 直近終値
-	lastPrices := make(map[string]decimal.Decimal)
-	atrMap := make(map[string]decimal.Decimal)
-	lotSizes := make(map[string]decimal.Decimal)
-	allBars := make(map[string][]domain.Bar)
-	// 足が古い・読めない銘柄（銘柄 → 理由）。この回は売りも買いも出さない（W6）
-	unusable := make(map[string]string)
-
-	for _, sym := range setCfg.Universe.Symbols {
-		lotSizes[sym] = decimal.NewFromInt(100)
-		if ov, ok := setCfg.Universe.LotSizeOverrides[sym]; ok && ov > 0 {
-			lotSizes[sym] = decimal.NewFromInt(int64(ov))
-		}
-
-		bars, err := barStore.Read(sym, "", "")
-		if why := barsUnusable(bars, err, today, cal.PreviousTradingDay); why != "" {
-			unusable[sym] = why
-		}
-		if err != nil || len(bars) == 0 {
-			continue
-		}
-		allBars[sym] = bars
-		lastBar := bars[len(bars)-1]
-		lastPrices[sym] = lastBar.Close
-
-		highs := make([]float64, len(bars))
-		lows := make([]float64, len(bars))
-		closes := make([]float64, len(bars))
-		for i, bar := range bars {
-			h, _ := bar.High.Float64()
-			l, _ := bar.Low.Float64()
-			c, _ := bar.Close.Float64()
-			highs[i] = h
-			lows[i] = l
-			closes[i] = c
-		}
-		atrVals, _ := indicators.ATR(highs, lows, closes, 14)
-		if len(atrVals) > 0 {
-			atrMap[sym] = decimal.NewFromFloat(atrVals[len(atrVals)-1])
-		}
+	d.loadBars()
+	if err := d.updateStops(); err != nil {
+		return err
 	}
-
-	// 足が古い・読めない銘柄は、この回は判断しない（売りも買いも出さない）。
-	// ストップの判定（損切り・利確）にも使わない（古い足で損切り・利確を決めない）
-	decisionCloses := make(map[string]decimal.Decimal, len(lastPrices))
-	for sym, px := range lastPrices {
-		if _, ng := unusable[sym]; !ng {
-			decisionCloses[sym] = px
-		}
-	}
-	reportUnusableBars(unusable, posMap, logger)
-
-	// 2. ストップロスの管理と更新
-	// 保存済みのストップが読めないと、全銘柄のストップが現値から作り直される（建値・
-	// 最高値の履歴が消える）。読めない台帳で発注しない
-	savedStops, err := rep.GetStops()
-	if err != nil {
-		return fmt.Errorf("ストップの記録を読めません: %w", err)
-	}
-	stopObjMap := make(map[string]*risk.Stop)
-	for sym, st := range savedStops {
-		stopObjMap[sym] = &risk.Stop{
-			Symbol:           st.Symbol,
-			StopPrice:        st.StopPrice,
-			EntryPrice:       st.EntryPrice,
-			CreatedOn:        st.CreatedOn,
-			Trailing:         st.Trailing,
-			ATRMultiple:      st.ATRMultiple,
-			TrailingPct:      st.TrailingPct,
-			HighestClose:     st.HighestClose,
-			InitialStopPrice: st.InitialStopPrice,
-			InitialQuantity:  st.InitialQuantity,
-			ScaledOut:        st.ScaledOut,
-		}
-	}
-	stopBook := risk.NewStopBook(stopObjMap)
-	// 手仕舞った銘柄のストップを外す（外すのはここ 1 か所）。発注する回は建玉を確かに
-	// 照会できている（照会に失敗したら上で止まる）。dry-run はメモリ上の模型（建玉 0）
-	// なので全部外れるが、dry-run はストップを保存しないので台帳は変わらない
-	if removed := stopBook.RetainHeld(posMap); canLive && len(removed) > 0 {
-		logger.Info("wbjp.stop_removed", fmt.Sprintf("保有していない銘柄のストップを外しました: %s", strings.Join(removed, ", ")))
-	}
-	stopBook.EnsureWithOptions(posMap, atrMap, todayJST,
-		risk.EnsureOptionsFrom(setCfg.Stops, setCfg.Sizing.ATRStopMultiple))
-	stopBook.UpdateTrailing(decisionCloses, atrMap)
-	// 建値への引き上げは利確・トレーリングより先に行う。
-	stopBook.UpdateBreakeven(decisionCloses, setCfg.Stops.BreakevenAfterR)
-	// ストップの保存は利確（ScaledOut・建値への引き上げ）を決めた後（3-4）
+	lastPrices, atrMap, lotSizes, allBars, unusable := d.lastPrices, d.atrMap, d.lotSizes, d.allBars, d.unusable
+	decisionCloses, stopBook := d.decisionCloses, d.stopBook
 
 	// 3. 戦略の評価
 	strats, weights, err := buildStrategies(stratCfg)
@@ -461,6 +379,17 @@ type dailyRun struct {
 	bal      *domain.Balance
 	equity   decimal.Decimal
 	posMap   map[string]domain.Position
+
+	// 足（loadBars）
+	lastPrices, atrMap, lotSizes map[string]decimal.Decimal
+	allBars                      map[string][]domain.Bar
+	// 足が古い・読めない銘柄（銘柄 → 理由）。この回は売りも買いも出さない（W6）
+	unusable map[string]string
+	// 判断に使う終値（unusable を除く）
+	decisionCloses map[string]decimal.Decimal
+
+	// ストップ（updateStops）
+	stopBook *risk.StopBook
 }
 
 // prepareDaily は設定を読み、発注するかを決めて口座を表示し、本番発注なら確認を取る。
@@ -625,6 +554,104 @@ func (d *dailyRun) checkLedger() error {
 	// 建玉の照会がエラーなしで 0 件なのに、台帳では保有中のはずの銘柄がある。信じると
 	// ストップを全部消し、保有中の銘柄を新規として買い直すので、発注する回は止める
 	return checkEmptyPositions(d.rep, d.posMap, string(appSettings.Env), d.runID, d.canLive, d.acceptFlat, d.logger)
+}
+
+// loadBars は日足を読み、直近終値・ATR・売買単位を集める。足が古い・読めない銘柄はこの回は
+// 判断しない（売りも買いも出さない。損切り・利確の判定にも使わない）。
+func (d *dailyRun) loadBars() {
+	lastPrices := make(map[string]decimal.Decimal)
+	atrMap := make(map[string]decimal.Decimal)
+	lotSizes := make(map[string]decimal.Decimal)
+	allBars := make(map[string][]domain.Bar)
+	// 足が古い・読めない銘柄（銘柄 → 理由）。この回は売りも買いも出さない（W6）
+	unusable := make(map[string]string)
+	d.lastPrices, d.atrMap, d.lotSizes, d.allBars, d.unusable = lastPrices, atrMap, lotSizes, allBars, unusable
+
+	for _, sym := range d.setCfg.Universe.Symbols {
+		lotSizes[sym] = decimal.NewFromInt(100)
+		if ov, ok := d.setCfg.Universe.LotSizeOverrides[sym]; ok && ov > 0 {
+			lotSizes[sym] = decimal.NewFromInt(int64(ov))
+		}
+
+		bars, err := d.barStore.Read(sym, "", "")
+		if why := barsUnusable(bars, err, d.today, d.cal.PreviousTradingDay); why != "" {
+			unusable[sym] = why
+		}
+		if err != nil || len(bars) == 0 {
+			continue
+		}
+		allBars[sym] = bars
+		lastBar := bars[len(bars)-1]
+		lastPrices[sym] = lastBar.Close
+
+		highs := make([]float64, len(bars))
+		lows := make([]float64, len(bars))
+		closes := make([]float64, len(bars))
+		for i, bar := range bars {
+			h, _ := bar.High.Float64()
+			l, _ := bar.Low.Float64()
+			c, _ := bar.Close.Float64()
+			highs[i] = h
+			lows[i] = l
+			closes[i] = c
+		}
+		atrVals, _ := indicators.ATR(highs, lows, closes, 14)
+		if len(atrVals) > 0 {
+			atrMap[sym] = decimal.NewFromFloat(atrVals[len(atrVals)-1])
+		}
+	}
+
+	// 足が古い・読めない銘柄は、この回は判断しない（売りも買いも出さない）。
+	// ストップの判定（損切り・利確）にも使わない（古い足で損切り・利確を決めない）
+	d.decisionCloses = make(map[string]decimal.Decimal, len(lastPrices))
+	for sym, px := range lastPrices {
+		if _, ng := unusable[sym]; !ng {
+			d.decisionCloses[sym] = px
+		}
+	}
+	reportUnusableBars(unusable, d.posMap, d.logger)
+}
+
+// updateStops は保存済みのストップを読み、手仕舞った銘柄のストップを外し、無い銘柄に作り、
+// トレーリング・建値への引き上げを進める。保存は利確を決めた後（decideStopExits）。
+func (d *dailyRun) updateStops() error {
+	// 保存済みのストップが読めないと、全銘柄のストップが現値から作り直される（建値・
+	// 最高値の履歴が消える）。読めない台帳で発注しない
+	savedStops, err := d.rep.GetStops()
+	if err != nil {
+		return fmt.Errorf("ストップの記録を読めません: %w", err)
+	}
+	stopObjMap := make(map[string]*risk.Stop)
+	for sym, st := range savedStops {
+		stopObjMap[sym] = &risk.Stop{
+			Symbol:           st.Symbol,
+			StopPrice:        st.StopPrice,
+			EntryPrice:       st.EntryPrice,
+			CreatedOn:        st.CreatedOn,
+			Trailing:         st.Trailing,
+			ATRMultiple:      st.ATRMultiple,
+			TrailingPct:      st.TrailingPct,
+			HighestClose:     st.HighestClose,
+			InitialStopPrice: st.InitialStopPrice,
+			InitialQuantity:  st.InitialQuantity,
+			ScaledOut:        st.ScaledOut,
+		}
+	}
+	stopBook := risk.NewStopBook(stopObjMap)
+	d.stopBook = stopBook
+	// 手仕舞った銘柄のストップを外す（外すのはここ 1 か所）。発注する回は建玉を確かに
+	// 照会できている（照会に失敗したら上で止まる）。dry-run はメモリ上の模型（建玉 0）
+	// なので全部外れるが、dry-run はストップを保存しないので台帳は変わらない
+	if removed := stopBook.RetainHeld(d.posMap); d.canLive && len(removed) > 0 {
+		d.logger.Info("wbjp.stop_removed", fmt.Sprintf("保有していない銘柄のストップを外しました: %s", strings.Join(removed, ", ")))
+	}
+	stopBook.EnsureWithOptions(d.posMap, d.atrMap, d.todayJST,
+		risk.EnsureOptionsFrom(d.setCfg.Stops, d.setCfg.Sizing.ATRStopMultiple))
+	stopBook.UpdateTrailing(d.decisionCloses, d.atrMap)
+	// 建値への引き上げは利確・トレーリングより先に行う。
+	stopBook.UpdateBreakeven(d.decisionCloses, d.setCfg.Stops.BreakevenAfterR)
+	// ストップの保存は利確（ScaledOut・建値への引き上げ）を決めた後（3-4）
+	return nil
 }
 
 // finishRun は実行の終わりを台帳に残す（err があれば failed）。評価額・現金は照会できた時点で
