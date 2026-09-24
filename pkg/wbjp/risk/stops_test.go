@@ -32,7 +32,7 @@ func TestTradingDaysHeld(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tradingDaysHeld(day(tc.created), day(tc.asOf))
+			got := tradingDaysHeld(day(tc.created), day(tc.asOf), nil)
 			if got != tc.want {
 				t.Errorf("tradingDaysHeld(%s → %s) = %d, want %d", tc.created, tc.asOf, got, tc.want)
 			}
@@ -47,7 +47,7 @@ func TestTradingDaysHeldIgnoresWeekendGap(t *testing.T) {
 	if calendar != 4 {
 		t.Fatalf("前提が崩れている: 暦日 %d", calendar)
 	}
-	if got := tradingDaysHeld(day("2026-09-03"), day("2026-09-07")); got != 2 {
+	if got := tradingDaysHeld(day("2026-09-03"), day("2026-09-07"), nil); got != 2 {
 		t.Errorf("営業日は 2 日であるべき: %d", got)
 	}
 }

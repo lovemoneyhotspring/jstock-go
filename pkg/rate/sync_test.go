@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/news"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 )
@@ -118,5 +120,38 @@ func TestSyncNewsSkipsDoneAndContinuesPastFailure(t *testing.T) {
 	src.calls = nil
 	if _, err := SyncNews(ctx, store, src, 5, 0, true); err != nil || len(src.calls) != 5 {
 		t.Errorf("force: calls = %v err = %v", src.calls, err)
+	}
+}
+
+// 平日の日単位の失敗は rate sync の終了コードに出す。休場日（既定は土日）の失敗は出さない
+// （news sync と同じ規則。日曜などは応答が空で失敗になる）。
+func TestSyncNewsFailureErrorSkipsClosedDays(t *testing.T) {
+	boom := errors.New("電文の失敗")
+	weekend := SyncNewsResult{Failed: 2, Days: []SyncNewsDay{
+		{Day: "2026-09-21", News: 3},
+		{Day: "2026-09-20", Err: boom}, // 日曜
+		{Day: "2026-09-19", Err: boom}, // 土曜
+	}}
+	if err := weekend.FailureError(nil); err != nil {
+		t.Errorf("土日だけの失敗の FailureError = %v, want nil", err)
+	}
+	weekday := SyncNewsResult{Failed: 3, Days: []SyncNewsDay{
+		{Day: "2026-09-23", Err: boom}, // 秋分の日（水曜）
+		{Day: "2026-09-20", Err: boom},
+		{Day: "2026-09-18", Err: boom}, // 金曜
+	}}
+	err := weekday.FailureError(nil)
+	if err == nil || !strings.HasPrefix(err.Error(), "2 日") || !strings.Contains(err.Error(), "2026-09-18") ||
+		strings.Contains(err.Error(), "2026-09-20") {
+		t.Errorf("FailureError(nil) = %v, want 9/23・9/18 の 2 日", err)
+	}
+	// 取引カレンダーを渡せば平日の祝日も問わない
+	holiday := func(day time.Time) bool { return news.Weekend(day) || day.Format("2006-01-02") == "2026-09-23" }
+	err = weekday.FailureError(holiday)
+	if err == nil || !strings.HasPrefix(err.Error(), "1 日") || strings.Contains(err.Error(), "2026-09-23") {
+		t.Errorf("FailureError(holiday) = %v, want 9/18 だけ", err)
+	}
+	if err := (SyncNewsResult{}).FailureError(nil); err != nil {
+		t.Errorf("失敗の無い回の FailureError = %v", err)
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/jquants/archive"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
@@ -78,6 +80,17 @@ func newBacktestCmd() *cobra.Command {
 				Start:     fromFlag,
 				End:       toFlag,
 				FillModel: fillModelFlag,
+			}
+
+			// 時間切れ（stale_exit_days・max_hold_days）の営業日数は本番と同じく東証のカレンダーで
+			// 数える（祝日を数えない）。米国株・カレンダーが無いときは土日だけを除く
+			if setCfg.Universe.Market != string(domain.MarketUS) {
+				cal := calendar.FromArchive(archive.NewArchive(appSettings.JQuantsArchiveDir()))
+				if !cal.Empty() {
+					opts.TradingDay = cal.IsTradingDay
+				} else if setCfg.Stops.StaleExitDays != nil || setCfg.Stops.MaxHoldDays != nil {
+					fmt.Println("取引カレンダーが読めないので、時間切れの営業日数は土日だけを除いて数えます（祝日も数える）")
+				}
 			}
 
 			// 信用残は使う戦略があるときだけ読む（200 万行の走査）。

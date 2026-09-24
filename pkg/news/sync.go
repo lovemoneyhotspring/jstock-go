@@ -40,21 +40,38 @@ type SyncResult struct {
 // 休場日（closed。nil なら土日）の失敗は数えない（ClosedFunc。記事の無い日曜は毎週失敗になり、
 // 朝の --days 5 が月〜木に毎回 1 で終わってしまう）。失敗の件数と表示は Failed・Days に残る。
 func (r SyncResult) FailureError(closed ClosedFunc) error {
+	outcomes := make([]DayOutcome, len(r.Days))
+	for i, d := range r.Days {
+		outcomes[i] = DayOutcome{Day: d.Day, Err: d.Err}
+	}
+	return FailedDaysError(outcomes, closed)
+}
+
+// DayOutcome は日単位の取り込みの結果（Day は JST の "2006-01-02"）。FailedDaysError に渡す。
+type DayOutcome struct {
+	Day string
+	Err error
+}
+
+// FailedDaysError は営業日の失敗があればエラーを返す。news sync と rate sync が同じ規則で
+// 終了コードを決めるための共通の判定（片方だけ直して判定が割れないように 1 か所に置く）。
+// 休場日（closed。nil なら土日）の失敗は数えない。
+func FailedDaysError(days []DayOutcome, closed ClosedFunc) error {
 	closed = closed.orWeekend()
-	var days []string
-	for _, d := range r.Days {
+	var failed []string
+	for _, d := range days {
 		if d.Err == nil {
 			continue
 		}
 		if day, err := time.ParseInLocation("2006-01-02", d.Day, clock.Tokyo); err == nil && closed(day) {
 			continue
 		}
-		days = append(days, d.Day)
+		failed = append(failed, d.Day)
 	}
-	if len(days) == 0 {
+	if len(failed) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%d 日の取り込みに失敗しました（%s。次回の sync で取り直します）", len(days), strings.Join(days, ", "))
+	return fmt.Errorf("%d 日の取り込みに失敗しました（%s。次回の sync で取り直します）", len(failed), strings.Join(failed, ", "))
 }
 
 // Walk は JST の now から days 日さかのぼり、取るべき日のニュースを source から引いて visit に渡す。

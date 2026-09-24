@@ -2,6 +2,7 @@ package risk
 
 import (
 	"testing"
+	"time"
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/domain"
 	wbjpcfg "github.com/lovemoneyhotspring/jstock-go/pkg/wbjp/config"
@@ -155,20 +156,58 @@ func TestTimeExitTargets(t *testing.T) {
 	closes := map[string]decimal.Decimal{"7203": dec("990"), "6758": dec("1200")}
 
 	// 2026-09-17 は 10 営業日後。含み益なしの 7203 だけが stale で落ちる。
-	targets := sb.TimeExitTargets(closes, "2026-09-17", intPtr(10), intPtr(40))
+	targets := sb.TimeExitTargets(closes, "2026-09-17", intPtr(10), intPtr(40), nil)
 	if len(targets) != 1 || targets[0].Symbol != "7203" {
 		t.Fatalf("stale_exit_days が効いていない: %+v", targets)
 	}
 
 	// max_hold_days に達すれば含み益があっても落ちる。
-	targets = sb.TimeExitTargets(closes, "2026-09-17", nil, intPtr(10))
+	targets = sb.TimeExitTargets(closes, "2026-09-17", nil, intPtr(10), nil)
 	if len(targets) != 2 {
 		t.Fatalf("max_hold_days が効いていない: %+v", targets)
 	}
 
 	// どちらも nil なら何もしない。
-	if got := sb.TimeExitTargets(closes, "2026-09-17", nil, nil); got != nil {
+	if got := sb.TimeExitTargets(closes, "2026-09-17", nil, nil, nil); got != nil {
 		t.Errorf("無効時は何も返さない: %+v", got)
+	}
+}
+
+// 時間切れの営業日数は東証のカレンダーで数える（平日の祝日を数えない）。
+// 2026-09-17 → 10-01 は平日 10 日だが、09-21（敬老の日）・09-22（国民の休日）・09-23（秋分の日）が
+// 休場で営業日は 7 日。10 営業日目は 10-06。
+func TestTimeExitTargetsSkipsHolidays(t *testing.T) {
+	sb := NewStopBook(nil)
+	sb.Set(Stop{Symbol: "7203", StopPrice: dec("960"), EntryPrice: dec("1000"), CreatedOn: "2026-09-17"})
+	closes := map[string]decimal.Decimal{"7203": dec("1200")}
+	holidays := map[string]bool{"2026-09-21": true, "2026-09-22": true, "2026-09-23": true}
+	tse := func(d time.Time) bool {
+		wd := d.Weekday()
+		return wd != time.Saturday && wd != time.Sunday && !holidays[d.Format("2006-01-02")]
+	}
+
+	// 土日だけを除く代用（nil）では 10-01 で 10 日に達してしまう
+	if got := sb.TimeExitTargets(closes, "2026-10-01", nil, intPtr(10), nil); len(got) != 1 {
+		t.Fatalf("前提が崩れている（平日で 10 日）: %+v", got)
+	}
+	if got := sb.TimeExitTargets(closes, "2026-10-01", nil, intPtr(10), tse); len(got) != 0 {
+		t.Errorf("祝日を挟んだ 7 営業日で max_hold_days=10 に達した: %+v", got)
+	}
+	if got := sb.TimeExitTargets(closes, "2026-10-05", nil, intPtr(10), tse); len(got) != 0 {
+		t.Errorf("9 営業日目（10-05）で落ちた: %+v", got)
+	}
+	if got := sb.TimeExitTargets(closes, "2026-10-06", nil, intPtr(10), tse); len(got) != 1 {
+		t.Errorf("10 営業日目（10-06）に落ちない: %+v", got)
+	}
+	// ExitPlan も ExitInputs.TradingDay を通す（本番・backtest の入口）
+	maxDays := 10
+	plan := sb.ExitPlan(wbjpcfg.StopsConfig{MaxHoldDays: &maxDays}, ExitInputs{
+		Closes: closes, Quantities: map[string]decimal.Decimal{"7203": dec("100")}, AsOf: "2026-10-01", TradingDay: tse,
+	})
+	for _, tg := range plan {
+		if tg.Quantity.IsZero() {
+			t.Errorf("ExitPlan が祝日を営業日に数えた: %+v", plan)
+		}
 	}
 }
 

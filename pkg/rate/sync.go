@@ -31,6 +31,20 @@ type SyncNewsResult struct {
 	Days     []SyncNewsDay
 }
 
+// FailureError は営業日の日単位の失敗があればエラーを返す（rate sync の終了コードに使う。
+// news.SyncResult.FailureError と同じ規則）。取れなかった日は済みにせず次回また取りに行くが、
+// 終了 0 だと cron のログを読まない限り取り込みが止まっていることに気づけない。
+//
+// 休場日（closed。nil なら土日）の失敗は数えない（日曜などは応答が空で毎週失敗になる）。
+// 失敗の件数と表示は Failed・Days に残る。
+func (r SyncNewsResult) FailureError(closed news.ClosedFunc) error {
+	outcomes := make([]news.DayOutcome, len(r.Days))
+	for k, d := range r.Days {
+		outcomes[k] = news.DayOutcome{Day: d.Day, Err: d.Err}
+	}
+	return news.FailedDaysError(outcomes, closed)
+}
+
 // SyncNews は JST の今日から days 日さかのぼって、ニュースからレーティングの動きを取り込む。
 //
 // 取り込み済みの日は飛ばすが、**直近 recent 日は済みでも取り直す**。レーティングの

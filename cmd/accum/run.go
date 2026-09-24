@@ -11,8 +11,10 @@ import (
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/cli"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/digest"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/execution"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 )
@@ -109,6 +111,8 @@ func runAccumulation(liveFlag, yesFlag, ignoreWindowFlag, noSyncFlag, brokerVeri
 	}
 	defer led.Close()
 	led.Verify = brokerVerifyFlag
+	// 照合（SyncOrderStatus）が貯めた実行品質（約定・失効）の記録を、どう終わっても書き出す
+	defer flushExecution()
 
 	// dry-run は常にメモリ上の模型
 	var b broker.Broker
@@ -122,4 +126,13 @@ func runAccumulation(liveFlag, yesFlag, ignoreWindowFlag, noSyncFlag, brokerVeri
 	hist := accumhist.StoreFor(appSettings)
 
 	return execute.RunAccumulation(cfg, b, barStore, led, logger, hist, canLive, ignoreWindowFlag)
+}
+
+// flushExecution は貯めた実行品質（約定・失効の記録。execution.Collect）を積立の履歴に書き出す。
+// daytrade の open・close・guard・protect と同じく実行の終わりに呼ぶ。呼ばないと貯めた行は
+// プロセスと一緒に消える。記録の失敗で実行は落とさない（ログに残すだけ）。
+func flushExecution() {
+	if err := execution.Flush(accumhist.StoreFor(appSettings), clock.TodayJST()); err != nil {
+		run.Warn("accum.execution", "実行品質の記録に失敗", map[string]any{"error": err.Error()})
+	}
 }

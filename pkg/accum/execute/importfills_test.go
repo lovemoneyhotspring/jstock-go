@@ -106,6 +106,17 @@ func TestImportFillsFiltersByOrderNumber(t *testing.T) {
 	}
 }
 
+// 空白だけの --order は絞り込みが外れて全件を取り込まないよう、エラーで止める。
+func TestImportFillsRejectsBlankOrder(t *testing.T) {
+	led := newLedger(t)
+	b := &stubBroker{history: []domain.Order{historyFill("563A", "11014725/20260911", 1000, 1000)}}
+
+	fills, err := ImportFills(led, b, &logging.Logger{}, ImportFillsOptions{Orders: []string{" "}, Apply: true})
+	if err == nil || len(fills) != 0 {
+		t.Fatalf("空白だけの --order は止めるべき: fills=%v err=%v", fills, err)
+	}
+}
+
 // 売りと未約定は投下額ではないので入れない。
 func TestImportFillsSkipsSellsAndUnfilled(t *testing.T) {
 	led := newLedger(t)
@@ -121,5 +132,42 @@ func TestImportFillsSkipsSellsAndUnfilled(t *testing.T) {
 	}
 	if len(fills) != 0 {
 		t.Errorf("売り・未約定を取り込んでいる: %v", fills)
+	}
+}
+
+// 注文番号の分け方は broker の splitBrokerOrderID と同じ（空白を落とす・番号か営業日が空なら通さない）。
+func TestSplitOrderNumberMatchesBroker(t *testing.T) {
+	cases := []struct {
+		in          string
+		number, day string
+		ok          bool
+	}{
+		{"11014725/20260925", "11014725", "20260925", true},
+		{" 11014725/20260925 ", "11014725", "20260925", true}, // 以前は空白付きの番号・営業日になった
+		{"11014725/", "", "", false},                          // 以前は番号 "11014725" として通した
+		{"/20260925", "", "", false},
+		{"11014725", "", "", false},
+		{"", "", "", false},
+	}
+	for _, tc := range cases {
+		number, day, ok := splitOrderNumber(tc.in)
+		if number != tc.number || day != tc.day || ok != tc.ok {
+			t.Errorf("splitOrderNumber(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tc.in, number, day, ok, tc.number, tc.day, tc.ok)
+		}
+	}
+}
+
+func TestMatchesOrder(t *testing.T) {
+	wanted := map[string]struct{}{"11014725": {}}
+	if !matchesOrder(wanted, "11014725/20260925") {
+		t.Error("番号だけの指定が「番号/営業日」に合わない")
+	}
+	if matchesOrder(wanted, "11014726/20260925") {
+		t.Error("別の番号に合った")
+	}
+	// 分けられない値は完全一致だけで見る（空の番号で引かない）
+	if matchesOrder(map[string]struct{}{"": {}}, "11014725/") {
+		t.Error("空の番号で合った")
 	}
 }
