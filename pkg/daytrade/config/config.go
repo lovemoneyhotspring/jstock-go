@@ -1106,6 +1106,11 @@ func validateCapacity(c Config) error {
 	if c.Capital.Weighting != WeightingTurnover {
 		return fmt.Errorf("margin.capacity_ratio は capital.weighting = turnover のときだけ使える")
 	}
+	// ショートの倍率が 1 を超えると、一時停止中はその総額がまるごとロングに回り、長短合計が上限を超える
+	one = decimal.NewFromInt(1)
+	if m.MultiplierNormal.GreaterThan(one) || m.MultiplierLongWeak.GreaterThan(one) {
+		return fmt.Errorf("margin.capacity_ratio は margin.multiplier_normal / multiplier_long_weak が 1 以下のときだけ使える")
+	}
 	// ショック日にショートを建てると、長短合計の上限（shock_capacity_ratio）をロングだけで判定できない
 	if c.Regime.ShockShortScale.IsPositive() {
 		return fmt.Errorf("margin.capacity_ratio は regime.shock_short_scale = 0 のときだけ使える")

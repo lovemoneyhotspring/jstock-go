@@ -248,14 +248,14 @@ func TestSizeDayLiveConfigPaused(t *testing.T) {
 		wantBudget, wantSpill int64
 		wantTotalAtMost       int64
 	}{
-		// 規則 R（weighting = turnover）: N = max_positions = 12 で、N × 1 注文が総額。
+		// 規則 R（weighting = turnover）: N = max_positions = 10 で、N × 1 注文が総額。
 		// 枠 200 万がロングに回って総額 700 万（長短合計は停止前と同じ）。保証金の比
 		// （margin.capacity_ratio）は open の applyMarginCap が当てるので、ここは設定の値のまま
-		{name: "通常の日", verdict: normal, wantN: 12, wantBudget: 583_332, wantSpill: 1_999_998, wantTotalAtMost: 6_999_984},
+		{name: "通常の日", verdict: normal, wantN: 10, wantBudget: 699_999, wantSpill: 1_999_998, wantTotalAtMost: 6_999_990},
 		// 米国小幅高の日もショートは停止のまま倍率を残すので、通常日と同じ形
-		{name: "米国小幅高の日", verdict: shortOff, wantN: 12, wantBudget: 583_332, wantSpill: 1_999_998, wantTotalAtMost: 6_999_984},
-		// ショック日はショート ×0 なので回す枠が無い（ロング 500 万 × 1.5 = 750 万を 12 位まで）
-		{name: "ショック日", verdict: shock, wantN: 12, wantBudget: 624_999, wantSpill: 0, wantTotalAtMost: 7_499_988},
+		{name: "米国小幅高の日", verdict: shortOff, wantN: 10, wantBudget: 699_999, wantSpill: 1_999_998, wantTotalAtMost: 6_999_990},
+		// ショック日はショート ×0 なので回す枠が無い（ロング 500 万 × 1.5 = 750 万を 10 位まで）
+		{name: "ショック日", verdict: shock, wantN: 10, wantBudget: 750_000, wantSpill: 0, wantTotalAtMost: 7_500_000},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			d := SizeDay(SizingInput{Cfg: cfg, Verdict: c.verdict})
@@ -294,13 +294,13 @@ func TestSizeDayRatioStaysWithinCapacity(t *testing.T) {
 	}{
 		// 平日: ロング 558 万 + 回したショート 200 万 = 758 万（上限 7,582,401）
 		{name: "平日", sinkidate: 11_150_590, verdict: regime.Verdict{Trade: true, Scale: 1},
-			wantTotal: 7_582_392, atMost: 7_582_401},
+			wantTotal: 7_582_390, atMost: 7_582_401},
 		// ショック日: ロング 558 万 × 1.5 = 837 万 < 上限 858 万（ショートは ×0 で回す枠なし）
 		{name: "ショック日", sinkidate: 11_150_590, verdict: regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: 1.5},
 			wantTotal: 8_373_600, atMost: 8_585_954},
 		// 天井に達した口座のショック日: ロング 800 万 × 1.5 = 1,200 万 → 天井 1,000 万で頭打ち
 		{name: "天井のショック日", sinkidate: 20_000_000, verdict: regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: 1.5},
-			wantTotal: 9_999_996, atMost: 10_000_000},
+			wantTotal: 10_000_000, atMost: 10_000_000},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cfg, res := margincap.Apply(base, margincap.Snapshot{Day: "2026-09-24", SinyouSinkidate: yenOf(c.sinkidate)})

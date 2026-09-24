@@ -581,9 +581,9 @@ func TestNominalLegsPausedSpillsWholeShortBudget(t *testing.T) {
 	if len(legs) != 1 || legs[0].Side != "BUY" {
 		t.Fatalf("脚 = %d 本（%v）, want ロング 1 本", len(legs), legs)
 	}
-	// 規則 R（weighting = turnover）: N = 12、総額 500 万 + 余り 200 万 = 700 万を 12 で割った 1 注文
-	if legs[0].N != 12 || legs[0].Budget.String() != "583332" {
-		t.Errorf("ロング N=%d 1 注文 %s, want N=12 1 注文 583332", legs[0].N, legs[0].Budget)
+	// 規則 R（weighting = turnover）: N = 10、総額 500 万 + 余り 200 万 = 700 万を 10 で割った 1 注文
+	if legs[0].N != 10 || legs[0].Budget.String() != "699999" {
+		t.Errorf("ロング N=%d 1 注文 %s, want N=10 1 注文 699999", legs[0].N, legs[0].Budget)
 	}
 }
 

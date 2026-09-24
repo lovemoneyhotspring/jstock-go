@@ -312,9 +312,9 @@ func TestApplyRatioLiveConfig(t *testing.T) {
 		// 追証の日は建てない
 		{name: "追証", sinkidate: "11150590", fusoku: "1000", wantLong: "0", wantShort: "0",
 			wantNormal: "0", wantShock: "0", wantRatio: true, wantWatch: true, change: true},
-		// 建可能額が取れない日は設定の値のまま（保証金 API の不調で休まない）
-		{name: "建可能額 0", sinkidate: "0", wantLong: "5000000", wantShort: "2000000",
-			wantNormal: "0", wantShock: "0"},
+		// 当日ぶんのキャッシュで建可能額が 0 なら建てない（取れない朝は applyMarginCap が設定の値に落とす）
+		{name: "建可能額 0", sinkidate: "0", wantLong: "0", wantShort: "0",
+			wantNormal: "0", wantShock: "0", wantRatio: true, wantWatch: true, change: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := Snapshot{Day: "2026-09-24", SinyouSinkidate: dec(c.sinkidate)}

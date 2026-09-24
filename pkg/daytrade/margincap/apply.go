@@ -217,20 +217,17 @@ func RatioTotals(m config.Margin, s Snapshot) (normal, shock decimal.Decimal) {
 // いつもどおり spill_to_long でロングに回るので、長短合計は上限を超えない。
 // ショック日のロングの総額は capital.ShockTotalCap（実行時の値）で頭打ちにする（execute.SizeDay）。
 //
-// 建可能額が取れない（0）日は元の設定のまま返す——ここで 0 にすると保証金 API の不調で一日休む。
-// 追証の日は建てない（合計 0）。
+// 追証の日・建可能額が 0 以下の日は建てない（合計 0）。
 func applyRatio(cfg config.Config, s Snapshot) (config.Config, Result) {
 	res := Result{Shortfall: s.Fusokugaku.GreaterThan(decimal.Zero)}
 	res.Long = LegChange{Before: cfg.Capital.MaxCapital, NBefore: cfg.Capital.Positions()}
 	res.Short = LegChange{Before: cfg.Margin.MaxCapital, NBefore: cfg.Margin.Positions()}
 	normal, shock := RatioTotals(cfg.Margin, s)
-	if res.Shortfall {
+	// 追証の日と、当日ぶんのキャッシュで建可能額が 0 以下の日は建てない（WatchOnly → 通知）。
+	// 保証金が取れない朝は呼ぶ側（applyMarginCap）がキャッシュ無し・古いとして設定の値に落としているので、
+	// ここに来るのは「当日の値が 0 と読めた」朝だけ（2026-09-24 のレビュー。従来の Apply と同じ向き）
+	if res.Shortfall || !normal.IsPositive() {
 		normal, shock = decimal.Zero, decimal.Zero
-	}
-	if !normal.IsPositive() && !res.Shortfall {
-		res.Long.After, res.Long.NAfter = res.Long.Before, res.Long.NBefore
-		res.Short.After, res.Short.NAfter = res.Short.Before, res.Short.NBefore
-		return cfg, res
 	}
 	// ショートの取り分は設定の長短比（legTargets と同じ）で割り、margin.max_capital を上限にする。
 	// 先に満額を取ると、建可能額の小さい朝にロングが 0 になり、一時停止中は何も建たない

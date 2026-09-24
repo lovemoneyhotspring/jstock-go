@@ -716,7 +716,8 @@ func PlacePicks(env Env, b broker.Broker, picks []selection.Pick) (orders int, f
 		} else if env.entryClosing() {
 			// 締め切りを過ぎた・残りが EntrySendMargin を切った。ここから先の注文は送らない——時間帯の外に
 			// 成行を出さない・締め切りに切られて結果の分からない電文を作らないため。
-			// 送れなかった分は次の cron が「残りの枚数」として建て直す
+			// 送れなかった分は次の cron が「残りの枚数」として建て直す。ただし規則 R（capital.weighting =
+			// turnover）は 1 件でも建てた日は買い足さない（longAfterPlaced）——見送った銘柄はその日は建たない
 			outcome = fmt.Sprintf("見送り 締め切り（%s）まで %s を切った", env.deadlineText(), EntrySendMargin)
 			failures = append(failures, fmt.Sprintf("%s %s: %s", pick.Symbol, label, outcome))
 			env.printf("  %s: %s\n", pick.Symbol, outcome)
