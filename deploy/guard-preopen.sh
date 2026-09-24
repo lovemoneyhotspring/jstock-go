@@ -144,7 +144,8 @@ if [ "$((10#$hour))" -lt 9 ]; then
       # まだ動かない: 起動しない（コードが出ない）か、設定を読めない → 1 世代前へ戻す
       if [ "$rc" -ne 0 ] && [ "${skip_repair:-0}" -eq 0 ]; then
         after=$(printf '%s\n' "$out" | sed -n 's/^preflight-problems: //p' | tail -1)
-        if [ -z "$after" ] || [[ ",$after," == *,config,* ]]; then
+        # 時間切れ（124/137）は起動しない・設定を読めないとは限らないので戻さない（冒頭の preflight と同じ扱い）
+        if ! timed_out "$rc" && { [ -z "$after" ] || [[ ",$after," == *,config,* ]]; }; then
           log "まだ動かない → 1 世代前へ戻す"
           if bounded "$ROLLBACK_TIMEOUT" "$HOME_DIR/deploy/rollback-bin.sh" >> "$GUARD_LOG" 2>&1; then
             summary+=("1 世代前の実行ファイルへ戻しました")
@@ -155,7 +156,9 @@ if [ "$((10#$hour))" -lt 9 ]; then
             # （古い版を黙って置いておくと、次の build まで「いつの版か」が分からなくなる）。
             # rollback-bin.sh は戻す前の版を .prev に入れ替えて残すので、もう一度呼べば進む。
             # plan など設定以外だけが残るなら、戻した版は設定を読めているので残す
-            if [ "$rc" -ne 0 ] && { [ -z "$back" ] || [[ ",$back," == *,config,* ]]; }; then
+            # 戻した版の preflight が時間切れなら、動くか分からないだけなので進め直さない
+            # （設定を読めないと分かっている戻す前の版より、確かめられなかった版の方がまし）
+            if [ "$rc" -ne 0 ] && ! timed_out "$rc" && { [ -z "$back" ] || [[ ",$back," == *,config,* ]]; }; then
               log "戻しても動かない → 戻す前の実行ファイルへ進め直す"
               if bounded "$ROLLBACK_TIMEOUT" "$HOME_DIR/deploy/rollback-bin.sh" >> "$GUARD_LOG" 2>&1; then
                 summary+=("1 世代前でも動かなかったので、戻す前の実行ファイルへ進め直しました（どちらの版も点検に通りません）")
@@ -171,8 +174,9 @@ if [ "$((10#$hour))" -lt 9 ]; then
     fi
     if [ "$rc" -ne 0 ] && [[ ",$(printf '%s\n' "$out" | sed -n 's/^preflight-problems: //p' | tail -1)," == *,plan,* ]]; then
       # with-lock.sh は自分で timeout を掛ける（ロック待ち 30 秒＋上限＋-k の 10 秒）。締め切りから逆算する
-      plan_limit=$(step_limit $((PLAN_TIMEOUT + 30)))
-      plan_limit=$((plan_limit - 30))
+      # plan の後の再点検（preflight）の分も残す。使い切ると plan ができても再点検が走らず「直せない」と出る
+      plan_limit=$(step_limit $((PLAN_TIMEOUT + 30 + PREFLIGHT_TIMEOUT)))
+      plan_limit=$((plan_limit - 30 - PREFLIGHT_TIMEOUT))
       if [ "$plan_limit" -ge 30 ]; then
         log "今日の plan を作る（daytrade plan --if-missing、上限 ${plan_limit} 秒）"
         WITH_LOCK_TIMEOUT="$plan_limit" "$HOME_DIR/deploy/with-lock.sh" /tmp/daytrade.lock 30 "$HOME_DIR/state/logs/daytrade-plan.log" \

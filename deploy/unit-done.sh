@@ -46,6 +46,15 @@ fi
 
 "$HOME_DIR/deploy/ping.sh" "$key" "$rc" >> "$HOME_DIR/state/logs/ping.log" 2>&1
 
+# systemd の起動失敗（200〜242: 203/EXEC など）はスクリプトが一度も動いていないので、通知は済んでいない
+case "$result" in
+  exit-code)
+    if [[ "${status:-}" =~ ^[0-9]+$ ]] && [ "$status" -ge 200 ] && [ "$status" -le 242 ]; then
+      result="exit-code-systemd-$status"
+    fi
+    ;;
+esac
+
 case "$result" in
   success|exit-code|'')
     # 成功、またはスクリプトが自分で終えた失敗（通知はスクリプトが済ませている）
