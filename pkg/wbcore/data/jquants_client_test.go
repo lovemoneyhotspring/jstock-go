@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 )
 
 // newStubClient は試験用のサーバに向けたクライアント。送信間隔は 0（待たない）。
@@ -80,6 +82,36 @@ func TestGetAllPassesParams(t *testing.T) {
 	}
 	if seen.Get("disc_date") != "2025-01-06" {
 		t.Errorf("引数が渡っていない: %v", seen)
+	}
+}
+
+// 再試行を使い切ったエラーに、最後の失敗の理由（ステータスと本文）が残る。
+// 以前は「maximum retries」だけで、sync の失敗から原因を追えなかった（2026-09-24 のレビュー）。
+func TestGetKeepsCauseAfterRetries(t *testing.T) {
+	var waits []time.Duration
+	retrySleep = func(d time.Duration) { waits = append(waits, d) }
+	t.Cleanup(func() { retrySleep = time.Sleep })
+
+	calls := 0
+	client, _ := newStubClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "7")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, "upstream down")
+	})
+	_, err := client.GetAll("/equities/bars/daily", nil)
+	if err == nil {
+		t.Fatal("5xx が続いてもエラーにならない")
+	}
+	if !strings.Contains(err.Error(), "status 502: upstream down") {
+		t.Errorf("エラーに最後の失敗の理由が無い: %v", err)
+	}
+	if calls != 3 || len(waits) != 3 || waits[0] != 7*time.Second {
+		t.Errorf("呼び出し %d 回・待ち %v", calls, waits)
 	}
 }
 

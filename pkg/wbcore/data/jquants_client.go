@@ -29,6 +29,9 @@ const (
 	downloadRetries = 3
 )
 
+// retrySleep は再試行の間の待ち。試験では待たないように差し替える。
+var retrySleep = time.Sleep
+
 type JQuantsClient struct {
 	apiKey     string
 	baseURL    string
@@ -75,6 +78,9 @@ func (c *JQuantsClient) Get(endpoint string, params url.Values) (*JQuantsRespons
 	}
 
 	maxRetries := 3
+	// lastErr は最後の失敗の理由。再試行を使い切ったとき、何で落ちたか（通信・429・5xx）を
+	// エラーに残す。無いと sync の失敗が「maximum retries」だけになり、原因を追えない
+	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		c.throttle()
 
@@ -88,7 +94,8 @@ func (c *JQuantsClient) Get(endpoint string, params url.Values) (*JQuantsRespons
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			time.Sleep(time.Duration(1<<attempt) * time.Second)
+			lastErr = err
+			retrySleep(time.Duration(1<<attempt) * time.Second)
 			continue
 		}
 
@@ -100,13 +107,16 @@ func (c *JQuantsClient) Get(endpoint string, params url.Values) (*JQuantsRespons
 					waitSec = s
 				}
 			}
-			time.Sleep(time.Duration(waitSec) * time.Second)
+			lastErr = fmt.Errorf("status %d（Retry-After %d 秒）", resp.StatusCode, waitSec)
+			retrySleep(time.Duration(waitSec) * time.Second)
 			continue
 		}
 
 		if resp.StatusCode >= 500 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
 			resp.Body.Close()
-			time.Sleep(time.Duration(1<<attempt) * time.Second)
+			lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			retrySleep(time.Duration(1<<attempt) * time.Second)
 			continue
 		}
 
@@ -130,7 +140,7 @@ func (c *JQuantsClient) Get(endpoint string, params url.Values) (*JQuantsRespons
 		return &res, nil
 	}
 
-	return nil, fmt.Errorf("J-Quants request exceeded maximum retries: %s", endpoint)
+	return nil, fmt.Errorf("J-Quants request exceeded maximum retries (%d): %s: %w", maxRetries, endpoint, lastErr)
 }
 
 // SetBaseURL は問い合わせ先を差し替える（試験のスタブサーバ用）。
@@ -218,13 +228,13 @@ func (c *JQuantsClient) download(signedURL string) ([]byte, error) {
 		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
-			time.Sleep(time.Duration(1<<attempt) * time.Second)
+			retrySleep(time.Duration(1<<attempt) * time.Second)
 			continue
 		}
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("一括ファイルの取得に失敗しました: HTTP %d", resp.StatusCode)
-			time.Sleep(time.Duration(1<<attempt) * time.Second)
+			retrySleep(time.Duration(1<<attempt) * time.Second)
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
