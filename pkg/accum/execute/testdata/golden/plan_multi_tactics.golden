@@ -1,0 +1,22 @@
+err: <nil>
+lotCalls: 1
+stale: []
+[0] Symbol=1306 Amount=200000 Quantity=100 Limit=1010 Failed=false LotUnknown=false Market=JP JudgedOn=2026-09-13 Month=2026-09-01 Close=1000 Target=200000 Placed=0 Multiplier=1 Tactic=constant
+    Reason=今月の目標 200000（基本 200000＋増額 0）− 発注済み 0
+    Note=
+    Request={ID:9704a7f987c193f1698c92fad29516fa Sym:1306 Side:BUY Type:LIMIT Qty:100 Limit:1010 Tax:SPECIFIC Trade:CASH Cond: Stop:nil Reason:今月の目標 200000（基本 200000＋増額 0）− 発注済み 0}
+[1] Symbol=563A Amount=11500 Quantity=8 Limit=1294 Failed=false LotUnknown=false Market=JP JudgedOn=2026-09-13 Month=2026-09-01 Close=1281.4 Target=11500 Placed=0 Multiplier=1 Tactic=bear_stack
+    Reason=今月の目標 11500（基本 11500〔9/8 開始、残り 23/30 日で日割り〕＋増額 0）− 発注済み 0
+    Note=
+    Request={ID:0765476797977eb82c88ce9d2003d0ea Sym:563A Side:BUY Type:LIMIT Qty:8 Limit:1294 Tax:SPECIFIC Trade:CASH Cond: Stop:nil Reason:今月の目標 11500（基本 11500〔9/8 開始、残り 23/30 日で日割り〕＋増額 0）− 発注済み 0}
+[2] Symbol=2559 Amount=25000 Quantity=1 Limit=20380 Failed=false LotUnknown=false Market=JP JudgedOn=2026-09-13 Month=2026-09-01 Close=20181.4 Target=25000 Placed=0 Multiplier=1 Tactic=bear_stack
+    Reason=今月の目標 25000（基本 25000＋増額 0）− 発注済み 0
+    Note=
+    Request={ID:d806ffa83a7a81791dfa956795bf616a Sym:2559 Side:BUY Type:LIMIT Qty:1 Limit:20380 Tax:SPECIFIC Trade:CASH Cond: Stop:nil Reason:今月の目標 25000（基本 25000＋増額 0）− 発注済み 0}
+[3] Symbol=9999 Amount=0 Quantity=0 Limit=nil Failed=true LotUnknown=false Market= JudgedOn= Month= Close=0 Target=0 Placed=0 Multiplier=0 Tactic=
+    Reason=
+    Note=足データなし
+    Request=nil
+started 1306: 2025-01-01 (<nil>)
+started 563A: 2026-09-08 (<nil>)
+started 2559: 2025-01-01 (<nil>)

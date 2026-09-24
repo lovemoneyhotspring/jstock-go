@@ -109,75 +109,30 @@ func VerifyStop(
 	result := &VerifyStopResult{}
 
 	// 1. 売買単位と現在値
-	lots := b.LotSizes([]string{opts.Symbol})
-	lot, ok := lots[opts.Symbol]
-	if !ok || !lot.IsPositive() {
-		return nil, fmt.Errorf("%s の売買単位を取得できません（CLMStkGetIssueMstKabu）", opts.Symbol)
-	}
-	prices, ok := b.(priceSource)
-	if !ok {
-		return nil, fmt.Errorf("このブローカー（%s）は時価問合を持たないので検証注文は作れません", b.Name())
-	}
-	quotes, err := prices.MarketPrices([]string{opts.Symbol})
+	qty, last, err := stopQuantityAndPrice(b, opts.Symbol, units)
 	if err != nil {
-		return nil, fmt.Errorf("%s の時価を取得できません: %w", opts.Symbol, err)
+		return nil, err
 	}
-	quote, found := quotes[opts.Symbol]
-	if !found || !quote.Last.IsPositive() {
-		return nil, fmt.Errorf("%s の現在値が取れません", opts.Symbol)
-	}
-	qty := lot.Mul(decimal.NewFromInt(int64(units)))
 
 	// 2. **保有の確認。** 持っていない株の売りは新規の空売りになるので、必ず止める
-	held, perr := b.PositionsBySymbol()
-	if perr != nil {
-		return nil, fmt.Errorf("現物建玉を照会できません（持っていない株を売らないため中止します）: %w", perr)
+	noPos, err := heldShortfall(b, opts.Symbol, qty)
+	if err != nil {
+		return nil, err
 	}
-	pos, hasPos := held[opts.Symbol]
-	if !hasPos || pos.Quantity.LessThan(qty) {
-		have := decimal.Zero
-		if hasPos {
-			have = pos.Quantity
-		}
-		return result, &ErrNoPosition{Symbol: opts.Symbol, Want: qty, Have: have}
+	if noPos != nil {
+		return result, noPos
 	}
 
 	// 3. 条件価格。普段は現在値から dropPct ぶん**下**（発火しない）。
 	//    Fire なら**上**に置く（置いた瞬間に発火する）
-	pct := decimal.NewFromInt(100).Sub(dropPct)
-	if opts.Fire {
-		pct = decimal.NewFromInt(100).Add(dropPct)
-	}
-	raw := quote.Last.Mul(pct).Div(decimal.NewFromInt(100))
-	trigger, err := marketrules.SnapToTick(raw, domain.SideSell, false, marketrules.RoundingConservative)
+	trigger, err := stopTrigger(last, dropPct, opts.Fire)
 	if err != nil {
 		return nil, fmt.Errorf("条件価格を呼値に乗せられません: %w", err)
 	}
 	result.Trigger = trigger
 
-	orderID := domain.MakeClientOrderID(
-		clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006-01-02"),
-		opts.Symbol, domain.SideSell, qty)
-	// 「通常＋逆指値」は指値で板に出す。売りなので現在値より**上**に置けば約定しない
-	orderType, note := domain.OrderTypeMarket, "逆指値経路の実機検証（1 単元・発火しない水準）"
-	var limitPrice *decimal.Decimal
-	if opts.AlsoLimit {
-		above := quote.Last.Mul(decimal.NewFromInt(100).Add(dropPct)).Div(decimal.NewFromInt(100))
-		above, err = marketrules.SnapToTick(above, domain.SideSell, false, marketrules.RoundingConservative)
-		if err != nil {
-			return result, fmt.Errorf("指値を呼値に乗せられません: %w", err)
-		}
-		orderType, limitPrice, note = domain.OrderTypeLimit, &above, "通常＋逆指値の実機検証（1 単元・約定しない指値）"
-		result.Limit = above
-	}
-	req, err := domain.NewOrderRequest(
-		orderID, opts.Symbol, domain.SideSell, orderType, qty, limitPrice,
-		domain.TaxAccountSpecific, note, domain.TradeTypeCash)
-	if err != nil {
-		return result, err
-	}
-	// 逆指値だけ（発火するまで板に出ない）。発火後は成行
-	req, err = req.WithStop(trigger, nil)
+	req, limit, err := stopRequest(opts, dropPct, last, qty, trigger)
+	result.Limit = limit
 	if err != nil {
 		return result, err
 	}
@@ -190,7 +145,7 @@ func VerifyStop(
 		}
 		logger.Info("accum.verify_stop_dry_run", fmt.Sprintf(
 			"[dry-run] %s を %s 株 売り逆指値 条件 %s 円（現在値 %s 円 の %s%s%%）",
-			opts.Symbol, qty, trigger, quote.Last, sign, dropPct))
+			opts.Symbol, qty, trigger, last, sign, dropPct))
 		result.add("発注", true, "dry-run（送っていません）")
 		return result, nil
 	}
@@ -205,41 +160,139 @@ func VerifyStop(
 	logger.Info("accum.verify_stop", fmt.Sprintf("逆指値を置きました: %s %s 株 条件 %s 円（ID: %s）",
 		opts.Symbol, qty, trigger, ack.ClientOrderID))
 
-	// ここから先は何があっても**生きている注文は**取消す。発火モードでは成行で
-	// 約定して終わっているのが正解なので、終わった注文に取消を送らない
-	defer func() {
-		if order, qerr := b.GetOrder(req.ClientOrderID, ack.BrokerOrderID); qerr == nil && order.Status.IsTerminal() {
-			result.add("取消", true, "送らず（状態 %s で既に終わっている）", order.Status)
-			return
-		}
-		if cerr := b.Cancel(req.ClientOrderID, ack.BrokerOrderID); cerr != nil {
-			result.add("取消", false, "%v", cerr)
-			logger.Warn("accum.verify_stop_cancel_failed", fmt.Sprintf(
-				"逆指値を取消せませんでした。手で取消してください（ID: %s / 注文番号 %s）: %v",
-				req.ClientOrderID, brokerOrderIDText(ack.BrokerOrderID), cerr))
-			return
-		}
-		time.Sleep(2 * time.Second)
-		if order, qerr := b.GetOrder(req.ClientOrderID, ack.BrokerOrderID); qerr != nil {
-			result.add("取消", true, "取消は通ったが照会できません: %v", qerr)
-		} else {
-			result.add("取消", true, "状態 %s", order.Status)
-		}
-	}()
+	// ここから先は何があっても**生きている注文は**取消す
+	defer cancelStep(b, logger, result, req, ack)
 
 	// 5. 照会——逆指値の項目が読めるか
+	if !queryStep(b, result, req, ack, opts) {
+		return result, nil
+	}
+
+	// 6. 訂正——条件価格をさらに 2% 下げ、一覧に反映されるか
+	correctStep(b, result, req, ack, trigger, qty, opts.Fire)
+	return result, nil
+}
+
+// stopQuantityAndPrice は売る数量（売買単位 × units）と現在値。
+func stopQuantityAndPrice(b broker.Broker, symbol string, units int) (qty, last decimal.Decimal, err error) {
+	lots := b.LotSizes([]string{symbol})
+	lot, ok := lots[symbol]
+	if !ok || !lot.IsPositive() {
+		return qty, last, fmt.Errorf("%s の売買単位を取得できません（CLMStkGetIssueMstKabu）", symbol)
+	}
+	prices, ok := b.(priceSource)
+	if !ok {
+		return qty, last, fmt.Errorf("このブローカー（%s）は時価問合を持たないので検証注文は作れません", b.Name())
+	}
+	quotes, err := prices.MarketPrices([]string{symbol})
+	if err != nil {
+		return qty, last, fmt.Errorf("%s の時価を取得できません: %w", symbol, err)
+	}
+	quote, found := quotes[symbol]
+	if !found || !quote.Last.IsPositive() {
+		return qty, last, fmt.Errorf("%s の現在値が取れません", symbol)
+	}
+	return lot.Mul(decimal.NewFromInt(int64(units))), quote.Last, nil
+}
+
+// heldShortfall は現物の保有が qty に足りないとき ErrNoPosition を返す（足りれば nil）。
+// 建玉を照会できないときは err（持っていない株を売らないため中止する）。
+func heldShortfall(b broker.Broker, symbol string, qty decimal.Decimal) (*ErrNoPosition, error) {
+	held, perr := b.PositionsBySymbol()
+	if perr != nil {
+		return nil, fmt.Errorf("現物建玉を照会できません（持っていない株を売らないため中止します）: %w", perr)
+	}
+	pos, hasPos := held[symbol]
+	if !hasPos || pos.Quantity.LessThan(qty) {
+		have := decimal.Zero
+		if hasPos {
+			have = pos.Quantity
+		}
+		return &ErrNoPosition{Symbol: symbol, Want: qty, Have: have}, nil
+	}
+	return nil, nil
+}
+
+// stopTrigger は条件価格。現在値から dropPct ぶん下（fire なら上）を呼値に乗せる。
+func stopTrigger(last, dropPct decimal.Decimal, fire bool) (decimal.Decimal, error) {
+	pct := decimal.NewFromInt(100).Sub(dropPct)
+	if fire {
+		pct = decimal.NewFromInt(100).Add(dropPct)
+	}
+	raw := last.Mul(pct).Div(decimal.NewFromInt(100))
+	return marketrules.SnapToTick(raw, domain.SideSell, false, marketrules.RoundingConservative)
+}
+
+// stopRequest は売りの逆指値の注文を組む。limit は「通常＋逆指値」で板に出す指値
+// （AlsoLimit のときだけ。それ以外はゼロ）。
+func stopRequest(
+	opts VerifyStopOptions,
+	dropPct, last, qty, trigger decimal.Decimal,
+) (req domain.OrderRequest, limit decimal.Decimal, err error) {
+	orderID := domain.MakeClientOrderID(
+		clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006-01-02"),
+		opts.Symbol, domain.SideSell, qty)
+	// 「通常＋逆指値」は指値で板に出す。売りなので現在値より**上**に置けば約定しない
+	orderType, note := domain.OrderTypeMarket, "逆指値経路の実機検証（1 単元・発火しない水準）"
+	var limitPrice *decimal.Decimal
+	if opts.AlsoLimit {
+		above := last.Mul(decimal.NewFromInt(100).Add(dropPct)).Div(decimal.NewFromInt(100))
+		above, err = marketrules.SnapToTick(above, domain.SideSell, false, marketrules.RoundingConservative)
+		if err != nil {
+			return req, limit, fmt.Errorf("指値を呼値に乗せられません: %w", err)
+		}
+		orderType, limitPrice, note = domain.OrderTypeLimit, &above, "通常＋逆指値の実機検証（1 単元・約定しない指値）"
+		limit = above
+	}
+	req, err = domain.NewOrderRequest(
+		orderID, opts.Symbol, domain.SideSell, orderType, qty, limitPrice,
+		domain.TaxAccountSpecific, note, domain.TradeTypeCash)
+	if err != nil {
+		return req, limit, err
+	}
+	// 逆指値だけ（発火するまで板に出ない）。発火後は成行
+	req, err = req.WithStop(trigger, nil)
+	return req, limit, err
+}
+
+// cancelStep は置いた逆指値を取消して 1 段として足す（VerifyStop が defer で必ず呼ぶ）。
+//
+// 発火モードでは成行で約定して終わっているのが正解なので、終わった注文に取消を送らない
+func cancelStep(b broker.Broker, logger *logging.Logger, result *VerifyStopResult, req domain.OrderRequest, ack *domain.OrderAck) {
+	if order, qerr := b.GetOrder(req.ClientOrderID, ack.BrokerOrderID); qerr == nil && order.Status.IsTerminal() {
+		result.add("取消", true, "送らず（状態 %s で既に終わっている）", order.Status)
+		return
+	}
+	if cerr := b.Cancel(req.ClientOrderID, ack.BrokerOrderID); cerr != nil {
+		result.add("取消", false, "%v", cerr)
+		logger.Warn("accum.verify_stop_cancel_failed", fmt.Sprintf(
+			"逆指値を取消せませんでした。手で取消してください（ID: %s / 注文番号 %s）: %v",
+			req.ClientOrderID, brokerOrderIDText(ack.BrokerOrderID), cerr))
+		return
+	}
+	time.Sleep(2 * time.Second)
+	if order, qerr := b.GetOrder(req.ClientOrderID, ack.BrokerOrderID); qerr != nil {
+		result.add("取消", true, "取消は通ったが照会できません: %v", qerr)
+	} else {
+		result.add("取消", true, "状態 %s", order.Status)
+	}
+}
+
+// queryStep は置いた注文を照会し、逆指値の項目が読めるかを 1 段として足す。
+// 偽なら訂正の段に進まない。
+func queryStep(b broker.Broker, result *VerifyStopResult, req domain.OrderRequest, ack *domain.OrderAck, opts VerifyStopOptions) bool {
 	time.Sleep(2 * time.Second)
 	order, qerr := b.GetOrder(req.ClientOrderID, ack.BrokerOrderID)
 	switch {
 	case qerr != nil:
 		result.add("照会", false, "%v", qerr)
-		return result, nil
+		return false
 	case order.Stop == nil:
 		// 発火すると逆指値の項目が落ちる実装かもしれない。発火モードでは
 		// 「読めなかった」を記録して先に進む（訂正が拒否されるかの方が本題）
 		result.add("照会", false, "状態 %s だが Stop が nil（逆指値の項目名が読めていない）", order.Status)
 		if !opts.Fire {
-			return result, nil
+			return false
 		}
 	case opts.Fire && !order.StopTriggered:
 		result.add("照会", false, "状態 %s・条件 %s 円 だが発火していない（条件は現在値より上のはず）",
@@ -250,22 +303,34 @@ func VerifyStop(
 		result.add("照会", true, "状態 %s  条件 %s 円  発火 %v",
 			order.Status, order.Stop.Trigger, order.StopTriggered)
 	}
+	return true
+}
 
-	// 6. 訂正——条件価格をさらに 2% 下げ、一覧に反映されるか
+// correctStep は条件価格をさらに 2% 下げる訂正を送り、結果を 1 段として足す。
+//
+// 発火モードでは訂正が拒否されるのが正解で、その後に約定を照会する（fillStep）。
+func correctStep(
+	b broker.Broker,
+	result *VerifyStopResult,
+	req domain.OrderRequest,
+	ack *domain.OrderAck,
+	trigger, qty decimal.Decimal,
+	fire bool,
+) {
 	lower := trigger.Mul(decimal.NewFromInt(98)).Div(decimal.NewFromInt(100))
-	lower, err = marketrules.SnapToTick(lower, domain.SideSell, false, marketrules.RoundingConservative)
+	lower, err := marketrules.SnapToTick(lower, domain.SideSell, false, marketrules.RoundingConservative)
 	if err != nil {
 		result.add("訂正", false, "条件価格を呼値に乗せられません: %v", err)
-		return result, nil
+		return
 	}
 	result.Corrected = lower
 	corrector, ok := b.(broker.StopCorrector)
 	if !ok {
 		result.add("訂正", false, "このブローカー（%s）は CorrectStop を持ちません", b.Name())
-		return result, nil
+		return
 	}
 	cerr := corrector.CorrectStop(req.ClientOrderID, ack.BrokerOrderID, domain.StopSpec{Trigger: lower})
-	if opts.Fire {
+	if fire {
 		// **発火後の訂正は拒否されるのが正解**（立花証券のリファレンス）。通ってしまうと、
 		// トレーリングが「もう市場に出た注文の条件を動かせる」前提で書けることになり、
 		// 実際には通常の値段訂正として別の動きをする
@@ -276,14 +341,14 @@ func VerifyStop(
 		}
 		time.Sleep(3 * time.Second)
 		fillStep(b, result, req.ClientOrderID, ack.BrokerOrderID, qty)
-		return result, nil
+		return
 	}
 	if cerr != nil {
 		result.add("訂正", false, "%v", cerr)
-		return result, nil
+		return
 	}
 	time.Sleep(2 * time.Second)
-	order, qerr = b.GetOrder(req.ClientOrderID, ack.BrokerOrderID)
+	order, qerr := b.GetOrder(req.ClientOrderID, ack.BrokerOrderID)
 	switch {
 	case qerr != nil:
 		result.add("訂正", false, "訂正は通ったが照会できません: %v", qerr)
@@ -294,7 +359,6 @@ func VerifyStop(
 	default:
 		result.add("訂正", true, "条件 %s 円 → %s 円 が照会に反映された", trigger, lower)
 	}
-	return result, nil
 }
 
 // fillStep は発火後の約定を照会して 1 段として足す。売れていないのに「売れた」と

@@ -1,0 +1,7 @@
+err: 563A の時価を取得できません: 時価が取れない
+ErrNoPosition: false
+result: nil
+log:
+calls:
+  LotSizes [563A]
+  MarketPrices [563A]

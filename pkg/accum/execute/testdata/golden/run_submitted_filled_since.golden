@@ -1,0 +1,13 @@
+err: <nil>
+OrdersFailedError: false
+log:
+  [info] [accum.fill] 前回の注文: 1306: FILLED（100/100 約定）
+  [info] [accum.skip] 1306: 差額 101000円は次のリリース日に持ち越し
+alerts:
+calls:
+  GetOrder 前回
+  GetBalance
+ledger:
+  前回 sym=1306 mkt=JP qty=100 filled=100 status=FILLED amount=99000 month=2026-09-01 placed=2026-09-13T05:30:00Z updated=2026-09-14T05:30:00Z broker=nil avg=990
+history:
+  decision/2026-09-14T053000Z-manual.parquet

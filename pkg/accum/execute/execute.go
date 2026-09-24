@@ -11,6 +11,7 @@ import (
 	accumhist "github.com/lovemoneyhotspring/jstock-go/pkg/accum/history"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/ledger"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/plan"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/accum/tactics"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/data"
@@ -83,6 +84,66 @@ func PlanOrders(
 	markStart bool,
 	brokerLots func() map[string]decimal.Decimal,
 ) (orders []PlannedOrder, staleSignals []string, err error) {
+	pc := newPlanContext(cfg, barStore, led, now, ignoreWindow, markStart, brokerLots)
+
+	for _, entry := range cfg.Tactics {
+		if !entry.IsEnabled() {
+			continue
+		}
+
+		// 設定に書かれたパラメータ（倍率・段表・発注時間帯）をそのまま反映する。
+		tactic, err := entry.Build()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		signalBars, signalProblem := loadSignalBars(barStore, &entry)
+
+		for _, sym := range entry.Symbols {
+			if signalProblem != "" {
+				orders = append(orders, PlannedOrder{Symbol: BrokerSymbol(sym), Note: signalProblem, Failed: true})
+				continue
+			}
+			po, staleSignal, err := pc.planSymbol(&entry, tactic, sym, signalBars)
+			if err != nil {
+				return nil, nil, err
+			}
+			if staleSignal != "" {
+				staleSignals = append(staleSignals, staleSignal)
+			}
+			if po != nil {
+				orders = append(orders, *po)
+			}
+		}
+	}
+
+	return orders, staleSignals, nil
+}
+
+// planContext は PlanOrders の 1 回の呼び出しで銘柄をまたいで共通の材料。
+type planContext struct {
+	cfg          *accumcfg.AccumConfig
+	barStore     *data.BarStore
+	led          *ledger.Ledger
+	now          time.Time
+	ignoreWindow bool
+	markStart    bool
+	todayJST     string    // 今日（東京）。これより前の足だけを確定足とみなす
+	monthStart   string    // 今月の月初（YYYY-MM-DD）
+	monthTime    time.Time // monthStart を日付にしたもの
+	// lots は銘柄マスタの売買単位。注文を作る段に初めて来たときに 1 回だけ引く
+	lots func() map[string]decimal.Decimal
+}
+
+func newPlanContext(
+	cfg *accumcfg.AccumConfig,
+	barStore *data.BarStore,
+	led *ledger.Ledger,
+	now time.Time,
+	ignoreWindow bool,
+	markStart bool,
+	brokerLots func() map[string]decimal.Decimal,
+) *planContext {
 	var lots map[string]decimal.Decimal
 	lotsLoaded := false
 	lotsOnce := func() map[string]decimal.Decimal {
@@ -98,332 +159,351 @@ func PlanOrders(
 	todayJST := clock.ToZone(now, clock.Tokyo).Format("2006-01-02")
 	monthStart := todayJST[:7] + "-01"
 	monthTime, _ := time.Parse("2006-01-02", monthStart)
+	return &planContext{
+		cfg: cfg, barStore: barStore, led: led, now: now,
+		ignoreWindow: ignoreWindow, markStart: markStart,
+		todayJST: todayJST, monthStart: monthStart, monthTime: monthTime,
+		lots: lotsOnce,
+	}
+}
 
-	for _, entry := range cfg.Tactics {
-		if !entry.IsEnabled() {
-			continue
+// loadSignalBars は戦略の判定用の足を読む。読めない・無いときは見送りの理由を返す。
+//
+// 判定用の足（^IXIC など）が読めないとき、黙って買う銘柄自身の足で判定しない
+// （BuildPlanWithSignal は判定用が空なら自身の足に倒れる）。上場の浅い ETF は自身の足に
+// 200 日線が揃わず、別物の判定で買うことになる。その戦略の銘柄は見送って知らせる（A7）。
+func loadSignalBars(barStore *data.BarStore, entry *accumcfg.TacticEntry) (signalBars []domain.Bar, problem string) {
+	if entry.SignalSymbol == "" {
+		return nil, ""
+	}
+	bars, rerr := barStore.Read(entry.SignalSymbol, "", "")
+	switch {
+	case rerr != nil:
+		return nil, fmt.Sprintf("判定用の足（%s）を読めないため見送り: %v", entry.SignalSymbol, rerr)
+	case len(bars) == 0:
+		return nil, fmt.Sprintf("判定用の足（%s）が無いため見送り", entry.SignalSymbol)
+	}
+	return bars, ""
+}
+
+// barsBefore は day より前の足（確定足）。1 本も無ければ nil。
+func barsBefore(bars []domain.Bar, day string) []domain.Bar {
+	var out []domain.Bar
+	for _, b := range bars {
+		if b.Date < day {
+			out = append(out, b)
 		}
+	}
+	return out
+}
 
-		// 設定に書かれたパラメータ（倍率・段表・発注時間帯）をそのまま反映する。
-		tactic, err := entry.Build()
+// planSymbol は 1 銘柄の今日の計画を立てる。
+//
+// 計画の行を立てない日（確定足が無い・今月の確定足が無い・今月分を発注済み）は nil を返す。
+// staleSignal は判定用の足が古いときの警告（空なら無し）。
+func (pc *planContext) planSymbol(
+	entry *accumcfg.TacticEntry,
+	tactic tactics.Tactic,
+	sym string,
+	signalBars []domain.Bar,
+) (po *PlannedOrder, staleSignal string, err error) {
+	bars, err := pc.barStore.Read(sym, "", "")
+	if err != nil || len(bars) == 0 {
+		note := "足データなし"
 		if err != nil {
-			return nil, nil, err
+			note = fmt.Sprintf("足データを読めない: %v", err)
 		}
+		return &PlannedOrder{
+			Symbol: BrokerSymbol(sym),
+			Note:   note,
+			Failed: true,
+		}, "", nil
+	}
 
-		// 判定用の足（^IXIC など）が読めないとき、黙って買う銘柄自身の足で判定しない
-		//（BuildPlanWithSignal は判定用が空なら自身の足に倒れる）。上場の浅い ETF は自身の足に
-		// 200 日線が揃わず、別物の判定で買うことになる。その戦略の銘柄は見送って知らせる（A7）。
-		var signalBars []domain.Bar
-		signalProblem := ""
-		if entry.SignalSymbol != "" {
-			bars, rerr := barStore.Read(entry.SignalSymbol, "", "")
-			switch {
-			case rerr != nil:
-				signalProblem = fmt.Sprintf("判定用の足（%s）を読めないため見送り: %v", entry.SignalSymbol, rerr)
-			case len(bars) == 0:
-				signalProblem = fmt.Sprintf("判定用の足（%s）が無いため見送り", entry.SignalSymbol)
-			default:
-				signalBars = bars
-			}
-		}
+	// 確定足（前日以前）で計画を計算
+	completed := barsBefore(bars, pc.todayJST)
+	if len(completed) == 0 {
+		return nil, "", nil
+	}
 
-		for _, sym := range entry.Symbols {
-			if signalProblem != "" {
-				orders = append(orders, PlannedOrder{Symbol: BrokerSymbol(sym), Note: signalProblem, Failed: true})
-				continue
-			}
-			bars, err := barStore.Read(sym, "", "")
-			if err != nil || len(bars) == 0 {
-				note := "足データなし"
-				if err != nil {
-					note = fmt.Sprintf("足データを読めない: %v", err)
-				}
-				orders = append(orders, PlannedOrder{
-					Symbol: BrokerSymbol(sym),
-					Note:   note,
-					Failed: true,
-				})
-				continue
-			}
+	completedSignal := barsBefore(signalBars, pc.todayJST)
+	if entry.SignalSymbol != "" && len(completedSignal) == 0 {
+		return &PlannedOrder{
+			Symbol: BrokerSymbol(sym),
+			Note:   fmt.Sprintf("判定用の足（%s）に確定足が無いため見送り", entry.SignalSymbol),
+			Failed: true,
+		}, "", nil
+	}
 
-			// 確定足（前日以前）で計画を計算
-			var completed []domain.Bar
-			for _, b := range bars {
-				if b.Date < todayJST {
-					completed = append(completed, b)
-				}
-			}
-			if len(completed) == 0 {
-				continue
-			}
-
-			var completedSignal []domain.Bar
-			for _, sb := range signalBars {
-				if sb.Date < todayJST {
-					completedSignal = append(completedSignal, sb)
-				}
-			}
-			if entry.SignalSymbol != "" && len(completedSignal) == 0 {
-				orders = append(orders, PlannedOrder{
-					Symbol: BrokerSymbol(sym),
-					Note:   fmt.Sprintf("判定用の足（%s）に確定足が無いため見送り", entry.SignalSymbol),
-					Failed: true,
-				})
-				continue
-			}
-
-			// 最終足が古すぎるなら判定しない。
-			//
-			// 取得元が止まっているのに気付かず、古い配列のまま増額判定を
-			// 続けるのを防ぐ。判定用の銘柄が古い場合は投下を止めず警告に留める
-			// （買う銘柄の足は新しいので、判定だけが前日基準になる）。
-			stale, age := isStale(completed, todayJST, cfg.Execution.MaxStaleDays)
-			if stale {
-				orders = append(orders, PlannedOrder{
-					Symbol: BrokerSymbol(sym),
-					Note: fmt.Sprintf("足が %d 日前（%s）で古いため見送り（max_stale_days=%d）",
-						age, completed[len(completed)-1].Date, cfg.Execution.MaxStaleDays),
-					Failed: true,
-				})
-				continue
-			}
-			if len(completedSignal) > 0 {
-				if staleSig, sigAge := isStale(completedSignal, todayJST, cfg.Execution.MaxStaleDays); staleSig {
-					staleSignals = append(staleSignals,
-						fmt.Sprintf("%s（%s, %d日前）", entry.SignalSymbol,
-							completedSignal[len(completedSignal)-1].Date, sigAge))
-				}
-			}
-
-			// 発注時間帯の外なら注文は作らない。
-			if !ignoreWindow && !tactic.AllowsOrder(now) {
-				orders = append(orders, PlannedOrder{
-					Symbol: BrokerSymbol(sym),
-					Note:   fmt.Sprintf("発注時間帯の外（%s）", tactic.Window().Describe()),
-				})
-				continue
-			}
-
-			p, err := plan.BuildPlanWithSignal(completed, completedSignal, entry.SignalLags(), tactic, entry.MonthlyBudget)
-			if err != nil {
-				orders = append(orders, PlannedOrder{
-					Symbol: BrokerSymbol(sym),
-					Note:   fmt.Sprintf("計画を立てられないため見送り: %v", err),
-					Failed: true,
-				})
-				continue
-			}
-			if len(p.Rows) == 0 {
-				continue
-			}
-
-			bSym := BrokerSymbol(sym)
-
-			// 今月ぶんの計画行だけを取り出す。
-			var thisMonth []plan.PlanRow
-			for _, r := range p.Rows {
-				if strings.HasPrefix(r.Date, todayJST[:7]) {
-					thisMonth = append(thisMonth, r)
-				}
-			}
-			if len(thisMonth) == 0 {
-				continue // 今月の確定足がまだ無い（月初の初日）
-			}
-
-			// 積立の開始日。月の途中から始めた月は日割りにする。
-			//
-			// 開始日は銘柄ごとに「最初に本発注の run が計画を立てた日」。記録が無ければ今日を
-			// 開始日とみなし、本発注の run なら台帳に残す（2 回目以降は INSERT OR IGNORE で
-			// 変わらない）。記録する経路が無いと日割りは一度も効かず、月の途中から始めた銘柄に
-			// その月の満額を投じる（2026-09-24 のレビュー A4。Python 版 c2ef6b4 の意図）。
-			//
-			// 記録が無くても注文が既にある銘柄（記録する経路が無かった間に発注・取り込みした
-			// もの）は、最初の注文の日を開始日とする。今日にすると積立中の月を日割りしてしまう。
-			startedOn, err := led.StartedOn(bSym)
-			if err != nil {
-				return nil, nil, err
-			}
-			if startedOn == nil {
-				startedOn, err = led.FirstOrderDay(bSym, clock.Tokyo)
-				if err != nil {
-					return nil, nil, err
-				}
-				if startedOn == nil {
-					startedOn = &todayJST
-				}
-				if markStart {
-					if err := led.MarkStarted(bSym, *startedOn); err != nil {
-						return nil, nil, fmt.Errorf("%s の積立の開始日を台帳に書けません: %w", bSym, err)
-					}
-				}
-			}
-			startedDay, err := time.Parse("2006-01-02", *startedOn)
-			if err != nil {
-				return nil, nil, fmt.Errorf("%s の積立の開始日 %q を読めません: %w", bSym, *startedOn, err)
-			}
-			started := &startedDay
-
-			baseTarget, extras, prorated := MonthTarget(thisMonth, entry.MonthlyBudget, monthTime, started)
-			carried, err := CarryOver(p.Rows, bSym, monthTime, entry.MonthlyBudget, started, led.HasOrders, led.PlacedAmount)
-			if err != nil {
-				return nil, nil, err
-			}
-			target := baseTarget.Add(extras)
-			already, err := led.PlacedAmount(bSym, monthTime)
-			if err != nil {
-				return nil, nil, err
-			}
-
-			due := target.Add(carried).Sub(already)
-			if due.LessThanOrEqual(decimal.Zero) {
-				continue // 今月分は発注済み
-			}
-
-			lastRow := thisMonth[len(thisMonth)-1]
-
-			// 端数や小さな予算増は、注文が出る日にまとめる。
-			if !ShouldPlaceToday(thisMonth, due, baseTarget) {
-				orders = append(orders, PlannedOrder{
-					Symbol:     bSym,
-					Amount:     due,
-					Note:       fmt.Sprintf("差額 %s円は次のリリース日に持ち越し", due.Round(0)),
-					Market:     entry.MarketResolved(),
-					JudgedOn:   lastRow.Date,
-					Month:      monthStart,
-					Close:      lastRow.Close,
-					Target:     target.Add(carried),
-					Placed:     already,
-					Multiplier: lastRow.Multiplier,
-					Tactic:     entry.Tactic,
-				})
-				continue
-			}
-
-			reason := fmt.Sprintf("今月の目標 %s（基本 %s", target.Round(0), baseTarget.Round(0))
-			if prorated != "" {
-				reason += fmt.Sprintf("〔%s〕", prorated)
-			}
-			reason += fmt.Sprintf("＋増額 %s）", extras.Round(0))
-			if carried.IsPositive() {
-				reason += fmt.Sprintf("＋前月からの繰り越し %s", carried.Round(0))
-			}
-			reason += fmt.Sprintf("− 発注済み %s", already.Round(0))
-
-			lastBar := completed[len(completed)-1]
-			lastPrice := lastBar.Close
-
-			// 単元株数（設定の上書きとブローカーの銘柄情報。どちらも無ければ見送りの失敗）
-			lotSize, lotErr := lotSizeFor(cfg, bSym, lotsOnce())
-			if lotErr != nil {
-				orders = append(orders, PlannedOrder{
-					Symbol:     bSym,
-					Amount:     due,
-					Reason:     reason,
-					Note:       lotErr.Error(),
-					Failed:     true,
-					LotUnknown: errors.Is(lotErr, errLotUnknown),
-					Market:     entry.MarketResolved(),
-					JudgedOn:   lastRow.Date,
-					Month:      monthStart,
-					Close:      lastRow.Close,
-					Target:     target.Add(carried),
-					Placed:     already,
-					Multiplier: lastRow.Multiplier,
-					Tactic:     entry.Tactic,
-				})
-				continue
-			}
-
-			// 指値価格の計算 (終値 * (1 + offset))
-			offset := decimal.RequireFromString("0.01")
-			if cfg.Execution.LimitOffset != "" {
-				if d, err := decimal.NewFromString(cfg.Execution.LimitOffset); err == nil {
-					offset = d
-				}
-			}
-
-			limitPrice := lastPrice.Mul(decimal.NewFromInt(1).Add(offset))
-			snappedPrice, _ := marketrules.SnapToTick(limitPrice, domain.SideBuy, false, marketrules.RoundingConservative)
-
-			// 株数 = floor(due / snappedPrice) を lotSize で切り捨て
-			rawQty := due.Div(snappedPrice).Floor()
-			qty, _ := marketrules.RoundToLot(rawQty, lotSize)
-
-			if qty.LessThanOrEqual(decimal.Zero) {
-				orders = append(orders, PlannedOrder{
-					Symbol:     bSym,
-					Amount:     due,
-					Reason:     reason,
-					Note:       fmt.Sprintf("単元株数（%s株）に満たないため見送り", lotSize),
-					Market:     entry.MarketResolved(),
-					JudgedOn:   lastRow.Date,
-					Month:      monthStart,
-					Close:      lastRow.Close,
-					Target:     target.Add(carried),
-					Placed:     already,
-					Multiplier: lastRow.Multiplier,
-					Tactic:     entry.Tactic,
-				})
-				continue
-			}
-
-			// 成行に指値を付けると NewOrderRequest が弾く。株数は指値で見積もるが、注文には載せない
-			orderType := domain.OrderTypeLimit
-			requestPrice := &snappedPrice
-			if cfg.Execution.OrderType == "market" {
-				orderType = domain.OrderTypeMarket
-				requestPrice = nil
-			}
-
-			taxType := domain.TaxAccountSpecific
-			if cfg.Execution.TaxAccountType != "" {
-				taxType = domain.TaxAccountType(cfg.Execution.TaxAccountType)
-			}
-
-			orderID := domain.MakeClientOrderID(todayJST, bSym, domain.SideBuy, qty)
-			req, err := domain.NewOrderRequest(
-				orderID,
-				bSym,
-				domain.SideBuy,
-				orderType,
-				qty,
-				requestPrice,
-				taxType,
-				reason,
-				domain.TradeTypeCash,
-			)
-			if err != nil {
-				// 黙って飛ばすと、その銘柄の積立が止まったことにログでも履歴でも気付けない
-				orders = append(orders, PlannedOrder{
-					Symbol: bSym,
-					Amount: due,
-					Reason: reason,
-					Note:   fmt.Sprintf("注文を組み立てられないため見送り: %v", err),
-					Failed: true,
-				})
-				continue
-			}
-
-			orders = append(orders, PlannedOrder{
-				Symbol:     bSym,
-				Amount:     due,
-				Quantity:   qty,
-				LimitPrice: &snappedPrice,
-				Request:    &req,
-				Reason:     req.Reason,
-				Market:     entry.MarketResolved(),
-				JudgedOn:   lastRow.Date,
-				Month:      monthStart,
-				Close:      lastRow.Close,
-				Target:     target.Add(carried),
-				Placed:     already,
-				Multiplier: lastRow.Multiplier,
-				Tactic:     entry.Tactic,
-			})
+	// 最終足が古すぎるなら判定しない。
+	//
+	// 取得元が止まっているのに気付かず、古い配列のまま増額判定を
+	// 続けるのを防ぐ。判定用の銘柄が古い場合は投下を止めず警告に留める
+	// （買う銘柄の足は新しいので、判定だけが前日基準になる）。
+	stale, age := isStale(completed, pc.todayJST, pc.cfg.Execution.MaxStaleDays)
+	if stale {
+		return &PlannedOrder{
+			Symbol: BrokerSymbol(sym),
+			Note: fmt.Sprintf("足が %d 日前（%s）で古いため見送り（max_stale_days=%d）",
+				age, completed[len(completed)-1].Date, pc.cfg.Execution.MaxStaleDays),
+			Failed: true,
+		}, "", nil
+	}
+	if len(completedSignal) > 0 {
+		if staleSig, sigAge := isStale(completedSignal, pc.todayJST, pc.cfg.Execution.MaxStaleDays); staleSig {
+			staleSignal = fmt.Sprintf("%s（%s, %d日前）", entry.SignalSymbol,
+				completedSignal[len(completedSignal)-1].Date, sigAge)
 		}
 	}
 
-	return orders, staleSignals, nil
+	// 発注時間帯の外なら注文は作らない。
+	if !pc.ignoreWindow && !tactic.AllowsOrder(pc.now) {
+		return &PlannedOrder{
+			Symbol: BrokerSymbol(sym),
+			Note:   fmt.Sprintf("発注時間帯の外（%s）", tactic.Window().Describe()),
+		}, staleSignal, nil
+	}
+
+	p, err := plan.BuildPlanWithSignal(completed, completedSignal, entry.SignalLags(), tactic, entry.MonthlyBudget)
+	if err != nil {
+		return &PlannedOrder{
+			Symbol: BrokerSymbol(sym),
+			Note:   fmt.Sprintf("計画を立てられないため見送り: %v", err),
+			Failed: true,
+		}, staleSignal, nil
+	}
+	if len(p.Rows) == 0 {
+		return nil, staleSignal, nil
+	}
+
+	po, err = pc.planMonth(entry, BrokerSymbol(sym), p.Rows, completed[len(completed)-1])
+	return po, staleSignal, err
+}
+
+// planMonth は今月の計画行と台帳から差額を出し、今日の注文（または見送り）にする。
+func (pc *planContext) planMonth(
+	entry *accumcfg.TacticEntry,
+	bSym string,
+	rows []plan.PlanRow,
+	lastBar domain.Bar,
+) (*PlannedOrder, error) {
+	// 今月ぶんの計画行だけを取り出す。
+	var thisMonth []plan.PlanRow
+	for _, r := range rows {
+		if strings.HasPrefix(r.Date, pc.todayJST[:7]) {
+			thisMonth = append(thisMonth, r)
+		}
+	}
+	if len(thisMonth) == 0 {
+		return nil, nil // 今月の確定足がまだ無い（月初の初日）
+	}
+
+	started, err := pc.startedOn(bSym)
+	if err != nil {
+		return nil, err
+	}
+	m, err := pc.monthAmounts(rows, thisMonth, bSym, entry.MonthlyBudget, started)
+	if err != nil {
+		return nil, err
+	}
+	if m.due.LessThanOrEqual(decimal.Zero) {
+		return nil, nil // 今月分は発注済み
+	}
+
+	lastRow := thisMonth[len(thisMonth)-1]
+	decided := m.decided(entry, bSym, pc.monthStart, lastRow)
+
+	// 端数や小さな予算増は、注文が出る日にまとめる。
+	if !ShouldPlaceToday(thisMonth, m.due, m.base) {
+		decided.Note = fmt.Sprintf("差額 %s円は次のリリース日に持ち越し", m.due.Round(0))
+		return &decided, nil
+	}
+
+	reason := m.reason()
+
+	// 単元株数（設定の上書きとブローカーの銘柄情報。どちらも無ければ見送りの失敗）
+	lotSize, lotErr := lotSizeFor(pc.cfg, bSym, pc.lots())
+	if lotErr != nil {
+		decided.Reason = reason
+		decided.Note = lotErr.Error()
+		decided.Failed = true
+		decided.LotUnknown = errors.Is(lotErr, errLotUnknown)
+		return &decided, nil
+	}
+
+	snappedPrice, qty := limitAndQuantity(pc.cfg.Execution, m.due, lastBar.Close, lotSize)
+	if qty.LessThanOrEqual(decimal.Zero) {
+		decided.Reason = reason
+		decided.Note = fmt.Sprintf("単元株数（%s株）に満たないため見送り", lotSize)
+		return &decided, nil
+	}
+
+	req, err := newBuyRequest(pc.cfg.Execution, pc.todayJST, bSym, qty, snappedPrice, reason)
+	if err != nil {
+		// 黙って飛ばすと、その銘柄の積立が止まったことにログでも履歴でも気付けない
+		return &PlannedOrder{
+			Symbol: bSym,
+			Amount: m.due,
+			Reason: reason,
+			Note:   fmt.Sprintf("注文を組み立てられないため見送り: %v", err),
+			Failed: true,
+		}, nil
+	}
+
+	decided.Quantity = qty
+	decided.LimitPrice = &snappedPrice
+	decided.Request = &req
+	decided.Reason = req.Reason
+	return &decided, nil
+}
+
+// startedOn は銘柄の積立の開始日。月の途中から始めた月は日割りにする。
+//
+// 開始日は銘柄ごとに「最初に本発注の run が計画を立てた日」。記録が無ければ今日を
+// 開始日とみなし、本発注の run なら台帳に残す（2 回目以降は INSERT OR IGNORE で
+// 変わらない）。記録する経路が無いと日割りは一度も効かず、月の途中から始めた銘柄に
+// その月の満額を投じる（2026-09-24 のレビュー A4。Python 版 c2ef6b4 の意図）。
+//
+// 記録が無くても注文が既にある銘柄（記録する経路が無かった間に発注・取り込みした
+// もの）は、最初の注文の日を開始日とする。今日にすると積立中の月を日割りしてしまう。
+func (pc *planContext) startedOn(bSym string) (*time.Time, error) {
+	startedOn, err := pc.led.StartedOn(bSym)
+	if err != nil {
+		return nil, err
+	}
+	if startedOn == nil {
+		startedOn, err = pc.led.FirstOrderDay(bSym, clock.Tokyo)
+		if err != nil {
+			return nil, err
+		}
+		if startedOn == nil {
+			today := pc.todayJST
+			startedOn = &today
+		}
+		if pc.markStart {
+			if err := pc.led.MarkStarted(bSym, *startedOn); err != nil {
+				return nil, fmt.Errorf("%s の積立の開始日を台帳に書けません: %w", bSym, err)
+			}
+		}
+	}
+	startedDay, err := time.Parse("2006-01-02", *startedOn)
+	if err != nil {
+		return nil, fmt.Errorf("%s の積立の開始日 %q を読めません: %w", bSym, *startedOn, err)
+	}
+	return &startedDay, nil
+}
+
+// monthAmounts は今月の目標と発注済みの額（差額 due の内訳）。
+type monthAmounts struct {
+	base     decimal.Decimal // 今月の基本目標（開始月は日割り）
+	extras   decimal.Decimal // 今月の増額
+	prorated string          // 日割りの説明（日割りしない月は空）
+	carried  decimal.Decimal // 前月からの繰り越し
+	target   decimal.Decimal // base + extras
+	already  decimal.Decimal // 今月の発注済み
+	due      decimal.Decimal // target + carried - already
+}
+
+// monthAmounts は今月の計画行と台帳から今月の差額を出す。
+func (pc *planContext) monthAmounts(
+	rows, thisMonth []plan.PlanRow,
+	bSym string,
+	budget decimal.Decimal,
+	started *time.Time,
+) (monthAmounts, error) {
+	var m monthAmounts
+	m.base, m.extras, m.prorated = MonthTarget(thisMonth, budget, pc.monthTime, started)
+	carried, err := CarryOver(rows, bSym, pc.monthTime, budget, started, pc.led.HasOrders, pc.led.PlacedAmount)
+	if err != nil {
+		return m, err
+	}
+	m.carried = carried
+	m.target = m.base.Add(m.extras)
+	m.already, err = pc.led.PlacedAmount(bSym, pc.monthTime)
+	if err != nil {
+		return m, err
+	}
+	m.due = m.target.Add(m.carried).Sub(m.already)
+	return m, nil
+}
+
+// reason は注文の理由（今月の目標の内訳）。
+func (m monthAmounts) reason() string {
+	reason := fmt.Sprintf("今月の目標 %s（基本 %s", m.target.Round(0), m.base.Round(0))
+	if m.prorated != "" {
+		reason += fmt.Sprintf("〔%s〕", m.prorated)
+	}
+	reason += fmt.Sprintf("＋増額 %s）", m.extras.Round(0))
+	if m.carried.IsPositive() {
+		reason += fmt.Sprintf("＋前月からの繰り越し %s", m.carried.Round(0))
+	}
+	reason += fmt.Sprintf("− 発注済み %s", m.already.Round(0))
+	return reason
+}
+
+// decided は判断履歴に残す材料を埋めた計画の行（注文・見送りの中身は呼び出し側で足す）。
+func (m monthAmounts) decided(entry *accumcfg.TacticEntry, bSym, monthStart string, lastRow plan.PlanRow) PlannedOrder {
+	return PlannedOrder{
+		Symbol:     bSym,
+		Amount:     m.due,
+		Market:     entry.MarketResolved(),
+		JudgedOn:   lastRow.Date,
+		Month:      monthStart,
+		Close:      lastRow.Close,
+		Target:     m.target.Add(m.carried),
+		Placed:     m.already,
+		Multiplier: lastRow.Multiplier,
+		Tactic:     entry.Tactic,
+	}
+}
+
+// limitAndQuantity は指値（終値 × (1 + limit_offset) を呼値に乗せたもの）と、
+// 差額 due をその指値で割って売買単位で切り捨てた株数。
+func limitAndQuantity(exec accumcfg.ExecutionConfig, due, lastPrice, lotSize decimal.Decimal) (snappedPrice, qty decimal.Decimal) {
+	// 指値価格の計算 (終値 * (1 + offset))
+	offset := decimal.RequireFromString("0.01")
+	if exec.LimitOffset != "" {
+		if d, err := decimal.NewFromString(exec.LimitOffset); err == nil {
+			offset = d
+		}
+	}
+
+	limitPrice := lastPrice.Mul(decimal.NewFromInt(1).Add(offset))
+	snappedPrice, _ = marketrules.SnapToTick(limitPrice, domain.SideBuy, false, marketrules.RoundingConservative)
+
+	// 株数 = floor(due / snappedPrice) を lotSize で切り捨て
+	rawQty := due.Div(snappedPrice).Floor()
+	qty, _ = marketrules.RoundToLot(rawQty, lotSize)
+	return snappedPrice, qty
+}
+
+// newBuyRequest は積立の買い注文を組み立てる。
+func newBuyRequest(exec accumcfg.ExecutionConfig, todayJST, bSym string, qty, snappedPrice decimal.Decimal, reason string) (domain.OrderRequest, error) {
+	// 成行に指値を付けると NewOrderRequest が弾く。株数は指値で見積もるが、注文には載せない
+	orderType := domain.OrderTypeLimit
+	requestPrice := &snappedPrice
+	if exec.OrderType == "market" {
+		orderType = domain.OrderTypeMarket
+		requestPrice = nil
+	}
+
+	taxType := domain.TaxAccountSpecific
+	if exec.TaxAccountType != "" {
+		taxType = domain.TaxAccountType(exec.TaxAccountType)
+	}
+
+	orderID := domain.MakeClientOrderID(todayJST, bSym, domain.SideBuy, qty)
+	return domain.NewOrderRequest(
+		orderID,
+		bSym,
+		domain.SideBuy,
+		orderType,
+		qty,
+		requestPrice,
+		taxType,
+		reason,
+		domain.TradeTypeCash,
+	)
 }
 
 // lotSizeFor は発注に使う売買単位を決める。
@@ -509,10 +589,52 @@ func RunAccumulation(
 	}
 
 	// 1. 前回までに送った注文がどうなったかを先に確かめる。
+	synced := syncPrevious(led, b, now, logger)
+	// 通知は最後にまとめて 1 通。保留した PENDING の銘柄に今日の注文が立つと、発注できなかった
+	// 銘柄（OrdersFailedError）として同じ注文を知らせる。以前はそれとは別に「照会できません」を
+	// 送り、1 件の PENDING で 2 通になっていた。失敗の行で知らせた注文はここから外す
+	coveredByFailure := map[string]bool{}
+	defer func() { alertHeld(synced.Unresolved, coveredByFailure, !isLive, logger) }()
+
+	// 送信結果不明（PENDING）が残る銘柄は発注しない。
 	//
-	// 失効・拒否なら「発注済み」から外れ、この後の差額の計算で自動的に
-	// 埋め直される。照会できないときは前回の状態のまま先へ進む——
-	// ここで止めると、ブローカー側の一時的な不調で積立が丸ごと飛ぶ。
+	// 照会の後でも PENDING のままの注文は、届いたかどうかを決められなかったもの（前日以前の
+	// 注文は立花の当日の注文一覧に出ない・一覧が空・候補が曖昧）。届いていたなら同じ額を
+	// もう一度買うことになる。台帳を読み直して決める——照会が途中で失敗しても漏らさない。
+	pendingBySymbol, err := led.PendingSymbols()
+	if err != nil {
+		logger.Error("accum.ledger_read_failed", err.Error())
+		return fmt.Errorf("台帳を読めないため発注を中止しました: %w", err)
+	}
+
+	// 2. 本日の発注計画
+	planned, err := planToday(cfg, b, barStore, led, logger, hist, now, ignoreWindow, isLive)
+	if err != nil {
+		return err
+	}
+
+	// 3. 台帳に無い当月の約定がないか確かめる。
+	if isLive {
+		if err := checkUnrecorded(led, b, planned, now, logger); err != nil {
+			return err
+		}
+	}
+
+	// 4. 発注処理
+	run := &orderRun{
+		b: b, led: led, logger: logger, isLive: isLive, monthStart: monthStart,
+		pendingBySymbol: pendingBySymbol, coveredByFailure: coveredByFailure,
+	}
+	return run.placeAll(planned)
+}
+
+// syncPrevious は前回までに送った注文の状態を照会して台帳に反映し、結果をログと
+// ダイジェストに残す。
+//
+// 失効・拒否なら「発注済み」から外れ、この後の差額の計算で自動的に
+// 埋め直される。照会できないときは前回の状態のまま先へ進む——
+// ここで止めると、ブローカー側の一時的な不調で積立が丸ごと飛ぶ。
+func syncPrevious(led *ledger.Ledger, b broker.Broker, now time.Time, logger *logging.Logger) SyncResult {
 	synced, err := SyncOrderStatus(led, b, now)
 	if err != nil {
 		logger.Warn("accum.sync_failed",
@@ -549,30 +671,29 @@ func RunAccumulation(
 			digest.Anomaly("accum.unresolved", other)
 		}
 	}
-	// 通知は最後にまとめて 1 通。保留した PENDING の銘柄に今日の注文が立つと、発注できなかった
-	// 銘柄（OrdersFailedError）として同じ注文を知らせる。以前はそれとは別に「照会できません」を
-	// 送り、1 件の PENDING で 2 通になっていた。失敗の行で知らせた注文はここから外す
-	coveredByFailure := map[string]bool{}
-	defer func() { alertHeld(synced.Unresolved, coveredByFailure, !isLive, logger) }()
+	return synced
+}
 
-	// 送信結果不明（PENDING）が残る銘柄は発注しない。
-	//
-	// 照会の後でも PENDING のままの注文は、届いたかどうかを決められなかったもの（前日以前の
-	// 注文は立花の当日の注文一覧に出ない・一覧が空・候補が曖昧）。届いていたなら同じ額を
-	// もう一度買うことになる。台帳を読み直して決める——照会が途中で失敗しても漏らさない。
-	pendingBySymbol, err := led.PendingSymbols()
-	if err != nil {
-		logger.Error("accum.ledger_read_failed", err.Error())
-		return fmt.Errorf("台帳を読めないため発注を中止しました: %w", err)
-	}
-
-	// 2. 本日の発注計画（本発注の run なら、開始日の無い銘柄に今日を開始日として残す）
-	// 銘柄マスタ（立花は全銘柄が一括で返る）は、今日出す注文が立ったときだけ引く
+// planToday は本日の発注計画を立て、判断の履歴を残す。
+//
+// 本発注の run なら、開始日の無い銘柄に今日を開始日として残す。
+// 銘柄マスタ（立花は全銘柄が一括で返る）は、今日出す注文が立ったときだけ引く。
+func planToday(
+	cfg *accumcfg.AccumConfig,
+	b broker.Broker,
+	barStore *data.BarStore,
+	led *ledger.Ledger,
+	logger *logging.Logger,
+	hist *wbhistory.Store,
+	now time.Time,
+	ignoreWindow bool,
+	isLive bool,
+) ([]PlannedOrder, error) {
 	planned, staleSignals, err := PlanOrders(cfg, barStore, led, now, ignoreWindow, isLive,
 		func() map[string]decimal.Decimal { return b.LotSizes(orderableSymbols(cfg)) })
 	if err != nil {
 		logger.Error("accum.plan_failed", err.Error())
-		return fmt.Errorf("発注計画を立てられないため発注を中止しました: %w", err)
+		return nil, fmt.Errorf("発注計画を立てられないため発注を中止しました: %w", err)
 	}
 	// dry-run は銘柄マスタを持たない（PaperBroker）。売買単位の不明を失敗にすると、
 	// lot_size_overrides に無い銘柄（1629・2559）で毎回、失敗の通知と非 0 終了になる。
@@ -597,172 +718,205 @@ func RunAccumulation(
 			logger.Warn("accum.history_failed", fmt.Sprintf("判断履歴を残せませんでした: %v", err))
 		}
 	}
+	return planned, nil
+}
 
-	// 3. 台帳に無い当月の約定がないか確かめる。
-	//
-	// 台帳を失った状態で走ると当月の予算をもう一度買う。ブローカー側にだけ
-	// 約定がある注文を見つけたら、額の計算が信用できないので発注を止める。
-	if isLive {
-		var symbols []string
-		for _, po := range planned {
-			if po.Request != nil {
-				symbols = append(symbols, po.Symbol)
-			}
-		}
-		if len(symbols) > 0 {
-			unrecorded, err := UnrecordedFills(led, b, symbols, now)
-			if err != nil {
-				// 照会できないなら二重買付を否定できない。安全側に倒して止める。
-				logger.Error("accum.unrecorded_check_failed", err.Error())
-				return fmt.Errorf("台帳とブローカーの突き合わせができないため発注を中止しました: %w", err)
-			}
-			if len(unrecorded) > 0 {
-				var detail []string
-				for sym, amt := range unrecorded {
-					detail = append(detail, fmt.Sprintf("%s %s円", sym, amt.Round(0)))
-				}
-				sort.Strings(detail)
-				msg := strings.Join(detail, "、")
-				logger.Error("accum.unrecorded_fills",
-					fmt.Sprintf("台帳に無い当月の約定があります（二重買付の恐れ）: %s", msg))
-				return fmt.Errorf(
-					"台帳に無い当月の約定があります（二重買付になります）: %s\n"+
-						"台帳（%s）が失われているか、別の環境で発注した可能性があります。"+
-						"状態を確かめてから実行してください", msg, led.Path())
-			}
+// checkUnrecorded は今日出す注文の銘柄に、台帳に無い当月の約定がないか確かめる。
+//
+// 台帳を失った状態で走ると当月の予算をもう一度買う。ブローカー側にだけ
+// 約定がある注文を見つけたら、額の計算が信用できないので発注を止める（エラーを返す）。
+func checkUnrecorded(led *ledger.Ledger, b broker.Broker, planned []PlannedOrder, now time.Time, logger *logging.Logger) error {
+	var symbols []string
+	for _, po := range planned {
+		if po.Request != nil {
+			symbols = append(symbols, po.Symbol)
 		}
 	}
-
-	// 4. 発注処理
-	//
-	// 出すべきなのに出せなかった銘柄（足が無い・判定用の足が読めない・見積り失敗・余力不足・
-	// 拒否・送信結果不明が残る）は failures に集め、最後に OrdersFailedError で返す。
-	// 以前はログの warn に留まり、通知にもダイジェストにも出ず終了コード 0 だった（A6）。
-	var failures []string
-	fail := func(symbol, detail string) {
-		line := fmt.Sprintf("%s: %s", symbol, detail)
-		failures = append(failures, line)
-		logger.Error("accum.order_failed", line)
+	if len(symbols) == 0 {
+		return nil
 	}
+	unrecorded, err := UnrecordedFills(led, b, symbols, now)
+	if err != nil {
+		// 照会できないなら二重買付を否定できない。安全側に倒して止める。
+		logger.Error("accum.unrecorded_check_failed", err.Error())
+		return fmt.Errorf("台帳とブローカーの突き合わせができないため発注を中止しました: %w", err)
+	}
+	if len(unrecorded) == 0 {
+		return nil
+	}
+	var detail []string
+	for sym, amt := range unrecorded {
+		detail = append(detail, fmt.Sprintf("%s %s円", sym, amt.Round(0)))
+	}
+	sort.Strings(detail)
+	msg := strings.Join(detail, "、")
+	logger.Error("accum.unrecorded_fills",
+		fmt.Sprintf("台帳に無い当月の約定があります（二重買付の恐れ）: %s", msg))
+	return fmt.Errorf(
+		"台帳に無い当月の約定があります（二重買付になります）: %s\n"+
+			"台帳（%s）が失われているか、別の環境で発注した可能性があります。"+
+			"状態を確かめてから実行してください", msg, led.Path())
+}
 
+// orderRun は発注処理の段の材料と、発注できなかった銘柄の控え。
+//
+// 出すべきなのに出せなかった銘柄（足が無い・判定用の足が読めない・見積り失敗・余力不足・
+// 拒否・送信結果不明が残る）は failures に集め、最後に OrdersFailedError で返す。
+// 以前はログの warn に留まり、通知にもダイジェストにも出ず終了コード 0 だった（A6）。
+type orderRun struct {
+	b               broker.Broker
+	led             *ledger.Ledger
+	logger          *logging.Logger
+	isLive          bool
+	monthStart      string
+	pendingBySymbol map[string][]string
+	// coveredByFailure は失敗の行で知らせた送信結果不明の注文（alertHeld が別に知らせない）
+	coveredByFailure map[string]bool
+	failures         []string
+}
+
+func (r *orderRun) fail(symbol, detail string) {
+	line := fmt.Sprintf("%s: %s", symbol, detail)
+	r.failures = append(r.failures, line)
+	r.logger.Error("accum.order_failed", line)
+}
+
+// failPending は送信結果不明の注文が残る銘柄を失敗の行で知らせ、印を付ける。
+// 印を付けないと alertHeld が「照会できません」を別に送り、1 件の PENDING で 2 通になる
+func (r *orderRun) failPending(symbol string, ids []string) {
+	for _, id := range ids {
+		r.coveredByFailure[id] = true
+	}
+	r.fail(symbol, pendingFailureNote(ids))
+}
+
+// placeAll は計画の注文を順に出し、発注できなかった銘柄があれば OrdersFailedError を返す。
+func (r *orderRun) placeAll(planned []PlannedOrder) error {
 	// 余力が分からないまま「余力不足」と記録すると、照会の失敗が資金の不足に化けて
 	// 切り分けられない。照会できない回は発注せず、理由をそのまま残す
-	bal, err := b.GetBalance()
+	bal, err := r.b.GetBalance()
 	if err != nil || bal == nil {
 		if err == nil {
 			err = errors.New("応答が空")
 		}
-		logger.Warn("accum.balance_failed",
+		r.logger.Warn("accum.balance_failed",
 			fmt.Sprintf("買付余力を照会できないため、この回は発注しません: %v", err))
 		for _, po := range planned {
 			switch {
 			case po.Failed:
-				fail(po.Symbol, po.Note)
-			case po.Request != nil && len(pendingBySymbol[po.Symbol]) > 0:
-				// 送信結果不明の注文はこの失敗の行で知らせる（下の本流と同じ）。印を付けないと
-				// alertHeld が「照会できません」を別に送り、1 件の PENDING で 2 通になる
-				ids := pendingBySymbol[po.Symbol]
-				for _, id := range ids {
-					coveredByFailure[id] = true
-				}
-				fail(po.Symbol, pendingFailureNote(ids))
+				r.fail(po.Symbol, po.Note)
+			case po.Request != nil && len(r.pendingBySymbol[po.Symbol]) > 0:
+				// 送信結果不明の注文はこの失敗の行で知らせる（下の本流と同じ）
+				r.failPending(po.Symbol, r.pendingBySymbol[po.Symbol])
 			case po.Request != nil:
-				fail(po.Symbol, fmt.Sprintf("買付余力を照会できないため発注しません: %v", err))
+				r.fail(po.Symbol, fmt.Sprintf("買付余力を照会できないため発注しません: %v", err))
 			}
 		}
-		return failedOrders(failures, !isLive)
+		return failedOrders(r.failures, !r.isLive)
 	}
 	buyingPower := bal.BuyingPower
 
 	for _, po := range planned {
-		if po.Request == nil {
-			switch {
-			case po.Failed:
-				fail(po.Symbol, po.Note)
-			case po.Note != "":
-				logger.Info("accum.skip", fmt.Sprintf("%s: %s", po.Symbol, po.Note))
-			}
-			continue
-		}
-
-		req := *po.Request
-		if ids := pendingBySymbol[po.Symbol]; len(ids) > 0 {
-			for _, id := range ids {
-				coveredByFailure[id] = true
-			}
-			fail(po.Symbol, pendingFailureNote(ids))
-			continue
-		}
-		placed, err := led.WasPlaced(req.ClientOrderID)
+		spent, err := r.placeOne(po, buyingPower)
 		if err != nil {
-			// 台帳が読めないなら二重発注を否定できない。安全側に倒して以降を止める。
-			logger.Error("accum.ledger_read_failed", err.Error())
-			return fmt.Errorf("台帳を読めないため発注を中止しました: %w", err)
-		}
-		if placed {
-			logger.Info("accum.skip", fmt.Sprintf("%s: 既に発注済み (ID: %s)", po.Symbol, req.ClientOrderID))
-			continue
-		}
-
-		// 見積りと買付余力チェック
-		preview, err := b.Preview(req)
-		if err != nil {
-			fail(po.Symbol, fmt.Sprintf("見積り失敗: %v", err))
-			continue
-		}
-		totalCost := preview.EstimatedCost.Add(preview.EstimatedFee)
-		if totalCost.GreaterThan(buyingPower) {
-			fail(po.Symbol, fmt.Sprintf("買付余力不足 (必要 %s / 余力 %s)", totalCost, buyingPower))
-			continue
-		}
-
-		mkt := domain.MarketJP
-		amt := po.Amount
-
-		if !isLive {
-			// dry-run
-			if rerr := led.Record(req, ledger.DryRunStatus, nil, &monthStart, &amt, &mkt); rerr != nil {
-				logger.Warn("accum.ledger", fmt.Sprintf("%s: dry-run の記録に失敗: %v", po.Symbol, rerr))
-			}
-			logger.Info("accum.dry_run", fmt.Sprintf("[dry-run] %s %s株 @ %s円 (%s)", po.Symbol, req.Quantity, po.LimitPrice, req.Reason))
-			continue
-		}
-
-		// 実発注。台帳に送信中で先に記録してから送る。
-		ack, err := placeRecorded(b, led, req, monthStart, amt, mkt)
-		if err != nil {
-			var rejected *broker.OrderRejectedError
-			if errors.As(err, &rejected) {
-				// 届いた上で拒否された。台帳は REJECTED で、次回の差額で埋め直す
-				fail(po.Symbol, fmt.Sprintf("発注拒否: %v", err))
-				continue
-			}
-			// それ以外は止める。送信結果不明（ErrUnconfirmedOrder）・送ったのに台帳を
-			// 書けない（ErrOrderNotRecorded・拒否を REJECTED にできない ErrRejectionNotRecorded）・
-			// 送る前の記録に失敗——どれも台帳が実態を
-			// 表していないので、続けて出すと二重発注を否定できない
-			code := "accum.order_aborted"
-			var unconfirmed *ErrUnconfirmedOrder
-			var unrecorded *ErrOrderNotRecorded
-			var rejectionUnrecorded *ErrRejectionNotRecorded
-			switch {
-			case errors.As(err, &unconfirmed):
-				code = "accum.unconfirmed"
-			case errors.As(err, &unrecorded), errors.As(err, &rejectionUnrecorded):
-				code = "accum.order_not_recorded"
-			}
-			logger.Error(code, fmt.Sprintf("%s: %v", po.Symbol, err))
-			if len(failures) > 0 {
-				return fmt.Errorf("%w（ほかに発注できなかった銘柄: %s）", err, strings.Join(failures, " / "))
-			}
 			return err
 		}
-
-		logger.Info("accum.order", fmt.Sprintf("発注成功: %s %s株 (ID: %s)", po.Symbol, req.Quantity, ack.ClientOrderID))
-		buyingPower = buyingPower.Sub(totalCost)
+		buyingPower = buyingPower.Sub(spent)
 	}
 
-	return failedOrders(failures, !isLive)
+	return failedOrders(r.failures, !r.isLive)
+}
+
+// placeOne は計画の 1 行を出す（dry-run は記録だけ）。spent は買付余力から引く額
+// （本発注が受理されたときだけ）。エラーは以降の発注を止めるべきもの。
+func (r *orderRun) placeOne(po PlannedOrder, buyingPower decimal.Decimal) (spent decimal.Decimal, err error) {
+	if po.Request == nil {
+		switch {
+		case po.Failed:
+			r.fail(po.Symbol, po.Note)
+		case po.Note != "":
+			r.logger.Info("accum.skip", fmt.Sprintf("%s: %s", po.Symbol, po.Note))
+		}
+		return decimal.Zero, nil
+	}
+
+	req := *po.Request
+	if ids := r.pendingBySymbol[po.Symbol]; len(ids) > 0 {
+		r.failPending(po.Symbol, ids)
+		return decimal.Zero, nil
+	}
+	placed, err := r.led.WasPlaced(req.ClientOrderID)
+	if err != nil {
+		// 台帳が読めないなら二重発注を否定できない。安全側に倒して以降を止める。
+		r.logger.Error("accum.ledger_read_failed", err.Error())
+		return decimal.Zero, fmt.Errorf("台帳を読めないため発注を中止しました: %w", err)
+	}
+	if placed {
+		r.logger.Info("accum.skip", fmt.Sprintf("%s: 既に発注済み (ID: %s)", po.Symbol, req.ClientOrderID))
+		return decimal.Zero, nil
+	}
+
+	// 見積りと買付余力チェック
+	preview, err := r.b.Preview(req)
+	if err != nil {
+		r.fail(po.Symbol, fmt.Sprintf("見積り失敗: %v", err))
+		return decimal.Zero, nil
+	}
+	totalCost := preview.EstimatedCost.Add(preview.EstimatedFee)
+	if totalCost.GreaterThan(buyingPower) {
+		r.fail(po.Symbol, fmt.Sprintf("買付余力不足 (必要 %s / 余力 %s)", totalCost, buyingPower))
+		return decimal.Zero, nil
+	}
+
+	mkt := domain.MarketJP
+	amt := po.Amount
+
+	if !r.isLive {
+		// dry-run
+		if rerr := r.led.Record(req, ledger.DryRunStatus, nil, &r.monthStart, &amt, &mkt); rerr != nil {
+			r.logger.Warn("accum.ledger", fmt.Sprintf("%s: dry-run の記録に失敗: %v", po.Symbol, rerr))
+		}
+		r.logger.Info("accum.dry_run", fmt.Sprintf("[dry-run] %s %s株 @ %s円 (%s)", po.Symbol, req.Quantity, po.LimitPrice, req.Reason))
+		return decimal.Zero, nil
+	}
+
+	// 実発注。台帳に送信中で先に記録してから送る。
+	ack, err := placeRecorded(r.b, r.led, req, r.monthStart, amt, mkt)
+	if err != nil {
+		var rejected *broker.OrderRejectedError
+		if errors.As(err, &rejected) {
+			// 届いた上で拒否された。台帳は REJECTED で、次回の差額で埋め直す
+			r.fail(po.Symbol, fmt.Sprintf("発注拒否: %v", err))
+			return decimal.Zero, nil
+		}
+		return decimal.Zero, r.abort(po.Symbol, err)
+	}
+
+	r.logger.Info("accum.order", fmt.Sprintf("発注成功: %s %s株 (ID: %s)", po.Symbol, req.Quantity, ack.ClientOrderID))
+	return totalCost, nil
+}
+
+// abort は拒否以外の発注の失敗をログに残し、以降の発注を止めるエラーにする。
+//
+// 送信結果不明（ErrUnconfirmedOrder）・送ったのに台帳を書けない（ErrOrderNotRecorded・
+// 拒否を REJECTED にできない ErrRejectionNotRecorded）・送る前の記録に失敗——どれも台帳が
+// 実態を表していないので、続けて出すと二重発注を否定できない
+func (r *orderRun) abort(symbol string, err error) error {
+	code := "accum.order_aborted"
+	var unconfirmed *ErrUnconfirmedOrder
+	var unrecorded *ErrOrderNotRecorded
+	var rejectionUnrecorded *ErrRejectionNotRecorded
+	switch {
+	case errors.As(err, &unconfirmed):
+		code = "accum.unconfirmed"
+	case errors.As(err, &unrecorded), errors.As(err, &rejectionUnrecorded):
+		code = "accum.order_not_recorded"
+	}
+	r.logger.Error(code, fmt.Sprintf("%s: %v", symbol, err))
+	if len(r.failures) > 0 {
+		return fmt.Errorf("%w（ほかに発注できなかった銘柄: %s）", err, strings.Join(r.failures, " / "))
+	}
+	return err
 }
 
 // describeHeld は保留した注文をダイジェストの異常の文にする。

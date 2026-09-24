@@ -1,0 +1,14 @@
+err: 2 件を発注できませんでした: 1306: 買付余力を照会できないため発注しません: 余力照会がタイムアウト / 9999: 足データなし
+OrdersFailedError: true
+log:
+  [warn] [accum.balance_failed] 買付余力を照会できないため、この回は発注しません: 余力照会がタイムアウト
+  [error] [accum.order_failed] 1306: 買付余力を照会できないため発注しません: 余力照会がタイムアウト
+  [error] [accum.order_failed] 9999: 足データなし
+alerts:
+calls:
+  LotSizes [1306 9999]
+  GetOrderHistory 2026-09-01T00:00:00+09:00..2026-09-14T14:30:00+09:00
+  GetBalance
+ledger:
+history:
+  decision/2026-09-14T053000Z-manual.parquet

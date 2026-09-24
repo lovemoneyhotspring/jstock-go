@@ -1,0 +1,6 @@
+err: このブローカー（stopgolden）は時価問合を持たないので検証注文は作れません
+ErrNoPosition: false
+result: nil
+log:
+calls:
+  LotSizes [563A]

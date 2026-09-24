@@ -1,0 +1,11 @@
+err: 逆指値の発注が通りませんでした: 拒否
+ErrNoPosition: false
+request: {ID:a36c2e546fffe75545d56ac893979b15 Sym:563A Side:SELL Type:MARKET Qty:1 Limit:nil Tax:SPECIFIC Trade:CASH Cond: Stop:{Trigger:970 Price:nil} Reason:逆指値経路の実機検証（1 単元・発火しない水準）}
+trigger=970 corrected=0 limit=0
+step 発注 ok=false 拒否
+log:
+calls:
+  LotSizes [563A]
+  MarketPrices [563A]
+  PositionsBySymbol
+  Place {ID:a36c2e546fffe75545d56ac893979b15 Sym:563A Side:SELL Type:MARKET Qty:1 Limit:nil Tax:SPECIFIC Trade:CASH Cond: Stop:{Trigger:970 Price:nil} Reason:逆指値経路の実機検証（1 単元・発火しない水準）}

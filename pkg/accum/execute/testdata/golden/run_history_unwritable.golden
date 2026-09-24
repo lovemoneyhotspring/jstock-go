@@ -1,0 +1,15 @@
+err: <nil>
+OrdersFailedError: false
+log:
+  [warn] [accum.history_failed] 判断履歴を残せませんでした: 履歴の置き場を作れません <tmp>/file/decision: mkdir <tmp>/file: not a directory
+  [info] [accum.order] 発注成功: 1306 100株 (ID: 9704a7f987c193f1698c92fad29516fa)
+alerts:
+calls:
+  LotSizes [1306]
+  GetOrderHistory 2026-09-01T00:00:00+09:00..2026-09-14T14:30:00+09:00
+  GetBalance
+  Preview 1306
+  Place {ID:9704a7f987c193f1698c92fad29516fa Sym:1306 Side:BUY Type:LIMIT Qty:100 Limit:1010 Tax:SPECIFIC Trade:CASH Cond: Stop:nil Reason:今月の目標 200000（基本 200000＋増額 0）− 発注済み 0}
+ledger:
+  9704a7f987c193f1698c92fad29516fa sym=1306 mkt=JP qty=100 filled=0 status=SUBMITTED amount=200000 month=2026-09-01 placed=2026-09-14T05:30:00Z updated=2026-09-14T05:30:00Z broker=B-1306 avg=nil
+history:

@@ -1,0 +1,11 @@
+err: <nil>
+OrdersFailedError: false
+log:
+  [info] [accum.skip] 1306: 売買単位が分からないため見送り（dry-run は銘柄マスタを引かない。本発注ではブローカーの銘柄マスタを使う。lot_size_overrides に書けば dry-run でも株数を出す）
+alerts:
+calls:
+  LotSizes [1306]
+  GetBalance
+ledger:
+history:
+  decision/2026-09-14T053000Z-manual.parquet

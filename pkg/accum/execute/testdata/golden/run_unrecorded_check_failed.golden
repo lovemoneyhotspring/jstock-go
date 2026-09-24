@@ -1,0 +1,11 @@
+err: 台帳とブローカーの突き合わせができないため発注を中止しました: ブローカーの注文履歴を照会できません: 履歴の照会がタイムアウト
+OrdersFailedError: false
+log:
+  [error] [accum.unrecorded_check_failed] ブローカーの注文履歴を照会できません: 履歴の照会がタイムアウト
+alerts:
+calls:
+  LotSizes [1306]
+  GetOrderHistory 2026-09-01T00:00:00+09:00..2026-09-14T14:30:00+09:00
+ledger:
+history:
+  decision/2026-09-14T053000Z-manual.parquet

@@ -1,0 +1,16 @@
+InitialEquity 3000000
+FinalEquity 3278082
+TotalReturn 0.092694
+MaxDrawdown 0.0679502049773752
+TotalFills 27
+SellFills 13
+Days 260
+WinningTrades 6
+LosingTrades 7
+WinRate 0.46153846153846156
+Interest 0
+Analysis[シャープレシオ (年率)] 1.82
+Analysis[勝率] 46.2%
+Analysis[平均損益/トレード] 22557.63
+Analysis[最長ドローダウン期間 (本)] 123
+Analysis[決済トレード数] 13

@@ -1,0 +1,11 @@
+err: 1 件を発注できませんでした: 1306: 売買単位が分からないため発注しません（ブローカーの銘柄情報に無い・取得できない。lot_size_overrides にも無い。既定の 100 株では丸めない）
+OrdersFailedError: true
+log:
+  [error] [accum.order_failed] 1306: 売買単位が分からないため発注しません（ブローカーの銘柄情報に無い・取得できない。lot_size_overrides にも無い。既定の 100 株では丸めない）
+alerts:
+calls:
+  LotSizes [1306]
+  GetBalance
+ledger:
+history:
+  decision/2026-09-14T053000Z-manual.parquet

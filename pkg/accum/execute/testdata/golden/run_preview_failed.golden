@@ -1,0 +1,13 @@
+err: 1 件を発注できませんでした: 1306: 見積り失敗: 見積りできない
+OrdersFailedError: true
+log:
+  [error] [accum.order_failed] 1306: 見積り失敗: 見積りできない
+alerts:
+calls:
+  LotSizes [1306]
+  GetOrderHistory 2026-09-01T00:00:00+09:00..2026-09-14T14:30:00+09:00
+  GetBalance
+  Preview 1306
+ledger:
+history:
+  decision/2026-09-14T053000Z-manual.parquet

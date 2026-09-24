@@ -1,0 +1,10 @@
+err: <nil>
+lotCalls: 0
+stale: []
+[0] Symbol=1306 Amount=50000 Quantity=0 Limit=nil Failed=false LotUnknown=false Market=JP JudgedOn=2026-09-13 Month=2026-09-01 Close=1000 Target=200000 Placed=150000 Multiplier=1 Tactic=constant
+    Reason=
+    Note=差額 50000円は次のリリース日に持ち越し
+    Request=nil
+started 1306: 2025-01-01 (<nil>)
+started 563A: nil (<nil>)
+started 2559: nil (<nil>)

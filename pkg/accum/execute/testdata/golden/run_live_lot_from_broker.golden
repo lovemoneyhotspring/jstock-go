@@ -1,0 +1,15 @@
+err: <nil>
+OrdersFailedError: false
+log:
+  [info] [accum.order] 発注成功: 1306 190株 (ID: d1ea1443df39b0464d09d4fdcd1305bb)
+alerts:
+calls:
+  LotSizes [1306]
+  GetOrderHistory 2026-09-01T00:00:00+09:00..2026-09-14T14:30:00+09:00
+  GetBalance
+  Preview 1306
+  Place {ID:d1ea1443df39b0464d09d4fdcd1305bb Sym:1306 Side:BUY Type:LIMIT Qty:190 Limit:1010 Tax:SPECIFIC Trade:CASH Cond: Stop:nil Reason:今月の目標 200000（基本 200000＋増額 0）− 発注済み 0}
+ledger:
+  d1ea1443df39b0464d09d4fdcd1305bb sym=1306 mkt=JP qty=190 filled=0 status=SUBMITTED amount=200000 month=2026-09-01 placed=2026-09-14T05:30:00Z updated=2026-09-14T05:30:00Z broker=B-1306 avg=nil
+history:
+  decision/2026-09-14T053000Z-manual.parquet

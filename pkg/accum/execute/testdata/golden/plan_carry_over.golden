@@ -1,0 +1,10 @@
+err: <nil>
+lotCalls: 0
+stale: []
+[0] Symbol=1306 Amount=280000 Quantity=200 Limit=1010 Failed=false LotUnknown=false Market=JP JudgedOn=2026-09-13 Month=2026-09-01 Close=1000 Target=280000 Placed=0 Multiplier=1 Tactic=constant
+    Reason=今月の目標 200000（基本 200000＋増額 0）＋前月からの繰り越し 80000− 発注済み 0
+    Note=
+    Request={ID:cfa4a15d7e33216c65d5505c105a44ad Sym:1306 Side:BUY Type:LIMIT Qty:200 Limit:1010 Tax:SPECIFIC Trade:CASH Cond: Stop:nil Reason:今月の目標 200000（基本 200000＋増額 0）＋前月からの繰り越し 80000− 発注済み 0}
+started 1306: 2025-01-01 (<nil>)
+started 563A: nil (<nil>)
+started 2559: nil (<nil>)

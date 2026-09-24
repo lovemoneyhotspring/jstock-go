@@ -1,0 +1,6 @@
+err: 563A の売買単位を取得できません（CLMStkGetIssueMstKabu）
+ErrNoPosition: false
+result: nil
+log:
+calls:
+  LotSizes [563A]

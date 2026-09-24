@@ -1,0 +1,8 @@
+err: 現物建玉を照会できません（持っていない株を売らないため中止します）: 建玉照会できない
+ErrNoPosition: false
+result: nil
+log:
+calls:
+  LotSizes [563A]
+  MarketPrices [563A]
+  PositionsBySymbol

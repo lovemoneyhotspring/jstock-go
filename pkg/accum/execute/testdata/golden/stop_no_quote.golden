@@ -1,0 +1,7 @@
+err: 563A の現在値が取れません
+ErrNoPosition: false
+result: nil
+log:
+calls:
+  LotSizes [563A]
+  MarketPrices [563A]

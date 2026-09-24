@@ -1,0 +1,15 @@
+err: 1 件を発注できませんでした: 1306: 送信結果不明の注文 今日の不明 が残っているため発注しません（届いていれば二重買付になる。口座の約定履歴で確かめて `accum pending resolve <client_order_id> --attribute … | --unsent` で確定する）
+OrdersFailedError: true
+log:
+  [error] [accum.order_failed] 1306: 送信結果不明の注文 今日の不明 が残っているため発注しません（届いていれば二重買付になる。口座の約定履歴で確かめて `accum pending resolve <client_order_id> --attribute … | --unsent` で確定する）
+alerts:
+calls:
+  GetOrder 今日の不明
+  GetOrderHistory 2026-09-14T00:00:00+09:00..2026-09-14T14:30:00+09:00
+  LotSizes [1306]
+  GetOrderHistory 2026-09-01T00:00:00+09:00..2026-09-14T14:30:00+09:00
+  GetBalance
+ledger:
+  今日の不明 sym=1306 mkt=JP qty=100 filled=0 status=PENDING amount=0 month=2026-09-01 placed=2026-09-14T05:29:00Z updated=nil broker=nil avg=nil
+history:
+  decision/2026-09-14T053000Z-manual.parquet
