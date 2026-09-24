@@ -565,7 +565,7 @@ def max_dd(x):
 
 
 def part_k(i0s, seeds, slot, caps):
-    """規則 R の 1 銘柄の上限を資金 ÷ k（k = 3, 5, 6）にしたときの利益・最悪日・最大 DD（シードごとに測って平均）。"""
+    """規則 R の 1 銘柄の上限を資金 ÷ k（k = 3, 5, 6, 9）にしたときの利益・最悪日・最大 DD（シードごとに測って平均）。"""
     from dt_preopen_sim import error_pools
     te = pd.read_parquet("test/out/dt_candidates_wide.parquet")
     te = te[te["d"] >= SINCE].copy()
@@ -573,7 +573,7 @@ def part_k(i0s, seeds, slot, caps):
     rules = day_rules(te)
     alld = pd.DatetimeIndex(sorted(te["d"].unique()))
     fns = [("N=3", lambda x, c: alloc_fixed_iv(x, 3, c))] + \
-          [(f"R÷{k}", (lambda k: lambda x, c: alloc_rule(x, 0.002, 20, c, k=k))(k)) for k in (3, 5, 6)]
+          [(f"R÷{k}", (lambda k: lambda x, c: alloc_rule(x, 0.002, 20, c, k=k))(k)) for k in (3, 5, 6, 9)]
     acc = {}
     for seed in range(seeds):
         g = seen_ranked(te, pools, seed)
