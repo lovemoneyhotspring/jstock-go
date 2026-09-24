@@ -634,6 +634,90 @@ func (r *Repo) RealizedPnLOn(dayJST string) (RealizedPnL, error) {
 	return result, rows.Err()
 }
 
+// ExpectedHoldings は台帳から見て「今も持っているはず」の銘柄を返す（銘柄 → 根拠）。
+//
+// 建玉の照会がエラーなしで 0 件を返したとき、それを信じてよいかの判定に使う
+// （信じると全銘柄が未保有扱いになり、ストップが全部消え、保有中の銘柄を買い直す）。
+//
+//   - 保存済みのストップがある銘柄（前に成功した発注する回で保有を見た）
+//   - 前に成功した発注する回（env が同じ）以降に出した買いで、約定した・約定が
+//     まだ分からないもの（ストップはそれを見た次の回に作るので、ストップだけでは漏れる）
+//
+// から、同じ期間に出した売りで約定した・約定がまだ分からない銘柄を除く（保有が 0 に
+// なったのは wbjp 自身の売りかもしれない）。currentRunID（実行中の回）は前の回に数えない。
+// 前に成功した発注する回が無ければ台帳の全期間の買い・売りを見る。
+func (r *Repo) ExpectedHoldings(env, currentRunID string) (map[string]string, error) {
+	var since string
+	err := r.db.QueryRow(
+		`SELECT started_at FROM runs
+		  WHERE mode = 'live' AND status = 'success' AND env = ? AND run_id != ?
+		  ORDER BY started_at DESC LIMIT 1;`,
+		env, currentRunID,
+	).Scan(&since)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("前の実行を読めません: %w", err)
+	}
+
+	out := make(map[string]string)
+	stops, err := r.db.Query("SELECT symbol FROM stops;")
+	if err != nil {
+		return nil, fmt.Errorf("ストップを読めません: %w", err)
+	}
+	for stops.Next() {
+		var sym string
+		if err := stops.Scan(&sym); err != nil {
+			stops.Close()
+			return nil, err
+		}
+		out[sym] = "保存済みのストップがある"
+	}
+	if err := stops.Close(); err != nil {
+		return nil, err
+	}
+
+	// 約定した、または約定がまだ分からない注文（dry-run・拒否・未送信は数えない）
+	touched := func(side domain.Side) (map[string]struct{}, error) {
+		rows, err := r.db.Query(
+			`SELECT DISTINCT symbol FROM orders
+			  WHERE side = ? AND placed_at >= ? AND status NOT IN (?, ?, ?)
+			    AND (CAST(filled_quantity AS REAL) > 0 OR status NOT IN (?, ?, ?));`,
+			string(side), since,
+			"dry_run", string(domain.OrderStatusRejected), string(domain.OrderStatusUnsent),
+			string(domain.OrderStatusFilled), string(domain.OrderStatusCancelled), string(domain.OrderStatusExpired),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("注文を読めません: %w", err)
+		}
+		defer rows.Close()
+		set := make(map[string]struct{})
+		for rows.Next() {
+			var sym string
+			if err := rows.Scan(&sym); err != nil {
+				return nil, err
+			}
+			set[sym] = struct{}{}
+		}
+		return set, rows.Err()
+	}
+	buys, err := touched(domain.SideBuy)
+	if err != nil {
+		return nil, err
+	}
+	for sym := range buys {
+		if _, ok := out[sym]; !ok {
+			out[sym] = "前の発注する回以降の買いが約定している（または約定が分からない）"
+		}
+	}
+	sells, err := touched(domain.SideSell)
+	if err != nil {
+		return nil, err
+	}
+	for sym := range sells {
+		delete(out, sym)
+	}
+	return out, nil
+}
+
 // OrdersToday はその日に実際に発注した件数。
 //
 // max_orders_per_day はプロセスをまたいで効かないと意味がない。

@@ -252,6 +252,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `wbjp.fill` / `wbjp.fill_unresolved`（warn。ダイジェストの異常にも） / `wbjp.fill_sync_failed`（異常） | 約定状況が変わった／注文を照会できず台帳が未確定／約定の同期に失敗 | 本文 |
 | `wbjp.pending_unresolved`（異常） | 当日の注文一覧を照会できず判定を持ち越した | `error` |
 | `wbjp.pending_stale`（warn。ダイジェストの異常にも） | 今日より前に送った送信結果不明（`PENDING`）の注文がある。立花の一覧は当日分しか返らないので自動では判定しない。放っておくと買いは未約定の枠を押さえ続ける。口座の約定履歴を見て `wbjp pending resolve <id> --attribute <注文番号> --status FILLED --filled <株数> --price <単価>` か `--unsent` で確定する（ID に発注日が入るので `--unsent` でも送り直しは起きない） | `pending`, `client_order_ids`, `fix` |
+| `wbjp.positions_empty`（発注する回はダイジェストの異常。通知も送る） | 建玉の照会がエラーなしで 0 件なのに、台帳では保有中のはずの銘柄（保存済みのストップ、前に成功した発注する回以降に約定した・約定が分からない買い。同じ期間に売った銘柄は除く）がある。信じるとストップを全部消して買い直すので、発注する回は止まる。dry-run は warn だけで続く（建玉 0 の模型で判断する）。口座を確かめ、本当に空（手で全部売った など）なら `wbjp run --live --yes --accept-flat` を 1 回走らせる（台帳のストップが外れ、その回が次の基準になる） | 本文に銘柄と根拠 |
 | `wbjp.bars_unusable`（warn。ダイジェストの異常にも。保有中の銘柄があれば通知も送る） / `wbjp.calendar_missing`（warn） / `wbjp.market_closed` | 足が古い・読めない銘柄があり、その銘柄はこの回に売りも買いも出さない（保有中なら**損切り・利確・時間切れも止まる**）／取引カレンダーが読めない（dry-run は平日で代用、発注する回は止まる）／休場日のため判断しない | 本文に銘柄・保有株数・理由 |
 | `wbjp.daily_pnl` / `wbjp.daily_pnl_unknown`（warn。ダイジェストの異常にも） | 当日の損益（実現・含み）と `max_daily_loss`／当日の損益を確かめられず新規の買いを止めた | 本文 |
 | `wbjp.regime` / `wbjp.strategy_error`（warn） / `wbjp.margin_missing`（warn） | 相場の状態を評価した／戦略の評価に失敗した／信用残がアーカイブに無い | 本文 |

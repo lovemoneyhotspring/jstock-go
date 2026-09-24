@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,13 +33,14 @@ func newRunCmd() *cobra.Command {
 	var yesFlag bool
 	var noSyncFlag bool
 	var brokerVerifyFlag bool
+	var acceptFlatFlag bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "日次実行サイクルを実行する（--live で発注）",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return run.Crash("日次実行", "wbjp.crash",
-				runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag))
+				runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag))
 		},
 	}
 
@@ -47,11 +49,13 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noSyncFlag, "no-sync", false, "足の更新をしない")
 	cmd.Flags().BoolVar(&brokerVerifyFlag, "broker-verify", false,
 		"発注経路の実機検証（docs/BROKER_VERIFY.md）。ログとダイジェストに印を付ける")
+	cmd.Flags().BoolVar(&acceptFlatFlag, "accept-flat", false,
+		"建玉の照会が 0 件でも台帳の保有を捨てて続ける（口座が本当に空だと確かめたときだけ）")
 	return cmd
 }
 
 // runDaily は本体。RunE から切り出してあるのは、異常終了を run.Crash で記録・通知するため。
-func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) {
+func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bool) (err error) {
 	// 以降のログの全行とダイジェストに印を付ける（env とは独立）
 	run.SetVerify(brokerVerifyFlag)
 	setCfg, err := wbjpcfg.LoadSettingsFile(configDirFlag)
@@ -169,6 +173,50 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 	// その時点の建玉を残す（explain / 事後の検証で「何を持っていたか」を引く）
 	if err := rep.RecordSnapshot(runID, todayJST, positionList(posMap)); err != nil {
 		logger.Warn("wbjp.ledger", fmt.Sprintf("建玉の記録を残せません: %v", err))
+	}
+
+	// 送信結果が分からなかった注文を判定する。決められないものがあれば発注しない
+	//（同じ銘柄に二重に出しうる）。dry-run は台帳に PENDING を作らないので飛ばす。
+	// 約定の取り込みまで建玉 0 件の確認（checkEmptyPositions）より先に行う（前の回の
+	// 売り・買いが約定したかで「持っているはず」が変わる）
+	if canLive {
+		summary, err := resolvePendingOrders(rep, b, logger, clock.NowUTC())
+		if err != nil {
+			digest.Anomaly("wbjp.pending_unresolved", err.Error())
+			return err
+		}
+		if summary.Attributed+summary.NotSent+summary.Ambiguous+summary.TooRecent > 0 {
+			digest.Note(summary.Fields("pending"))
+		}
+		if err := pendingBlocksOrders(summary); err != nil {
+			return err
+		}
+
+		// 出した注文の約定・失効を台帳に取り込む。当日買付（差金決済の柵）と
+		// 未約定の買い（比率上限）はこの台帳から数えるので、発注の判断より先に行う。
+		// 照会できなかった注文は未確定のまま残る（未約定に数え続けるので安全側）
+		fills, err := execute.SyncFills(rep, b)
+		if err != nil {
+			digest.Anomaly("wbjp.fill_sync_failed", err.Error())
+			return err
+		}
+		for _, c := range fills.Changes {
+			logger.Info("wbjp.fill", fmt.Sprintf("%s: %s → %s（%s/%s 株約定, ID: %s）",
+				c.Symbol, c.Before, c.After, c.FilledQuantity, c.Quantity, c.ClientOrderID))
+		}
+		if len(fills.Unresolved) > 0 {
+			logger.Warn("wbjp.fill_unresolved", "注文を照会できません（台帳は未確定のまま）:\n"+strings.Join(fills.Unresolved, "\n"))
+			digest.Anomaly("wbjp.fill_unresolved", fmt.Sprintf("%d 件の注文を照会できません（次の実行で再照会）", len(fills.Unresolved)))
+		}
+		if len(fills.Changes) > 0 {
+			digest.Note(map[string]any{"phase": "fills", "changed": len(fills.Changes)})
+		}
+	}
+
+	// 建玉の照会がエラーなしで 0 件なのに、台帳では保有中のはずの銘柄がある。信じると
+	// ストップを全部消し、保有中の銘柄を新規として買い直すので、発注する回は止める
+	if err := checkEmptyPositions(rep, posMap, string(appSettings.Env), runID, canLive, acceptFlatFlag, logger); err != nil {
+		return err
 	}
 
 	// 1. 日足の収集と ATR / 直近終値
@@ -370,42 +418,6 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag bool) (err error) 
 		logger.Warn("wbjp.ledger", fmt.Sprintf("目標を記録できません: %v", err))
 	}
 
-	// 3-5. 送信結果が分からなかった注文を判定する。決められないものがあれば発注しない
-	//（同じ銘柄に二重に出しうる）。dry-run は台帳に PENDING を作らないので飛ばす
-	if canLive {
-		summary, err := resolvePendingOrders(rep, b, logger, clock.NowUTC())
-		if err != nil {
-			digest.Anomaly("wbjp.pending_unresolved", err.Error())
-			return err
-		}
-		if summary.Attributed+summary.NotSent+summary.Ambiguous+summary.TooRecent > 0 {
-			digest.Note(summary.Fields("pending"))
-		}
-		if err := pendingBlocksOrders(summary); err != nil {
-			return err
-		}
-
-		// 出した注文の約定・失効を台帳に取り込む。当日買付（差金決済の柵）と
-		// 未約定の買い（比率上限）はこの台帳から数えるので、発注の判断より先に行う。
-		// 照会できなかった注文は未確定のまま残る（未約定に数え続けるので安全側）
-		fills, err := execute.SyncFills(rep, b)
-		if err != nil {
-			digest.Anomaly("wbjp.fill_sync_failed", err.Error())
-			return err
-		}
-		for _, c := range fills.Changes {
-			logger.Info("wbjp.fill", fmt.Sprintf("%s: %s → %s（%s/%s 株約定, ID: %s）",
-				c.Symbol, c.Before, c.After, c.FilledQuantity, c.Quantity, c.ClientOrderID))
-		}
-		if len(fills.Unresolved) > 0 {
-			logger.Warn("wbjp.fill_unresolved", "注文を照会できません（台帳は未確定のまま）:\n"+strings.Join(fills.Unresolved, "\n"))
-			digest.Anomaly("wbjp.fill_unresolved", fmt.Sprintf("%d 件の注文を照会できません（次の実行で再照会）", len(fills.Unresolved)))
-		}
-		if len(fills.Changes) > 0 {
-			digest.Note(map[string]any{"phase": "fills", "changed": len(fills.Changes)})
-		}
-	}
-
 	// 4. リコンサイル
 	//
 	// 板に残っている注文が見えないと、同じ注文をもう一度出しうる。
@@ -568,6 +580,59 @@ func dailyPnL(rep *repo.Repo, todayJST string, positions map[string]domain.Posit
 		return decimal.Zero, unrealized, nil, fmt.Errorf("当日の実現損益を読めません: %w", err)
 	}
 	return r.Amount, unrealized, r.Unpriced, nil
+}
+
+// checkEmptyPositions は、建玉の照会がエラーなしで 0 件を返したのに、台帳では保有中の
+// はずの銘柄（repo.ExpectedHoldings）があるかを確かめる。
+//
+// 照会の不調で 0 件が返ったのを信じると、全銘柄が未保有扱いになり、RetainHeld が
+// ストップを全部外し、SyncStops が台帳の stops を全部消し、sizer が保有中の銘柄を新規と
+// して買い直す（2026-09-24 の再点検）。発注する回は止める（通知・ダイジェスト・非 0 終了）。
+// dry-run は建玉 0 の模型で判断するので警告だけで続ける（ストップは保存しない）。
+// acceptFlat（--accept-flat）は口座が本当に空だと確かめたときの逃げ道: 手で全部売った
+// 後など、台帳の保有を捨てて続ける（ストップは RetainHeld で外れ、成功した回が次の基準になる）。
+func checkEmptyPositions(rep *repo.Repo, posMap map[string]domain.Position, env, runID string,
+	canLive, acceptFlat bool, logger *logging.Logger) error {
+	for _, pos := range posMap {
+		if pos.Quantity.IsPositive() {
+			return nil
+		}
+	}
+	expected, err := rep.ExpectedHoldings(env, runID)
+	if err != nil {
+		if canLive {
+			return fmt.Errorf("建玉が 0 件と返り、台帳の保有も確かめられないため発注を中止しました: %w", err)
+		}
+		logger.Warn("wbjp.positions_empty", fmt.Sprintf("台帳の保有を確かめられません（dry-run のため続行）: %v", err))
+		return nil
+	}
+	if len(expected) == 0 {
+		return nil
+	}
+	syms := make([]string, 0, len(expected))
+	for sym := range expected {
+		syms = append(syms, sym)
+	}
+	sort.Strings(syms)
+	lines := make([]string, 0, len(syms))
+	for _, sym := range syms {
+		lines = append(lines, fmt.Sprintf("%s: %s", sym, expected[sym]))
+	}
+	detail := strings.Join(lines, "\n")
+	if !canLive {
+		logger.Warn("wbjp.positions_empty",
+			"dry-run は建玉 0 の模型で判断します（台帳では保有中のはず。ストップは保存しない）:\n"+detail)
+		return nil
+	}
+	if acceptFlat {
+		logger.Warn("wbjp.positions_empty",
+			"建玉の照会は 0 件。--accept-flat のため台帳の保有を捨てて続けます:\n"+detail)
+		digest.Note(map[string]any{"phase": "accept_flat", "dropped": len(syms)})
+		return nil
+	}
+	digest.Anomaly("wbjp.positions_empty", fmt.Sprintf("%d 銘柄（発注を中止）:\n%s", len(syms), detail))
+	return fmt.Errorf("建玉の照会が 0 件なのに台帳では %d 銘柄を保有中のはずのため発注を中止しました"+
+		"（口座を確かめ、本当に空なら --accept-flat を付けて 1 回実行してください）:\n%s", len(syms), detail)
 }
 
 // decideStopExits はストップ由来の目標を決め（risk.ExitPlan。backtest と同じ）、その後で
