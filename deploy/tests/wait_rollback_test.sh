@@ -139,7 +139,7 @@ check "8:59 台の snap は KILL の猶予を詰めている（既定の 10 秒�
 # 寄る前の snap は固まっても寄る前の open の 1 秒前までにロックを手放す（開始 + 打ち切り + KILL ≤ DT_PREOPEN_AT − 1）
 secs() { awk -F: '{printf "%.1f", $1*3600 + $2*60 + $3}' <<<"$1"; }
 pre=$(sed -n 's/^DT_PREOPEN_AT=//p' "$C"); presnap=$(sed -n 's/^DT_PRESNAP_AT=//p' "$C")
-sl=$(grep -v "^#" "$C" | grep -- "--slot 085940")
+sl=$(grep -v "^#" "$C" | grep -- "--slot 085942")
 st=$(sed -n 's/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p' <<<"$sl"); sk=$(sed -n 's/.*WITH_LOCK_KILL_AFTER=\([0-9]*\).*/\1/p' <<<"$sl")
 check "寄る前の snap（DT_PRESNAP_AT）は固まっても DT_PREOPEN_AT の 1 秒前までにロックを手放す" \
   '[ -n "$pre" ] && [ -n "$presnap" ] && [ -n "$st" ] && [ -n "$sk" ] && grep -q "wait-until.sh \$DT_PRESNAP_AT" <<<"$sl" && awk -v a="$(secs "$presnap")" -v t="$st" -v k="$sk" -v b="$(secs "$pre")" "BEGIN{exit !(a + t + k <= b - 1)}"'
