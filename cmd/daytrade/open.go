@@ -129,6 +129,9 @@ type openState struct {
 
 	// verdict は寄付の判定（危険信号・米国小幅高・倍率）
 	verdict regime.Verdict
+	// sizing はその日の件数と 1 注文の予算。rankQuotes は順位付けに使う気配（建て済み・返済に回した銘柄を落とした後）
+	sizing     execute.DaySizing
+	rankQuotes map[string]selection.Quote
 }
 
 func runOpen(opts openOptions) error {
@@ -174,64 +177,17 @@ func runOpen(opts openOptions) error {
 		return err
 	}
 
-	// 件数と 1 注文の予算: 縮小 → ショック → 拘束 → ショートの倍率 → （選定の後に）余り。
-	// その日の全体で決めてから、今日すでに建てた件数と金額を引く（execute.SizeDay）
-	sizing := execute.SizeDay(execute.SizingInput{
-		Cfg: s.cfg, Verdict: s.verdict, Placed: s.placed, TiedLong: s.tiedLong, TiedShort: s.tiedShort,
-		WatchOnly: s.watchOnly, WatchRows: watchRows,
-	})
-	execute.EmitNotes(s.env, sizing.Notes)
-	weak := sizing.Weak
-	weighting := sizing.Long.Weighting
-
-	// 候補の気配: 今日建てた銘柄・台帳外として返済に回した銘柄を落とし、signal.skip_opened なら
-	// 9:01 の時点で既に寄っている銘柄も落とす。順位付けの直前に気配そのものを落とすので、
-	// ロング・ショートの両方に効く（市場ギャップと危険信号は落とす前の気配で見る——候補全体の
-	// 分布が変わるため）
-	swept := execute.SweptSymbols(s.carried)
-	if len(swept) > 0 {
-		logWarn("daytrade.sweep", "台帳外の返済に回した銘柄を今日の候補から外す",
-			map[string]any{"symbols": sortedKeys(swept)})
-	}
-	rankQuotes, dropped := execute.RankQuotes(s.quotes, s.placed.Symbols, swept, s.cfg.Signal.SkipOpened)
-	if s.cfg.Signal.SkipOpened {
-		s.summary["quotes_opened"] = int64(len(dropped))
-		fmt.Printf("既に寄っている %d 銘柄を候補から外しました（signal.skip_opened。残り %d）\n",
-			len(dropped), len(rankQuotes))
-		logInfo("daytrade.quotes", "既に寄っている銘柄を除外", map[string]any{
-			"opened": len(dropped), "opened_sample": sample(dropped), "remaining": len(rankQuotes),
-		})
-	}
-
-	// ショートの脚（[margin]）を**先に**決める: 使わなかった資金をロングに回すため
-	// （margin.spill_to_long。検証の simulateMarginSpill と同じ順序）。資金はシーソー
-	shortMultiplier := sizing.ShortMultiplier
-	var (
-		shortRanking []selection.Ranked
-		shortPicks   []selection.Pick
-		shortReasons map[string]string
-		shortN       int
-		shortBudget  decimal.Decimal
-	)
-	if sizing.ShortOpen {
-		shortN, shortBudget = sizing.Short.N, sizing.Short.Budget
-		shortRanking = selection.RankShort(s.shortUniverse, rankQuotes, s.cfg.Margin)
-		shortOpts := selection.PickOptions{
-			N: shortN, Budget: shortBudget, Weighting: sizing.Short.Weighting, Side: domain.SideSell,
-			MaxAmount: s.cfg.Margin.MaxOrder,
-		}
-		shortPicks = selection.PickFrom(shortRanking, shortOpts)
-		shortReasons = selection.PickReasons(shortRanking, shortOpts, shortPicks)
-	}
+	s.sizeDay()
+	short := s.pickShort()
 
 	// ショートの余り（候補が無い・上限で頭打ち）をロングに回す。銘柄数は総予算 ÷ 1 注文の
 	// 予算（capital.max_positions が上限）。倍率 0 の日（ショック日）は回す元が無い。
 	// 余りは今日のショートの総予算から、今日建てた分と今回の選定を引いたもの（再実行で数え直さない）
-	long, spill, spillNotes := sizing.WithSpill(shortPicks)
+	long, spill, spillNotes := s.sizing.WithSpill(short.picks)
 	if s.corpStale != "" {
 		// 記録簿が使えずショートを見送った回は余りを回さない。回したまま後の回で記録簿が読めると、
 		// ショートは建てた金額 0 として満額で建ち、ロングに回した分と合わせて資金を超える
-		long, spill, spillNotes = sizing.Long, decimal.Zero, nil
+		long, spill, spillNotes = s.sizing.Long, decimal.Zero, nil
 	}
 	n, budget := long.N, long.Budget
 
@@ -257,7 +213,7 @@ func runOpen(opts openOptions) error {
 			logInfo("daytrade.skip", "gap_vol に戻して見送り",
 				map[string]any{"reason": "regime", "reasons": s.verdict.ShortOffReason})
 			digest.Note(map[string]any{"regime_skip": s.verdict.ShortOffReason})
-			appendSkippedRanking(s.cfg, s.p, rankQuotes, s.day)
+			appendSkippedRanking(s.cfg, s.p, s.rankQuotes, s.day)
 			s.finish("regime", map[string]any{"trade": false, "reasons": s.verdict.ShortOffReason})
 			return nil
 		}
@@ -269,7 +225,7 @@ func runOpen(opts openOptions) error {
 	}
 	// 今日すでに建てた銘柄・返済に回した銘柄（と signal.skip_opened なら寄った銘柄）を、
 	// 順位を付けた後に落とす
-	ranking = selection.Keep(ranking, rankQuotes)
+	ranking = selection.Keep(ranking, s.rankQuotes)
 	// 業種の上限を掛ける設定なのに業種が取れていないと、判定は黙って素通りする
 	// （2026-09-12 に発覚：plan の parquet に sector 列が無く、本番だけ無制限だった）。
 	// 古い plan を読んだときも気付けるように、ここで鳴らす。
@@ -288,7 +244,7 @@ func runOpen(opts openOptions) error {
 		}
 	}
 	longOpts := selection.PickOptions{
-		N: n, Budget: budget, Weighting: weighting, Side: domain.SideBuy,
+		N: n, Budget: budget, Weighting: s.sizing.Long.Weighting, Side: domain.SideBuy,
 		MaxAmount: s.cfg.Capital.MaxOrder, ValuePool: s.cfg.Signal.ValuePool,
 		MaxPerSector: s.cfg.Signal.MaxPerSector,
 	}
@@ -309,8 +265,8 @@ func runOpen(opts openOptions) error {
 		longFrame = dthistory.MarkRuleOff(longFrame)
 	}
 	frames := []history.Frame{longFrame}
-	s.summary["n"], s.summary["budget"], s.summary["weighting"], s.summary["weak"] = n, budget, weighting, weak
-	printPicks(picks, len(rankQuotes), s.p, s.watchOnly, "")
+	s.summary["n"], s.summary["budget"], s.summary["weighting"], s.summary["weak"] = n, budget, s.sizing.Long.Weighting, s.sizing.Weak
+	printPicks(picks, len(s.rankQuotes), s.p, s.watchOnly, "")
 	if s.cfg.Signal.RankBy == dtconfig.RankByLGBM && len(ranking) > 0 && ranking[0].Score != nil {
 		// 既存規則は参考として並べて出す（発注はしない。順位表の rule_picked にも残る）
 		names := make([]string, 0, len(rulePicks))
@@ -319,7 +275,7 @@ func runOpen(opts openOptions) error {
 		}
 		fmt.Printf("  参考: 既存規則（gap_vol）なら %s\n", strings.Join(names, " "))
 	}
-	logRanking(s.day, "BUY", ranking, picks, longReasons, n, budget, s.verdict.Scale, weighting, len(rankQuotes))
+	logRanking(s.day, "BUY", ranking, picks, longReasons, n, budget, s.verdict.Scale, s.sizing.Long.Weighting, len(s.rankQuotes))
 
 	switch {
 	case s.cfg.Margin.Enabled && !s.watchOnly && s.cfg.Margin.Paused:
@@ -332,20 +288,20 @@ func runOpen(opts openOptions) error {
 			fmt.Println("ショート: 一時停止中（margin.paused）。この回にロングへ回す枠はありません")
 		}
 		s.summary["short_paused"] = true
-	case shortMultiplier.GreaterThan(decimal.Zero):
+	case short.multiplier.GreaterThan(decimal.Zero):
 		label := "通常日"
-		if weak {
+		if s.sizing.Weak {
 			label = "弱い日"
 		}
 		fmt.Printf("ショート: %sの倍率 %s × 1 注文 %s 円 = %s 円  対象 %d 銘柄\n",
-			label, shortMultiplier.String(), yen(s.cfg.Margin.BudgetPerOrder()), yen(shortBudget), len(s.shortUniverse))
-		printPicks(shortPicks, len(rankQuotes), s.p, false, "寄付の売建（信用）")
-		frames = append(frames, dthistory.RankingFrame(shortRanking, shortPicks, shortPicks, "SELL", shortN, shortBudget, shortReasons))
-		s.summary["short_n"] = shortN
-		s.summary["short_budget"] = shortBudget
-		s.summary["short_multiplier"] = shortMultiplier
-		logRanking(s.day, "SELL", shortRanking, shortPicks, shortReasons, shortN, shortBudget, s.verdict.Scale, s.cfg.Margin.Weighting, len(rankQuotes))
-		picks = append(picks, shortPicks...)
+			label, short.multiplier.String(), yen(s.cfg.Margin.BudgetPerOrder()), yen(short.budget), len(s.shortUniverse))
+		printPicks(short.picks, len(s.rankQuotes), s.p, false, "寄付の売建（信用）")
+		frames = append(frames, dthistory.RankingFrame(short.ranking, short.picks, short.picks, "SELL", short.n, short.budget, short.reasons))
+		s.summary["short_n"] = short.n
+		s.summary["short_budget"] = short.budget
+		s.summary["short_multiplier"] = short.multiplier
+		logRanking(s.day, "SELL", short.ranking, short.picks, short.reasons, short.n, short.budget, s.verdict.Scale, s.cfg.Margin.Weighting, len(s.rankQuotes))
+		picks = append(picks, short.picks...)
 	case s.cfg.Margin.Enabled && !s.watchOnly && s.remainingShort <= 0 && s.placed.Short > 0:
 		fmt.Printf("ショート: 発注済み（%d 件）\n", s.placed.Short)
 	case s.cfg.Margin.Enabled && !s.watchOnly:
@@ -422,6 +378,66 @@ func runOpen(opts openOptions) error {
 		"phase": "open", "live": s.allowed, "picks": len(picks), "failures": len(failures),
 	})
 	return nil
+}
+
+// sizeDay はその日の件数と 1 注文の予算を決め（execute.SizeDay）、順位付けに使う気配から今日建てた銘柄・
+// 返済に回した銘柄（と signal.skip_opened なら既に寄った銘柄）を落とす。
+func (s *openState) sizeDay() {
+	// 件数と 1 注文の予算: 縮小 → ショック → 拘束 → ショートの倍率 → （選定の後に）余り。
+	// その日の全体で決めてから、今日すでに建てた件数と金額を引く（execute.SizeDay）
+	s.sizing = execute.SizeDay(execute.SizingInput{
+		Cfg: s.cfg, Verdict: s.verdict, Placed: s.placed, TiedLong: s.tiedLong, TiedShort: s.tiedShort,
+		WatchOnly: s.watchOnly, WatchRows: watchRows,
+	})
+	execute.EmitNotes(s.env, s.sizing.Notes)
+
+	// 候補の気配: 今日建てた銘柄・台帳外として返済に回した銘柄を落とし、signal.skip_opened なら
+	// 9:01 の時点で既に寄っている銘柄も落とす。順位付けの直前に気配そのものを落とすので、
+	// ロング・ショートの両方に効く（市場ギャップと危険信号は落とす前の気配で見る——候補全体の
+	// 分布が変わるため）
+	swept := execute.SweptSymbols(s.carried)
+	if len(swept) > 0 {
+		logWarn("daytrade.sweep", "台帳外の返済に回した銘柄を今日の候補から外す",
+			map[string]any{"symbols": sortedKeys(swept)})
+	}
+	rankQuotes, dropped := execute.RankQuotes(s.quotes, s.placed.Symbols, swept, s.cfg.Signal.SkipOpened)
+	if s.cfg.Signal.SkipOpened {
+		s.summary["quotes_opened"] = int64(len(dropped))
+		fmt.Printf("既に寄っている %d 銘柄を候補から外しました（signal.skip_opened。残り %d）\n",
+			len(dropped), len(rankQuotes))
+		logInfo("daytrade.quotes", "既に寄っている銘柄を除外", map[string]any{
+			"opened": len(dropped), "opened_sample": sample(dropped), "remaining": len(rankQuotes),
+		})
+	}
+	s.rankQuotes = rankQuotes
+}
+
+// openShortLeg はショートの脚（[margin]）の選定。倍率が 0 の日・閉じた日は順位も候補も空。
+type openShortLeg struct {
+	multiplier decimal.Decimal
+	ranking    []selection.Ranked
+	picks      []selection.Pick
+	reasons    map[string]string
+	n          int
+	budget     decimal.Decimal
+}
+
+// pickShort はショートの脚を選ぶ。
+func (s *openState) pickShort() (short openShortLeg) {
+	// ショートの脚（[margin]）を**先に**決める: 使わなかった資金をロングに回すため
+	// （margin.spill_to_long。検証の simulateMarginSpill と同じ順序）。資金はシーソー
+	short = openShortLeg{multiplier: s.sizing.ShortMultiplier}
+	if s.sizing.ShortOpen {
+		short.n, short.budget = s.sizing.Short.N, s.sizing.Short.Budget
+		short.ranking = selection.RankShort(s.shortUniverse, s.rankQuotes, s.cfg.Margin)
+		shortOpts := selection.PickOptions{
+			N: short.n, Budget: short.budget, Weighting: s.sizing.Short.Weighting, Side: domain.SideSell,
+			MaxAmount: s.cfg.Margin.MaxOrder,
+		}
+		short.picks = selection.PickFrom(short.ranking, shortOpts)
+		short.reasons = selection.PickReasons(short.ranking, shortOpts, short.picks)
+	}
+	return short
 }
 
 // judgeDay はその日の並べ方と危険信号（寄付の判定）を決め、要約に記録する。前夜の米国市場を待つ回・
