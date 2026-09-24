@@ -382,7 +382,12 @@ type Execution struct {
 	// GuardWindow は材料の出た売建を取消・返済してよい時間帯（daytrade guard）。引けの手仕舞い
 	// （15:20〜）と重ねない。
 	GuardWindow []string `toml:"guard_window"`
-	KillSwitch  bool     `toml:"kill_switch"`
+	// ProtectWindow は保険の手仕舞いを置いてよい時間帯（daytrade protect）。**後場（12:30〜）だけ。**
+	// 立花の「引け」（sCondition = 4）は前場に置くと前引け（11:30）で約定する（2026-09-24 に実機で確認。
+	// 前引けの手仕舞いは 15:20 の成行より 1 日 −4,758 円、t −2.62。vault 2026-09-jp-daytrade-exit-midday）。
+	// 終わりは guard と同じく 15:20 の close の前。
+	ProtectWindow []string `toml:"protect_window"`
+	KillSwitch    bool     `toml:"kill_switch"`
 	// MaxQuoteAge は気配のタイムスタンプがこれより古ければ使わない（秒）。
 	MaxQuoteAge int `toml:"max_quote_age"`
 	// MaxRunSeconds は open / close の 1 回の実行に許す時間（秒）。開始からこれだけ経つか
@@ -598,6 +603,7 @@ func Default() Config {
 			PreopenLegs:    PreopenLegsNone,
 			ExitWindow:     []string{"15:20", "15:30"},
 			GuardWindow:    []string{"09:00", "15:19"},
+			ProtectWindow:  []string{"12:30", "15:19"},
 			MaxQuoteAge:    90,
 			MaxRunSeconds:  150,
 			SpreadBPOpen:   decimal.NewFromInt(27),
@@ -686,6 +692,8 @@ func (e Execution) Window(name string) (startHour, startMinute, endHour, endMinu
 		raw = e.EntryWindow
 	case "guard":
 		raw = e.GuardWindow
+	case "protect":
+		raw = e.ProtectWindow
 	}
 	if len(raw) != 2 {
 		return 0, 0, 0, 0, fmt.Errorf("%s_window は開始と終了の 2 要素", name)
@@ -933,6 +941,13 @@ func (c Config) Validate() error {
 	// 書き間違えると guard が毎回「時間帯の外」で黙って何もしなくなる
 	if _, _, _, _, err := c.Execution.Window("guard"); err != nil {
 		return err
+	}
+	// 前場に掛かると、保険が前引けで約定して建玉が昼に手仕舞われる
+	if sh, sm, _, _, err := c.Execution.Window("protect"); err != nil {
+		return err
+	} else if sh*60+sm < 12*60+30 {
+		return fmt.Errorf("execution.protect_window の開始は後場の 12:30 以降にする（今は %s。前場に置いた「引け」は前引けで約定する）",
+			c.Execution.ProtectWindow[0])
 	}
 	if c.Execution.MaxRunSeconds < 0 || c.Book.MaxRunSeconds < 0 {
 		return fmt.Errorf("execution.max_run_seconds / book.max_run_seconds は 0 以上")

@@ -54,18 +54,18 @@ func runProtect(live, yes, ignoreWindow bool, date string) error {
 		digest.Skipped("disabled")
 		return nil
 	}
-	// 場が開いている間（寄った後〜15:20 の close の前）だけ。close の後に置くと、close が出した
-	// 成行と重なる。guard と同じ時間帯を使う
-	if live && !ignoreWindow && !cfg.Execution.InWindow("guard", now, jst) {
-		fmt.Printf("保険を置く時間帯の外（%s）。何もしません\n", describeWindow(cfg, "guard"))
+	// 後場（12:30〜15:20 の close の前）だけ。前場に置いた「引け」は前引けで約定し、close の後に置くと
+	// close が出した成行と重なる
+	if live && !ignoreWindow && !cfg.Execution.InWindow("protect", now, jst) {
+		fmt.Printf("保険を置く時間帯の外（%s）。何もしません\n", describeWindow(cfg, "protect"))
 		logInfo("daytrade.skip", "保険を置く時間帯の外",
-			map[string]any{"reason": "window", "phase": "protect", "window": describeWindow(cfg, "guard")})
+			map[string]any{"reason": "window", "phase": "protect", "window": describeWindow(cfg, "protect")})
 		digest.Skipped("window")
 		return nil
 	}
 	allowed, reason := appSettings.CanExecuteLive(live, cfg.Execution.KillSwitch)
 	started := now
-	deadline := cfg.Execution.RunDeadline("guard", now, live && !ignoreWindow, jst)
+	deadline := cfg.Execution.RunDeadline("protect", now, live && !ignoreWindow, jst)
 	logConfig(cfg, "protect", map[string]any{
 		"day": day.Format(DateLayout), "live": live,
 		"deadline": deadlineText(deadline), "max_run_seconds": cfg.Execution.MaxRunSeconds,
