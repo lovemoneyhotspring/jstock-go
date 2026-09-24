@@ -429,6 +429,63 @@ def part_ext(i0s, seeds, slot):
             print(f"  I0 {i0:>4.0f} 資金 {C/1e4:5.0f} 万: " + "  ".join(line))
 
 
+def alloc_iv_cap(g, n, cap_total, cap_name, spill):
+    """N=n の逆ボラ配分に 1 銘柄の上限 cap_name を掛ける。spill なら、あふれた分を n+1 位以降へ順に
+    （各 cap_name まで、20 位まで）回す。spill でなければ現金のまま（本番の max_order と同じ）。"""
+    idx, w = alloc_fixed_iv(g, n, cap_total)
+    w = np.minimum(w, cap_name)
+    left = cap_total - w.sum()
+    if spill and left > 1:
+        ext = g[(g["rank"] > n) & (g["rank"] <= 20)]
+        add = np.minimum(np.full(len(ext), cap_name), np.maximum(left - (np.cumsum(np.full(len(ext), cap_name)) - cap_name), 0))
+        m = add > 0
+        idx = idx.append(ext.index[m])
+        w = np.concatenate([w, add[m]])
+    return idx, w
+
+
+def part_cap200(i0s, seeds, slot, caps, cap_name=2e6):
+    """1 銘柄の上限 200 万: A 上限なし / B 上限・余りは現金 / C 上限・余りは 4 位以降へ。"""
+    from dt_preopen_sim import error_pools
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet")
+    te = te[te["d"] >= SINCE].copy()
+    pools = error_pools(slot, "2026-09-11")
+    rules = day_rules(te)
+    acc = {}
+    for seed in range(seeds):
+        g = seen_ranked(te, pools, seed)
+        days = [(d, x) for d, x in g.groupby("d") if not rules.loc[d, "skip"]]
+        for i0 in i0s:
+            kappa = calib_kappa(g, i0 * 1e-4)
+            for C in caps:
+                for lab, fn in [("A", lambda x, c: alloc_fixed_iv(x, 3, c)),
+                                ("B", lambda x, c: alloc_iv_cap(x, 3, c, cap_name, False)),
+                                ("C", lambda x, c: alloc_iv_cap(x, 3, c, cap_name, True))]:
+                    acc.setdefault((i0, C, lab), []).append(pd.Series(
+                        {d: pnl_day(x, *fn(x, C * rules.loc[d, "mult"]), kappa) for d, x in days}))
+                    if seed == 0 and i0 == i0s[0]:
+                        acc[(C, lab, "cap")] = np.mean([fn(x, C * rules.loc[d, "mult"])[1].sum() / (C * rules.loc[d, "mult"])
+                                                         for d, x in days])
+                        acc[(C, lab, "bind")] = np.mean([(alloc_fixed_iv(x, 3, C * rules.loc[d, "mult"])[1] > cap_name).any()
+                                                          for d, x in days])
+    alld = pd.DatetimeIndex(sorted(te["d"].unique()))
+    print(f"\n## K. 1 銘柄の上限 {cap_name/1e4:.0f} 万（{seeds} シード平均、休みの日は 0）")
+    for C in caps:
+        print(f"  資金 {C/1e4:.0f} 万: 上限が効く日 {acc[(C, 'A', 'bind')]:.0%}、資金の使用率 A {acc[(C, 'A', 'cap')]:.0%} "
+              f"B {acc[(C, 'B', 'cap')]:.0%} C {acc[(C, 'C', 'cap')]:.0%}")
+    for i0 in i0s:
+        for C in caps:
+            a_ = pd.concat(acc[(i0, C, "A")], axis=1).reindex(alld).fillna(0.0).mean(axis=1)
+            for lab in ["B", "C"]:
+                x = pd.concat(acc[(i0, C, lab)], axis=1).reindex(alld).fillna(0.0).mean(axis=1)
+                out = []
+                for pl, sl in [("IS", a_.index <= IS_END), ("OOS", a_.index > IS_END)]:
+                    dd = (x - a_)[sl]
+                    out.append(f"{pl} A {a_[sl].mean()*245/C*100:5.1f}% → {x[sl].mean()*245/C*100:5.1f}% "
+                               f"({dd.mean()*245/1e4:+6.1f} 万円/年, t {tstat(dd):5.2f})")
+                print(f"  I0 {i0:>3.0f} 資金 {C/1e4:4.0f} 万 {lab}: " + " | ".join(out))
+
+
 def part_now(i0s, seeds, slot, caps):
     """今の資金（ロング 500〜700 万）で規則 R（p 0.2%、Rmax 20 に固定）と N=3 逆ボラを比べる。"""
     from dt_preopen_sim import error_pools
@@ -476,6 +533,9 @@ def main():
         part_rank(c)
     if a.part in ("keybin", "all"):
         part_keybin(c)
+    if a.part == "cap200":
+        part_cap200(a.i0, a.seeds, a.slot, [5e6, 7e6, 1e7])
+        return
     if a.part == "now":
         part_now(a.i0, a.seeds, a.slot, [5e6, 7e6])
         return
