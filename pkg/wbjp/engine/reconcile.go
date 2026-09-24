@@ -41,7 +41,18 @@ type ReconcileSettings struct {
 	// Frozen は この回は判断しない銘柄 → 理由（足が古い・読めない等）。目標や保有に
 	// かかわらず売りも買いも出さず、Skipped に理由を残す。backtest は使わない（nil）。
 	Frozen map[string]string
+	// Universe は wbjp が扱う銘柄（universe.symbols）。ここに無い保有（手で買った株など）には
+	// 手を出さない: 目標があっても注文を作らず、Skipped に理由を残す。nil なら全銘柄を扱う
+	// （backtest は保有がユニバースの内側だけなので渡さない）。
+	//
+	// 以前はユニバース外の保有が目標 0 株となり全株の売りを作っていた（成行なら全株を
+	// 成行で売る注文。実際は RiskManager の allowlist で毎回見送られていた）。ユニバースから
+	// 外した銘柄を手仕舞う仕組みは無い（外す前に手で売るか、売り切るまでユニバースに残す）。
+	Universe map[string]struct{}
 }
+
+// OutsideUniverseReason はユニバース外の保有を見送ったときの Skipped の理由。
+const OutsideUniverseReason = "ユニバース外の保有（wbjp は売買しない）"
 
 // Reconcile は目標建玉と現在の実効建玉（保有＋未約定残）の差分から注文を作る。
 //
@@ -95,6 +106,10 @@ func Reconcile(
 
 		diff := targetQty.Sub(currentQty)
 		if diff.IsZero() {
+			continue
+		}
+		if _, ok := settings.Universe[sym]; settings.Universe != nil && !ok {
+			plan.Skipped[sym] = OutsideUniverseReason
 			continue
 		}
 

@@ -187,6 +187,10 @@ func OpenRepo(dbPath string) (*Repo, error) {
 		{Name: "stops.trailing_pct", Up: storage.AddColumns("stops", map[string]string{
 			"trailing_pct": "TEXT",
 		})},
+		// --accept-flat で建玉 0 件の検査を素通りした回の印（1 回で失効させる。AcceptFlatSpent）
+		{Name: "runs.accept_flat", Up: storage.AddColumns("runs", map[string]string{
+			"accept_flat": "INTEGER NOT NULL DEFAULT 0",
+		})},
 	}
 
 	if err := storage.Migrate(db, migrations); err != nil {
@@ -632,6 +636,201 @@ func (r *Repo) RealizedPnLOn(dayJST string) (RealizedPnL, error) {
 		result.Amount = result.Amount.Add(price.Sub(*cost).Mul(filled))
 	}
 	return result, rows.Err()
+}
+
+// ExpectedHoldings は台帳から見て「今も持っているはず」の銘柄を返す（銘柄 → 根拠）。
+//
+// 建玉の照会がエラーなしで 0 件を返したとき、それを信じてよいかの判定に使う
+// （信じると全銘柄が未保有扱いになり、ストップが全部消え、保有中の銘柄を買い直す）。
+// 迷ったら「持っているはず」に倒す（止める側）。
+//
+// 株数で差し引く: 前に成功した発注する回（env が同じ。currentRunID は数えない）の
+// 建玉の記録（position_snapshots）の株数 ＋ その回以降に出した買いの株数 − 売りの約定株数
+// が正なら持っているはず。
+//
+//   - 買い: 約定が確定した（FILLED・CANCELLED・EXPIRED）ものは約定株数、約定がまだ
+//     分からないもの（SUBMITTED・PARTIALLY_FILLED・PENDING など）は注文の全株を足す
+//   - 売り: 約定株数だけ引く。約定が分からないぶんは引かない（一部約定して失効した売り、
+//     照会できず SUBMITTED のまま残った売りで、保有を 0 と見誤らない）
+//   - dry-run・拒否・未送信の注文は数えない
+//
+// 保存済みのストップがある銘柄（前に成功した発注する回で保有を見た）も持っているはず。
+// 外すのは、その銘柄の株数が分かっていて（前の回の記録にある、または前の回が無く台帳の
+// 全期間から数えた）、売りの約定で 0 以下になったと確かめられたときだけ。
+// 前に成功した発注する回が無ければ台帳の全期間の買い・売りを見る（記録の株数は 0）。
+func (r *Repo) ExpectedHoldings(env, currentRunID string) (map[string]string, error) {
+	var since, prevRunID string
+	err := r.db.QueryRow(
+		`SELECT started_at, run_id FROM runs
+		  WHERE mode = 'live' AND status = 'success' AND env = ? AND run_id != ?
+		  ORDER BY started_at DESC, rowid DESC LIMIT 1;`,
+		env, currentRunID,
+	).Scan(&since, &prevRunID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("前の実行を読めません: %w", err)
+	}
+	hasPrev := err == nil
+
+	// 前の回の建玉の記録（前の回が無ければ空＝全期間を 0 から数える）
+	base := make(map[string]decimal.Decimal)
+	if hasPrev {
+		rows, err := r.db.Query("SELECT symbol, quantity FROM position_snapshots WHERE run_id = ?;", prevRunID)
+		if err != nil {
+			return nil, fmt.Errorf("建玉の記録を読めません: %w", err)
+		}
+		for rows.Next() {
+			var sym, qtyText string
+			if err := rows.Scan(&sym, &qtyText); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			qty, err := decimal.NewFromString(qtyText)
+			if err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("建玉の記録 %s の株数 %q を読めません: %w", sym, qtyText, err)
+			}
+			base[sym] = base[sym].Add(qty)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+
+	net := make(map[string]decimal.Decimal)
+	for sym, qty := range base {
+		net[sym] = qty
+	}
+	bought := make(map[string]bool)     // 期間内に数えた買いがある
+	soldFilled := make(map[string]bool) // 期間内に売りの約定がある
+	rows, err := r.db.Query(
+		`SELECT symbol, side, status, quantity, filled_quantity FROM orders
+		  WHERE placed_at >= ? AND status NOT IN (?, ?, ?);`,
+		since, "dry_run", string(domain.OrderStatusRejected), string(domain.OrderStatusUnsent),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("注文を読めません: %w", err)
+	}
+	for rows.Next() {
+		var sym, side, status, qtyText, filledText string
+		if err := rows.Scan(&sym, &side, &status, &qtyText, &filledText); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		qty, qerr := decimal.NewFromString(qtyText)
+		filled, ferr := decimal.NewFromString(filledText)
+		if qerr != nil || ferr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("注文 %s の株数を読めません（%q / %q）", sym, qtyText, filledText)
+		}
+		settled := false
+		switch domain.OrderStatus(status) {
+		case domain.OrderStatusFilled, domain.OrderStatusCancelled, domain.OrderStatusExpired:
+			settled = true
+		}
+		switch domain.Side(side) {
+		case domain.SideBuy:
+			add := filled
+			if !settled && qty.GreaterThan(add) {
+				add = qty // 約定が分からない買いは全株を足す
+			}
+			if add.IsPositive() {
+				net[sym] = net[sym].Add(add)
+				bought[sym] = true
+			}
+		case domain.SideSell:
+			// 約定が分からないぶんは引かない
+			if filled.IsPositive() {
+				net[sym] = net[sym].Sub(filled)
+				soldFilled[sym] = true
+			}
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]string)
+	for sym, qty := range net {
+		if !qty.IsPositive() {
+			continue
+		}
+		switch {
+		case !base[sym].IsZero() && bought[sym]:
+			out[sym] = fmt.Sprintf("前の回の建玉と、その後の買い・売りの約定から %s 株を保有中のはず", qty)
+		case bought[sym]:
+			out[sym] = fmt.Sprintf("前の発注する回以降の買いが約定している（または約定が分からない）: %s 株", qty)
+		default:
+			out[sym] = fmt.Sprintf("前の回の建玉の記録から %s 株を保有中のはず（売りの約定で減らしても残る）", qty)
+		}
+	}
+
+	stops, err := r.db.Query("SELECT symbol FROM stops;")
+	if err != nil {
+		return nil, fmt.Errorf("ストップを読めません: %w", err)
+	}
+	defer stops.Close()
+	for stops.Next() {
+		var sym string
+		if err := stops.Scan(&sym); err != nil {
+			return nil, err
+		}
+		if _, ok := out[sym]; ok {
+			continue
+		}
+		// 株数が分かっていて、売りの約定で 0 以下になったと確かめられたときだけ外す
+		_, recorded := base[sym]
+		if (recorded || !hasPrev) && soldFilled[sym] {
+			continue
+		}
+		out[sym] = "保存済みのストップがある"
+	}
+	return out, stops.Err()
+}
+
+// MarkAcceptFlat は、その回が --accept-flat で建玉 0 件の検査を素通りしたと印を付ける。
+func (r *Repo) MarkAcceptFlat(runID string) error {
+	res, err := r.db.Exec("UPDATE runs SET accept_flat = 1 WHERE run_id = ?;", runID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n != 1 {
+		return fmt.Errorf("実行 %s が台帳に無い", runID)
+	}
+	return nil
+}
+
+// AcceptFlatSpent は --accept-flat がもう使えないときにその理由を返す（使えるなら ""）。
+//
+// --accept-flat は 1 回で失効させる（cron の行に残ると 0 件の検査を毎回素通りする）。
+// 使えないのは、--accept-flat で素通りして成功した発注する回（env が同じ。currentRunID は
+// 数えない）が
+//
+//   - 実行中の回と同じ日（as_of）にある、または
+//   - 前に成功した発注する回そのもの（その後に通常の検査で成功した回が無い）
+//
+// のとき。素通りした回が成功すれば次の回からはその回の建玉が基準になり、期待は空か
+// その回の買いだけになる。それでも照会が 0 件なら通常どおり止める。
+func (r *Repo) AcceptFlatSpent(env, currentRunID string) (string, error) {
+	var runID, asOf string
+	err := r.db.QueryRow(
+		`SELECT run_id, as_of FROM runs
+		  WHERE mode = 'live' AND status = 'success' AND env = ? AND run_id != ? AND accept_flat = 1
+		    AND (as_of = (SELECT as_of FROM runs WHERE run_id = ?)
+		         OR run_id = (SELECT run_id FROM runs
+		                       WHERE mode = 'live' AND status = 'success' AND env = ? AND run_id != ?
+		                       ORDER BY started_at DESC, rowid DESC LIMIT 1))
+		  ORDER BY started_at DESC, rowid DESC LIMIT 1;`,
+		env, currentRunID, currentRunID, env, currentRunID,
+	).Scan(&runID, &asOf)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("--accept-flat を使った回を読めません: %w", err)
+	}
+	return fmt.Sprintf("--accept-flat は %s の回（%s）で使い済み", asOf, runID), nil
 }
 
 // OrdersToday はその日に実際に発注した件数。

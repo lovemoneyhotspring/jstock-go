@@ -252,10 +252,12 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `wbjp.fill` / `wbjp.fill_unresolved`（warn。ダイジェストの異常にも） / `wbjp.fill_sync_failed`（異常） | 約定状況が変わった／注文を照会できず台帳が未確定／約定の同期に失敗 | 本文 |
 | `wbjp.pending_unresolved`（異常） | 当日の注文一覧を照会できず判定を持ち越した | `error` |
 | `wbjp.pending_stale`（warn。ダイジェストの異常にも） | 今日より前に送った送信結果不明（`PENDING`）の注文がある。立花の一覧は当日分しか返らないので自動では判定しない。放っておくと買いは未約定の枠を押さえ続ける。口座の約定履歴を見て `wbjp pending resolve <id> --attribute <注文番号> --status FILLED --filled <株数> --price <単価>` か `--unsent` で確定する（ID に発注日が入るので `--unsent` でも送り直しは起きない） | `pending`, `client_order_ids`, `fix` |
+| `wbjp.positions_empty`（発注する回はダイジェストの異常。通知も送る） | 建玉の照会がエラーなしで 0 件なのに、台帳では保有中のはずの銘柄がある（前に成功した発注する回の建玉の株数 ＋ その後の買い（約定が分からないものは全株）− 売りの約定株数 が正、または保存済みのストップがあり売りの約定で 0 株になったと確かめられない）。一部だけ約定した売り・約定が分からない売りでは保有を 0 と見なさない。信じるとストップを全部消して買い直すので、発注する回は止まる。dry-run は warn だけで続く（建玉 0 の模型で判断する）。口座を確かめ、本当に空（手で全部売った など）なら `wbjp run --live --yes --accept-flat` を手で 1 回走らせる（台帳のストップが外れ、その回が次の基準になる。cron の行には書かない。1 回で失効し、同じ日の 2 回目・素通りした回の直後の回では使えずに止まる） | 本文に銘柄と根拠 |
 | `wbjp.bars_unusable`（warn。ダイジェストの異常にも。保有中の銘柄があれば通知も送る） / `wbjp.calendar_missing`（warn） / `wbjp.market_closed` | 足が古い・読めない銘柄があり、その銘柄はこの回に売りも買いも出さない（保有中なら**損切り・利確・時間切れも止まる**）／取引カレンダーが読めない（dry-run は平日で代用、発注する回は止まる）／休場日のため判断しない | 本文に銘柄・保有株数・理由 |
 | `wbjp.daily_pnl` / `wbjp.daily_pnl_unknown`（warn。ダイジェストの異常にも） | 当日の損益（実現・含み）と `max_daily_loss`／当日の損益を確かめられず新規の買いを止めた | 本文 |
 | `wbjp.regime` / `wbjp.strategy_error`（warn） / `wbjp.margin_missing`（warn） | 相場の状態を評価した／戦略の評価に失敗した／信用残がアーカイブに無い | 本文 |
-| `wbjp.stop_exit`（warn） / `wbjp.stop_removed` / `wbjp.stop_save_failed`（warn） | ストップに掛かった／保有の無い銘柄のストップを外した／ストップを保存できない | 本文 |
+| `wbjp.outside_universe`（ダイジェストの `outside_universe` にも） | ユニバース（`universe.symbols`）外の保有（手で買った株など）がある。wbjp は目標を作らず売りも買いも出さない（地合いの手仕舞いも掛けない。`wbjp.reconcile_skip` にも理由が出る）。ユニバースから外した銘柄を自動で手仕舞う仕組みは無いので、外す前に手で売るか、売り切るまでユニバースに残す | 本文に銘柄 |
+| `wbjp.stop_exit`（warn） / `wbjp.stop_removed` / `wbjp.stop_save_failed`（warn） | ストップに掛かった／保有の無い銘柄のストップを外した／ストップを保存できない（ダイジェストの異常。発注は続ける: 止めても失った変更は戻らず、損切りの売りまで出なくなる。失ったトレーリングの最高値・`ScaledOut` は次の回に立て直る） | 本文 |
 | `wbjp.ledger`（warn / error） | 台帳（実行・建玉・シグナル・未送信・拒否）への書き込みに失敗した | 本文 |
 | `wbjp.crash` | 実行が例外で異常終了した（通知も送る） | `error` |
 

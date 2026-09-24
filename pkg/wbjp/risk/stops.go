@@ -32,6 +32,7 @@ type Stop struct {
 	// ストップを動かした後も変わらない。nil は旧レコード。
 	InitialStopPrice *decimal.Decimal
 	// InitialQuantity は設定時の建玉数。2 段階利確で「元の何%を売ったか」の基準。
+	// 利確前に建玉が増えたら EnsureWithOptions で引き上げる（利確後は変えない）。
 	InitialQuantity *decimal.Decimal
 	// ScaledOut は 1 段目の利確（部分手仕舞い）が済んだか。
 	ScaledOut bool
@@ -191,7 +192,15 @@ func (sb *StopBook) EnsureWithOptions(
 		if pos.Quantity.LessThanOrEqual(decimal.Zero) {
 			continue
 		}
-		if _, exists := sb.stops[sym]; exists {
+		if st, exists := sb.stops[sym]; exists {
+			// 利確前の建玉が後から増えた（買いが分割で約定した・買い増した）なら、利確の
+			// 基準の株数も引き上げる。作った回の株数のままだと、利確で割合より多く
+			// （最悪は全株）売る（2026-09-24 の再点検）。利確後（ScaledOut）は引き上げない
+			// （利確で減らした株数が基準になると、残りをもう一度利確しかねない）
+			if !st.ScaledOut && st.InitialQuantity != nil && pos.Quantity.GreaterThan(*st.InitialQuantity) {
+				q := pos.Quantity
+				st.InitialQuantity = &q
+			}
 			continue
 		}
 
