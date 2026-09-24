@@ -88,6 +88,12 @@ type openState struct {
 	deadline  time.Time
 	watchOnly bool
 	cal       *calendar.Calendar
+
+	p dtplan.Plan
+	// corpStale は材料の記録簿を使えずショートを見送る理由（空なら使えた）。
+	// corpDropped は材料でショートの対象から外した銘柄
+	corpStale   string
+	corpDropped []string
 }
 
 func runOpen(opts openOptions) error {
@@ -96,38 +102,9 @@ func runOpen(opts openOptions) error {
 		return err
 	}
 
-	p, ok, err := dtplan.Load(appSettings.DaytradeDir(), s.day)
-	if err != nil {
+	if err := s.loadPlan(); err != nil {
 		return err
 	}
-	if !ok {
-		fmt.Printf("%s の候補が無いので今作ります（前夜の plan が走っていません）\n", s.day.Format(DateLayout))
-		if p, err = buildPlan(s.cfg, s.day); err != nil {
-			return err
-		}
-	}
-	p = refreshIV(s.cfg, p)
-	// 材料（TOB・MBO など）の印をこの時点の記録簿で付け直す。前夜の plan より後の公表
-	// （20:30 以降・朝の開示）を拾うため。記録簿が読めない・古いときは、その朝の公表を知らないまま
-	// 売らないようにショートを見送る（ロングは止めない）
-	corpStale := ""
-	var corpDropped []string
-	// ショートの一時停止中（margin.paused）は売らないので、記録簿の鮮度でショートを見送る判定も要らない
-	if s.cfg.Margin.Enabled && s.cfg.Margin.ExcludeCorpEvents && !s.cfg.Margin.Paused {
-		ev, dropped, err := markPlanCorpEvents(s.cfg, &p, s.day, s.now, s.cal.Closed)
-		if err != nil {
-			corpStale = err.Error()
-		} else {
-			corpStale = ev.staleness(s.now, s.cfg.Margin.CorpEventMaxStalenessMinutes)
-		}
-		corpDropped = dropped
-		if corpStale != "" {
-			fmt.Println("ニュースの記録簿を使えないため、ショートを見送ります: " + corpStale)
-			logWarn("daytrade.news_stale", "ニュースの記録簿を使えずショートを見送り", map[string]any{"reason": corpStale})
-			digest.Anomaly("daytrade.news_stale", "ショートを見送り: "+corpStale)
-		}
-	}
-	printPlan(p, s.cfg)
 
 	allowed, reason := appSettings.CanExecuteLive(s.opts.live, s.cfg.Execution.KillSwitch)
 	led, err := dtledger.Open(appSettings.DaytradeDBPath())
@@ -204,15 +181,15 @@ func runOpen(opts openOptions) error {
 		})
 	}
 
-	eligible := p.Eligible()
-	symbols := p.Symbols(eligible)
-	shortUniverse := p.ShortEligible()
-	if corpStale != "" || s.cfg.Margin.Paused {
+	eligible := s.p.Eligible()
+	symbols := s.p.Symbols(eligible)
+	shortUniverse := s.p.ShortEligible()
+	if s.corpStale != "" || s.cfg.Margin.Paused {
 		shortUniverse = nil
 	}
 	if s.cfg.Margin.Enabled && !s.watchOnly {
 		// ショートの母集団はロングと別なので、気配はその和集合で取る
-		symbols = mergeSymbols(symbols, p.Symbols(shortUniverse))
+		symbols = mergeSymbols(symbols, s.p.Symbols(shortUniverse))
 	}
 
 	quotesStarted := clock.NowUTC()
@@ -248,7 +225,7 @@ func runOpen(opts openOptions) error {
 		logInfo("daytrade.quotes", "気配の内訳（除外なし）", breakdown)
 	}
 
-	prevAll := p.PrevCloseBySymbol()
+	prevAll := s.p.PrevCloseBySymbol()
 	appendHistory(dthistory.KindQuotes, dthistory.QuotesFrame(received, quotes, prevAll), s.day)
 
 	summary := map[string]any{
@@ -267,8 +244,8 @@ func runOpen(opts openOptions) error {
 		"deadline":      deadlineText(s.deadline),
 		"broker_verify": s.opts.brokerVerify,
 		// 材料（TOB・MBO など）でショートの対象から外した銘柄と、記録簿が使えずショートを見送った理由
-		"corp_excluded": strings.Join(corpDropped, ","),
-		"news_stale":    corpStale,
+		"corp_excluded": strings.Join(s.corpDropped, ","),
+		"news_stale":    s.corpStale,
 	}
 	finish := func(outcome string, extra map[string]any) {
 		row := map[string]any{}
@@ -302,8 +279,8 @@ func runOpen(opts openOptions) error {
 	}
 	// ロングの並べ方を寄付の判定より先に決める: LightGBM で並べられない日は gap_vol で取引し、
 	// 米国小幅高の日は両脚とも休む（us_skip_legs を all に戻す。config.FallbackToGapVol）
-	s.cfg = resolveRankBy(s.cfg, p, eligible, quotes)
-	verdict, usStale, err := evaluateRegime(s.cfg, p, s.day, regime.MarketGapOf(gaps), led, env.Preopen, s.deadline)
+	s.cfg = resolveRankBy(s.cfg, s.p, eligible, quotes)
+	verdict, usStale, err := evaluateRegime(s.cfg, s.p, s.day, regime.MarketGapOf(gaps), led, env.Preopen, s.deadline)
 	if err != nil {
 		return err
 	}
@@ -345,7 +322,7 @@ func runOpen(opts openOptions) error {
 		// 見送りの日も「建てていたら」の順位表を残す。無いと evaluate が始値で作り直すので、
 		// 9:01 の気配で何を選んでいたかが消え、dt_missed も欠けと見送りを見分けられない
 		skippedQuotes, _ := execute.RankQuotes(quotes, placed.Symbols, execute.SweptSymbols(carried), s.cfg.Signal.SkipOpened)
-		appendSkippedRanking(s.cfg, p, skippedQuotes, s.day)
+		appendSkippedRanking(s.cfg, s.p, skippedQuotes, s.day)
 		finish("regime", nil)
 		return nil
 	}
@@ -404,7 +381,7 @@ func runOpen(opts openOptions) error {
 	// 予算（capital.max_positions が上限）。倍率 0 の日（ショック日）は回す元が無い。
 	// 余りは今日のショートの総予算から、今日建てた分と今回の選定を引いたもの（再実行で数え直さない）
 	long, spill, spillNotes := sizing.WithSpill(shortPicks)
-	if corpStale != "" {
+	if s.corpStale != "" {
 		// 記録簿が使えずショートを見送った回は余りを回さない。回したまま後の回で記録簿が読めると、
 		// ショートは建てた金額 0 として満額で建ち、ロングに回した分と合わせて資金を超える
 		long, spill, spillNotes = sizing.Long, decimal.Zero, nil
@@ -433,7 +410,7 @@ func runOpen(opts openOptions) error {
 			logInfo("daytrade.skip", "gap_vol に戻して見送り",
 				map[string]any{"reason": "regime", "reasons": verdict.ShortOffReason})
 			digest.Note(map[string]any{"regime_skip": verdict.ShortOffReason})
-			appendSkippedRanking(s.cfg, p, rankQuotes, s.day)
+			appendSkippedRanking(s.cfg, s.p, rankQuotes, s.day)
 			finish("regime", map[string]any{"trade": false, "reasons": verdict.ShortOffReason})
 			return nil
 		}
@@ -486,7 +463,7 @@ func runOpen(opts openOptions) error {
 	}
 	frames := []history.Frame{longFrame}
 	summary["n"], summary["budget"], summary["weighting"], summary["weak"] = n, budget, weighting, weak
-	printPicks(picks, len(rankQuotes), p, s.watchOnly, "")
+	printPicks(picks, len(rankQuotes), s.p, s.watchOnly, "")
 	if s.cfg.Signal.RankBy == dtconfig.RankByLGBM && len(ranking) > 0 && ranking[0].Score != nil {
 		// 既存規則は参考として並べて出す（発注はしない。順位表の rule_picked にも残る）
 		names := make([]string, 0, len(rulePicks))
@@ -515,7 +492,7 @@ func runOpen(opts openOptions) error {
 		}
 		fmt.Printf("ショート: %sの倍率 %s × 1 注文 %s 円 = %s 円  対象 %d 銘柄\n",
 			label, shortMultiplier.String(), yen(s.cfg.Margin.BudgetPerOrder()), yen(shortBudget), len(shortUniverse))
-		printPicks(shortPicks, len(rankQuotes), p, false, "寄付の売建（信用）")
+		printPicks(shortPicks, len(rankQuotes), s.p, false, "寄付の売建（信用）")
 		frames = append(frames, dthistory.RankingFrame(shortRanking, shortPicks, shortPicks, "SELL", shortN, shortBudget, shortReasons))
 		summary["short_n"] = shortN
 		summary["short_budget"] = shortBudget
@@ -597,6 +574,45 @@ func runOpen(opts openOptions) error {
 	digest.Note(map[string]any{
 		"phase": "open", "live": allowed, "picks": len(picks), "failures": len(failures),
 	})
+	return nil
+}
+
+// loadPlan は判定日の plan を読み（無ければ作り）、材料（TOB・MBO など）の印を付け直して表示する。
+// 記録簿を使えない朝は corpStale に理由を入れる（ショートを見送る。ロングは止めない）。
+func (s *openState) loadPlan() error {
+	p, ok, err := dtplan.Load(appSettings.DaytradeDir(), s.day)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Printf("%s の候補が無いので今作ります（前夜の plan が走っていません）\n", s.day.Format(DateLayout))
+		if p, err = buildPlan(s.cfg, s.day); err != nil {
+			return err
+		}
+	}
+	p = refreshIV(s.cfg, p)
+	// 材料（TOB・MBO など）の印をこの時点の記録簿で付け直す。前夜の plan より後の公表
+	// （20:30 以降・朝の開示）を拾うため。記録簿が読めない・古いときは、その朝の公表を知らないまま
+	// 売らないようにショートを見送る（ロングは止めない）
+	corpStale := ""
+	var corpDropped []string
+	// ショートの一時停止中（margin.paused）は売らないので、記録簿の鮮度でショートを見送る判定も要らない
+	if s.cfg.Margin.Enabled && s.cfg.Margin.ExcludeCorpEvents && !s.cfg.Margin.Paused {
+		ev, dropped, err := markPlanCorpEvents(s.cfg, &p, s.day, s.now, s.cal.Closed)
+		if err != nil {
+			corpStale = err.Error()
+		} else {
+			corpStale = ev.staleness(s.now, s.cfg.Margin.CorpEventMaxStalenessMinutes)
+		}
+		corpDropped = dropped
+		if corpStale != "" {
+			fmt.Println("ニュースの記録簿を使えないため、ショートを見送ります: " + corpStale)
+			logWarn("daytrade.news_stale", "ニュースの記録簿を使えずショートを見送り", map[string]any{"reason": corpStale})
+			digest.Anomaly("daytrade.news_stale", "ショートを見送り: "+corpStale)
+		}
+	}
+	printPlan(p, s.cfg)
+	s.p, s.corpStale, s.corpDropped = p, corpStale, corpDropped
 	return nil
 }
 
