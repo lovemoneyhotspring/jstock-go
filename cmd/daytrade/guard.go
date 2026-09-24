@@ -58,6 +58,8 @@ type guardState struct {
 	shorts map[string]bool
 	ev     corpEvents
 	marks  map[string]string
+	// b は live のときだけ繋ぐ（dry-run は nil）
+	b broker.Broker
 }
 
 func runGuard(live, yes, ignoreWindow bool, date string) error {
@@ -93,38 +95,10 @@ func runGuard(live, yes, ignoreWindow bool, date string) error {
 		return err
 	}
 	shorts, ev, marks := s.shorts, s.ev, s.marks
-	// 取消・返済の済んだ売建だけなら接続しない（10 分ごとにログインしない）
-	pending, err := execute.GuardPending(env, marks)
-	if err != nil {
+	if done, err := s.connect(); done || err != nil {
 		return err
 	}
-	if len(pending) == 0 {
-		fmt.Printf("材料の出た売建 %d 銘柄は処置済み（取消・返済が済んでいるか返済が生きている）\n", len(marks))
-		logInfo("daytrade.run", "材料の点検を終了", map[string]any{
-			"phase": "guard", "live": allowed, "shorts": len(shorts), "marked": len(marks), "pending": 0,
-			"elapsed_ms": clock.NowUTC().Sub(started).Milliseconds(),
-		})
-		return nil
-	}
-
-	var b broker.Broker
-	if allowed {
-		if b, err = openBroker(cfg); err != nil {
-			alert("デイトレ: 材料（TOB など）の出た売建があるのに証券会社に接続できません。口座を確認してください",
-				strings.Join(sortedKeys(marks), "、")+": "+err.Error())
-			return err
-		}
-		broker.SetDeadline(b, deadline)
-		// 送信結果の分からない注文を先に判定する。判定できなくても処置は続ける——判定できなかった
-		// 注文は照会で「分からない」になり、取消も返済もしない（GuardCorpEvents）
-		if err := resolvePending(env, b); err != nil {
-			logError("daytrade.pending_unresolved", "送信結果不明の注文を判定できず材料の処置を続ける",
-				map[string]any{"error": err.Error()})
-		}
-	}
-	if err := confirmLive(allowed, yes); err != nil {
-		return err
-	}
+	b := s.b
 
 	actions, err := execute.GuardCorpEvents(env, b, marks)
 	run.FlushAlerts()
@@ -284,5 +258,42 @@ func (s *guardState) markShorts() (done bool, err error) {
 		return true, nil
 	}
 	s.ev, s.marks = ev, marks
+	return false, nil
+}
+
+// connect は処置の残る売建があるかを台帳だけで確かめ（無ければ done。取消・返済の済んだ売建で
+// 10 分ごとにログインしない）、live ならブローカーに繋いで送信結果不明の注文を判定する。
+// 最後に本番の確認を取る。
+func (s *guardState) connect() (done bool, err error) {
+	pending, err := execute.GuardPending(s.env, s.marks)
+	if err != nil {
+		return false, err
+	}
+	if len(pending) == 0 {
+		fmt.Printf("材料の出た売建 %d 銘柄は処置済み（取消・返済が済んでいるか返済が生きている）\n", len(s.marks))
+		logInfo("daytrade.run", "材料の点検を終了", map[string]any{
+			"phase": "guard", "live": s.allowed, "shorts": len(s.shorts), "marked": len(s.marks), "pending": 0,
+			"elapsed_ms": clock.NowUTC().Sub(s.started).Milliseconds(),
+		})
+		return true, nil
+	}
+
+	if s.allowed {
+		if s.b, err = openBroker(s.cfg); err != nil {
+			alert("デイトレ: 材料（TOB など）の出た売建があるのに証券会社に接続できません。口座を確認してください",
+				strings.Join(sortedKeys(s.marks), "、")+": "+err.Error())
+			return false, err
+		}
+		broker.SetDeadline(s.b, s.deadline)
+		// 送信結果の分からない注文を先に判定する。判定できなくても処置は続ける——判定できなかった
+		// 注文は照会で「分からない」になり、取消も返済もしない（GuardCorpEvents）
+		if err := resolvePending(s.env, s.b); err != nil {
+			logError("daytrade.pending_unresolved", "送信結果不明の注文を判定できず材料の処置を続ける",
+				map[string]any{"error": err.Error()})
+		}
+	}
+	if err := confirmLive(s.allowed, s.yes); err != nil {
+		return false, err
+	}
 	return false, nil
 }
