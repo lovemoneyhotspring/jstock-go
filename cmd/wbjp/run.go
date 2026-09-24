@@ -92,72 +92,18 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	if err := d.updateStops(); err != nil {
 		return err
 	}
-	lastPrices, lotSizes, unusable := d.lastPrices, d.lotSizes, d.unusable
+	lastPrices := d.lastPrices
 
 	if err := d.decide(); err != nil {
 		return err
 	}
-	targets, targetList, universe := d.targets, d.targetList, d.universe
+	targetList := d.targetList
 
-	// 4. リコンサイル
-	//
-	// 板に残っている注文が見えないと、同じ注文をもう一度出しうる。
-	// 発注する回では照会に失敗した時点で止める（dry-run は記録だけ
-	// なので、見えないまま続けても実害は無い）。
-	openOrders, err := b.GetOpenOrders()
-	if err != nil {
-		if canLive {
-			return fmt.Errorf("板の注文を照会できないため発注を中止しました（二重発注を避けます）: %w", err)
-		}
-		logger.Warn("run.open_orders_failed",
-			fmt.Sprintf("板の注文を照会できません（dry-run のため続行）: %v", err))
-		openOrders = nil
-	}
-
-	orderType := domain.OrderTypeLimit
-	if setCfg.Execution.OrderType == "market" {
-		orderType = domain.OrderTypeMarket
-	}
-	limitOffset := decimal.RequireFromString("0.005")
-	if setCfg.Execution.LimitOffset != "" {
-		if d, err := decimal.NewFromString(setCfg.Execution.LimitOffset); err == nil {
-			limitOffset = d
-		}
-	}
-
-	taxType := domain.TaxAccountSpecific
-	if setCfg.Execution.TaxAccountType != "" {
-		taxType = domain.TaxAccountType(setCfg.Execution.TaxAccountType)
-	}
-
-	// 当日買い付けた銘柄。現物の差金決済を避けるため売却を止める。
-	boughtToday, err := rep.BoughtToday(todayJST)
-	if err != nil {
-		return fmt.Errorf("当日の買付履歴を読めません: %w", err)
-	}
-
-	plan, err := engine.Reconcile(targets, posMap, openOrders, lastPrices, lotSizes,
-		engine.ReconcileSettings{
-			OrderType:         orderType,
-			LimitOffset:       limitOffset,
-			TaxType:           taxType,
-			Topix500:          symbolSet(setCfg.Universe.TOPIX500Symbols),
-			BlocksSameDaySale: true,
-			Frozen:            unusable,
-			Universe:          universe,
-		},
-		boughtToday, todayJST)
+	plan, err := d.reconcileOrders()
 	if err != nil {
 		return err
 	}
-
-	for sym, why := range plan.Skipped {
-		logger.Info("wbjp.reconcile_skip", fmt.Sprintf("%s 見送り: %s", sym, why))
-	}
-	if outside := outsideUniverseHeld(posMap, universe); len(outside) > 0 {
-		logger.Info("wbjp.outside_universe", "ユニバース外の保有には手を出しません: "+strings.Join(outside, ", "))
-		digest.Note(map[string]any{"outside_universe": outside})
-	}
+	boughtToday := d.boughtToday
 
 	// 5. リスク管理チェック (RiskManager)
 	riskMgr := risk.NewRiskManager(setCfg.Risk, setCfg.Universe.Symbols)
@@ -282,6 +228,9 @@ type dailyRun struct {
 	targetList []domain.TargetPosition
 	// wbjp が売買する銘柄。ユニバース外の保有（手で買った株など）には手を出さない
 	universe map[string]struct{}
+
+	// 注文の照合（reconcileOrders）。当日買い付けた銘柄（差金決済を避けるため売らない）
+	boughtToday map[string]struct{}
 }
 
 // prepareDaily は設定を読み、発注するかを決めて口座を表示し、本番発注なら確認を取る。
@@ -673,6 +622,74 @@ func (d *dailyRun) decide() error {
 		logger.Warn("wbjp.ledger", fmt.Sprintf("目標を記録できません: %v", err))
 	}
 	return nil
+}
+
+// reconcileOrders は目標と建玉・板に残る注文の差から出す注文を決める（engine.Reconcile）。
+//
+// 板に残っている注文が見えないと、同じ注文をもう一度出しうる。
+// 発注する回では照会に失敗した時点で止める（dry-run は記録だけ
+// なので、見えないまま続けても実害は無い）。
+func (d *dailyRun) reconcileOrders() (*engine.ReconcilePlan, error) {
+	setCfg, canLive, logger, rep, b := d.setCfg, d.canLive, d.logger, d.rep, d.b
+	posMap, lastPrices, lotSizes, unusable, todayJST := d.posMap, d.lastPrices, d.lotSizes, d.unusable, d.todayJST
+	targets, universe := d.targets, d.universe
+
+	openOrders, err := b.GetOpenOrders()
+	if err != nil {
+		if canLive {
+			return nil, fmt.Errorf("板の注文を照会できないため発注を中止しました（二重発注を避けます）: %w", err)
+		}
+		logger.Warn("run.open_orders_failed",
+			fmt.Sprintf("板の注文を照会できません（dry-run のため続行）: %v", err))
+		openOrders = nil
+	}
+
+	orderType := domain.OrderTypeLimit
+	if setCfg.Execution.OrderType == "market" {
+		orderType = domain.OrderTypeMarket
+	}
+	limitOffset := decimal.RequireFromString("0.005")
+	if setCfg.Execution.LimitOffset != "" {
+		if v, err := decimal.NewFromString(setCfg.Execution.LimitOffset); err == nil {
+			limitOffset = v
+		}
+	}
+
+	taxType := domain.TaxAccountSpecific
+	if setCfg.Execution.TaxAccountType != "" {
+		taxType = domain.TaxAccountType(setCfg.Execution.TaxAccountType)
+	}
+
+	// 当日買い付けた銘柄。現物の差金決済を避けるため売却を止める。
+	boughtToday, err := rep.BoughtToday(todayJST)
+	if err != nil {
+		return nil, fmt.Errorf("当日の買付履歴を読めません: %w", err)
+	}
+	d.boughtToday = boughtToday
+
+	plan, err := engine.Reconcile(targets, posMap, openOrders, lastPrices, lotSizes,
+		engine.ReconcileSettings{
+			OrderType:         orderType,
+			LimitOffset:       limitOffset,
+			TaxType:           taxType,
+			Topix500:          symbolSet(setCfg.Universe.TOPIX500Symbols),
+			BlocksSameDaySale: true,
+			Frozen:            unusable,
+			Universe:          universe,
+		},
+		boughtToday, todayJST)
+	if err != nil {
+		return nil, err
+	}
+
+	for sym, why := range plan.Skipped {
+		logger.Info("wbjp.reconcile_skip", fmt.Sprintf("%s 見送り: %s", sym, why))
+	}
+	if outside := outsideUniverseHeld(posMap, universe); len(outside) > 0 {
+		logger.Info("wbjp.outside_universe", "ユニバース外の保有には手を出しません: "+strings.Join(outside, ", "))
+		digest.Note(map[string]any{"outside_universe": outside})
+	}
+	return plan, nil
 }
 
 // finishRun は実行の終わりを台帳に残す（err があれば failed）。評価額・現金は照会できた時点で
