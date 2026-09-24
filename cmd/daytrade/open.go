@@ -110,6 +110,17 @@ type openState struct {
 	placed                        execute.Placed
 	remainingLong, remainingShort int
 	tiedLong, tiedShort           decimal.Decimal
+
+	// eligible はロングの対象、shortUniverse はショートの対象（見送る日は nil）、symbols は気配を取る銘柄
+	eligible      []universe.Candidate
+	shortUniverse []universe.Candidate
+	symbols       []string
+	// quotesStarted は気配を取り始めた時刻（送る直前の時価に使い回してよいかを測る）
+	quotesStarted time.Time
+	// received は取れた気配ぜんぶ、quotes は鮮度の検査を通った気配、bookKept は板で残した銘柄
+	received map[string]selection.Quote
+	quotes   map[string]selection.Quote
+	bookKept []string
 }
 
 func runOpen(opts openOptions) error {
@@ -143,60 +154,20 @@ func runOpen(opts openOptions) error {
 		return err
 	}
 
-	eligible := s.p.Eligible()
-	symbols := s.p.Symbols(eligible)
-	shortUniverse := s.p.ShortEligible()
-	if s.corpStale != "" || s.cfg.Margin.Paused {
-		shortUniverse = nil
-	}
-	if s.cfg.Margin.Enabled && !s.watchOnly {
-		// ショートの母集団はロングと別なので、気配はその和集合で取る
-		symbols = mergeSymbols(symbols, s.p.Symbols(shortUniverse))
-	}
-
-	quotesStarted := clock.NowUTC()
-	received, err := fetchQuotes(s.cfg, s.b, symbols, s.opts.quoteSource, s.opts.quoteFile, s.deadline)
-	if err != nil {
-		fmt.Println(err)
-		logError("daytrade.skip", "気配が取れず寄付の買いを見送り", map[string]any{"reason": "no_quotes", "error": err.Error()})
-		alert("デイトレ: 気配が取れず寄付の買いを見送り", fmt.Sprintf("%s 候補 %d 銘柄: %v", s.day.Format(DateLayout), len(symbols), err))
-		digest.Anomaly("daytrade.no_quotes", err.Error())
+	if done := s.readQuotes(); done {
 		return nil
-	}
-	quotes, stale, delayed, bookKept := dtquotes.Fresh(received, s.cfg.Execution.MaxQuoteAge, s.now, s.opts.allowDelayed)
-	// 気配の時刻（tDPP:T）には今日の日付を当てている。寄り前の銘柄で前日の時刻が返ると
-	// 「今日の 15:30」＝未来として鮮度の検査を素通りする。実機で確かめるまで、除外した
-	// 銘柄の時刻と年齢、未来の時刻を持つ銘柄の数を残す（docs/OPENING_DATA.md「実機で確かめること」）
-	future := dtquotes.FutureStamped(received, s.now, futureSlack)
-	// 気配の内訳は毎回残す（朝の点検 deploy/open-pipeline.jq が回ごとに並べる）。警告にするのは
-	// 実際に除外した（stale / delayed）ときと未来の時刻があったときだけ——板で残しただけの回まで
-	// 「使えない気配を除外」と書くと、除外 0 件でも警告に見える（2026-09-15 の朝がそうだった）
-	breakdown := map[string]any{
-		"received": len(received), "usable": len(quotes),
-		"stale": len(stale), "stale_sample": dtquotes.DescribeAges(received, sample(stale), s.now),
-		"delayed": len(delayed), "delayed_sample": sample(delayed),
-		"future": len(future), "future_sample": dtquotes.DescribeAges(received, sample(future), s.now),
-		// book_kept は現在値時刻が古くても板が返っていたので残した銘柄
-		// （tDPP:T は最後の約定時刻なので、約定の薄い銘柄はここに入る）
-		"book_kept": len(bookKept), "book_kept_sample": dtquotes.DescribeAges(received, sample(bookKept), s.now),
-		"max_age_sec": s.cfg.Execution.MaxQuoteAge,
-	}
-	if len(stale) > 0 || len(delayed) > 0 || len(future) > 0 {
-		logWarn("daytrade.quotes", "使えない気配を除外", breakdown)
-	} else {
-		logInfo("daytrade.quotes", "気配の内訳（除外なし）", breakdown)
 	}
 
 	prevAll := s.p.PrevCloseBySymbol()
-	appendHistory(dthistory.KindQuotes, dthistory.QuotesFrame(received, quotes, prevAll), s.day)
+	appendHistory(dthistory.KindQuotes, dthistory.QuotesFrame(s.received, s.quotes, prevAll), s.day)
 
 	summary := map[string]any{
 		"mode":             modeOf(s.watchOnly, s.allowed),
-		"quotes_requested": len(symbols),
-		"quotes_received":  len(received),
-		"quotes_usable":    len(quotes),
+		"quotes_requested": len(s.symbols),
+		"quotes_received":  len(s.received),
+		"quotes_usable":    len(s.quotes),
 		// 現在値時刻は古いが板が返っていたので残した銘柄（寄付が遅れる＝利益源）
-		"quotes_book_kept": len(bookKept),
+		"quotes_book_kept": len(s.bookKept),
 		// signal.skip_opened で外した「既に寄っていた」銘柄の数（設定が偽なら null）
 		"quotes_opened": nil,
 		// margin.spill_to_long でロングに回したショートの余り（円。回さなかった日は null）
@@ -222,18 +193,18 @@ func runOpen(opts openOptions) error {
 		appendHistory(dthistory.KindOpenRun, dthistory.OpenRunFrame(row), s.day)
 	}
 
-	if len(quotes) == 0 {
+	if len(s.quotes) == 0 {
 		fmt.Println("使える気配がありません。発注しません")
 		logError("daytrade.skip", "気配が無いため見送り", map[string]any{"reason": "no_quotes"})
 		alert("デイトレ: 気配が取れず寄付の買いを見送り",
-			fmt.Sprintf("%s 候補 %d 銘柄", s.day.Format(DateLayout), len(symbols)))
+			fmt.Sprintf("%s 候補 %d 銘柄", s.day.Format(DateLayout), len(s.symbols)))
 		finish("no_quotes", nil)
 		return nil
 	}
 
 	// 市場ギャップは候補全体の中央値で代用する（TOPIX の寄付は取れない）
 	var gaps []float64
-	for symbol, q := range quotes {
+	for symbol, q := range s.quotes {
 		if prev, ok := prevAll[symbol]; ok && prev > 0 {
 			price, _ := q.Price.Float64()
 			gaps = append(gaps, price/prev-1)
@@ -241,7 +212,7 @@ func runOpen(opts openOptions) error {
 	}
 	// ロングの並べ方を寄付の判定より先に決める: LightGBM で並べられない日は gap_vol で取引し、
 	// 米国小幅高の日は両脚とも休む（us_skip_legs を all に戻す。config.FallbackToGapVol）
-	s.cfg = resolveRankBy(s.cfg, s.p, eligible, quotes)
+	s.cfg = resolveRankBy(s.cfg, s.p, s.eligible, s.quotes)
 	verdict, usStale, err := evaluateRegime(s.cfg, s.p, s.day, regime.MarketGapOf(gaps), s.led, s.env.Preopen, s.deadline)
 	if err != nil {
 		return err
@@ -283,7 +254,7 @@ func runOpen(opts openOptions) error {
 		digest.Note(map[string]any{"regime_skip": strings.Join(verdict.Reasons, "、")})
 		// 見送りの日も「建てていたら」の順位表を残す。無いと evaluate が始値で作り直すので、
 		// 9:01 の気配で何を選んでいたかが消え、dt_missed も欠けと見送りを見分けられない
-		skippedQuotes, _ := execute.RankQuotes(quotes, s.placed.Symbols, execute.SweptSymbols(s.carried), s.cfg.Signal.SkipOpened)
+		skippedQuotes, _ := execute.RankQuotes(s.quotes, s.placed.Symbols, execute.SweptSymbols(s.carried), s.cfg.Signal.SkipOpened)
 		appendSkippedRanking(s.cfg, s.p, skippedQuotes, s.day)
 		finish("regime", nil)
 		return nil
@@ -308,7 +279,7 @@ func runOpen(opts openOptions) error {
 		logWarn("daytrade.sweep", "台帳外の返済に回した銘柄を今日の候補から外す",
 			map[string]any{"symbols": sortedKeys(swept)})
 	}
-	rankQuotes, dropped := execute.RankQuotes(quotes, s.placed.Symbols, swept, s.cfg.Signal.SkipOpened)
+	rankQuotes, dropped := execute.RankQuotes(s.quotes, s.placed.Symbols, swept, s.cfg.Signal.SkipOpened)
 	if s.cfg.Signal.SkipOpened {
 		summary["quotes_opened"] = int64(len(dropped))
 		fmt.Printf("既に寄っている %d 銘柄を候補から外しました（signal.skip_opened。残り %d）\n",
@@ -330,7 +301,7 @@ func runOpen(opts openOptions) error {
 	)
 	if sizing.ShortOpen {
 		shortN, shortBudget = sizing.Short.N, sizing.Short.Budget
-		shortRanking = selection.RankShort(shortUniverse, rankQuotes, s.cfg.Margin)
+		shortRanking = selection.RankShort(s.shortUniverse, rankQuotes, s.cfg.Margin)
 		shortOpts := selection.PickOptions{
 			N: shortN, Budget: shortBudget, Weighting: sizing.Short.Weighting, Side: domain.SideSell,
 			MaxAmount: s.cfg.Margin.MaxOrder,
@@ -352,7 +323,7 @@ func runOpen(opts openOptions) error {
 
 	// 並べるのは**落とす前の**気配で。建て済みを落としてから採点すると、機械学習の特徴量
 	// （候補の中での百分位）が 1 回目と変わる。落とすのは順位を付けた後（selection.Keep）
-	ranking, err := selection.TryRank(eligible, quotes, s.cfg.Signal)
+	ranking, err := selection.TryRank(s.eligible, s.quotes, s.cfg.Signal)
 	if err != nil {
 		// 試し並べ（resolveRankBy）は通ったのに、候補を絞った後で失敗した。寄付の判定は済んでいるので
 		// gap_vol で並べて続ける。米国小幅高で「ショートだけ休む」と判定した日は、gap_vol なら
@@ -363,7 +334,7 @@ func runOpen(opts openOptions) error {
 		fmt.Printf("LightGBM で並べられないため gap_vol で並べます: %v\n", err)
 		s.cfg = s.cfg.FallbackToGapVol()
 		summary["rank_by"] = s.cfg.Signal.RankBy
-		ranking = selection.Rank(eligible, quotes, s.cfg.Signal)
+		ranking = selection.Rank(s.eligible, s.quotes, s.cfg.Signal)
 		if verdict.ShortOff {
 			// gap_vol はこの日を両脚とも休む（us_skip_legs = "all"）。危険信号で見送った日と
 			// 同じ形で終える——余りをロングに回した通知だけ出して no_picks で終わると、
@@ -453,7 +424,7 @@ func runOpen(opts openOptions) error {
 			label = "弱い日"
 		}
 		fmt.Printf("ショート: %sの倍率 %s × 1 注文 %s 円 = %s 円  対象 %d 銘柄\n",
-			label, shortMultiplier.String(), yen(s.cfg.Margin.BudgetPerOrder()), yen(shortBudget), len(shortUniverse))
+			label, shortMultiplier.String(), yen(s.cfg.Margin.BudgetPerOrder()), yen(shortBudget), len(s.shortUniverse))
 		printPicks(shortPicks, len(rankQuotes), s.p, false, "寄付の売建（信用）")
 		frames = append(frames, dthistory.RankingFrame(shortRanking, shortPicks, shortPicks, "SELL", shortN, shortBudget, shortReasons))
 		summary["short_n"] = shortN
@@ -473,7 +444,7 @@ func runOpen(opts openOptions) error {
 	summary["short_picks"] = len(picks) - longPicks
 
 	if len(picks) == 0 {
-		logInfo("daytrade.skip", "条件に合う銘柄なし", map[string]any{"reason": "no_picks", "quotes": len(quotes)})
+		logInfo("daytrade.skip", "条件に合う銘柄なし", map[string]any{"reason": "no_picks", "quotes": len(s.quotes)})
 		finish("no_picks", nil)
 		return nil
 	}
@@ -511,8 +482,8 @@ func runOpen(opts openOptions) error {
 	// 台帳に残す「送る直前の時価」は、取ったばかりの気配があればそれを使う（取り直すと順位表と
 	// 1 本目の注文の間に往復が 1 つ挟まる）。年齢は**取り始め**から測る——120 銘柄ずつの直列なので
 	// 先頭のバッチがいちばん古い。古ければ渡さず、PlacePicks が従来どおり取り直す
-	if age := clock.NowUTC().Sub(quotesStarted); s.allowed && age <= refReuseMaxAge {
-		s.env.RefPrices = execute.RefPricesFromQuotes(received, picks)
+	if age := clock.NowUTC().Sub(s.quotesStarted); s.allowed && age <= refReuseMaxAge {
+		s.env.RefPrices = execute.RefPricesFromQuotes(s.received, picks)
 		logInfo("daytrade.ref_price", "執行時の時価に選定の気配を使う", map[string]any{
 			"age_ms": age.Milliseconds(), "reused": s.env.RefPrices != nil, "picks": len(picks)})
 	}
@@ -537,6 +508,58 @@ func runOpen(opts openOptions) error {
 		"phase": "open", "live": s.allowed, "picks": len(picks), "failures": len(failures),
 	})
 	return nil
+}
+
+// readQuotes は候補（ロングとショートの和集合）の気配を取り、古い・遅延した気配を落とす。
+// 取れなければ見送りを記録して done を返す。
+func (s *openState) readQuotes() (done bool) {
+	eligible := s.p.Eligible()
+	symbols := s.p.Symbols(eligible)
+	shortUniverse := s.p.ShortEligible()
+	if s.corpStale != "" || s.cfg.Margin.Paused {
+		shortUniverse = nil
+	}
+	if s.cfg.Margin.Enabled && !s.watchOnly {
+		// ショートの母集団はロングと別なので、気配はその和集合で取る
+		symbols = mergeSymbols(symbols, s.p.Symbols(shortUniverse))
+	}
+
+	quotesStarted := clock.NowUTC()
+	received, err := fetchQuotes(s.cfg, s.b, symbols, s.opts.quoteSource, s.opts.quoteFile, s.deadline)
+	if err != nil {
+		fmt.Println(err)
+		logError("daytrade.skip", "気配が取れず寄付の買いを見送り", map[string]any{"reason": "no_quotes", "error": err.Error()})
+		alert("デイトレ: 気配が取れず寄付の買いを見送り", fmt.Sprintf("%s 候補 %d 銘柄: %v", s.day.Format(DateLayout), len(symbols), err))
+		digest.Anomaly("daytrade.no_quotes", err.Error())
+		return true
+	}
+	quotes, stale, delayed, bookKept := dtquotes.Fresh(received, s.cfg.Execution.MaxQuoteAge, s.now, s.opts.allowDelayed)
+	// 気配の時刻（tDPP:T）には今日の日付を当てている。寄り前の銘柄で前日の時刻が返ると
+	// 「今日の 15:30」＝未来として鮮度の検査を素通りする。実機で確かめるまで、除外した
+	// 銘柄の時刻と年齢、未来の時刻を持つ銘柄の数を残す（docs/OPENING_DATA.md「実機で確かめること」）
+	future := dtquotes.FutureStamped(received, s.now, futureSlack)
+	// 気配の内訳は毎回残す（朝の点検 deploy/open-pipeline.jq が回ごとに並べる）。警告にするのは
+	// 実際に除外した（stale / delayed）ときと未来の時刻があったときだけ——板で残しただけの回まで
+	// 「使えない気配を除外」と書くと、除外 0 件でも警告に見える（2026-09-15 の朝がそうだった）
+	breakdown := map[string]any{
+		"received": len(received), "usable": len(quotes),
+		"stale": len(stale), "stale_sample": dtquotes.DescribeAges(received, sample(stale), s.now),
+		"delayed": len(delayed), "delayed_sample": sample(delayed),
+		"future": len(future), "future_sample": dtquotes.DescribeAges(received, sample(future), s.now),
+		// book_kept は現在値時刻が古くても板が返っていたので残した銘柄
+		// （tDPP:T は最後の約定時刻なので、約定の薄い銘柄はここに入る）
+		"book_kept": len(bookKept), "book_kept_sample": dtquotes.DescribeAges(received, sample(bookKept), s.now),
+		"max_age_sec": s.cfg.Execution.MaxQuoteAge,
+	}
+	if len(stale) > 0 || len(delayed) > 0 || len(future) > 0 {
+		logWarn("daytrade.quotes", "使えない気配を除外", breakdown)
+	} else {
+		logInfo("daytrade.quotes", "気配の内訳（除外なし）", breakdown)
+	}
+
+	s.eligible, s.symbols, s.shortUniverse = eligible, symbols, shortUniverse
+	s.quotesStarted, s.received, s.quotes, s.bookKept = quotesStarted, received, quotes, bookKept
+	return false
 }
 
 // countPlaced は今日すでに建てた件数を数え、残りの枠と持ち越しが拘束する資金を決める。
