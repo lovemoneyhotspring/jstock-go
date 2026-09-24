@@ -1,0 +1,90 @@
+=== 実行 1: 2026-09-24 09:31 JST live=true accept_flat=false env=prod
+--- 戻り値
+建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（口座を確かめ、本当に空なら --accept-flat を付けて 1 回実行してください）:
+7203: 保存済みのストップがある
+--- ブローカーへの接続: 1 回
+--- ブローカーの呼び出し
+GetBalance
+PositionsBySymbol
+--- 出した注文
+--- 通知
+wbjp: 日次実行が異常終了 | 建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（口座を確かめ、本当に空なら --accept-flat を付けて 1 回実行してください）:
+7203: 保存済みのストップがある
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.crash","command":"run","env":"prod","extra":{"error":"建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（口座を確かめ、本当に空なら --accept-flat を付けて 1 回実行してください）:\n7203: 保存済みのストップがある"},"level":"error","msg":"日次実行が異常終了","schema":1}
+--- ダイジェスト
+{"anomalies":["wbjp.positions_empty: 1 銘柄（発注を中止）:\n7203: 保存済みのストップがある","wbjp.crash: 建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（口座を確かめ、本当に空なら --accept-flat を付けて 1 回実行してください）:\n7203: 保存済みのストップがある","wbjp.command_failed: 建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（口座を確かめ、本当に空なら --accept-flat を付けて 1 回実行してください）:\n7203: 保存済みのストップがある"],"app":"wbjp","command":"run","env":"prod","outcome":"error","schema":"wbjp.digest.v1"}
+=== 実行 2: 2026-09-24 09:40 JST live=false accept_flat=false env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 0 回
+--- ブローカーの呼び出し
+--- 出した注文
+--- 通知
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: しない (--live フラグが無いため発注しません（dry-run）)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.positions_empty","command":"run","env":"prod","level":"warn","msg":"dry-run は建玉 0 の模型で判断します（台帳では保有中のはず。ストップは保存しない）:\n7203: 保存済みのストップがある","schema":1}
+{"app":"wbjp","code":"wbjp.daily_pnl","command":"run","env":"prod","level":"info","msg":"当日の損益: 実現 0 円・含み 0 円（上限 100000 円）","schema":1}
+{"app":"wbjp","code":"wbjp.dry_run","command":"run","env":"prod","level":"info","msg":"[dry-run] 7203 BUY 100株 @ 1215.5円 (atr_risk (強さ 1.00))","schema":1}
+--- ダイジェスト
+{"app":"wbjp","command":"run","dry_run_orders":1,"env":"prod","live":false,"orders":0,"outcome":"ok","phase":"run","risk_rejected":0,"schema":"wbjp.digest.v1","targets":1}
+=== 実行 3: 2026-09-24 09:50 JST live=true accept_flat=true env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 1 回
+--- ブローカーの呼び出し
+GetBalance
+PositionsBySymbol
+GetOpenOrders
+Place 6758 BUY 900
+Place 7203 BUY 1600
+--- 出した注文
+{"client_order_id":"44fd98f452d28dabb0e271836ddb502a","limit_price":"2230","quantity":"900","reason":"atr_risk (強さ 1.00)","side":"BUY","symbol":"6758","tax":"SPECIFIC","trade":"CASH","type":"LIMIT"}
+{"client_order_id":"eed1f2a5d93a3742e9a7aefde01aef8e","limit_price":"1215.5","quantity":"1600","reason":"atr_risk (強さ 1.00)","side":"BUY","symbol":"7203","tax":"SPECIFIC","trade":"CASH","type":"LIMIT"}
+--- 通知
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.positions_empty","command":"run","env":"prod","level":"warn","msg":"建玉の照会は 0 件。--accept-flat のため台帳の保有を捨てて続けます:\n7203: 保存済みのストップがある","schema":1}
+{"app":"wbjp","code":"wbjp.stop_removed","command":"run","env":"prod","level":"info","msg":"保有していない銘柄のストップを外しました: 7203","schema":1}
+{"app":"wbjp","code":"wbjp.daily_pnl","command":"run","env":"prod","level":"info","msg":"当日の損益: 実現 0 円・含み 0 円（上限 100000 円）","schema":1}
+{"app":"wbjp","code":"wbjp.order","command":"run","env":"prod","level":"info","msg":"発注成功: 6758 BUY 900株 (ID: 44fd98f452d28dabb0e271836ddb502a)","schema":1}
+{"app":"wbjp","code":"wbjp.order","command":"run","env":"prod","level":"info","msg":"発注成功: 7203 BUY 1600株 (ID: eed1f2a5d93a3742e9a7aefde01aef8e)","schema":1}
+--- ダイジェスト
+{"app":"wbjp","command":"run","dropped":1,"dry_run_orders":0,"env":"prod","live":true,"orders":2,"outcome":"ok","phase":"run","risk_rejected":0,"schema":"wbjp.digest.v1","targets":2}
+=== 最後の状態
+--- 台帳 runs
+{"accept_flat":"0","as_of":"2026-09-24","cash":"10000000","env":"prod","equity":"10000000","error":"建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（口座を確かめ、本当に空なら --accept-flat を付けて 1 回実行してください）:\n7203: 保存済みのストップがある","finished_at":"2026-09-24T00:31:00Z","mode":"live","run_id":"<run 1>","started_at":"2026-09-24T00:31:00Z","status":"failed"}
+{"accept_flat":"0","as_of":"2026-09-24","cash":"1000000","env":"prod","equity":"1000000","error":null,"finished_at":"2026-09-24T00:40:00Z","mode":"dry_run","run_id":"<run 2>","started_at":"2026-09-24T00:40:00Z","status":"success"}
+{"accept_flat":"1","as_of":"2026-09-24","cash":"10000000","env":"prod","equity":"10000000","error":null,"finished_at":"2026-09-24T00:50:00Z","mode":"live","run_id":"<run 3>","started_at":"2026-09-24T00:50:00Z","status":"success"}
+--- 台帳 orders
+{"avg_fill_price":null,"broker_order_id":null,"client_order_id":"d86a56d3eac9d28ca9812de99f5fd496","filled_quantity":"0","limit_price":"1215.5","order_type":"LIMIT","placed_at":"2026-09-24T00:40:00Z","placed_on":"2026-09-24","quantity":"100","reason":"atr_risk (強さ 1.00)","run_id":"<run 2>","side":"BUY","status":"dry_run","symbol":"7203","updated_at":null}
+{"avg_fill_price":null,"broker_order_id":"B/6758","client_order_id":"44fd98f452d28dabb0e271836ddb502a","filled_quantity":"0","limit_price":"2230","order_type":"LIMIT","placed_at":"2026-09-24T00:50:00Z","placed_on":"2026-09-24","quantity":"900","reason":"atr_risk (強さ 1.00)","run_id":"<run 3>","side":"BUY","status":"SUBMITTED","symbol":"6758","updated_at":"2026-09-24T00:50:00Z"}
+{"avg_fill_price":null,"broker_order_id":"B/7203","client_order_id":"eed1f2a5d93a3742e9a7aefde01aef8e","filled_quantity":"0","limit_price":"1215.5","order_type":"LIMIT","placed_at":"2026-09-24T00:50:00Z","placed_on":"2026-09-24","quantity":"1600","reason":"atr_risk (強さ 1.00)","run_id":"<run 3>","side":"BUY","status":"SUBMITTED","symbol":"7203","updated_at":"2026-09-24T00:50:00Z"}
+--- 台帳 stops
+--- 台帳 risk_events
+--- 台帳 position_snapshots
+--- 台帳 targets
+{"quantity":"100","reason":"atr_risk (強さ 1.00)","run_id":"<run 2>","symbol":"7203"}
+{"quantity":"1600","reason":"atr_risk (強さ 1.00)","run_id":"<run 3>","symbol":"7203"}
+{"quantity":"900","reason":"atr_risk (強さ 1.00)","run_id":"<run 3>","symbol":"6758"}
+--- 台帳 combined_signals
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 2>","symbol":"7203"}
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 2>","symbol":"6758"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 2>","symbol":"9984"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 2>","symbol":"8306"}
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 3>","symbol":"7203"}
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 3>","symbol":"6758"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 3>","symbol":"9984"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 3>","symbol":"8306"}
+--- 台帳 signals
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 2>","strategy":"flow_fixed","symbol":"7203"}
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 2>","strategy":"flow_fixed","symbol":"6758"}
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 3>","strategy":"flow_fixed","symbol":"7203"}
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 3>","strategy":"flow_fixed","symbol":"6758"}

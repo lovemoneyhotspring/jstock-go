@@ -1,0 +1,31 @@
+=== 実行 1: 2026-09-24 09:31 JST live=true accept_flat=true env=prod
+--- 戻り値
+建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（--accept-flat は 2026-09-24 の回（seed-flat）で使い済み。--accept-flat は 1 回で失効します。cron の行に付けていないか確かめてください）:
+7203: 保存済みのストップがある
+--- ブローカーへの接続: 1 回
+--- ブローカーの呼び出し
+GetBalance
+PositionsBySymbol
+--- 出した注文
+--- 通知
+wbjp: 日次実行が異常終了 | 建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（--accept-flat は 2026-09-24 の回（seed-flat）で使い済み。--accept-flat は 1 回で失効します。cron の行に付けていないか確かめてください）:
+7203: 保存済みのストップがある
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.crash","command":"run","env":"prod","extra":{"error":"建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（--accept-flat は 2026-09-24 の回（seed-flat）で使い済み。--accept-flat は 1 回で失効します。cron の行に付けていないか確かめてください）:\n7203: 保存済みのストップがある"},"level":"error","msg":"日次実行が異常終了","schema":1}
+--- ダイジェスト
+{"anomalies":["wbjp.positions_empty: 1 銘柄（発注を中止。--accept-flat は 2026-09-24 の回（seed-flat）で使い済み）:\n7203: 保存済みのストップがある","wbjp.crash: 建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（--accept-flat は 2026-09-24 の回（seed-flat）で使い済み。--accept-flat は 1 回で失効します。cron の行に付けていないか確かめてください）:\n7203: 保存済みのストップがある","wbjp.command_failed: 建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（--accept-flat は 2026-09-24 の回（seed-flat）で使い済み。--accept-flat は 1 回で失効します。cron の行に付けていないか確かめてください）:\n7203: 保存済みのストップがある"],"app":"wbjp","command":"run","env":"prod","outcome":"error","schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳 runs
+{"accept_flat":"1","as_of":"2026-09-24","cash":null,"env":"prod","equity":null,"error":null,"finished_at":"2026-09-23T23:31:00Z","mode":"live","run_id":"seed-flat","started_at":"2026-09-23T23:31:00Z","status":"success"}
+{"accept_flat":"0","as_of":"2026-09-24","cash":"10000000","env":"prod","equity":"10000000","error":"建玉の照会が 0 件なのに台帳では 1 銘柄を保有中のはずのため発注を中止しました（--accept-flat は 2026-09-24 の回（seed-flat）で使い済み。--accept-flat は 1 回で失効します。cron の行に付けていないか確かめてください）:\n7203: 保存済みのストップがある","finished_at":"2026-09-24T00:31:00Z","mode":"live","run_id":"<run 1>","started_at":"2026-09-24T00:31:00Z","status":"failed"}
+--- 台帳 orders
+--- 台帳 stops
+{"atr_multiple":"2","created_on":"2026-09-01","entry_price":"1000","highest_close":null,"initial_quantity":null,"initial_stop_price":null,"scaled_out":"0","stop_price":"900","symbol":"7203","trailing":"0","trailing_pct":null,"updated_at":"2026-09-23T23:31:00Z"}
+--- 台帳 risk_events
+--- 台帳 position_snapshots
+--- 台帳 targets
+--- 台帳 combined_signals
+--- 台帳 signals

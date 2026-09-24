@@ -1,0 +1,43 @@
+=== 実行 1: 2026-09-24 09:31 JST live=true accept_flat=false env=prod
+--- 戻り値
+取引カレンダーが読めないため発注を中止しました（祝日に発注しないため。jquants sync で取り込む）
+--- ブローカーへの接続: 0 回
+--- ブローカーの呼び出し
+--- 出した注文
+--- 通知
+wbjp: 日次実行が異常終了 | 取引カレンダーが読めないため発注を中止しました（祝日に発注しないため。jquants sync で取り込む）
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.crash","command":"run","env":"prod","extra":{"error":"取引カレンダーが読めないため発注を中止しました（祝日に発注しないため。jquants sync で取り込む）"},"level":"error","msg":"日次実行が異常終了","schema":1}
+--- ダイジェスト
+{"anomalies":["wbjp.crash: 取引カレンダーが読めないため発注を中止しました（祝日に発注しないため。jquants sync で取り込む）","wbjp.command_failed: 取引カレンダーが読めないため発注を中止しました（祝日に発注しないため。jquants sync で取り込む）"],"app":"wbjp","command":"run","env":"prod","outcome":"error","schema":"wbjp.digest.v1"}
+=== 実行 2: 2026-09-24 09:40 JST live=false accept_flat=false env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 0 回
+--- ブローカーの呼び出し
+--- 出した注文
+--- 通知
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: しない (--live フラグが無いため発注しません（dry-run）)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.calendar_missing","command":"run","env":"prod","level":"warn","msg":"取引カレンダーが読めないので平日を営業日とみなします（祝日明けは足が古いとみなして止まる）","schema":1}
+{"app":"wbjp","code":"wbjp.bars_unusable","command":"run","env":"prod","level":"warn","msg":"足が古い・読めないため、この回は判断しません（売りも買いも出さない）:\n6758: 足が古い（最終 2026-09-22、2026-09-23 の足が無い）\n7203: 足が古い（最終 2026-09-22、2026-09-23 の足が無い）\n8306: 足が古い（最終 2026-09-22、2026-09-23 の足が無い）\n9984: 足が古い（最終 2026-09-22、2026-09-23 の足が無い）","schema":1}
+{"app":"wbjp","code":"wbjp.daily_pnl","command":"run","env":"prod","level":"info","msg":"当日の損益: 実現 0 円・含み 0 円（上限 100000 円）","schema":1}
+--- ダイジェスト
+{"anomalies":["wbjp.bars_unusable: 4 銘柄の足が古い・読めない（その銘柄は判断しない。保有 0 銘柄は損切りも止まる）"],"app":"wbjp","command":"run","dry_run_orders":0,"env":"prod","live":false,"orders":0,"outcome":"ok","phase":"run","risk_rejected":0,"schema":"wbjp.digest.v1","targets":0}
+=== 最後の状態
+--- 台帳 runs
+{"accept_flat":"0","as_of":"2026-09-24","cash":"1000000","env":"prod","equity":"1000000","error":null,"finished_at":"2026-09-24T00:40:00Z","mode":"dry_run","run_id":"<run 2>","started_at":"2026-09-24T00:40:00Z","status":"success"}
+--- 台帳 orders
+--- 台帳 stops
+--- 台帳 risk_events
+--- 台帳 position_snapshots
+--- 台帳 targets
+--- 台帳 combined_signals
+--- 台帳 signals
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 2>","strategy":"flow_fixed","symbol":"7203"}
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 2>","strategy":"flow_fixed","symbol":"6758"}

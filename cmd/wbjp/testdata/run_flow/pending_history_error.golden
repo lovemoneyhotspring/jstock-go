@@ -1,0 +1,32 @@
+=== 実行 1: 2026-09-24 09:31 JST live=true accept_flat=false env=prod
+--- 戻り値
+送信結果不明の注文 1 件を判定できません（当日の注文一覧を照会できない）: 一覧の照会に失敗
+--- ブローカーへの接続: 1 回
+--- ブローカーの呼び出し
+GetBalance
+PositionsBySymbol
+GetOrderHistory 2026-09-24T00:00:00+09:00 2026-09-24T23:59:59+09:00
+--- 出した注文
+--- 通知
+wbjp: 日次実行が異常終了 | 送信結果不明の注文 1 件を判定できません（当日の注文一覧を照会できない）: 一覧の照会に失敗
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.pending_stale","command":"run","env":"prod","extra":{"client_order_ids":["cid-old"],"fix":"約定していれば `wbjp pending resolve \u003cclient_order_id\u003e --attribute \u003c注文番号\u003e --status FILLED --filled \u003c株数\u003e --price \u003c単価\u003e`、届いていない・失効なら `wbjp pending resolve \u003cclient_order_id\u003e --unsent`（ID に発注日が入るので送り直しは起きない）","pending":1},"level":"warn","msg":"今日より前に送った送信結果不明の注文は判定しない（一覧は当日分のみ。PENDING のまま）","schema":1}
+{"app":"wbjp","code":"wbjp.crash","command":"run","env":"prod","extra":{"error":"送信結果不明の注文 1 件を判定できません（当日の注文一覧を照会できない）: 一覧の照会に失敗"},"level":"error","msg":"日次実行が異常終了","schema":1}
+--- ダイジェスト
+{"anomalies":["wbjp.pending_stale: 今日より前の送信結果不明の注文 1 件（口座の約定履歴を見て 約定していれば `wbjp pending resolve \u003cclient_order_id\u003e --attribute \u003c注文番号\u003e --status FILLED --filled \u003c株数\u003e --price \u003c単価\u003e`、届いていない・失効なら `wbjp pending resolve \u003cclient_order_id\u003e --unsent`（ID に発注日が入るので送り直しは起きない））: cid-old","wbjp.pending_unresolved: 送信結果不明の注文 1 件を判定できません（当日の注文一覧を照会できない）: 一覧の照会に失敗","wbjp.crash: 送信結果不明の注文 1 件を判定できません（当日の注文一覧を照会できない）: 一覧の照会に失敗","wbjp.command_failed: 送信結果不明の注文 1 件を判定できません（当日の注文一覧を照会できない）: 一覧の照会に失敗"],"app":"wbjp","command":"run","env":"prod","outcome":"error","schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳 runs
+{"accept_flat":"0","as_of":"2026-09-24","cash":null,"env":"prod","equity":null,"error":null,"finished_at":null,"mode":"live","run_id":"seed-1","started_at":"2026-09-23T23:31:00Z","status":"running"}
+{"accept_flat":"0","as_of":"2026-09-24","cash":"10000000","env":"prod","equity":"10000000","error":"送信結果不明の注文 1 件を判定できません（当日の注文一覧を照会できない）: 一覧の照会に失敗","finished_at":"2026-09-24T00:31:00Z","mode":"live","run_id":"<run 1>","started_at":"2026-09-24T00:31:00Z","status":"failed"}
+--- 台帳 orders
+{"avg_fill_price":null,"broker_order_id":null,"client_order_id":"cid-old","filled_quantity":"0","limit_price":"1000","order_type":"LIMIT","placed_at":"2026-09-23T00:31:00Z","placed_on":"2026-09-23","quantity":"100","reason":"seed","run_id":"seed-1","side":"BUY","status":"PENDING","symbol":"9984","updated_at":null}
+{"avg_fill_price":null,"broker_order_id":null,"client_order_id":"cid-pend","filled_quantity":"0","limit_price":"1000","order_type":"LIMIT","placed_at":"2026-09-24T00:21:00Z","placed_on":"2026-09-24","quantity":"100","reason":"seed","run_id":"seed-1","side":"BUY","status":"PENDING","symbol":"7203","updated_at":null}
+--- 台帳 stops
+--- 台帳 risk_events
+--- 台帳 position_snapshots
+--- 台帳 targets
+--- 台帳 combined_signals
+--- 台帳 signals

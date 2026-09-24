@@ -55,16 +55,117 @@ func newRunCmd() *cobra.Command {
 }
 
 // runDaily は本体。RunE から切り出してあるのは、異常終了を run.Crash で記録・通知するため。
+//
+// 段を順に呼ぶだけ: 準備（設定・発注の可否・確認）→ 判定日（休場なら終わる）→ 実行の記録 →
+// 接続（足の更新・残高・建玉）→ 台帳の照合（送信結果不明・約定・建玉 0 件）→ 足 → ストップ →
+// 判断（戦略・サイジング・ストップ由来の手仕舞い）→ 注文の照合 → 発注。
+// 状態は dailyRun が持ち、各段が埋める。
 func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bool) (err error) {
+	d, err := prepareDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag)
+	if err != nil {
+		return err
+	}
+
+	rep, err := repo.OpenRepo(appSettings.DBPath())
+	if err != nil {
+		return err
+	}
+	defer rep.Close()
+	d.rep = rep
+
+	if done, err := d.openDay(); done || err != nil {
+		return err
+	}
+	if err := rep.StartRun(d.runID, d.todayJST, string(appSettings.Env), d.mode()); err != nil {
+		return fmt.Errorf("実行の記録を始められません: %w", err)
+	}
+	// 途中で返っても実行の終わりを残す（runs.status が running のまま残らないように）
+	defer func() { d.finishRun(err) }()
+
+	if err := d.connect(); err != nil {
+		return err
+	}
+	if err := d.checkLedger(); err != nil {
+		return err
+	}
+	d.loadBars()
+	if err := d.updateStops(); err != nil {
+		return err
+	}
+	if err := d.decide(); err != nil {
+		return err
+	}
+	plan, err := d.reconcileOrders()
+	if err != nil {
+		return err
+	}
+	return d.place(plan)
+}
+
+var decimalZero = decimal.Zero
+
+// dailyRun は日次実行 1 回ぶんの状態。runDaily の段（準備・接続・照合・判断・発注）が順に埋める。
+//
+// 各段はフィールドを埋めた段より後で付け替えない（map・slice は中身だけ足す）。decide・reconcileOrders・
+// place は頭でフィールドをローカルに写して使うので、後の段で付け替えると古い値で発注の判断が進む。
+type dailyRun struct {
+	// 準備（prepareDaily）
+	noSync, acceptFlat bool
+	setCfg             *wbjpcfg.SettingsFile
+	stratCfg           *wbjpcfg.StrategiesConfig
+	canLive            bool
+	// ロガーと run_id（run_id は入口で発行済み。ログ・DB・履歴で共有する）
+	runID  string
+	logger *logging.Logger
+	rep    *repo.Repo
+
+	// 判定日（openDay）。営業日と「あるべき最後の足」は東証のカレンダーで決める
+	todayJST string
+	today    time.Time
+	cal      *calendar.Calendar
+
+	// 実行の終わりに残す評価額・現金（照会できた時点で埋まる）
+	finishEquity, finishCash *decimal.Decimal
+
+	// 接続（connect）
+	barStore *data.BarStore
+	b        broker.Broker
+	bal      *domain.Balance
+	equity   decimal.Decimal
+	posMap   map[string]domain.Position
+
+	// 足（loadBars）
+	lastPrices, atrMap, lotSizes map[string]decimal.Decimal
+	allBars                      map[string][]domain.Bar
+	// 足が古い・読めない銘柄（銘柄 → 理由）。この回は売りも買いも出さない（W6）
+	unusable map[string]string
+	// 判断に使う終値（unusable を除く）
+	decisionCloses map[string]decimal.Decimal
+
+	// ストップ（updateStops）
+	stopBook *risk.StopBook
+
+	// 判断（decide）
+	targets    map[string]domain.TargetPosition
+	targetList []domain.TargetPosition
+	// wbjp が売買する銘柄。ユニバース外の保有（手で買った株など）には手を出さない
+	universe map[string]struct{}
+
+	// 注文の照合（reconcileOrders）。当日買い付けた銘柄（差金決済を避けるため売らない）
+	boughtToday map[string]struct{}
+}
+
+// prepareDaily は設定を読み、発注するかを決めて口座を表示し、本番発注なら確認を取る。
+func prepareDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bool) (*dailyRun, error) {
 	// 以降のログの全行とダイジェストに印を付ける（env とは独立）
 	run.SetVerify(brokerVerifyFlag)
 	setCfg, err := wbjpcfg.LoadSettingsFile(configDirFlag)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	stratCfg, err := wbjpcfg.LoadStrategiesConfig(configDirFlag)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	canLive, reason := appSettings.CanExecuteLive(liveFlag, setCfg.Risk.KillSwitch)
@@ -80,107 +181,107 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	}(), reason)
 
 	if err := cli.ConfirmLive(appSettings, canLive, yesFlag); err != nil {
-		return err
+		return nil, err
 	}
 
-	// ロガーとリポジトリ（run_id は入口で発行済み。ログ・DB・履歴で共有する）
-	runID := run.RunID
-	logger := run.Logger
+	return &dailyRun{
+		noSync: noSyncFlag, acceptFlat: acceptFlatFlag,
+		setCfg: setCfg, stratCfg: stratCfg, canLive: canLive,
+		runID: run.RunID, logger: run.Logger,
+	}, nil
+}
 
-	rep, err := repo.OpenRepo(appSettings.DBPath())
+// openDay は今日（JST）を決め、休場日なら判断も発注もせずに終える（done）。
+// カレンダーが読めなければ発注する回は止める（tradingDayGate）。
+func (d *dailyRun) openDay() (done bool, err error) {
+	d.todayJST = clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006-01-02")
+	d.today, err = time.Parse("2006-01-02", d.todayJST)
 	if err != nil {
-		return err
-	}
-	defer rep.Close()
-
-	todayJST := clock.ToZone(clock.NowUTC(), clock.Tokyo).Format("2006-01-02")
-	today, err := time.Parse("2006-01-02", todayJST)
-	if err != nil {
-		return fmt.Errorf("今日の日付を読めません: %w", err)
+		return false, fmt.Errorf("今日の日付を読めません: %w", err)
 	}
 	// 営業日と「あるべき最後の足」は東証のカレンダーで決める
-	cal := calendar.FromArchive(archive.NewArchive(appSettings.JQuantsArchiveDir()))
-	if skip, err := tradingDayGate(cal, today, canLive); err != nil {
-		return err
+	d.cal = calendar.FromArchive(archive.NewArchive(appSettings.JQuantsArchiveDir()))
+	if skip, err := tradingDayGate(d.cal, d.today, d.canLive); err != nil {
+		return false, err
 	} else if skip != "" {
-		logger.Info("wbjp.market_closed", skip)
+		d.logger.Info("wbjp.market_closed", skip)
 		fmt.Println(skip)
-		return nil
+		return true, nil
 	}
-	if cal.Empty() {
-		logger.Warn("wbjp.calendar_missing", "取引カレンダーが読めないので平日を営業日とみなします（祝日明けは足が古いとみなして止まる）")
+	if d.cal.Empty() {
+		d.logger.Warn("wbjp.calendar_missing", "取引カレンダーが読めないので平日を営業日とみなします（祝日明けは足が古いとみなして止まる）")
 	}
-	mode := "dry_run"
-	if canLive {
-		mode = "live"
-	}
-	if err := rep.StartRun(runID, todayJST, string(appSettings.Env), mode); err != nil {
-		return fmt.Errorf("実行の記録を始められません: %w", err)
-	}
-	// 途中で返っても実行の終わりを残す（runs.status が running のまま残らないように）。
-	// 評価額・現金は照会できた時点で埋まる
-	var finishEquity, finishCash *decimal.Decimal
-	defer func() {
-		status := "success"
-		var errText *string
-		if err != nil {
-			status = "failed"
-			s := err.Error()
-			errText = &s
-		}
-		if ferr := rep.FinishRun(runID, status, finishEquity, finishCash, errText); ferr != nil {
-			logger.Warn("wbjp.ledger", fmt.Sprintf("実行の終了を記録できません: %v", ferr))
-		}
-	}()
+	return false, nil
+}
 
+// mode は runs.mode に残す実行の形（live / dry_run）。
+func (d *dailyRun) mode() string {
+	if d.canLive {
+		return "live"
+	}
+	return "dry_run"
+}
+
+// connect は判断の前に足を更新し、ブローカーに繋いで残高と建玉を照会し、その時点の建玉を残す。
+// 発注する回は建玉を照会できなければ止める（二重に建てないため）。
+func (d *dailyRun) connect() error {
 	// 判断の前に足を更新する。cron の data sync とは独立に、
 	// この実行が見る足を自分で最新にしてから判断する
 	// （--no-sync で抑止。取得元が不調な日に保存済みだけで回すため）。
-	if !noSyncFlag {
-		if failures := syncUniverseBars(setCfg, logger, runSyncDays, false, false); failures > 0 {
-			logger.Warn("run.sync_failed",
+	if !d.noSync {
+		if failures := syncUniverseBars(d.setCfg, d.logger, runSyncDays, false, false); failures > 0 {
+			d.logger.Warn("run.sync_failed",
 				fmt.Sprintf("%d 銘柄の足を更新できませんでした（保存済みの足で続けます）", failures))
 		}
 	}
 
-	barStore := data.NewBarStore(appSettings.BarsDir())
+	d.barStore = data.NewBarStore(appSettings.BarsDir())
 
 	// ブローカー初期化。dry-run は常にメモリ上の模型
 	var b broker.Broker
-	if !canLive {
+	var err error
+	if !d.canLive {
 		b = broker.NewPaperBroker(decimal.Zero, "open")
-	} else if b, err = run.ConnectBroker(setCfg.Execution.Broker, appSettings); err != nil {
+	} else if b, err = runBroker(d.setCfg.Execution.Broker, appSettings); err != nil {
 		return err
 	}
+	d.b = b
 
 	bal, err := b.GetBalance()
 	if err != nil {
 		return err
 	}
 	equity := bal.CashBalance.Add(bal.MarketValue)
-	finishEquity, finishCash = &equity, &bal.CashBalance
+	d.bal, d.equity = bal, equity
+	d.finishEquity, d.finishCash = &equity, &bal.CashBalance
 	// 建玉が見えないまま進むと、保有中の銘柄を「未保有」として買い足し、ストップも
 	// 現値で作り直してしまう。発注する回は照会に失敗した時点で止める
 	posMap, err := b.PositionsBySymbol()
 	if err != nil {
-		if canLive {
+		if d.canLive {
 			return fmt.Errorf("建玉を照会できないため発注を中止しました（二重に建てないため）: %w", err)
 		}
-		logger.Warn("run.positions_failed",
+		d.logger.Warn("run.positions_failed",
 			fmt.Sprintf("建玉を照会できません（dry-run のため未保有として続行）: %v", err))
 		posMap = map[string]domain.Position{}
 	}
 	// その時点の建玉を残す（explain / 事後の検証で「何を持っていたか」を引く）
-	if err := rep.RecordSnapshot(runID, todayJST, positionList(posMap)); err != nil {
-		logger.Warn("wbjp.ledger", fmt.Sprintf("建玉の記録を残せません: %v", err))
+	d.posMap = posMap
+	if err := d.rep.RecordSnapshot(d.runID, d.todayJST, positionList(posMap)); err != nil {
+		d.logger.Warn("wbjp.ledger", fmt.Sprintf("建玉の記録を残せません: %v", err))
 	}
+	return nil
+}
 
+// checkLedger は発注の判断の前に台帳を口座に合わせる（発注する回だけ）: 送信結果が分からなかった
+// 注文の判定と約定・失効の取り込み。その後で建玉 0 件の照会を信じてよいかを確かめる。
+func (d *dailyRun) checkLedger() error {
 	// 送信結果が分からなかった注文を判定する。決められないものがあれば発注しない
 	//（同じ銘柄に二重に出しうる）。dry-run は台帳に PENDING を作らないので飛ばす。
 	// 約定の取り込みまで建玉 0 件の確認（checkEmptyPositions）より先に行う（前の回の
 	// 売り・買いが約定したかで「持っているはず」が変わる）
-	if canLive {
-		summary, err := resolvePendingOrders(rep, b, logger, clock.NowUTC())
+	if d.canLive {
+		summary, err := resolvePendingOrders(d.rep, d.b, d.logger, clock.NowUTC())
 		if err != nil {
 			digest.Anomaly("wbjp.pending_unresolved", err.Error())
 			return err
@@ -195,17 +296,17 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 		// 出した注文の約定・失効を台帳に取り込む。当日買付（差金決済の柵）と
 		// 未約定の買い（比率上限）はこの台帳から数えるので、発注の判断より先に行う。
 		// 照会できなかった注文は未確定のまま残る（未約定に数え続けるので安全側）
-		fills, err := execute.SyncFills(rep, b)
+		fills, err := execute.SyncFills(d.rep, d.b)
 		if err != nil {
 			digest.Anomaly("wbjp.fill_sync_failed", err.Error())
 			return err
 		}
 		for _, c := range fills.Changes {
-			logger.Info("wbjp.fill", fmt.Sprintf("%s: %s → %s（%s/%s 株約定, ID: %s）",
+			d.logger.Info("wbjp.fill", fmt.Sprintf("%s: %s → %s（%s/%s 株約定, ID: %s）",
 				c.Symbol, c.Before, c.After, c.FilledQuantity, c.Quantity, c.ClientOrderID))
 		}
 		if len(fills.Unresolved) > 0 {
-			logger.Warn("wbjp.fill_unresolved", "注文を照会できません（台帳は未確定のまま）:\n"+strings.Join(fills.Unresolved, "\n"))
+			d.logger.Warn("wbjp.fill_unresolved", "注文を照会できません（台帳は未確定のまま）:\n"+strings.Join(fills.Unresolved, "\n"))
 			digest.Anomaly("wbjp.fill_unresolved", fmt.Sprintf("%d 件の注文を照会できません（次の実行で再照会）", len(fills.Unresolved)))
 		}
 		if len(fills.Changes) > 0 {
@@ -215,26 +316,28 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 
 	// 建玉の照会がエラーなしで 0 件なのに、台帳では保有中のはずの銘柄がある。信じると
 	// ストップを全部消し、保有中の銘柄を新規として買い直すので、発注する回は止める
-	if err := checkEmptyPositions(rep, posMap, string(appSettings.Env), runID, canLive, acceptFlatFlag, logger); err != nil {
-		return err
-	}
+	return checkEmptyPositions(d.rep, d.posMap, string(appSettings.Env), d.runID, d.canLive, d.acceptFlat, d.logger)
+}
 
-	// 1. 日足の収集と ATR / 直近終値
+// loadBars は日足を読み、直近終値・ATR・売買単位を集める。足が古い・読めない銘柄はこの回は
+// 判断しない（売りも買いも出さない。損切り・利確の判定にも使わない）。
+func (d *dailyRun) loadBars() {
 	lastPrices := make(map[string]decimal.Decimal)
 	atrMap := make(map[string]decimal.Decimal)
 	lotSizes := make(map[string]decimal.Decimal)
 	allBars := make(map[string][]domain.Bar)
 	// 足が古い・読めない銘柄（銘柄 → 理由）。この回は売りも買いも出さない（W6）
 	unusable := make(map[string]string)
+	d.lastPrices, d.atrMap, d.lotSizes, d.allBars, d.unusable = lastPrices, atrMap, lotSizes, allBars, unusable
 
-	for _, sym := range setCfg.Universe.Symbols {
+	for _, sym := range d.setCfg.Universe.Symbols {
 		lotSizes[sym] = decimal.NewFromInt(100)
-		if ov, ok := setCfg.Universe.LotSizeOverrides[sym]; ok && ov > 0 {
+		if ov, ok := d.setCfg.Universe.LotSizeOverrides[sym]; ok && ov > 0 {
 			lotSizes[sym] = decimal.NewFromInt(int64(ov))
 		}
 
-		bars, err := barStore.Read(sym, "", "")
-		if why := barsUnusable(bars, err, today, cal.PreviousTradingDay); why != "" {
+		bars, err := d.barStore.Read(sym, "", "")
+		if why := barsUnusable(bars, err, d.today, d.cal.PreviousTradingDay); why != "" {
 			unusable[sym] = why
 		}
 		if err != nil || len(bars) == 0 {
@@ -263,18 +366,21 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 
 	// 足が古い・読めない銘柄は、この回は判断しない（売りも買いも出さない）。
 	// ストップの判定（損切り・利確）にも使わない（古い足で損切り・利確を決めない）
-	decisionCloses := make(map[string]decimal.Decimal, len(lastPrices))
+	d.decisionCloses = make(map[string]decimal.Decimal, len(lastPrices))
 	for sym, px := range lastPrices {
 		if _, ng := unusable[sym]; !ng {
-			decisionCloses[sym] = px
+			d.decisionCloses[sym] = px
 		}
 	}
-	reportUnusableBars(unusable, posMap, logger)
+	reportUnusableBars(unusable, d.posMap, d.logger)
+}
 
-	// 2. ストップロスの管理と更新
+// updateStops は保存済みのストップを読み、手仕舞った銘柄のストップを外し、無い銘柄に作り、
+// トレーリング・建値への引き上げを進める。保存は利確を決めた後（decideStopExits）。
+func (d *dailyRun) updateStops() error {
 	// 保存済みのストップが読めないと、全銘柄のストップが現値から作り直される（建値・
 	// 最高値の履歴が消える）。読めない台帳で発注しない
-	savedStops, err := rep.GetStops()
+	savedStops, err := d.rep.GetStops()
 	if err != nil {
 		return fmt.Errorf("ストップの記録を読めません: %w", err)
 	}
@@ -295,77 +401,38 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 		}
 	}
 	stopBook := risk.NewStopBook(stopObjMap)
+	d.stopBook = stopBook
 	// 手仕舞った銘柄のストップを外す（外すのはここ 1 か所）。発注する回は建玉を確かに
 	// 照会できている（照会に失敗したら上で止まる）。dry-run はメモリ上の模型（建玉 0）
 	// なので全部外れるが、dry-run はストップを保存しないので台帳は変わらない
-	if removed := stopBook.RetainHeld(posMap); canLive && len(removed) > 0 {
-		logger.Info("wbjp.stop_removed", fmt.Sprintf("保有していない銘柄のストップを外しました: %s", strings.Join(removed, ", ")))
+	if removed := stopBook.RetainHeld(d.posMap); d.canLive && len(removed) > 0 {
+		d.logger.Info("wbjp.stop_removed", fmt.Sprintf("保有していない銘柄のストップを外しました: %s", strings.Join(removed, ", ")))
 	}
-	stopBook.EnsureWithOptions(posMap, atrMap, todayJST,
-		risk.EnsureOptionsFrom(setCfg.Stops, setCfg.Sizing.ATRStopMultiple))
-	stopBook.UpdateTrailing(decisionCloses, atrMap)
+	stopBook.EnsureWithOptions(d.posMap, d.atrMap, d.todayJST,
+		risk.EnsureOptionsFrom(d.setCfg.Stops, d.setCfg.Sizing.ATRStopMultiple))
+	stopBook.UpdateTrailing(d.decisionCloses, d.atrMap)
 	// 建値への引き上げは利確・トレーリングより先に行う。
-	stopBook.UpdateBreakeven(decisionCloses, setCfg.Stops.BreakevenAfterR)
+	stopBook.UpdateBreakeven(d.decisionCloses, d.setCfg.Stops.BreakevenAfterR)
 	// ストップの保存は利確（ScaledOut・建値への引き上げ）を決めた後（3-4）
+	return nil
+}
 
-	// 3. 戦略の評価
-	strats, weights, err := buildStrategies(stratCfg)
+// decide は戦略の評価（シグナルと合成は evaluateSignals）・地合い・サイジングとストップ由来の
+// 手仕舞いから銘柄ごとの目標を決め、シグナル・目標を台帳に残す。ストップの保存もここ（decideStopExits）。
+func (d *dailyRun) decide() error {
+	setCfg, stratCfg, canLive, runID, logger, rep := d.setCfg, d.stratCfg, d.canLive, d.runID, d.logger, d.rep
+	barStore, bal, equity, posMap := d.barStore, d.bal, d.equity, d.posMap
+	lastPrices, atrMap, lotSizes, allBars, unusable := d.lastPrices, d.atrMap, d.lotSizes, d.allBars, d.unusable
+	decisionCloses, stopBook, todayJST, cal := d.decisionCloses, d.stopBook, d.todayJST, d.cal
+
+	allSignals, combinedSignals, signalMap, err := d.evaluateSignals()
 	if err != nil {
 		return err
 	}
-	combineFunc := strategy.GetCombinerByName(stratCfg.Combiner)
-
-	var allSignals []domain.Signal
-	var combinedSignals []domain.CombinedSignal
 	targets := make(map[string]domain.TargetPosition)
 	// wbjp が売買する銘柄。ユニバース外の保有（手で買った株など）には手を出さない
 	universe := symbolSet(setCfg.Universe.Symbols)
-
-	// 3-1. 全銘柄のシグナルを出す。
-	//
-	// 戦略には銘柄ごとではなく全銘柄をまとめて渡す。モメンタムの
-	// 順位付けやベンチマークとの比較は、1 銘柄ずつ呼ぶ形では書けない。
-	stratUniverse := strategy.NewUniverse(allBars)
-	if needsMargin(stratCfg) {
-		book, err := loadMarginBook(setCfg.Universe.Symbols)
-		if err != nil {
-			return err
-		}
-		if book == nil {
-			logger.Warn("wbjp.margin_missing", "信用残がアーカイブにありません。margin_balance は黙ります")
-		}
-		stratUniverse.SetMargin(book)
-	}
-	stratCtx := stratUniverse.At(todayJST, posMap, equity)
-
-	signalsBySymbol := make(map[string][]domain.Signal)
-	for _, s := range strats {
-		sigs, err := s.OnBars(stratCtx)
-		if err != nil {
-			logger.Warn("wbjp.strategy_error", fmt.Sprintf("%s の評価に失敗: %v", s.Name(), err))
-			continue
-		}
-		for _, sig := range sigs {
-			signalsBySymbol[sig.Symbol] = append(signalsBySymbol[sig.Symbol], sig)
-			allSignals = append(allSignals, sig)
-		}
-	}
-
-	signalMap := make(map[string]domain.CombinedSignal)
-	for _, sym := range setCfg.Universe.Symbols {
-		// 足の無い銘柄は判断材料が無い。合成すると「中立」を主張した
-		// ことになり、保有中なら手仕舞い扱いになってしまう。
-		if !stratCtx.HasBars(sym, 1) {
-			continue
-		}
-		// 足が古い銘柄も同じ（古い足での「シグナル消滅」で全株を売らない。W6）
-		if _, ng := unusable[sym]; ng {
-			continue
-		}
-		combined := combineFunc(sym, signalsBySymbol[sym], weights)
-		combinedSignals = append(combinedSignals, combined)
-		signalMap[sym] = combined
-	}
+	d.targets, d.universe = targets, universe
 
 	// 3-2. 地合いに応じて露出を絞る。弱気なら新規を止めて全て手仕舞う。
 	sizingEquity := equity
@@ -422,19 +489,88 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	for _, t := range targets {
 		targetList = append(targetList, t)
 	}
+	d.targetList = targetList
 	if err := rep.RecordTargets(runID, targetList); err != nil {
 		logger.Warn("wbjp.ledger", fmt.Sprintf("目標を記録できません: %v", err))
 	}
+	return nil
+}
 
-	// 4. リコンサイル
+// evaluateSignals は戦略を組み立てて全銘柄のシグナルを出し、銘柄ごとに合成する。
+// 足の無い銘柄・足が古い銘柄は合成しない（「中立」＝手仕舞いにしない）。
+func (d *dailyRun) evaluateSignals() (allSignals []domain.Signal, combinedSignals []domain.CombinedSignal,
+	signalMap map[string]domain.CombinedSignal, err error) {
+	setCfg, stratCfg, logger := d.setCfg, d.stratCfg, d.logger
+	posMap, equity, allBars, unusable, todayJST := d.posMap, d.equity, d.allBars, d.unusable, d.todayJST
+
+	strats, weights, err := buildStrategies(stratCfg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	combineFunc := strategy.GetCombinerByName(stratCfg.Combiner)
+
+	// 3-1. 全銘柄のシグナルを出す。
 	//
-	// 板に残っている注文が見えないと、同じ注文をもう一度出しうる。
-	// 発注する回では照会に失敗した時点で止める（dry-run は記録だけ
-	// なので、見えないまま続けても実害は無い）。
+	// 戦略には銘柄ごとではなく全銘柄をまとめて渡す。モメンタムの
+	// 順位付けやベンチマークとの比較は、1 銘柄ずつ呼ぶ形では書けない。
+	stratUniverse := strategy.NewUniverse(allBars)
+	if needsMargin(stratCfg) {
+		book, err := loadMarginBook(setCfg.Universe.Symbols)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if book == nil {
+			logger.Warn("wbjp.margin_missing", "信用残がアーカイブにありません。margin_balance は黙ります")
+		}
+		stratUniverse.SetMargin(book)
+	}
+	stratCtx := stratUniverse.At(todayJST, posMap, equity)
+
+	signalsBySymbol := make(map[string][]domain.Signal)
+	for _, s := range strats {
+		sigs, err := s.OnBars(stratCtx)
+		if err != nil {
+			logger.Warn("wbjp.strategy_error", fmt.Sprintf("%s の評価に失敗: %v", s.Name(), err))
+			continue
+		}
+		for _, sig := range sigs {
+			signalsBySymbol[sig.Symbol] = append(signalsBySymbol[sig.Symbol], sig)
+			allSignals = append(allSignals, sig)
+		}
+	}
+
+	signalMap = make(map[string]domain.CombinedSignal)
+	for _, sym := range setCfg.Universe.Symbols {
+		// 足の無い銘柄は判断材料が無い。合成すると「中立」を主張した
+		// ことになり、保有中なら手仕舞い扱いになってしまう。
+		if !stratCtx.HasBars(sym, 1) {
+			continue
+		}
+		// 足が古い銘柄も同じ（古い足での「シグナル消滅」で全株を売らない。W6）
+		if _, ng := unusable[sym]; ng {
+			continue
+		}
+		combined := combineFunc(sym, signalsBySymbol[sym], weights)
+		combinedSignals = append(combinedSignals, combined)
+		signalMap[sym] = combined
+	}
+	return allSignals, combinedSignals, signalMap, nil
+}
+
+// reconcileOrders は目標と建玉・板に残る注文の差から出す注文を決める（engine.Reconcile）。
+//
+// 板に残っている注文が見えないと、同じ注文をもう一度出しうる。
+// 発注する回では照会に失敗した時点で止める（dry-run は記録だけ
+// なので、見えないまま続けても実害は無い）。
+func (d *dailyRun) reconcileOrders() (*engine.ReconcilePlan, error) {
+	setCfg, canLive, logger, rep, b := d.setCfg, d.canLive, d.logger, d.rep, d.b
+	posMap, lastPrices, lotSizes, unusable, todayJST := d.posMap, d.lastPrices, d.lotSizes, d.unusable, d.todayJST
+	targets, universe := d.targets, d.universe
+
 	openOrders, err := b.GetOpenOrders()
 	if err != nil {
 		if canLive {
-			return fmt.Errorf("板の注文を照会できないため発注を中止しました（二重発注を避けます）: %w", err)
+			return nil, fmt.Errorf("板の注文を照会できないため発注を中止しました（二重発注を避けます）: %w", err)
 		}
 		logger.Warn("run.open_orders_failed",
 			fmt.Sprintf("板の注文を照会できません（dry-run のため続行）: %v", err))
@@ -447,8 +583,8 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	}
 	limitOffset := decimal.RequireFromString("0.005")
 	if setCfg.Execution.LimitOffset != "" {
-		if d, err := decimal.NewFromString(setCfg.Execution.LimitOffset); err == nil {
-			limitOffset = d
+		if v, err := decimal.NewFromString(setCfg.Execution.LimitOffset); err == nil {
+			limitOffset = v
 		}
 	}
 
@@ -460,8 +596,9 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	// 当日買い付けた銘柄。現物の差金決済を避けるため売却を止める。
 	boughtToday, err := rep.BoughtToday(todayJST)
 	if err != nil {
-		return fmt.Errorf("当日の買付履歴を読めません: %w", err)
+		return nil, fmt.Errorf("当日の買付履歴を読めません: %w", err)
 	}
+	d.boughtToday = boughtToday
 
 	plan, err := engine.Reconcile(targets, posMap, openOrders, lastPrices, lotSizes,
 		engine.ReconcileSettings{
@@ -475,7 +612,7 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 		},
 		boughtToday, todayJST)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	for sym, why := range plan.Skipped {
@@ -485,8 +622,16 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 		logger.Info("wbjp.outside_universe", "ユニバース外の保有には手を出しません: "+strings.Join(outside, ", "))
 		digest.Note(map[string]any{"outside_universe": outside})
 	}
+	return plan, nil
+}
 
-	// 5. リスク管理チェック (RiskManager)
+// place はリスク管理の前提（未約定の買い・当日の発注件数・当日の損益）をそろえ、売りを先に
+// 並べて注文を審査・送信し（execute.PlaceOrders）、見送りの理由と結果を残す。
+func (d *dailyRun) place(plan *engine.ReconcilePlan) error {
+	setCfg, canLive, runID, logger, rep, b := d.setCfg, d.canLive, d.runID, d.logger, d.rep, d.b
+	bal, equity, posMap, lastPrices, todayJST := d.bal, d.equity, d.posMap, d.lastPrices, d.todayJST
+	boughtToday, targetList := d.boughtToday, d.targetList
+
 	riskMgr := risk.NewRiskManager(setCfg.Risk, setCfg.Universe.Symbols)
 
 	// 未約定の買い注文が押さえている金額と、当日の発注件数は
@@ -564,7 +709,20 @@ func runDaily(liveFlag, yesFlag, noSyncFlag, brokerVerifyFlag, acceptFlatFlag bo
 	return nil
 }
 
-var decimalZero = decimal.Zero
+// finishRun は実行の終わりを台帳に残す（err があれば failed）。評価額・現金は照会できた時点で
+// 埋まっている（照会の前に止まった回は空）。
+func (d *dailyRun) finishRun(err error) {
+	status := "success"
+	var errText *string
+	if err != nil {
+		status = "failed"
+		s := err.Error()
+		errText = &s
+	}
+	if ferr := d.rep.FinishRun(d.runID, status, d.finishEquity, d.finishCash, errText); ferr != nil {
+		d.logger.Warn("wbjp.ledger", fmt.Sprintf("実行の終了を記録できません: %v", ferr))
+	}
+}
 
 // dailyPnL は当日の損益を実現（台帳の約定した売り）と含み（保有中の建玉の当日の値動き）に分けて返す。
 //

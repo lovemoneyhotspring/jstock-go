@@ -1,0 +1,24 @@
+=== 実行 1: 2026-09-23 09:31 JST live=true accept_flat=false env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 0 回
+--- ブローカーの呼び出し
+--- 出した注文
+--- 通知
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+2026-09-23 は休場日のため判断も発注もしません
+--- ログ
+{"app":"wbjp","code":"wbjp.market_closed","command":"run","env":"prod","level":"info","msg":"2026-09-23 は休場日のため判断も発注もしません","schema":1}
+--- ダイジェスト
+{"app":"wbjp","command":"run","env":"prod","outcome":"ok","schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳 runs
+--- 台帳 orders
+--- 台帳 stops
+--- 台帳 risk_events
+--- 台帳 position_snapshots
+--- 台帳 targets
+--- 台帳 combined_signals
+--- 台帳 signals

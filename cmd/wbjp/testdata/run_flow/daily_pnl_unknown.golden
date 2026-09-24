@@ -1,0 +1,43 @@
+=== 実行 1: 2026-09-24 09:31 JST live=true accept_flat=false env=prod
+--- 戻り値
+<nil>
+--- ブローカーへの接続: 1 回
+--- ブローカーの呼び出し
+GetBalance
+PositionsBySymbol
+GetOrder cid-sell B3
+GetOpenOrders
+--- 出した注文
+--- 通知
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.fill","command":"run","env":"prod","level":"info","msg":"9984: SUBMITTED → FILLED（100/100 株約定, ID: cid-sell）","schema":1}
+{"app":"wbjp","code":"wbjp.reconcile_skip","command":"run","env":"prod","level":"info","msg":"1301 見送り: ユニバース外の保有（wbjp は売買しない）","schema":1}
+{"app":"wbjp","code":"wbjp.outside_universe","command":"run","env":"prod","level":"info","msg":"ユニバース外の保有には手を出しません: 1301","schema":1}
+{"app":"wbjp","code":"wbjp.daily_pnl_unknown","command":"run","env":"prod","level":"warn","msg":"当日の損益を確かめられないため新規の買いを止めます:\ncid-sell 9984: 取得単価が分からない（建玉の記録が無い）","schema":1}
+{"app":"wbjp","code":"wbjp.daily_pnl","command":"run","env":"prod","level":"info","msg":"当日の損益: 実現 0 円・含み 0 円（上限 100000 円）","schema":1}
+{"app":"wbjp","code":"wbjp.risk_rejected","command":"run","env":"prod","level":"warn","msg":"7203 発注見送り: 当日の損益を確かめられないため新規の買いを止める（max_daily_loss を判断できない）","schema":1}
+--- ダイジェスト
+{"anomalies":["wbjp.daily_pnl_unknown: 1 件（新規の買いを止めた）"],"app":"wbjp","changed":1,"command":"run","dry_run_orders":0,"env":"prod","live":true,"orders":0,"outcome":"ok","outside_universe":["1301"],"phase":"run","risk_rejected":1,"schema":"wbjp.digest.v1","targets":1}
+=== 最後の状態
+--- 台帳 runs
+{"accept_flat":"0","as_of":"2026-09-24","cash":null,"env":"prod","equity":null,"error":null,"finished_at":null,"mode":"live","run_id":"seed-1","started_at":"2026-09-23T23:31:00Z","status":"running"}
+{"accept_flat":"0","as_of":"2026-09-24","cash":"10000000","env":"prod","equity":"10000000","error":null,"finished_at":"2026-09-24T00:31:00Z","mode":"live","run_id":"<run 1>","started_at":"2026-09-24T00:31:00Z","status":"success"}
+--- 台帳 orders
+{"avg_fill_price":"990","broker_order_id":"B3","client_order_id":"cid-sell","filled_quantity":"100","limit_price":"1000","order_type":"LIMIT","placed_at":"2026-09-23T23:31:00Z","placed_on":"2026-09-24","quantity":"100","reason":"seed","run_id":"seed-1","side":"SELL","status":"FILLED","symbol":"9984","updated_at":"2026-09-24T00:31:00Z"}
+--- 台帳 stops
+--- 台帳 risk_events
+{"created_at":"2026-09-24T00:31:00Z","reason":"当日の損益を確かめられないため新規の買いを止める（max_daily_loss を判断できない）","run_id":"<run 1>","symbol":"7203"}
+--- 台帳 position_snapshots
+{"as_of":"2026-09-24","cost_price":"3000","last_price":"3100","quantity":"100","run_id":"<run 1>","symbol":"1301"}
+--- 台帳 targets
+{"quantity":"1600","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","symbol":"7203"}
+--- 台帳 combined_signals
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 1>","symbol":"7203"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"6758"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"9984"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"8306"}
+--- 台帳 signals
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 1>","strategy":"flow_fixed","symbol":"7203"}

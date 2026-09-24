@@ -1,0 +1,36 @@
+=== 実行 1: 2026-09-24 09:31 JST live=true accept_flat=false env=prod
+--- 戻り値
+板の注文を照会できないため発注を中止しました（二重発注を避けます）: 注文の照会に失敗
+--- ブローカーへの接続: 1 回
+--- ブローカーの呼び出し
+GetBalance
+PositionsBySymbol
+GetOpenOrders
+--- 出した注文
+--- 通知
+wbjp: 日次実行が異常終了 | 板の注文を照会できないため発注を中止しました（二重発注を避けます）: 注文の照会に失敗
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.crash","command":"run","env":"prod","extra":{"error":"板の注文を照会できないため発注を中止しました（二重発注を避けます）: 注文の照会に失敗"},"level":"error","msg":"日次実行が異常終了","schema":1}
+--- ダイジェスト
+{"anomalies":["wbjp.crash: 板の注文を照会できないため発注を中止しました（二重発注を避けます）: 注文の照会に失敗","wbjp.command_failed: 板の注文を照会できないため発注を中止しました（二重発注を避けます）: 注文の照会に失敗"],"app":"wbjp","command":"run","env":"prod","outcome":"error","schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳 runs
+{"accept_flat":"0","as_of":"2026-09-24","cash":"10000000","env":"prod","equity":"10000000","error":"板の注文を照会できないため発注を中止しました（二重発注を避けます）: 注文の照会に失敗","finished_at":"2026-09-24T00:31:00Z","mode":"live","run_id":"<run 1>","started_at":"2026-09-24T00:31:00Z","status":"failed"}
+--- 台帳 orders
+--- 台帳 stops
+--- 台帳 risk_events
+--- 台帳 position_snapshots
+--- 台帳 targets
+{"quantity":"1600","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","symbol":"7203"}
+{"quantity":"900","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","symbol":"6758"}
+--- 台帳 combined_signals
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 1>","symbol":"7203"}
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 1>","symbol":"6758"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"9984"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"8306"}
+--- 台帳 signals
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 1>","strategy":"flow_fixed","symbol":"7203"}
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 1>","strategy":"flow_fixed","symbol":"6758"}

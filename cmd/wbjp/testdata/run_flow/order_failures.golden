@@ -1,0 +1,47 @@
+=== 実行 1: 2026-09-24 09:31 JST live=true accept_flat=false env=prod
+--- 戻り値
+注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できないため発注を中止しました（口座と台帳 <root>/state/wbjp-prod.db を確かめてください）: 注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できませんでした（送信済みの可能性）: 通信が切れた
+--- ブローカーへの接続: 1 回
+--- ブローカーの呼び出し
+GetBalance
+PositionsBySymbol
+GetOpenOrders
+Place 6758 BUY 900
+Place 7203 BUY 1600
+--- 出した注文
+{"client_order_id":"44fd98f452d28dabb0e271836ddb502a","limit_price":"2230","quantity":"900","reason":"atr_risk (強さ 1.00)","side":"BUY","symbol":"6758","tax":"SPECIFIC","trade":"CASH","type":"LIMIT"}
+{"client_order_id":"eed1f2a5d93a3742e9a7aefde01aef8e","limit_price":"1215.5","quantity":"1600","reason":"atr_risk (強さ 1.00)","side":"BUY","symbol":"7203","tax":"SPECIFIC","trade":"CASH","type":"LIMIT"}
+--- 通知
+wbjp: 日次実行が異常終了 | 注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できないため発注を中止しました（口座と台帳 <root>/state/wbjp-prod.db を確かめてください）: 注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できませんでした（送信済みの可能性）: 通信が切れた
+--- 端末
+口座: 本番口座 (PROD) (WBJP_ENV=prod)  発注: する (本番発注を行います)
+
+--- ログ
+{"app":"wbjp","code":"wbjp.daily_pnl","command":"run","env":"prod","level":"info","msg":"当日の損益: 実現 0 円・含み 0 円（上限 100000 円）","schema":1}
+{"app":"wbjp","code":"wbjp.order_failed","command":"run","env":"prod","level":"error","msg":"6758 発注できません: order rejected: 余力不足","schema":1}
+{"app":"wbjp","code":"wbjp.unconfirmed","command":"run","env":"prod","level":"error","msg":"7203: 注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できませんでした（送信済みの可能性）: 通信が切れた","schema":1}
+{"app":"wbjp","code":"wbjp.crash","command":"run","env":"prod","extra":{"error":"注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できないため発注を中止しました（口座と台帳 <root>/state/wbjp-prod.db を確かめてください）: 注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できませんでした（送信済みの可能性）: 通信が切れた"},"level":"error","msg":"日次実行が異常終了","schema":1}
+--- ダイジェスト
+{"anomalies":["wbjp.crash: 注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できないため発注を中止しました（口座と台帳 <root>/state/wbjp-prod.db を確かめてください）: 注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できませんでした（送信済みの可能性）: 通信が切れた","wbjp.command_failed: 注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できないため発注を中止しました（口座と台帳 <root>/state/wbjp-prod.db を確かめてください）: 注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できませんでした（送信済みの可能性）: 通信が切れた"],"app":"wbjp","command":"run","env":"prod","outcome":"error","schema":"wbjp.digest.v1"}
+=== 最後の状態
+--- 台帳 runs
+{"accept_flat":"0","as_of":"2026-09-24","cash":"10000000","env":"prod","equity":"10000000","error":"注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できないため発注を中止しました（口座と台帳 <root>/state/wbjp-prod.db を確かめてください）: 注文 eed1f2a5d93a3742e9a7aefde01aef8e の結果を確認できませんでした（送信済みの可能性）: 通信が切れた","finished_at":"2026-09-24T00:31:00Z","mode":"live","run_id":"<run 1>","started_at":"2026-09-24T00:31:00Z","status":"failed"}
+--- 台帳 orders
+{"avg_fill_price":null,"broker_order_id":null,"client_order_id":"44fd98f452d28dabb0e271836ddb502a","filled_quantity":"0","limit_price":"2230","order_type":"LIMIT","placed_at":"2026-09-24T00:31:00Z","placed_on":"2026-09-24","quantity":"900","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","side":"BUY","status":"REJECTED","symbol":"6758","updated_at":"2026-09-24T00:31:00Z"}
+{"avg_fill_price":null,"broker_order_id":null,"client_order_id":"eed1f2a5d93a3742e9a7aefde01aef8e","filled_quantity":"0","limit_price":"1215.5","order_type":"LIMIT","placed_at":"2026-09-24T00:31:00Z","placed_on":"2026-09-24","quantity":"1600","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","side":"BUY","status":"PENDING","symbol":"7203","updated_at":null}
+--- 台帳 stops
+--- 台帳 risk_events
+--- 台帳 position_snapshots
+--- 台帳 targets
+{"quantity":"1600","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","symbol":"7203"}
+{"quantity":"2000","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","symbol":"9984"}
+{"quantity":"900","reason":"atr_risk (強さ 1.00)","run_id":"<run 1>","symbol":"6758"}
+--- 台帳 combined_signals
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 1>","symbol":"7203"}
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 1>","symbol":"6758"}
+{"contributions_json":"{\"flow_fixed\":1}","direction":"1","reason":"重み付き投票: 合計スコア 1 / 重み 1","run_id":"<run 1>","symbol":"9984"}
+{"contributions_json":"{}","direction":"0","reason":"シグナルなし","run_id":"<run 1>","symbol":"8306"}
+--- 台帳 signals
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 1>","strategy":"flow_fixed","symbol":"7203"}
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 1>","strategy":"flow_fixed","symbol":"6758"}
+{"confidence":"1","direction":"1","reason":"固定","run_id":"<run 1>","strategy":"flow_fixed","symbol":"9984"}
