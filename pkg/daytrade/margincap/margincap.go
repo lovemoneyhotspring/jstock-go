@@ -136,6 +136,12 @@ func DefaultCachePath(dataDir string) string {
 	return filepath.Join(dataDir, "daytrade", "margin.json")
 }
 
+// DatedCachePath はその日の保証金の控え（data/daytrade/margin/YYYY-MM-DD.json）。margin.json は
+// 翌朝に上書きされるので、後から「その日の総額」を知りたい読み手（evaluate の作り直し）はこちらを読む。
+func DatedCachePath(dataDir, day string) string {
+	return filepath.Join(dataDir, "daytrade", "margin", day+".json")
+}
+
 // Read はキャッシュを読む。無ければ ok = false。
 func Read(path string) (Snapshot, bool) {
 	raw, err := os.ReadFile(path)

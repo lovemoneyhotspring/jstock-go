@@ -428,6 +428,15 @@ func (o PickOptions) affordable(r Ranked) bool {
 	return SharesFor(amount, r.Price, lotOf(o.LotSizes, r.Symbol)).GreaterThan(decimal.Zero)
 }
 
+// unaffordableReason は affordable でない銘柄の理由。規則 R で総額 ÷ name_divisor には 1 単元が
+// 載るのに売買代金の上限で載らないなら turnover_cap、それ以外（値がさ）は over_budget。
+func (o PickOptions) unaffordableReason(r Ranked) string {
+	if o.byTurnover() && SharesFor(o.nameCap(), r.Price, lotOf(o.LotSizes, r.Symbol)).GreaterThan(decimal.Zero) {
+		return ReasonTurnoverCap
+	}
+	return ReasonOverBudget
+}
+
 // Pick は順位表の上位 N 銘柄を選び、株数を決める。
 //
 // まず「1 単元が Budget に収まる」銘柄を順位順に N 個取る（届かない銘柄は次点を繰り上げ）。
@@ -518,6 +527,9 @@ const (
 	ReasonPicked = "picked"
 	// ReasonOverBudget は 1 単元が 1 注文の予算を超える（次点が繰り上がる）。
 	ReasonOverBudget = "over_budget"
+	// ReasonTurnoverCap は規則 R で、1 単元が売買代金 × turnover_ratio（1 銘柄の上限）を超える
+	// ——値がさでなく薄い銘柄（総額 ÷ name_divisor には収まる）。売買代金が欠けた銘柄もここ。
+	ReasonTurnoverCap = "turnover_cap"
 	// ReasonSectorCap は同じ業種から MaxPerSector 銘柄を既に取っていた。
 	ReasonSectorCap = "sector_cap"
 	// ReasonValuePool は 2 段階選定の母数（N × ValuePool）には入ったが、益回りで N に入らなかった。
@@ -551,7 +563,7 @@ func candidatePool(ranked []Ranked, opts PickOptions, reasons map[string]string)
 		}
 		if !opts.affordable(r) {
 			if reasons != nil {
-				reasons[r.Symbol] = ReasonOverBudget
+				reasons[r.Symbol] = opts.unaffordableReason(r)
 			}
 			continue
 		}

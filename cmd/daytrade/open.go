@@ -668,8 +668,14 @@ func (s *openState) countPlaced() (done bool, err error) {
 				"reason": "already", "orders": placed.Total(), "long": placed.Long, "short": placed.Short})
 			return true, nil
 		}
-		fmt.Printf("今日は既にロング %d / ショート %d 件を建てています。残り（ロング %d / ショート %d）だけ建てます\n",
-			placed.Long, placed.Short, max(remainingLong, 0), max(remainingShort, 0))
+		if execute.LongClosedForToday(s.cfg, placed) {
+			// 規則 R: 寄る前の回が一部しか送れなかった朝も買い足さない。この回は気配と順位表を残して終わる
+			fmt.Printf("今日は既にロング %d / ショート %d 件を建てています。規則 R なのでロングは買い足しません（残り ショート %d）\n",
+				placed.Long, placed.Short, max(remainingShort, 0))
+		} else {
+			fmt.Printf("今日は既にロング %d / ショート %d 件を建てています。残り（ロング %d / ショート %d）だけ建てます\n",
+				placed.Long, placed.Short, max(remainingLong, 0), max(remainingShort, 0))
+		}
 		logInfo("daytrade.resume", "建玉の残りを建て直す", map[string]any{
 			"long": placed.Long, "short": placed.Short,
 			"remaining_long": max(remainingLong, 0), "remaining_short": max(remainingShort, 0),
@@ -780,7 +786,7 @@ func prepareOpen(opts openOptions) (s *openState, done bool, err error) {
 	if err != nil {
 		return nil, false, err
 	}
-	// 保証金で建玉の上限を安全側へ寄せる（下げ方向のみ）。朝 8:53 の warm-margin が焼いた
+	// 保証金で建玉の上限を決める（規則 R では建可能額の比で上げ下げ両方。それ以外は下げ方向のみ）。朝 8:53 の warm-margin が焼いた
 	// キャッシュを読むだけなので、ここでブローカーには繋がない。取れない朝は設定の値のまま建てる。
 	// **watchOnly の判定より前**でなければ、下げた結果が今日の判断に効かない
 	// 運用通知は同期の HTTP。発注の前に挟むと Discord が遅い日に注文が遅れるので、

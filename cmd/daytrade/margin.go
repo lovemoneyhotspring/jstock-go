@@ -11,12 +11,15 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/margincap"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/broker"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/wbcore/clock"
+	"github.com/shopspring/decimal"
 	"github.com/spf13/cobra"
 )
 
@@ -98,6 +101,12 @@ func warmMargin(cfg dtconfig.Config, day time.Time) {
 		warn("保証金をキャッシュに書けない（open は設定の値で建てる）", err)
 		return
 	}
+	// 日付つきの控え（evaluate が順位表の無い日を作り直すときに、その日の総額を決め直す）。失敗しても open には効かない
+	if err := margincap.Write(margincap.DatedCachePath(appSettings.DataDir, snapshot.Day), snapshot); err != nil {
+		fields["error"] = err.Error()
+		logWarn("daytrade.margin_warm", "保証金の日付つきの控えを書けない（evaluate の作り直しが設定の値になる）", fields)
+		delete(fields, "error")
+	}
 
 	fields["snapshot"] = snapshot.Describe()
 	fields["source_date"] = snapshot.SourceDate
@@ -121,14 +130,13 @@ func warmMargin(cfg dtconfig.Config, day time.Time) {
 	logInfo("daytrade.margin_warm", "保証金をキャッシュに焼いた", fields)
 }
 
-// applyMarginCap は朝の保証金で建玉の上限を下げる。**下げ方向のみ**。
-// ただし margin.capacity_ratio を置いた設定（規則 R）では、建可能額の比で上げ下げ両方に決め直す
-// （margincap.Apply → applyRatio）。キャッシュが無い・古い朝は同じく設定の値で建てる。
+// applyMarginCap は朝の保証金で建玉の上限を決める。向きは設定で違う:
+//   - margin.capacity_ratio なし: **下げ方向のみ**。設定は狙いの水準で、ここは「その日それが本当に
+//     建てられるか」の検算。保証金が増えていても勝手には上げない（増えたぶんを使うかは人が決める）
+//   - margin.capacity_ratio あり（規則 R）: 建可能額の比で**上げ下げ両方**に決め直す（margincap.Apply → applyRatio）。
+//     キャッシュが無い・古い朝は ratioFallback（設定の値か前日の値の小さい方。ショック日も同額で頭打ち）
 //
-// 設定は狙いの水準で、ここは「その日それが本当に建てられるか」の検算。
-// 保証金が増えていても勝手には上げない（増えたぶんを使うかは人が決める）。
-// キャッシュが無い・古い・下げた結果が検証を通らない、のいずれでも元の設定を返す
-// ——保証金が読めないことを理由に売買を止めない。
+// 下げた結果が検証を通らない朝は元の設定を返す——保証金が読めないことを理由に売買を止めない。
 func applyMarginCap(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 	if !marginCapNeeded(cfg) {
 		return cfg
@@ -138,12 +146,12 @@ func applyMarginCap(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 	snapshot, ok := margincap.Read(marginCachePath())
 	if !ok {
 		logWarn("daytrade.margin_cap", "保証金のキャッシュが無い（設定の値で建てる）", fields)
-		return cfg
+		return ratioFallback(cfg, day, nil, fields)
 	}
 	if !snapshot.IsFresh(day) {
 		fields["cached_day"] = snapshot.Day
 		logWarn("daytrade.margin_cap", "保証金のキャッシュが当日ぶんでない（設定の値で建てる）", fields)
-		return cfg
+		return ratioFallback(cfg, day, &snapshot, fields)
 	}
 
 	capped, res := margincap.Apply(cfg, snapshot)
@@ -187,4 +195,63 @@ func applyMarginCap(cfg dtconfig.Config, day time.Time) dtconfig.Config {
 	}
 	logWarn("daytrade.margin_cap", res.Describe(), fields)
 	return capped
+}
+
+// ratioFallback は規則 R（margin.capacity_ratio）で当日の保証金が読めない朝（8:53 と 8:56 の取得が
+// 両方失敗）の設定。**下げる方向にだけ**動かす:
+//   - 前の日のキャッシュがあれば、それで決め直した総額が設定の固定値より小さいときだけ使う
+//     （前日から保証金が減っていれば、少なくともその分は控える）
+//   - ショック日の総額は設定の固定値（長短合計）で頭打ち。倍率で固定値を超えて建てない
+//     ——保証金が分からない日に、分かっている日より大きく建てる理由が無い
+//   - 人に知らせる（1 日 1 回）。固定値は建可能額 × 0.68 の目安で置いた値で、保証金が大きく減った
+//     翌朝は建可能額を超えうる（2026-09-25 のレビュー）
+//
+// 比を置いていない設定では何もしない（従来どおり設定の値で建てる）。
+func ratioFallback(cfg dtconfig.Config, day time.Time, stale *margincap.Snapshot, fields map[string]any) dtconfig.Config {
+	if !cfg.Margin.CapacityRatio.IsPositive() {
+		return cfg
+	}
+	out, total, fromStale := ratioFallbackConfig(cfg, stale)
+	if fromStale {
+		fields["stale_total"] = total.StringFixed(0)
+	}
+	fields["fallback_total"] = total.StringFixed(0)
+	fields["shock_total_cap"] = out.Capital.ShockTotalCap.StringFixed(0)
+	msg := fmt.Sprintf("当日の保証金が読めないので、長短合計 %s 円（ショック日も同額で頭打ち）で建てます", yen(total))
+	fmt.Println(msg)
+	logWarn("daytrade.margin_cap", "規則 R: 保証金が読めず設定の値で建てる", fields)
+	if markOncePerDay(marginCachePath()+".fallback-alerted", day) {
+		alert("daytrade: 保証金が読めません", msg+"。8:53・8:56 の warm-margin が失敗しています（state/logs/daytrade-margin.log）")
+	}
+	return out
+}
+
+// ratioFallbackConfig は ratioFallback の設定の部分（通知・ログなし）。長短合計と、前の日の
+// キャッシュで決め直したか（fromStale）も返す。
+func ratioFallbackConfig(cfg dtconfig.Config, stale *margincap.Snapshot) (out dtconfig.Config, total decimal.Decimal, fromStale bool) {
+	total = cfg.Capital.MaxCapital
+	if cfg.Margin.Enabled {
+		total = total.Add(cfg.Margin.MaxCapital)
+	}
+	out = cfg
+	if stale != nil && !stale.Fusokugaku.IsPositive() {
+		capped, res := margincap.Apply(cfg, *stale)
+		if res.NormalTotal.IsPositive() && res.NormalTotal.LessThan(total) && !res.WatchOnly && capped.Validate() == nil {
+			out, total, fromStale = capped, res.NormalTotal, true
+		}
+	}
+	if !out.Capital.ShockTotalCap.IsPositive() || out.Capital.ShockTotalCap.GreaterThan(total) {
+		out.Capital.ShockTotalCap = total
+	}
+	return out, total, fromStale
+}
+
+// markOncePerDay は path に当日の日付を書き、その日初めてなら真。書けなければ真（通知を落とさない側）。
+func markOncePerDay(path string, day time.Time) bool {
+	today := day.Format(DateLayout)
+	if b, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(b)) == today {
+		return false
+	}
+	_ = os.WriteFile(path, []byte(today+"\n"), 0o644)
+	return true
 }

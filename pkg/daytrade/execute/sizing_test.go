@@ -345,3 +345,42 @@ func TestSizeDayTurnoverRerunDoesNotTopUp(t *testing.T) {
 		t.Errorf("建てていない回が N=%d, want %d", long.N, cfg.Capital.MaxPositions)
 	}
 }
+
+// 規則 R で寄る前の回が一部しか送れなかった朝、9:00 の回の「残り」はロング 0（買い足さないので）。
+// 件数の差（10 − 7 = 3）を出すと、点検で「3 件建て損ねた」と読み違える（2026-09-25 のレビュー）
+func TestRemainingTurnoverPartialPreopen(t *testing.T) {
+	cfg, err := config.Load("../../../config/daytrade_margin")
+	if err != nil {
+		t.Fatalf("本番の設定を読めない: %v", err)
+	}
+	if cfg.Capital.Weighting != config.WeightingTurnover {
+		t.Skip("規則 R でない設定")
+	}
+	partial := Placed{Long: 7, LongAmount: yenOf(4_800_000)}
+	if long, _ := Remaining(cfg, partial, false); long != 0 {
+		t.Errorf("一部建てた後の残り %d, want 0", long)
+	}
+	if long, _ := Remaining(cfg, Placed{}, false); long != cfg.Capital.MaxPositions {
+		t.Errorf("建てていない回の残り %d, want %d", long, cfg.Capital.MaxPositions)
+	}
+	// 9:00 の回は「済み」で抜けない（気配と順位表を残す）
+	if DoneForToday(cfg, partial, false) {
+		t.Error("一部建てた後の回が発注済みで抜けた（順位表と open_run が残らない）")
+	}
+	eq := cfg
+	eq.Capital.Weighting = "equal"
+	if long, _ := Remaining(eq, partial, false); long != eq.Capital.Positions()-7 {
+		t.Errorf("等金額の残り %d, want %d", long, eq.Capital.Positions()-7)
+	}
+}
+
+// 規則 R の予算は総額と 1 銘柄の上限で見せる（1 注文 = 総額 ÷ N は実際の金額でないため）
+func TestLongBudgetText(t *testing.T) {
+	r := config.Capital{Weighting: config.WeightingTurnover, NameDivisor: 7}
+	if got, want := LongBudgetText(r, 10, yenOf(758_240)), "総額 7,582,400 円・1 銘柄まで 1,083,200 円"; got != want {
+		t.Errorf("規則 R: %q, want %q", got, want)
+	}
+	if got, want := LongBudgetText(config.Capital{Weighting: "equal"}, 3, yenOf(1_666_666)), "1 注文 1,666,666 円"; got != want {
+		t.Errorf("等金額: %q, want %q", got, want)
+	}
+}

@@ -155,6 +155,7 @@ var RankingSchema = []history.Column{
 	// N と予算は通常日の値（縮小・ショックの倍率を掛けない。evaluate.NominalLegs）。
 	{Name: "skipped", Type: history.TypeBool},
 	// reason は選ばれた／外れた理由（selection.PickReasons）: picked / over_budget（1 単元が予算超え）/
+	// turnover_cap（規則 R で 1 単元が売買代金 × turnover_ratio を超える。2026-09-25 から。over_budget 列は偽）/
 	// sector_cap（業種の上限）/ value_pool（2 段階選定で益回りが足りない）/ too_small（按分が 1 単元未満）/
 	// beyond_n（N が埋まった後の順位）。2026-09-15 より前の順位表には無い。
 	{Name: "reason", Type: history.TypeString},

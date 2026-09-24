@@ -414,6 +414,15 @@ func recentWindow(pnl, scales []float64, traded []bool, i, days int) *float64 {
 	return &total
 }
 
+// markScale は取引に表示用の倍率（その日のロングの倍率）を書く。株数・金額は変えない。
+// 選ぶ前に倍率を掛け終えた取引（規則 R）に、scaleTrades が書いた 1 を上書きするためのもの。
+func markScale(trades []Trade, scale float64) []Trade {
+	for i := range trades {
+		trades[i].Scale = scale
+	}
+	return trades
+}
+
 // scaleTrades は日ごとの倍率を取引に掛け、倍率 0 の日の取引を落とす。
 func scaleTrades(trades []Trade, scale map[string]float64) []Trade {
 	out := trades[:0]

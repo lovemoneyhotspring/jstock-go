@@ -7,6 +7,7 @@ import (
 
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/calendar"
 	dtconfig "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/config"
+	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/execute"
 	dthistory "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/history"
 	dtplan "github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/plan"
 	"github.com/lovemoneyhotspring/jstock-go/pkg/daytrade/regime"
@@ -136,11 +137,11 @@ func buildPlan(cfg dtconfig.Config, day time.Time) (dtplan.Plan, error) {
 // printPlan は候補の概要。N と予算は plan 時点ではなく**今の設定**（資金を変えたら即反映）。
 func printPlan(p dtplan.Plan, cfg dtconfig.Config) {
 	n := cfg.Capital.Positions()
-	budget := "—（資金 0）"
+	budget := "1 注文 —（資金 0）"
 	if n > 0 {
-		budget = yen(cfg.Capital.BudgetPerOrder()) + " 円"
+		budget = execute.LongBudgetText(cfg.Capital, n, cfg.Capital.BudgetPerOrder())
 	}
-	fmt.Printf("判定日 %s（前営業日 %s）  候補 %d / %d 銘柄  N=%d  1 注文 %s\n",
+	fmt.Printf("判定日 %s（前営業日 %s）  候補 %d / %d 銘柄  N=%d  %s\n",
 		p.Meta.Day, p.Meta.PrevDay, p.Meta.Eligible, p.Meta.Candidates, n, budget)
 
 	var signals []string

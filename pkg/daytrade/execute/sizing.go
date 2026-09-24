@@ -17,6 +17,11 @@ import (
 // 前の回が N を超えて建てた）。様子見（資金 0）とショートの一時停止（margin.paused）ではショートは 0。
 func Remaining(cfg config.Config, placed Placed, watchOnly bool) (long, short int) {
 	long = cfg.Capital.Positions() - placed.Long
+	// 規則 R は 1 件でも建てた日は買い足さない（longAfterPlaced）。件数の差を「残り」と表示すると、
+	// 寄る前の回が一部しか送れなかった朝に「残り 3 件だけ建てます」と出て実際は 0 件で終わる
+	if LongClosedForToday(cfg, placed) {
+		long = 0
+	}
 	if cfg.Margin.Enabled && !watchOnly && !cfg.Margin.Paused {
 		short = cfg.Margin.Positions() - placed.Short
 	}
@@ -37,6 +42,28 @@ func DoneForToday(cfg config.Config, placed Placed, watchOnly bool) bool {
 		return false
 	}
 	return !(cfg.Margin.Enabled && cfg.Margin.SpillToLong && !watchOnly)
+}
+
+// LongClosedForToday は規則 R（capital.weighting = "turnover"）で今日すでにロングを建てた日か。
+// その日は再実行でロングを買い足さない（longAfterPlaced と同じ条件）。DoneForToday では「済み」に
+// しない——9:00 の回は建てなくても気配を取り、順位表と open_run を残す（研究と所要の計測に使う）。
+func LongClosedForToday(cfg config.Config, placed Placed) bool {
+	return cfg.Capital.Weighting == config.WeightingTurnover && (placed.Long > 0 || placed.LongAmount.IsPositive())
+}
+
+// LongBudgetText はロングの予算の見せ方。規則 R（weighting = "turnover"）の 1 注文の予算は
+// 総額 ÷ N の割り算の値で、実際の 1 銘柄の金額（売買代金 × 比と総額 ÷ name_divisor の小さい方）では
+// ないので、総額と 1 銘柄の上限で見せる。それ以外は「1 注文 X 円」。
+func LongBudgetText(c config.Capital, n int, budget decimal.Decimal) string {
+	if c.Weighting != config.WeightingTurnover || n < 1 {
+		return "1 注文 " + cli.Yen(budget) + " 円"
+	}
+	total := budget.Mul(decimal.NewFromInt(int64(n)))
+	perName := total
+	if c.NameDivisor > 1 {
+		perName = total.Div(decimal.NewFromInt(int64(c.NameDivisor))).Floor()
+	}
+	return fmt.Sprintf("総額 %s 円・1 銘柄まで %s 円", cli.Yen(total), cli.Yen(perName))
 }
 
 // Sizing は 1 つの脚の今回の件数と 1 注文の予算。
@@ -131,7 +158,7 @@ func SizeDay(in SizingInput) DaySizing {
 	}
 	if d.Weak && (!cfg.Margin.Enabled || cfg.Margin.LongShrink) {
 		budget = budget.Mul(decimal.NewFromFloat(v.Scale)).Round(0)
-		d.note(SizingNote{Text: fmt.Sprintf("%s（1 注文 %s 円）", v.ScaleReason, cli.Yen(budget))})
+		d.note(SizingNote{Text: fmt.Sprintf("%s（%s）", v.ScaleReason, LongBudgetText(cfg.Capital, dayN, budget))})
 	} else if d.Weak {
 		d.note(SizingNote{Text: strings.Split(v.ScaleReason, "→")[0] + "→ ロングは縮めず、ショートを建てる合図にする"})
 	}
@@ -139,7 +166,7 @@ func SizeDay(in SizingInput) DaySizing {
 	if v.Shock && !in.WatchOnly {
 		budget = budget.Mul(decimal.NewFromFloat(v.ShockLong)).Round(0)
 		d.note(SizingNote{
-			Text:  fmt.Sprintf("%s（ロング 1 注文 %s 円）", v.ShockReason, cli.Yen(budget)),
+			Text:  fmt.Sprintf("%s（ロング %s）", v.ShockReason, LongBudgetText(cfg.Capital, dayN, budget)),
 			Level: "info", Code: "daytrade.regime", Msg: "ショック日",
 			Fields: map[string]any{"reason": v.ShockReason, "long_scale": v.ShockLong, "short_scale": v.ShockShort},
 		})
@@ -149,7 +176,7 @@ func SizeDay(in SizingInput) DaySizing {
 			if total := budget.Mul(decimal.NewFromInt(int64(dayN))); total.GreaterThan(limit) {
 				budget = limit.Div(decimal.NewFromInt(int64(dayN))).Floor()
 				d.note(SizingNote{
-					Text:  fmt.Sprintf("ショック日の総額 %s 円を保証金の上限 %s 円で頭打ち（1 注文 %s 円）", cli.Yen(total), cli.Yen(limit), cli.Yen(budget)),
+					Text:  fmt.Sprintf("ショック日の総額 %s 円を保証金の上限 %s 円で頭打ち（%s）", cli.Yen(total), cli.Yen(limit), LongBudgetText(cfg.Capital, dayN, budget)),
 					Level: "info", Code: "daytrade.margin_cap", Msg: "ショック日の総額を保証金で頭打ち",
 					Fields: map[string]any{"total": total.String(), "cap": limit.String(), "budget": budget.String()},
 				})
@@ -162,8 +189,8 @@ func SizeDay(in SizingInput) DaySizing {
 		before := dayN
 		dayN, budget = CapByTied(dayN, 0, cfg.Capital.MaxCapital, in.TiedLong, budget)
 		d.note(SizingNote{
-			Text: fmt.Sprintf("持ち越しがロングの資金 %s 円を拘束 → 今日は %d 件（1 注文 %s 円）",
-				cli.Yen(in.TiedLong), max(dayN-placed.Long, 0), cli.Yen(budget)),
+			Text: fmt.Sprintf("持ち越しがロングの資金 %s 円を拘束 → 今日は %d 件（%s）",
+				cli.Yen(in.TiedLong), max(dayN-placed.Long, 0), LongBudgetText(cfg.Capital, dayN, budget)),
 			Level: "warn", Code: "daytrade.carry", Msg: "持ち越しの拘束資金でロングを縮める",
 			Fields: map[string]any{"tied": in.TiedLong.String(), "n_before": before, "n": dayN, "budget": budget.String()},
 		})
@@ -249,7 +276,7 @@ func (d DaySizing) longAfterPlaced(dayN int, budget decimal.Decimal) (int, decim
 	// 再実行が「まだ建てていない枠」と読むと、寄りの後に 13 位以下を成行で買い足す——寄り後の買い増しは
 	// 効きが無く（研究ノート 2026-09-jp-daytrade-nscale）、max_positions の栓も破る。1 件でも建てた日は
 	// 足さない（寄る前の回が丸ごと失敗した日は placed が 0 なので、9:01 の回が満額で建てる）
-	if d.in.Cfg.Capital.Weighting == config.WeightingTurnover {
+	if LongClosedForToday(d.in.Cfg, placed) {
 		return 0, budget
 	}
 	left := budget.Mul(decimal.NewFromInt(int64(dayN))).Sub(placed.LongAmount)
@@ -279,8 +306,13 @@ func (d DaySizing) WithSpill(shortPicks []selection.Pick) (long Sizing, spill de
 	}
 	dayN, budget := selection.SpillInto(d.longDayN, d.longDayBudget, cfg.Capital.BudgetPerOrder(), spill, cfg.Capital.MaxPositions)
 	long.N, long.Budget = d.longAfterPlaced(dayN, budget)
+	budgetText := LongBudgetText(cfg.Capital, long.N, long.Budget)
+	if cfg.Capital.Weighting == config.WeightingTurnover {
+		// 建てた後の回は long.N が 0 になるので、その日の総額（dayN × budget）で見せる
+		budgetText = LongBudgetText(cfg.Capital, dayN, budget)
+	}
 	notes = append(notes, SizingNote{
-		Text:  fmt.Sprintf("ショートの余り %s 円をロングに回す → N=%d、1 注文 %s 円", cli.Yen(spill), long.N, cli.Yen(long.Budget)),
+		Text:  fmt.Sprintf("ショートの余り %s 円をロングに回す → N=%d、%s", cli.Yen(spill), long.N, budgetText),
 		Level: "info", Code: "daytrade.regime", Msg: "ショートの余りをロングへ",
 		Fields: map[string]any{"spill": spill.String(), "n": long.N, "budget": long.Budget.String(), "n_day": dayN},
 	})
