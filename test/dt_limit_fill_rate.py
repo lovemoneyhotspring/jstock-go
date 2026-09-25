@@ -2,7 +2,7 @@
 
 根拠: vault 20-research/2026-09-jp-daytrade-preopen-order.md（「寄指の約定率」の追記、2026-09-21）
 
-  test/.venv/bin/python test/dt_limit_fill_rate.py [--slot 085930] [--since 2026-09-11] [--top 10]
+  test/.venv/bin/python test/dt_limit_fill_rate.py [--slot snap] [--since 2026-09-11] [--top 10]
 
 見える値段は寄る前の最良気配の中値（test/dt_preopen_rank.py と同じ）。指値 L = 見える値段 × (1 + m)。
 約定は「始値 < L」（m = 0）か「始値 <= L」（m > 0）。始値 = L は板寄せで約定が保証されないので m = 0 では数えない。

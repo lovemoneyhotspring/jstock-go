@@ -2,7 +2,7 @@
 
 根拠: vault 20-research/2026-09-jp-daytrade-limit-on-open.md の「事前登録 3」（2026-09-21）
 
-  test/.venv/bin/python test/dt_limit_uslow.py [--seeds 20] [--side-seeds 10] [--slot 085930] [--err-since 2026-09-11]
+  test/.venv/bin/python test/dt_limit_uslow.py [--seeds 20] [--side-seeds 10] [--slot snap] [--err-since 2026-09-11]
   test/.venv/bin/python test/dt_limit_uslow.py --report-only
 
 判定は 1 本: U = LightGBM 順・上位 3 本・指値 = 前日終値 −0.5%（始値のギャップ < −0.5% だけ約定、残りの枠は現金）。

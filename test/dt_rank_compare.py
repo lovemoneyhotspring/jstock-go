@@ -3,7 +3,7 @@
 根拠・事前登録: vault 20-research/2026-09-jp-daytrade-rankby-preopen-fair.md
 
   test/.venv/bin/python test/dt_candidates.py --max-gap 0.03 --out test/out/dt_candidates_wide.parquet
-  test/.venv/bin/python test/dt_rank_compare.py [--seeds 20] [--side-seeds 10] [--slot 085930] [--err-since 2026-09-11]
+  test/.venv/bin/python test/dt_rank_compare.py [--seeds 20] [--side-seeds 10] [--slot snap] [--err-since 2026-09-11]
 
 誤差の入れ方・候補の作り直しは test/dt_preopen_sim.py と同じ。違いは
   - 学習が walk-forward（1 年ずつ 7 本。dt_preopen_sim は 2024-09 で 1 分割）

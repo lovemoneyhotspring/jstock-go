@@ -9,15 +9,12 @@
 事前登録（2026-09-25、発注時の気配が 1 日分しか無いうちに固定。この docstring を commit してから回す）:
   回す日: 発注時の気配（history/quotes の 8:59 台）と始値がそろった日が **10 日**になってから（2026-09-24 から数えて
           10/7 の始値が入った後）。10 日に満たなければ止める（下の MIN_DAYS）。ユーザ判断で 10 日（2026-09-25）。
-  誤差: 発注時の気配 − 始値（dt_preopen_sim.error_frame("order")）。ギャップの帯（BANDS）ごとに引く。
-        行が 30 未満の帯（深い帯は候補が少ない）は、次の順で代える（2026-09-25 ユーザの提案で決め直し。結果はまだ見ていない）:
-          1) 同じ帯の寄り直前の全銘柄の板のうちロングの候補（その日の発注時の気配にある銘柄）の行（30 以上なら）
-          2) 同じ帯の寄り直前の全銘柄の板の全行（30 以上なら）
-        寄り直前の全銘柄の板は 9/25 の 8:59:42 の snap（slot 085942）と、9/28 からは寄る前の open が 8:59:48〜51.2 に撮る
-        候補の外の板（slot は撮り始めた時刻 0859xx。独立の snap を open に畳んだため。2026-09-25 に決め直し、結果はまだ見ていない）。
-        9/28 からの板には候補の行が無い（候補は発注時の気配にある）ので、1) は 9/25 の分だけになる。
-          3) 行が 30 以上ある発注時の気配の帯のうち、帯の番号が最も近いもの
-        記述: 最初の決め方（3 だけ）でも回して並べる。
+  誤差: 見える気配 − 始値。材料は dt_preopen_sim.error_frame("snap")（2026-09-25 ユーザ判断で決め直し。結果はまだ見ていない）:
+          第一 8:59:48 以降の値（候補は発注時の気配、候補の外は寄る前の open が撮る板）、
+          補い 第一に無い銘柄だけ同じ日の 8:59:30 の snap（slot 085930）。
+        ギャップの帯（BANDS）ごとに引く。行が 30 未満の帯は、30 以上ある帯のうち帯の番号が最も近いものの行で代える。
+        回す日の数え方（10 日）は第一の材料のある日。
+        記述: 発注時の気配だけ（候補の外を入れない）でも回して並べる。
     iid    帯ごとに全日の行から引く（主）
     block  模擬の 1 日ごとに記録の 1 日を選び、その日のその帯の行から引く（5 行未満ならその帯の全日の行）
     upper  誤差なし（記述）
@@ -47,33 +44,18 @@ MIN_BAND_ROWS = 30
 RMAX, CAP, I0 = 10, 1e7, 10e-4
 
 
-def band_pools(order, snap, neighbor_only=False):
-    """帯ごとの誤差の行（d・e）。order は発注時の気配、snap は 8:59:42 の snap（どちらも d・symbol・g・e）。
-    返すのは {帯: DataFrame(d, e)} と、帯ごとの出どころの説明。"""
+def band_pools(err):
+    """帯ごとの誤差の行（d・e）。行が MIN_BAND_ROWS 未満の帯は近い帯で代える。返すのは {帯: DataFrame(d, e)} と出どころの説明。"""
     nb = len(BANDS) - 1
-    band_of = lambda x: np.digitize(x["g"], BANDS[1:-1], right=True)
-    order = order.assign(band=band_of(order))
-    snap = snap.assign(band=band_of(snap))
-    cand = set(zip(order["d"], order["symbol"]))
-    snap_cand = snap[[k in cand for k in zip(snap["d"], snap["symbol"])]]
-    ok = [b for b in range(nb) if (order["band"] == b).sum() >= MIN_BAND_ROWS]
+    err = err.assign(band=np.digitize(err["g"], BANDS[1:-1], right=True))
+    ok = [b for b in range(nb) if (err["band"] == b).sum() >= MIN_BAND_ROWS]
     if not ok:
         raise SystemExit("誤差の行が足りない")
     pools, how = {}, {}
     for b in range(nb):
-        if b in ok:
-            pools[b], how[b] = order.loc[order["band"] == b, ["d", "e"]], "発注時"
-            continue
-        if not neighbor_only:
-            for name, frame in (("snap 候補", snap_cand), ("snap 全銘柄", snap)):
-                rows = frame.loc[frame["band"] == b, ["d", "e"]]
-                if len(rows) >= MIN_BAND_ROWS:
-                    pools[b], how[b] = rows, name
-                    break
-            if b in pools:
-                continue
-        near = min(ok, key=lambda o: (abs(o - b), o))
-        pools[b], how[b] = order.loc[order["band"] == near, ["d", "e"]], f"発注時の帯 {near}"
+        src = b if b in ok else min(ok, key=lambda o: (abs(o - b), o))
+        pools[b] = err.loc[err["band"] == src, ["d", "e"]]
+        how[b] = "そのまま" if src == b else f"帯 {src} で代える"
     return pools, how
 
 
@@ -101,18 +83,17 @@ def main():
     ap.add_argument("--seeds", type=int, default=10)
     a = ap.parse_args()
 
-    err = error_frame("order", "2026-09-19")
-    ndays = err["d"].nunique()
-    print(f"発注時の気配の誤差: {ndays} 日（{err['d'].min()}〜{err['d'].max()}）、{len(err):,} 行", flush=True)
-    if ndays < MIN_DAYS:
+    err = error_frame("snap", "2026-09-19")  # 第一の材料が 10 日に満たなければここで止まる（MIN_DAYS と同じ 10）
+    first_days = err.loc[err["src"] != "085930", "d"].nunique()
+    print(f"誤差の材料: 第一の材料のある日 {first_days} 日、{len(err):,} 行（出どころ {err['src'].value_counts().to_dict()}）", flush=True)
+    if first_days < MIN_DAYS:
         raise SystemExit(f"{MIN_DAYS} 日に満たないので回さない（事前登録）")
-    snap = error_frame("presnap", "2026-09-25")
-    print(f"寄り直前の全銘柄の板の誤差: {snap['d'].nunique()} 日、{len(snap):,} 行", flush=True)
     rec_days = np.sort(err["d"].unique())
+    order_only = err[err["src"] == "order"]
     forms = {}
-    for form, neighbor in (("主", False), ("近い帯（記述）", True)):
-        forms[form], how = band_pools(err, snap, neighbor)
-        print(f"帯の出どころ（{form}）: " + "、".join(f"{b}={h}（{len(forms[form][b])} 行）" for b, h in how.items()))
+    for form, frame in (("主", err), ("発注時の気配だけ（記述）", order_only)):
+        forms[form], how = band_pools(frame)
+        print(f"帯（{form}）: " + "、".join(f"{b}={h}（{len(forms[form][b])} 行）" for b, h in how.items()))
 
     df = pd.read_parquet(CAND)
     last_day = df["d"].max()
@@ -134,7 +115,7 @@ def main():
     band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
     day_idx = te["d"].rank(method="dense").astype(int).values - 1
     acc = {}
-    runs = [("iid", "主"), ("block", "主"), ("upper", "主"), ("iid", "近い帯（記述）")]
+    runs = [("iid", "主"), ("block", "主"), ("upper", "主"), ("iid", "発注時の気配だけ（記述）")]
     for mode, form in runs:
         for seed in range(a.seeds if mode != "upper" else 1):
             g = seen(te, draw(np.random.default_rng(seed), forms[form], band, day_idx, rec_days, mode))

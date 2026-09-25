@@ -2,7 +2,7 @@
 
 根拠: vault 20-research/2026-09-jp-daytrade-limit-on-open.md の「事前登録 2」（2026-09-21）
 
-  test/.venv/bin/python test/dt_limit_breakeven.py [--seeds 20] [--side-seeds 10] [--slot 085930] [--err-since 2026-09-11]
+  test/.venv/bin/python test/dt_limit_breakeven.py [--seeds 20] [--side-seeds 10] [--slot snap] [--err-since 2026-09-11]
   test/.venv/bin/python test/dt_limit_breakeven.py --report-only
 
 選定は B（今の本番: gap_vol 上位 3 本を寄成、米国小幅高は休む）と同じ。寄指は指値のギャップ −c を固定で置き、始値のギャップ < −c だけ約定。

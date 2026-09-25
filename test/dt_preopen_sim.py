@@ -5,7 +5,7 @@
 8:59:45 の記録が 20 営業日溜まったら、--slot 085945 で測り直す）
 
   test/.venv/bin/python test/dt_candidates.py --max-gap 0.03 --out test/out/dt_candidates_wide.parquet
-  test/.venv/bin/python test/dt_preopen_sim.py [--slot 085930] [--seeds 20] [--err-since 2026-09-11]
+  test/.venv/bin/python test/dt_preopen_sim.py [--slot snap] [--seeds 20] [--err-since 2026-09-11]
 
 形:
   upper    誤差なし。始値のギャップで並べて始値で建てる（上限）
@@ -41,10 +41,13 @@ BARS = "data/jquants/equities_bars_daily/*.parquet"
 TEST_START = "2024-09-02"
 HALF = "2025-10-01"
 BANDS = [-np.inf, -5.0, -3.0, -1.0, 0.0, 3.0, np.inf]
-# snap を使う検証の既定の slot（2026-09-25 ユーザ判断で 8:59:30 へ。記録は 2026-09-28 から）。8:59:00（"0859"）は
-# 8:59:30 の蓄積が進んだらやめる。2026-09-25 までの結果（slot 0859 で測った数字）を回し直すときは --slot 0859。
-# SNAP_SLOT の記録が MIN_SNAP_DAYS に満たなければ error_frame が止める（旧い材料で黙って回さない）
-SNAP_SLOT = "085930"
+# 気配の誤差の材料の既定（2026-09-25 ユーザ判断）。"snap" は層にした材料:
+#   第一: 8:59:48 以降の値 = 候補は発注時の気配（history/quotes の 8:59 台）、候補の外は寄る前の open が撮る板（slot 085948 以降）
+#   補い: 第一に無い銘柄（打ち切りで撮れなかった候補の外など）だけ、同じ日の 8:59:30 の snap（slot 085930）の行
+#   （8:59:48 以降の 6 桁の slot には 9/24 だけの 8:59:55 の snap も入る。9/25 の 8:59:42 は第一にも補いにも入れない）
+# 8:59:00（"0859"）は 8:59:30 の蓄積が進んだらやめる。2026-09-25 までの結果（slot 0859 で測った数字）を回し直すときは --slot 0859。
+# 第一の材料のある日が MIN_SNAP_DAYS に満たなければ error_frame が止める（旧い材料で黙って回さない）
+SNAP_SLOT = "snap"
 MIN_SNAP_DAYS = 10  # 始値のギャップ（%）。元の検証と同じ区切り
 
 ERR_SQL = f"""
@@ -86,18 +89,31 @@ FROM v JOIN q ON q.d = v.d AND q.code = v.symbol || '0' WHERE q.op > 0
 PRESNAP_ERR_SQL = ERR_SQL.replace("WHERE slot = ? AND", "WHERE regexp_matches(slot, '^0859[45][0-9]$') AND ? = ? AND")
 
 
+SNAP_LAYERED_SQL = f"""
+WITH o AS ({ORDER_ERR_SQL.replace("SELECT v.d, v.symbol,", "SELECT v.d, v.symbol, 1 AS pri, 'order' AS src,")}),
+p AS ({ERR_SQL.replace("WHERE slot = ? AND", "WHERE regexp_matches(slot, '^0859[45][0-9]$') AND slot >= '085948' AND").replace("SELECT v.d, v.symbol,", "SELECT v.d, v.symbol, 2 AS pri, 'presnap' AS src,")}),
+s AS ({ERR_SQL.replace("WHERE slot = ? AND", "WHERE slot = '085930' AND").replace("SELECT v.d, v.symbol,", "SELECT v.d, v.symbol, 3 AS pri, '085930' AS src,")}),
+u AS (SELECT * FROM o UNION ALL SELECT * FROM p UNION ALL SELECT * FROM s)
+SELECT d, symbol, g, e, src FROM u
+QUALIFY row_number() OVER (PARTITION BY d, symbol ORDER BY pri) = 1
+"""
+
+
 def error_frame(slot, since):
-    """誤差の実測の行（d・symbol・始値のギャップ g・誤差 e、%pt）。slot = "order" なら発注時の気配、
-    "presnap" なら寄り直前の全銘柄の板（上の PRESNAP_ERR_SQL）、ほかは板の記録の時刻。"""
+    """誤差の実測の行（d・symbol・始値のギャップ g・誤差 e、%pt）。slot = "snap" なら層にした既定の材料（上の SNAP_SLOT。
+    列 src に出どころ）、"order" なら発注時の気配、"presnap" なら寄り直前の全銘柄の板、ほかは板の記録の時刻。"""
     if slot == "order":
         return duckdb.sql(ORDER_ERR_SQL, params=[since, since]).df()
     if slot == "presnap":
         return duckdb.sql(PRESNAP_ERR_SQL, params=[1, 1, since, since]).df()
-    df = duckdb.sql(ERR_SQL, params=[slot, since, since]).df()
-    if slot == SNAP_SLOT and df["d"].nunique() < MIN_SNAP_DAYS:
-        raise SystemExit(f"slot {slot}（8:59:30 の snap）の記録は {df['d'].nunique()} 日で {MIN_SNAP_DAYS} 日に満たない。"
-                         f"2026-09-25 までの材料で回すなら --slot 0859")
-    return df
+    if slot == "snap":
+        df = duckdb.sql(SNAP_LAYERED_SQL, params=[since, since, since, since, since, since]).df()
+        first = df.loc[df["src"] != "085930", "d"].nunique()
+        if first < MIN_SNAP_DAYS:
+            raise SystemExit(f"8:59:48 以降の材料のある日が {first} 日で {MIN_SNAP_DAYS} 日に満たない。"
+                             f"2026-09-25 までの材料で回すなら --slot 0859")
+        return df
+    return duckdb.sql(ERR_SQL, params=[slot, since, since]).df()
 
 
 def error_pools(slot, since):

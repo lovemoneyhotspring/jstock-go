@@ -2,7 +2,7 @@
 
 根拠: vault 20-research/2026-09-jp-daytrade-limit-on-open.md（事前登録 2026-09-21）
 
-  test/.venv/bin/python test/dt_limit_on_open.py [--seeds 20] [--side-seeds 10] [--slot 085930] [--err-since 2026-09-11]
+  test/.venv/bin/python test/dt_limit_on_open.py [--seeds 20] [--side-seeds 10] [--slot snap] [--err-since 2026-09-11]
   test/.venv/bin/python test/dt_limit_on_open.py --report-only [--detail b0_m0_k3_cap,b0.4_m1_k6_avg]
 
 土台は test/dt_rank_compare.py と同じ（候補表・誤差の引き方・米国小幅高の日は休む＝G0）。並べ方は gap_vol だけで、学習は無い。
