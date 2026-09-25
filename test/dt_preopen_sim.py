@@ -57,9 +57,34 @@ FROM v JOIN q ON q.d = v.d AND q.code = v.symbol || '0' WHERE v.vis IS NOT NULL 
 """
 
 
+# 発注時の気配（open が寄る前の回に自分で取った値。history/quotes の 8:59 台）。slot = "order" で使う。
+# snap（板の記録）より発注の判断に使った値そのものに近い（2026-09-24 の 1 日で誤差の中央値 0.49% 対 snap 0859 の 0.71%）。
+# 寄る前の発注は 2026-09-19 から（最初の取引日は 9/24）
+QUOTES = "state/daytrade/history/quotes/*.parquet"
+ORDER_ERR_SQL = f"""
+WITH v AS (
+  SELECT CAST(day AS DATE) d, symbol, prev_close pc, price vis
+  FROM read_parquet('{QUOTES}', union_by_name=true)
+  WHERE strftime(quote_at AT TIME ZONE 'Asia/Tokyo', '%H:%M') = '08:59' AND price > 0 AND prev_close > 0
+    AND CAST(day AS DATE) >= CAST(? AS DATE)),
+q AS (
+  SELECT CAST(Date AS DATE) d, CAST(Code AS VARCHAR) code, TRY_CAST(O AS DOUBLE) op
+  FROM read_parquet('{BARS}', union_by_name=true) WHERE CAST(Date AS DATE) >= CAST(? AS DATE))
+SELECT v.d, (q.op / v.pc - 1) * 100 g, (v.vis / v.pc - 1) * 100 - (q.op / v.pc - 1) * 100 e
+FROM v JOIN q ON q.d = v.d AND q.code = v.symbol || '0' WHERE q.op > 0
+"""
+
+
+def error_frame(slot, since):
+    """誤差の実測の行（d・始値のギャップ g・誤差 e、%pt）。slot = "order" なら発注時の気配、ほかは板の記録の時刻。"""
+    if slot == "order":
+        return duckdb.sql(ORDER_ERR_SQL, params=[since, since]).df()
+    return duckdb.sql(ERR_SQL, params=[slot, since, since]).df()
+
+
 def error_pools(slot, since):
     """帯ごとの誤差 e（見えるギャップ − 始値のギャップ、%pt）の実測。"""
-    err = duckdb.sql(ERR_SQL, params=[slot, since, since]).df()
+    err = error_frame(slot, since)
     err["band"] = np.digitize(err["g"], BANDS[1:-1], right=True)
     pools = [err.loc[err["band"] == b, "e"].values for b in range(len(BANDS) - 1)]
     print(f"誤差の実測: slot {slot}、{err['d'].nunique()} 日、帯ごとの行数 {[len(p) for p in pools]}、"
