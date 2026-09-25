@@ -23,7 +23,7 @@ import glob
 import numpy as np
 import pandas as pd
 
-from dt_nscale import COST, IS_END, SINCE, alloc_rule, calib_kappa, day_rules, max_dd, pnl_day, tstat
+from dt_nscale import COST, IS_END, SINCE, alloc_rule, calib_kappa, day_rules, max_dd, pnl_day, tstat, tstat_err
 from dt_rsi2_deep import POOL
 from dt_rsi_family import family_features
 
@@ -66,14 +66,8 @@ def wilder_features():
 
 def seen_all(te, pools, seed):
     """test/dt_nscale.seen_ranked と同じ乱数で見えるギャップを作る（業種の上限は掛けない）。"""
-    from dt_preopen_sim import BANDS, seen
-    band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
-    rng = np.random.default_rng(seed)
-    e = np.zeros(len(te))
-    for b, pool in enumerate(pools):
-        if (band == b).any():
-            e[band == b] = rng.choice(pool, size=int((band == b).sum()))
-    return seen(te, e)
+    from dt_preopen_sim import draw_errors, seen
+    return seen(te, draw_errors(pools, te, seed))
 
 
 def cap_rank(g, key):
@@ -145,7 +139,7 @@ def main():
     oos = alld > IS_END
     for v in variants:
         d = mean[v] - mean["base"]
-        cells = [f"{mean[v][m].mean():,.0f}" + ("" if v == "base" else f"（{d[m].mean():+,.0f}, {tstat(d[m]):+.2f}）")
+        cells = [f"{mean[v][m].mean():,.0f}" + ("" if v == "base" else f"（{d[m].mean():+,.0f}, {tstat(d[m]):+.2f}, 誤差込み {tstat_err(acc[v], acc['base'], m):+.2f}）")
                  for m in per.values()]
         ann = np.mean([x[oos].mean() * 245 / C * 100 for x in acc[v]])
         mdd = np.mean([max_dd(x[oos].values) / C * 100 for x in acc[v]])

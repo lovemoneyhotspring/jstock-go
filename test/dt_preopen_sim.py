@@ -82,14 +82,76 @@ def error_frame(slot, since):
     return duckdb.sql(ERR_SQL, params=[slot, since, since]).df()
 
 
-def error_pools(slot, since):
-    """帯ごとの誤差 e（見えるギャップ − 始値のギャップ、%pt）の実測。"""
+ERR_MODES = ("iid", "day", "iid_boot", "day_boot")
+MIN_ERR_DAYS = 10   # これより少ない日数の誤差で出した数字は、判定に使わない（2026-09-25、vault 2026-09-jp-daytrade-sim-parity）
+
+
+class ErrorPools(list):
+    """帯ごとの誤差の実測。list としては従来どおり帯ごとの配列（pools[b]）。引き方 mode は draw_errors が見る。
+      iid       帯ごとに銘柄ごと独立に引く（従来）
+      day       過去の日ごとに実測の 1 日を当て、その日の同じ帯の行から引く（同じ日の銘柄の誤差の相関を残す）
+      iid_boot  シードごとに実測の日を復元抽出し直してから iid（誤差の分布が数日分しかない不確かさをシード間に出す）
+      day_boot  同じく復元抽出してから day"""
+
+    def __init__(self, err, mode):
+        super().__init__(err.loc[err["band"] == b, "e"].values for b in range(len(BANDS) - 1))
+        self.err, self.mode = err, mode
+        self.days = np.array(sorted(err["d"].unique()))
+
+
+def error_pools(slot, since, mode=None):
+    """帯ごとの誤差 e（見えるギャップ − 始値のギャップ、%pt）の実測。mode を渡さなければ環境変数 DT_ERR_MODE（既定 iid）。"""
+    mode = mode or os.environ.get("DT_ERR_MODE", "iid")
+    if mode not in ERR_MODES:
+        raise ValueError(f"DT_ERR_MODE は {ERR_MODES} のどれか: {mode}")
     err = error_frame(slot, since)
     err["band"] = np.digitize(err["g"], BANDS[1:-1], right=True)
-    pools = [err.loc[err["band"] == b, "e"].values for b in range(len(BANDS) - 1)]
-    print(f"誤差の実測: slot {slot}、{err['d'].nunique()} 日、帯ごとの行数 {[len(p) for p in pools]}、"
+    pools = ErrorPools(err, mode)
+    print(f"誤差の実測: slot {slot}、{len(pools.days)} 日、引き方 {mode}、帯ごとの行数 {[len(p) for p in pools]}、"
           f"絶対誤差の中央値 {[round(float(np.median(np.abs(p))), 2) if len(p) else None for p in pools]}")
+    if len(pools.days) < MIN_ERR_DAYS:
+        print(f"**注意: 誤差の実測が {len(pools.days)} 日しかない（{MIN_ERR_DAYS} 日未満）。誤差ありの形の数字は判定に使わない**")
     return pools
+
+
+def draw_errors(pools, te, seed):
+    """seed の乱数で、候補 te（gap は小数、d は日付）の気配の誤差 e（%pt）を引く。
+    iid（従来の list も）は各スクリプトにあったループと同じ乱数の流れ（過去の数字を再現する）。"""
+    band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
+    rng = np.random.default_rng(seed)
+    e = np.zeros(len(te))
+    mode = getattr(pools, "mode", "iid")
+    if mode == "iid":
+        for b, pool in enumerate(pools):
+            if (band == b).any():
+                e[band == b] = rng.choice(pool, size=int((band == b).sum()))
+        return e
+    err = pools.err
+    days = pools.days
+    if mode.endswith("_boot"):
+        days = rng.choice(days, size=len(days), replace=True)
+    rows = pd.concat([err[err["d"] == d] for d in days], ignore_index=True)  # 復元抽出の重複は行の重複として残す
+    if mode == "iid_boot":
+        for b in range(len(BANDS) - 1):
+            pool = rows.loc[rows["band"] == b, "e"].values
+            if (band == b).any() and len(pool):
+                e[band == b] = rng.choice(pool, size=int((band == b).sum()))
+        return e
+    # day / day_boot: 過去の日ごとに実測の 1 日を当てる
+    hist = pd.Index(np.sort(te["d"].unique()))
+    assign = pd.Series(rng.choice(days, size=len(hist)), index=hist)
+    errday = assign.reindex(te["d"].values).values
+    by = {k: x["e"].values for k, x in err.groupby(["d", "band"])}
+    for j in np.unique(errday):
+        for b in np.unique(band):
+            m = (errday == j) & (band == b)
+            if not m.any():
+                continue
+            pool = by.get((j, b))
+            if pool is None or len(pool) == 0:   # その日のその帯に行が無ければ、選んだ日全体の同じ帯から
+                pool = rows.loc[rows["band"] == b, "e"].values
+            e[m] = rng.choice(pool, size=int(m.sum()))
+    return e
 
 
 def train(df):
@@ -160,10 +222,13 @@ def main():
     for ranker in ("lgbm", "gap_vol"):
         picks.append(run(model, exact, "upper", ranker, 0, False))
     for s in range(a.seeds):
-        rng = np.random.default_rng(s)
-        e = np.empty(len(te))
-        for b, pool in enumerate(pools):
-            e[band == b] = rng.choice(pool, size=int((band == b).sum()))
+        if pools.mode == "iid":   # 元の乱数の流れのまま（過去の数字を再現する）
+            rng = np.random.default_rng(s)
+            e = np.empty(len(te))
+            for b, pool in enumerate(pools):
+                e[band == b] = rng.choice(pool, size=int((band == b).sum()))
+        else:
+            e = draw_errors(pools, te, s)
         g = seen(te, e)
         for ranker in ("lgbm", "gap_vol"):
             picks.append(run(model, g, "preopen", ranker, s, False))

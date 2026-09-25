@@ -34,6 +34,17 @@ def load():
     return c
 
 
+def tstat_err(a, b, m):
+    """誤差の引き方の不確かさを入れた t。a・b はシードごとの日次系列のリスト（同じシード順）、m は日の絞り込み。
+    se = √(日の標本誤差² + シードごとの平均差のばらつき²)。*_boot の引き方ではシード間に「誤差の分布が数日分しかない」
+    不確かさが出るので、これが大きいと t は縮む。iid でもシード間の乱数の揺れの分だけ保守的になる。"""
+    D = pd.concat(a, axis=1).values[m] - pd.concat(b, axis=1).values[m]
+    x = D.mean(axis=1)
+    se_day = x.std(ddof=1) / np.sqrt(len(x))
+    sd_seed = D.mean(axis=0).std(ddof=1) if D.shape[1] > 1 else 0.0
+    return x.mean() / np.sqrt(se_day ** 2 + sd_seed ** 2)
+
+
 def tstat(x):
     x = np.asarray(x, dtype=float)
     x = x[~np.isnan(x)]
@@ -289,14 +300,8 @@ def seen_ranked(te, pools, seed, sector_cap=True, per_sector=1, afford=None):
     per_sector は 1 業種あたりの上限（本番の signal.max_per_sector）。業種が欠けた行は 1 つの業種として数える。
     afford は見える候補の表 → 1 単元が載るか（bool の配列）。渡すと載らない銘柄を業種の上限の前に外す
     （Go の candidatePool と同じ順番。test/dt_parity_go.py の unit_affordable）。既定の None は外さない（従来の形）。"""
-    from dt_preopen_sim import BANDS, seen
-    band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
-    rng = np.random.default_rng(seed)
-    e = np.zeros(len(te))
-    for b, pool in enumerate(pools):
-        if (band == b).any():
-            e[band == b] = rng.choice(pool, size=int((band == b).sum()))
-    g = seen(te, e)
+    from dt_preopen_sim import draw_errors, seen
+    g = seen(te, draw_errors(pools, te, seed))
     g = g.sort_values(["d", "key_sort", "code"], kind="mergesort")
     if afford is not None:
         g = g[afford(g)]
