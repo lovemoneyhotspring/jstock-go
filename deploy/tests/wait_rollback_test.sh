@@ -160,7 +160,7 @@ while IFS= read -r line; do
 done < <(grep -v "^#" "$C" | grep "^59 8" | grep "daytrade snap")
 check "8:59 台の snap は 8:59:00 と 8:59:30 の 2 回で、どちらも寄る前の open の 1 秒前までにロックを手放す" \
   '! grep -v "^#" "$C" | grep -q "DT_PRESNAP_AT" && [ -n "$s30" ] && [ "$snap59_n" = 2 ] && [ "$snap59_ok" = 1 ]'
-check "8:30・8:45・8:55 の snap はやめた（2026-09-25）" '! grep -v "^#" "$C" | grep -Eq "^(30|45|55)[, ].* 8 \* \* 1-5.*daytrade snap"'
+check "8:30・8:45・8:55・8:57 の snap はやめた（2026-09-25）" '! grep -v "^#" "$C" | grep -Eq "^(30|45|55|57)[, ][^ ]* ?8 \* \* 1-5.*daytrade snap"'
 
 echo
 [ "$fail" = 0 ] && echo "全部通った" || echo "失敗あり"

@@ -179,11 +179,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 行ごと open に畳んだ（git の 2026-09-25 の crontab.txt に元の行と説明がある）。
 # 8:30・8:45・8:55 の回は 2026-09-25 にやめた（ユーザ判断）。9/24 の候補で気配の誤差は 8:45 0.68%・8:55 0.78%・8:59:00 0.71%・
 # 8:59:35 0.66% と時刻でほぼ変わらず、発注時の気配（8:59:50）だけ 0.49% だった——寄る前の数十分の推移は選定にも誤差の模擬にも
-# 使っていない。8:57 は 8:55 と 8:59 の間を埋めるために足した回（気配の動く速さを特徴量にするため。2026-09-19 追加）で残す。
-# 8:57 だけは既定（170 秒 + KILL 10 秒）にしない。8:57:01 に起きると TERM が 08:59:51・KILL が 09:00:01 に当たり、
-# 8:59:52 の寄成（ロック待ち 5 秒）を [lock_busy] で弾く。snap の自己締め切りは 50 秒（book.max_run_seconds）なので
-# 60 + 5 で足り、遅くとも 08:58:06 にはロックを手放す
-57 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=60 WITH_LOCK_KILL_AFTER=5 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+# 使っていない。8:57（8:55 と 8:59 の間を埋めて気配の動く速さを測るため 2026-09-19 に足した回）も同日にやめた。
 59 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=25 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 20
 # 8:59:30（DT_SNAP30_AT、slot 085930。2026-09-25 追加）: 8:59:00 の代わり。蓄積が進んだら 8:59:00 をやめる（ユーザ判断）。
 # やめる条件は vault 30-projects/daytrade.md「snap の時刻の整理」（板の厚みの代理を 085930 で測り直してから）。
@@ -221,7 +217,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 取れなかった朝は open が設定の値で建てる（売買は止まらない）
 53 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=65 WITH_LOCK_KILL_AFTER=5 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-margin.log $WBJP_BIN/daytrade warm-margin --config-dir config/daytrade_margin
 # 8:56 の保険: 8:53 に取れなかった朝（margin.json が今日の日付でない）だけもう一度。取れていれば何もしない。
-# ロック待ち 5 秒・35 秒で打ち切る——TERM は遅くとも 8:56:40、KILL（+10 秒）でも 8:56:50 に手放し、8:57 の snap（wait 0）を塞がない。cron では % を \% と書く
+# ロック待ち 5 秒・35 秒で打ち切る——TERM は遅くとも 8:56:40、KILL（+10 秒）でも 8:56:50 に手放し、8:59:00 の snap（wait 0）を塞がない。cron では % を \% と書く
 56 8 * * 1-5          cd $WBJP_HOME && [ "$(date -r data/daytrade/margin.json +\%F 2>/dev/null)" != "$(date +\%F)" ] && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=35 deploy/with-lock.sh /tmp/daytrade.lock 5 state/logs/daytrade-margin.log $WBJP_BIN/daytrade warm-margin --config-dir config/daytrade_margin
 # 9:22: その朝の記録が回ったかを点検して Discord に 1 通投げる（deploy/morning-check.sh）。
 # 板は遡れないので、欠けたその日のうちに気づくためのもの。判断も修正もしない。
