@@ -5,7 +5,8 @@
 #   bash test/dt_remeasure_errmode.sh [名前 ...]   # 出力は test/out/remeasure_err/<名前>.txt
 set -u
 cd "$(dirname "$0")/.."
-export PYTHONPATH=test
+# 誤差の実測は 2026-09-24 まで（7 日）に固定する。単元の判定・日の区分の測り直しと同じ材料で比べるため
+export PYTHONPATH=test DT_ERR_UNTIL=2026-09-24
 PY=test/.venv/bin/python
 OUT=test/out/remeasure_err
 mkdir -p "$OUT"

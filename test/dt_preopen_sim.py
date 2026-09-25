@@ -76,10 +76,17 @@ FROM v JOIN q ON q.d = v.d AND q.code = v.symbol || '0' WHERE q.op > 0
 
 
 def error_frame(slot, since):
-    """誤差の実測の行（d・symbol・始値のギャップ g・誤差 e、%pt）。slot = "order" なら発注時の気配、ほかは板の記録の時刻。"""
+    """誤差の実測の行（d・symbol・始値のギャップ g・誤差 e、%pt）。slot = "order" なら発注時の気配、ほかは板の記録の時刻。
+    環境変数 DT_ERR_UNTIL（YYYY-MM-DD）があればその日までに絞る。記録は毎日増えるので、比べる実行どうしで
+    誤差の日数を揃えるために使う（2026-09-25、実行の途中で 7 日 → 8 日に増えて数字が動いた）。"""
     if slot == "order":
-        return duckdb.sql(ORDER_ERR_SQL, params=[since, since]).df()
-    return duckdb.sql(ERR_SQL, params=[slot, since, since]).df()
+        err = duckdb.sql(ORDER_ERR_SQL, params=[since, since]).df()
+    else:
+        err = duckdb.sql(ERR_SQL, params=[slot, since, since]).df()
+    until = os.environ.get("DT_ERR_UNTIL")
+    if until:
+        err = err[pd.to_datetime(err["d"]) <= pd.Timestamp(until)]
+    return err
 
 
 ERR_MODES = ("iid", "day", "iid_boot", "day_boot")
