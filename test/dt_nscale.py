@@ -3,7 +3,7 @@
 根拠: vault 20-research/2026-09-jp-daytrade-nscale.md
 候補表は test/dt_candidates.py の出力（test/out/dt_candidates.parquet）。
 
-  test/.venv/bin/python test/dt_nscale.py [--part rank|keybin|tail|all]
+  test/.venv/bin/python test/dt_nscale.py [--part rank|keybin|tail|all]（sector_m: 業種の上限 m × R÷7）
 
 本番に合わせる規則: gap_vol（key_sort 昇順、同順位は code 昇順）→ 同じ 33 業種は 1 日 1 銘柄。
 コストは往復 5.7 bp（ロングの検証の前提）。指標は「その日の選定の等加重平均 net bp」を日次で平均する
@@ -229,8 +229,9 @@ def alloc_fixed_iv(g, n, cap_total):
     return sel.index, cap_total * iv / iv.sum() if len(sel) else np.array([])
 
 
-def seen_ranked(te, pools, seed, sector_cap=True):
-    """気配の誤差を入れて見えるギャップで並べ直し、業種の上限を掛ける（y_raw は真の値）。"""
+def seen_ranked(te, pools, seed, sector_cap=True, per_sector=1):
+    """気配の誤差を入れて見えるギャップで並べ直し、業種の上限を掛ける（y_raw は真の値）。
+    per_sector は 1 業種あたりの上限（本番の signal.max_per_sector）。業種が欠けた行は 1 つの業種として数える。"""
     from dt_preopen_sim import BANDS, seen
     band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
     rng = np.random.default_rng(seed)
@@ -241,7 +242,7 @@ def seen_ranked(te, pools, seed, sector_cap=True):
     g = seen(te, e)
     g = g.sort_values(["d", "key_sort", "code"], kind="mergesort")
     if sector_cap:
-        g = g[~g.duplicated(["d", "sector"])]
+        g = g[g.groupby(["d", "sector"], dropna=False).cumcount() < per_sector]
     g = g.copy()
     g["rank"] = g.groupby("d").cumcount() + 1
     g["net"] = (g["y_raw"] - COST) * 1e4
@@ -279,6 +280,49 @@ def part_sector(i0s, seeds, slot):
             print(f"  I0 {i0:>4.0f} 資金 {C/1e4:5.0f} 万: 上限あり IS {ann(on[on.index <= IS_END]):5.1f}% OOS {ann(on[on.index > IS_END]):5.1f}%"
                   f" | 上限なし IS {ann(off[off.index <= IS_END]):5.1f}% OOS {ann(off[off.index > IS_END]):5.1f}%"
                   f" | 差の t IS {tstat(dd[dd.index <= IS_END]):5.2f} OOS {tstat(dd[dd.index > IS_END]):5.2f}")
+
+
+def part_sector_m(i0s, seeds, slot, ms=(1, 2, 3, None)):
+    """業種の上限 m（1・2・3・なし）× 規則 R÷7・20 位（本番の max_positions）。事前登録は 2026-09-25。"""
+    from dt_preopen_sim import error_pools
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet")
+    te = te[te["d"] >= SINCE].copy()
+    pools = error_pools(slot, "2026-09-11")
+    rules = day_rules(te)
+    alld = pd.DatetimeIndex(sorted(te["d"].unique()))
+    caps = [7e6, 1.5e7, 3e7, 5e7]
+    fn = lambda x, c: alloc_rule(x, 0.002, 20, c, k=7)
+    acc = {}
+    for seed in range(seeds):
+        for m in ms:
+            g = seen_ranked(te, pools, seed, sector_cap=m is not None, per_sector=m or 0)
+            days = [(d, x) for d, x in g.groupby("d") if not rules.loc[d, "skip"]]
+            for i0 in i0s:
+                if m == ms[0]:
+                    acc[("kappa", i0, seed)] = calib_kappa(g, i0 * 1e-4)
+                kappa = acc[("kappa", i0, seed)]
+                for C in caps:
+                    v = pd.Series({d: pnl_day(x, *fn(x, C * rules.loc[d, "mult"]), kappa) for d, x in days})
+                    acc.setdefault((i0, C, m), []).append(v.reindex(alld).fillna(0.0))
+                    if i0 == i0s[0] and seed == 0:
+                        ns = [len(fn(x, C * rules.loc[d, "mult"])[0]) for d, x in days]
+                        used = [fn(x, C * rules.loc[d, "mult"])[1].sum() / (C * rules.loc[d, "mult"]) for d, x in days]
+                        acc[(C, m, "n")], acc[(C, m, "n20")], acc[(C, m, "used")] = np.mean(ns), np.mean(np.array(ns) >= 20), np.mean(used)
+    print(f"\n## P. 業種の上限 m × R÷7・20 位（{seeds} シード、指標はシードごとに測って平均、% は対資金）")
+    for i0 in i0s:
+        for C in caps:
+            print(f"  I0 {i0:.0f} bp・資金 {C/1e4:.0f} 万")
+            base = acc[(i0, C, ms[0])]
+            for m in ms:
+                ss = acc[(i0, C, m)]
+                row = []
+                for pl, sl in [("IS", alld <= IS_END), ("OOS", alld > IS_END)]:
+                    ann = np.mean([v[sl].mean() * 245 / C * 100 for v in ss])
+                    dd = np.mean([max_dd(v[sl].values) / C * 100 for v in ss])
+                    t = tstat(pd.concat(ss, axis=1).mean(axis=1)[sl] - pd.concat(base, axis=1).mean(axis=1)[sl]) if m != ms[0] else 0.0
+                    row.append(f"{pl} 年率 {ann:5.1f}% 最大DD {dd:5.1f}% (対m=1 t {t:5.2f})")
+                lab = f"m={m}" if m else "なし"
+                print(f"    {lab:4s} 銘柄数 {acc[(C, m, 'n')]:4.1f} 20本の日 {acc[(C, m, 'n20')]:4.0%} 使用率 {acc[(C, m, 'used')]:4.0%}: " + " | ".join(row))
 
 
 def part_prod(i0s, seeds, slot):
@@ -731,6 +775,9 @@ def main():
         return
     if a.part == "sector":
         part_sector(a.i0, a.seeds, a.slot)
+        return
+    if a.part == "sector_m":
+        part_sector_m(a.i0, a.seeds, a.slot)
         return
     if a.part == "ext":
         part_ext(a.i0, a.seeds, a.slot)
