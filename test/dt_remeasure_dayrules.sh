@@ -2,6 +2,7 @@
 # 日の区分を本番の形（S&P500 0〜+1% かつ VIX ≤ 24・12 月休み）にして、ナスダック近似で測った検証を測り直す。
 # 根拠: vault 20-research/2026-09-jp-daytrade-sim-parity.md。重い検証は 1 本ずつ（並列はメモリ不足で止まる）。
 #   bash test/dt_remeasure_dayrules.sh [名前 ...]   # 名前を省くと全部。出力は test/out/remeasure/<名前>.txt
+# I0 は vault の古い記録と同じ値にそろえる（比べるのは同じ前提どうし）。実行中にこのファイルを書き換えない（bash は逐次読む）
 set -u
 cd "$(dirname "$0")/.."
 export DT_DAY_RULES=prod PYTHONPATH=test
@@ -19,13 +20,13 @@ declare -A CMD=(
   [prefer_lgbm_wf]="test/dt_prefer_lgbm_wf.py --seeds 10"
   [rsi_family]="test/dt_rsi_family.py --seeds 10"
   [rsi2_deep]="test/dt_rsi2_deep.py --seeds 10"
-  [ext]="test/dt_nscale.py --part ext"
+  [ext]="test/dt_nscale.py --part ext --i0 5"
   [wilder]="test/dt_wilder.py --seeds 10"
-  [now]="test/dt_nscale.py --part now"
-  [cap200]="test/dt_nscale.py --part cap200"
-  [r200]="test/dt_nscale.py --part r200"
-  [sector]="test/dt_nscale.py --part sector"
-  [fixed]="test/dt_nscale.py --part fixed --caps 1e7 1.5e7 2e7"
+  [now]="test/dt_nscale.py --part now --i0 3 5"
+  [cap200]="test/dt_nscale.py --part cap200 --i0 3 5"
+  [r200]="test/dt_nscale.py --part r200 --i0 3 5"
+  [sector]="test/dt_nscale.py --part sector --i0 3 5 10"
+  [fixed]="test/dt_nscale.py --part fixed --caps 1e7 1.5e7 2e7 --i0 5 3"
 )
 ORDER=(k rule prod sector_m ranker ranker_liq prefer_lgbm_wf rsi_family rsi2_deep ext wilder now cap200 r200 sector fixed)
 [ $# -gt 0 ] && ORDER=("$@")
