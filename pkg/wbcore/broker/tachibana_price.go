@@ -157,6 +157,45 @@ func (t *TachibanaBroker) MarketPrices(symbols []string) (map[string]MarketPrice
 	if err != nil {
 		return nil, err
 	}
+	return marketPricesOf(rows), nil
+}
+
+// MarketPricesWithRaw は MarketPrices と同じ時価を、columns（板の列）で取った**生の行**と行ごとの受信時刻も添えて返す。
+// 時価の解釈は MarketPrices と同じ（MarketPriceColumns の列は必ず足して取る）。全バッチが揃わなければ失敗するのも同じ。
+//
+// 寄る前の open が、発注の判断に使った気配の板をそのまま残すための口（始値の予測の学習の材料。2026-09-25）。
+func (t *TachibanaBroker) MarketPricesWithRaw(symbols []string, columns string) (map[string]MarketPrice, []map[string]any, []time.Time, error) {
+	rows, received, failed := t.MarketPricesRawPartialAt(symbols, withPriceColumns(columns))
+	if len(failed) > 0 {
+		return nil, nil, nil, &BrokerError{Message: fmt.Sprintf(
+			"立花証券の時価取得に失敗しました（%d/%d バッチ。%v）", len(failed), failed[0].Batches, failed[0])}
+	}
+	return marketPricesOf(rows), rows, received, nil
+}
+
+// withPriceColumns は columns に MarketPriceColumns の列を（無ければ）足す。
+func withPriceColumns(columns string) string {
+	if strings.TrimSpace(columns) == "" {
+		return MarketPriceColumns
+	}
+	have := map[string]bool{}
+	var out []string
+	for _, c := range strings.Split(columns, ",") {
+		if c = strings.TrimSpace(c); c != "" && !have[c] {
+			have[c] = true
+			out = append(out, c)
+		}
+	}
+	for _, c := range strings.Split(MarketPriceColumns, ",") {
+		if !have[c] {
+			out = append(out, c)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+// marketPricesOf は時価問合の行を銘柄 → 時価にする（MarketPrices と MarketPricesWithRaw で共有）。
+func marketPricesOf(rows []map[string]any) map[string]MarketPrice {
 	found := make(map[string]MarketPrice, len(rows))
 	for _, row := range rows {
 		symbol := strings.TrimSpace(fmt.Sprint(row["sIssueCode"]))
@@ -173,7 +212,7 @@ func (t *TachibanaBroker) MarketPrices(symbols []string) (map[string]MarketPrice
 			Ask:       priceDecimal(row["pQAP"]),
 		}
 	}
-	return found, nil
+	return found
 }
 
 // PriceBatchFailure は時価問合で取れなかった 1 バッチ。

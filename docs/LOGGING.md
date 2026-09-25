@@ -224,6 +224,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `daytrade.protect_failed`（異常） / `daytrade.protect_filled_early`（warn。異常にも） / `daytrade.protect_held`（warn） | 保険の引け注文が通らなかった／引けの前に約定・失効していた（実機の挙動を確かめる）／取り消せず、その株数は引け値の手仕舞いに任せる | `day`, `orders` / `held` |
 | `daytrade.snap` | 板・気配をそのまま履歴に残した（`docs/OPENING_DATA.md`）。発注はしない | `day`, `slot`（JST の HHMM）, `scope`, `requested`, `rows`, `path` |
 | `daytrade.presnap`（info / warn） | 寄る前の `open` が候補の外の板を撮って記録した（`--presnap-until`。記録だけ）。打ち切りで残りを落とすのは設計どおりで info。取れない・時刻を過ぎていた・異常終了は warn で、発注は続ける | `slot`（撮り始めた時刻 HHMMSS。起動の約 1 秒後）, `requested`, `rows`, `missing`, `until`, `elapsed_ms`, `path`, `error` |
+| `daytrade.quote_book`（info / warn） | 寄る前の `open` が候補の気配の板（`--quote-book`、62 列）を発注の後に記録した | `slot`（取り始めた時刻 HHMMSS）, `rows`, `path`, `error` |
 | `daytrade.crash` | 実行が例外で異常終了した（通知も送る）。exit 1 | `error`, `exception`（トレースバック） |
 
 気配が取れなかった銘柄は `daytrade.quotes` の `missing_sample` に残る。

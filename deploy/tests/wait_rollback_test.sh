@@ -145,6 +145,7 @@ ol=$(grep -v "^#" "$C" | grep "wait-until.sh \$DT_PREOPEN_AT")
 ot=$(sed -n 's/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p' <<<"$ol")
 check "寄る前の open は --presnap-until \$DT_PRESNAP_UNTIL と --quotes-at \$DT_QUOTES_AT を渡している" \
   'grep -q -- "--presnap-until \$DT_PRESNAP_UNTIL --quotes-at \$DT_QUOTES_AT" <<<"$ol"'
+check "寄る前の open は候補の気配の板を残す（--quote-book）" 'grep -q -- "--quote-book" <<<"$ol"'
 check "起動 < 候補の外の打ち切り、打ち切り + 1 秒 ≤ 候補の気配、候補の気配 ≤ 8:59:55" \
   '[ -n "$pre" ] && [ -n "$until_" ] && [ -n "$qat" ] && awk -v p="$(secs "$pre")" -v u="$(secs "$until_")" -v q="$(secs "$qat")" -v l="$(secs 08:59:55)" "BEGIN{exit !(p < u && u + 1 <= q && q <= l)}"'
 check "寄る前の open の起動 + ロックの打ち切り ≥ 9:00:05" \

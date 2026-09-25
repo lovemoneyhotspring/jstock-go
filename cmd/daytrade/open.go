@@ -43,6 +43,7 @@ func newOpenCmd() *cobra.Command {
 		brokerVerifyFlag bool
 		presnapUntilFlag string
 		quotesAtFlag     string
+		quoteBookFlag    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "open",
@@ -54,7 +55,7 @@ func newOpenCmd() *cobra.Command {
 				live: liveFlag, yes: yesFlag, ignoreWindow: ignoreWindowFlag,
 				allowDelayed: allowDelayedFlag, quoteSource: quoteSourceFlag,
 				quoteFile: quoteFileFlag, date: dateFlag, brokerVerify: brokerVerifyFlag,
-				presnapUntil: presnapUntilFlag, quotesAt: quotesAtFlag,
+				presnapUntil: presnapUntilFlag, quotesAt: quotesAtFlag, quoteBook: quoteBookFlag,
 			}))
 		},
 	}
@@ -69,6 +70,8 @@ func newOpenCmd() *cobra.Command {
 		"寄る前の回で、候補の外の板をこの時刻（HH:MM:SS.f、JST）まで撮って記録する（記録だけ。空なら撮らない）")
 	cmd.Flags().StringVar(&quotesAtFlag, "quotes-at", "",
 		"寄る前の回で、候補の気配をこの時刻（HH:MM:SS.f、JST）まで待ってから取る（空なら待たない）")
+	cmd.Flags().BoolVar(&quoteBookFlag, "quote-book", false,
+		"寄る前の回で、候補の気配を板の列（book.columns）で取り、その生の行を板の記録に残す（並べ方は同じ。記録は発注の後）")
 	cmd.Flags().BoolVar(&brokerVerifyFlag, "broker-verify", false,
 		"発注経路の実機検証（docs/BROKER_VERIFY.md）。台帳・履歴・ログに印を付け、成績の集計から外す")
 	return cmd
@@ -82,6 +85,8 @@ type openOptions struct {
 	brokerVerify bool
 	// presnapUntil / quotesAt は寄る前の回の候補の外の板の打ち切りと、候補の気配を取る時刻（open_presnap.go）
 	presnapUntil, quotesAt string
+	// quoteBook は寄る前の回の候補の気配を板の列（book.columns）で取り、その生の行を記録する（open_presnap.go）
+	quoteBook bool
 }
 
 // openState は runOpen の 1 回の実行で、段（準備・plan・台帳と接続・気配・判定・選定・発注）を
@@ -99,6 +104,8 @@ type openState struct {
 	cal       *calendar.Calendar
 
 	p dtplan.Plan
+	// book は候補の気配の板（--quote-book。nil なら取らない）
+	book *quoteBook
 	// corpStale は材料の記録簿を使えずショートを見送る理由（空なら使えた）。
 	// corpDropped は材料でショートの対象から外した銘柄
 	corpStale   string
@@ -179,6 +186,8 @@ func runOpen(opts openOptions) error {
 	// 寄る前の回だけ: 候補の外の板を撮って記録し（--presnap-until）、候補を撮る時刻まで待つ（--quotes-at）
 	s.presnapOthers()
 	s.waitQuotesAt()
+	// 候補の気配の板（--quote-book）は発注の後に書き出す（parquet の書き出しで寄成を遅らせない）
+	defer s.recordQuoteBook()
 	if done := s.readQuotes(); done {
 		return nil
 	}
@@ -627,7 +636,8 @@ func (s *openState) readQuotes() (done bool) {
 	symbols, eligible, shortUniverse := s.quoteSymbols()
 
 	quotesStarted := clock.NowUTC()
-	received, err := fetchQuotes(s.cfg, s.b, symbols, s.opts.quoteSource, s.opts.quoteFile, s.deadline)
+	s.book = s.newQuoteBook()
+	received, err := fetchQuotes(s.cfg, s.b, symbols, s.opts.quoteSource, s.opts.quoteFile, s.deadline, s.book)
 	if err != nil {
 		fmt.Println(err)
 		logError("daytrade.skip", "気配が取れず寄付の買いを見送り", map[string]any{"reason": "no_quotes", "error": err.Error()})
@@ -1213,7 +1223,7 @@ func sortedKeys[V any](m map[string]V) []string {
 // fetchQuotes は設定（または上書き）の取得元から気配を取る。deadline は立花の電文の締め切り。
 // fetchQuotes は候補の気配を取る。b が立花の接続なら時価問合もそれで送る（接続と
 // セッションの取り回しを増やさない）。nil（dry-run）なら取得元が自分で繋ぐ。
-func fetchQuotes(cfg dtconfig.Config, b broker.Broker, symbols []string, sourceOverride, fileOverride string, deadline time.Time) (map[string]selection.Quote, error) {
+func fetchQuotes(cfg dtconfig.Config, b broker.Broker, symbols []string, sourceOverride, fileOverride string, deadline time.Time, book *quoteBook) (map[string]selection.Quote, error) {
 	name := cfg.Execution.QuoteSource
 	if sourceOverride != "" {
 		name = sourceOverride
@@ -1223,11 +1233,11 @@ func fetchQuotes(cfg dtconfig.Config, b broker.Broker, symbols []string, sourceO
 		file = fileOverride
 	}
 	tachibana, _ := b.(*broker.TachibanaBroker)
-	source, err := dtquotes.New(name, dtquotes.Params{
+	source, err := dtquotes.New(name, withBook(dtquotes.Params{
 		Env: appSettings.Env, Dotenv: appSettings.DotenvMap,
 		StateDir: appSettings.StateDir, QuoteFile: file,
 		Logger: run, Deadline: deadline, Broker: tachibana,
-	})
+	}, book))
 	if err != nil {
 		return nil, err
 	}

@@ -104,6 +104,11 @@ type Tachibana struct {
 	Broker *broker.TachibanaBroker
 	// Prices は時価問合の差し替え口（試験用）。nil なら Broker.MarketPrices。
 	Prices func(symbols []string) (map[string]broker.MarketPrice, error)
+	// BookColumns が空でなければ、時価問合をこの板の列で取り（MarketPricesWithRaw。気配の解釈は同じ）、
+	// 生の行と行ごとの受信時刻を OnBook に渡す。発注の判断に使った気配の板をそのまま残すため
+	// （寄る前の open --quote-book。始値の予測の学習の材料）。Prices を差し替えたときは使わない。
+	BookColumns string
+	OnBook      func(rows []map[string]any, received []time.Time)
 }
 
 // Name は取得元の識別子。
@@ -127,6 +132,15 @@ func (t *Tachibana) Fetch(symbols []string) (map[string]selection.Quote, error) 
 	prices := t.Prices
 	if prices == nil {
 		prices = t.Broker.MarketPrices
+		if t.BookColumns != "" {
+			prices = func(symbols []string) (map[string]broker.MarketPrice, error) {
+				found, rows, received, err := t.Broker.MarketPricesWithRaw(symbols, t.BookColumns)
+				if err == nil && t.OnBook != nil {
+					t.OnBook(rows, received)
+				}
+				return found, err
+			}
+		}
 	}
 	rows, err := prices(symbols)
 	if err != nil {
@@ -195,6 +209,9 @@ type Params struct {
 	// Broker は繋ぎ済みの立花の接続。あればそれで時価問合を送る（HTTP の接続と
 	// セッションファイルの取り回しを増やさない）。nil なら Connect で新しく繋ぐ。
 	Broker *broker.TachibanaBroker
+	// BookColumns / OnBook は Tachibana の同名の項目（空なら今までどおり 6 列の時価問合）。
+	BookColumns string
+	OnBook      func(rows []map[string]any, received []time.Time)
 }
 
 // New は設定の名前から取得元を組み立てる。
@@ -203,7 +220,7 @@ func New(name string, params Params) (Source, error) {
 	case "tachibana":
 		if params.Broker != nil {
 			// 発注に使っている接続をそのまま使う。締め切りは呼び出し側が同じ値を入れている
-			return &Tachibana{Broker: params.Broker}, nil
+			return &Tachibana{Broker: params.Broker, BookColumns: params.BookColumns, OnBook: params.OnBook}, nil
 		}
 		t, err := Connect(params.Env, params.Dotenv, params.StateDir)
 		if err != nil {
@@ -213,6 +230,7 @@ func New(name string, params Params) (Source, error) {
 			t.Broker.SetLogger(params.Logger)
 		}
 		t.Broker.SetDeadline(params.Deadline)
+		t.BookColumns, t.OnBook = params.BookColumns, params.OnBook
 		return t, nil
 	case "csv":
 		if params.QuoteFile == "" {

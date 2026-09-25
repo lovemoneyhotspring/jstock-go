@@ -165,3 +165,47 @@ func (s *openState) quoteSourceName() string {
 	}
 	return s.cfg.Execution.QuoteSource
 }
+
+// quoteBook は寄る前の回に候補の気配を取った板（--quote-book）。発注の判断に使った気配そのものの 62 列を、
+// 実際の始値と組にして残す——将来の「snap → 始値の予測 → 選定 → 発注」の、始値の予測の学習の材料
+// （2026-09-25、ユーザの構想）。気配の解釈（並べ方）は 6 列のときと同じ関数で、変わらない。
+type quoteBook struct {
+	columns  string
+	started  time.Time
+	rows     []map[string]any
+	received []time.Time
+}
+
+// newQuoteBook は --quote-book が有効な寄る前の回（立花から取る回）なら、候補の気配の板の受け取り口を作る。
+func (s *openState) newQuoteBook() *quoteBook {
+	if !s.opts.quoteBook || !s.env.Preopen || !presnapSourceOK(s.quoteSourceName()) {
+		return nil
+	}
+	return &quoteBook{columns: s.cfg.Book.Columns, started: clock.NowUTC()}
+}
+
+// withBook は時価問合の取得元に板の受け取り口を付ける（book が nil なら何もしない）。
+func withBook(p dtquotes.Params, book *quoteBook) dtquotes.Params {
+	if book == nil {
+		return p
+	}
+	p.BookColumns = book.columns
+	p.OnBook = func(rows []map[string]any, received []time.Time) { book.rows, book.received = rows, received }
+	return p
+}
+
+// recordQuoteBook は候補の気配の板を記録する（open の終わりに 1 回。slot は取り始めた時刻 HHMMSS）。
+func (s *openState) recordQuoteBook() {
+	b := s.book
+	if b == nil || len(b.rows) == 0 {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			logWarn("daytrade.quote_book", "候補の気配の板を書けない", map[string]any{"error": fmt.Sprint(r)})
+		}
+	}()
+	slot := b.started.In(jst).Format("150405")
+	path := appendHistory(dthistory.KindBook, dthistory.BookFrame(b.rows, b.received, slot, b.started), s.day)
+	logInfo("daytrade.quote_book", "候補の気配の板を記録", map[string]any{"slot": slot, "rows": len(b.rows), "path": path})
+}

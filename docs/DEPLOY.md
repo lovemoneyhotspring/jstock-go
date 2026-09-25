@@ -192,6 +192,7 @@ deploy/tests/prune_state_test.sh    # prune-state.sh（置き場の掃除）の�
 `DT_QUOTES_AT`（いま 8:59:52.2）まで待ってから候補の気配を取って発注する。候補の気配は `history/quotes` に残る。記録だけで、選定にも発注にも使わない。
 時価問合の送信枠（8 回/秒）はプロセスで 1 つなので、`DT_PRESNAP_UNTIL + 1 秒 ≤ DT_QUOTES_AT` を保つ（空けないと候補の取得が枠待ちで遅れる）。
 候補の外の問合せは別の接続に締め切りを掛けて打ち切り、失敗しても発注は続ける（`daytrade.presnap` の warn）。
+候補の気配は `--quote-book` で板の 62 列（`book.columns`）で取り、その生の行を発注の後に `history/book` に書く（slot は取り始めた時刻 `085952` など、`daytrade.quote_book`）。並べ方は 6 列のときと同じ関数。将来の「snap → 始値の予測 → 選定 → 発注」の学習の材料。取得が遅くなるなら open の行から外す。
 それまでは独立の `snap`（`DT_PRESNAP_AT`、9/25 朝は 8:59:42・`--slot 085942`）で、`DT_PRESNAP_AT + 打ち切り + KILL ≤ DT_PREOPEN_AT − 1 秒` を組で保っていた。
 **`--max-run` は必ず打ち切り（`WITH_LOCK_TIMEOUT`）より手前に置く**。
 `--max-run` で切り上げた回は取れたバッチを記録して正常に終わるが、打ち切りの TERM が先に当たると何も

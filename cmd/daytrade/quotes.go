@@ -25,7 +25,7 @@ func newQuotesCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			found, err := fetchQuotes(cfg, nil, args, sourceFlag, quoteFileFlag, time.Time{})
+			found, err := fetchQuotes(cfg, nil, args, sourceFlag, quoteFileFlag, time.Time{}, nil)
 			if err != nil {
 				return err
 			}

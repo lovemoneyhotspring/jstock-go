@@ -309,7 +309,7 @@ func TestOpenFlow(t *testing.T) {
 			name: "preopen_presnap", knobs: flowKnobs{marginPaused: true, excludeCorpEvents: true},
 			calendar: tradingCalendar(), usRet: ret(-0.005), env: settings.EnvProd,
 			runs: []flowRun{{at: jstAt(8, 59, 48, 0), opts: openOptions{live: true, yes: true,
-				presnapUntil: "08:59:51.2", quotesAt: "08:59:52.2"}}},
+				presnapUntil: "08:59:51.2", quotesAt: "08:59:52.2", quoteBook: true}}},
 		},
 		{
 			// 9:00:01.2 の回: ザラ場の成行。ショートは paused
