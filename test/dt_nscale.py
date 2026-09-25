@@ -11,6 +11,7 @@
 """
 
 import argparse
+import os
 
 import numpy as np
 import pandas as pd
@@ -222,7 +223,7 @@ def us_low_spx(days):
     return pd.Series(((d["r"] >= US_SKIP_LOW) & (d["r"] < US_SKIP_HIGH) & vix_ok).values, index=d["d"])
 
 
-def day_rules(te, us="nasdaq", skip_months=()):
+def day_rules(te, us=None, skip_months=None):
     """日の規則の近似: ショック（候補表の全銘柄のギャップの中央値 ≤ −2%）で資金 ×1.5、米国小幅高で休み。
     us は小幅高の判定:
       "nasdaq"  従来の近似（ナスダック 0〜+1%、VIX なし）。2026-09-25 までの検証はこれ。再現するときはこのまま
@@ -230,7 +231,16 @@ def day_rules(te, us="nasdaq", skip_months=()):
                 ナスダック版とは 2017〜2026 で 487 日食い違う（vault 20-research/2026-09-jp-daytrade-sim-parity.md）
     skip_months はその月を丸ごと休む（本番・Go は regime.skip_months = [12]。従来の検証は休んでいない）。
     休む月の日は mult = 0・skip = True。新しい検証は day_rules(te, us="spx", skip_months=(12,)) が本番の形。
+    us・skip_months を渡さないときは環境変数 DT_DAY_RULES で決める: 未設定・"legacy" は従来（nasdaq・12 月あり）、
+    "prod" は本番の形（spx・12 月休み）。過去の検証を中身を変えずに本番の区分で測り直すため（2026-09-25）。
     本番のショックは 9:00 の市場ギャップで判定するが、手元の ^TOPIX は始値が前日終値のままで使えないので候補表で代用する。"""
+    mode = os.environ.get("DT_DAY_RULES", "legacy")
+    if mode not in ("legacy", "prod"):
+        raise ValueError(f"DT_DAY_RULES は legacy か prod: {mode}")
+    if us is None:
+        us = "spx" if mode == "prod" else "nasdaq"
+    if skip_months is None:
+        skip_months = (12,) if mode == "prod" else ()
     days = te["d"].unique()
     tp = te.groupby("d")["gap"].median().rename("tgap").reset_index().rename(columns={"d": "date"})
     tp["date"] = tp["date"].astype("datetime64[ns]")
