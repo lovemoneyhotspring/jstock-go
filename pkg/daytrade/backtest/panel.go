@@ -50,6 +50,9 @@ type Row struct {
 	Gap    float64
 	// Ret1 ほかは並べ替えの機械学習の特徴量（universe.Candidate と同じ定義。無ければ nil）。
 	Ret1, Ret5, Ret20, Pos20, PrevIntraday *float64
+	// RSI2 / StochRSI14 は選定の優先（signal.prefer）の材料（universe.Candidate と同じ定義）。
+	// signal.prefer を掛ける設定のときだけ付ける（attachOscillators）。無ければ nil。
+	RSI2, StochRSI14 *float64
 	// ShortInterest は空売り残高（発行済に対する比。報告が無ければ nil）。
 	// ショートの母集団の条件（margin.max_short_interest）に使う。
 	ShortInterest *float64
@@ -346,6 +349,11 @@ func LoadPanelWith(arch *archive.Archive, start, end time.Time, cfg config.Confi
 		}
 	}
 	panel.Days = days
+	if cfg.Signal.Prefer.Enabled() {
+		if err := attachOscillators(db, arch, panel, start, end); err != nil {
+			return nil, err
+		}
+	}
 	if len(panel.Days) == 0 {
 		return nil, fmt.Errorf("対象日がありません（%s〜%s）",
 			start.Format(archsql.DateLayout), end.Format(archsql.DateLayout))

@@ -101,3 +101,38 @@ func TestTryRankReportsFailure(t *testing.T) {
 		t.Errorf("候補 0 件で誤り: %v", err)
 	}
 }
+
+// LightGBM の日も、予測値で並べた後に優先を掛ける。RuleRank（既存規則の順位）は変えない。
+func TestPreferAppliesAfterLGBM(t *testing.T) {
+	sig := lgbmSignal(t)
+	vol := 0.02
+	var candidates []universe.Candidate
+	quotes := map[string]Quote{}
+	for i, s := range []string{"1000", "2000", "3000", "4000", "5000", "6000"} {
+		ret := float64(i-3) * 0.02
+		c := candidate(s, 1000, &vol)
+		c.TurnoverMed, c.MktCap = float64(i+1)*3e8, float64(6-i)*1e5
+		c.Ret1, c.Ret5 = &ret, &ret
+		candidates = append(candidates, c)
+		quotes[s] = quote(s, 1000*(1-0.01*float64(i+1)))
+	}
+	plain := Rank(candidates, quotes, sig)
+	last := plain[len(plain)-1]
+	for i := range candidates {
+		v := 0.5
+		if candidates[i].Symbol == last.Symbol {
+			v = 0.1
+		}
+		candidates[i].StochRSI14 = &v
+	}
+	sig.Prefer = config.Prefer{Indicator: config.PreferStochRSI, Max: 0.2, Pool: 20}
+	got := Rank(candidates, quotes, sig)
+	if got[0].Symbol != last.Symbol || !got[0].Preferred || got[0].RuleRank != last.RuleRank {
+		t.Fatalf("LightGBM の最下位 %s が先頭に来ない: %+v", last.Symbol, got[0])
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Symbol != plain[i-1].Symbol {
+			t.Fatalf("残りは予測値の順のまま: %d 位 %s, want %s", i+1, got[i].Symbol, plain[i-1].Symbol)
+		}
+	}
+}

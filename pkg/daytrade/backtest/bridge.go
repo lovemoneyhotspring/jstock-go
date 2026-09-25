@@ -28,6 +28,8 @@ func candidateOf(r Row) universe.Candidate {
 		Ret20:         r.Ret20,
 		Pos20:         r.Pos20,
 		PrevIntraday:  r.PrevIntraday,
+		RSI2:          r.RSI2,
+		StochRSI14:    r.StochRSI14,
 		Segment:       r.Segment,
 		Shortable:     r.Shortable,
 		TurnoverMed:   r.TurnoverMed,

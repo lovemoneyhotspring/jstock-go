@@ -169,6 +169,13 @@ var RankingSchema = []history.Column{
 	// 休む（us_skip_legs = "all"）ので、LightGBM だけが取引する日の rule_picked は 0 件になる。
 	// 候補が無かった日と区別するための列（この列が真の日は gap_vol 側の成績を 0 として数える）。
 	{Name: "rule_off", Type: history.TypeBool},
+	// rsi2 / stoch_rsi14 は前日の引けまでの RSI(2)（0〜100）とストキャス RSI(14,14)（0〜1）、
+	// preferred は選定の優先（signal.prefer）で先に出した銘柄。rank は優先を掛けた後の順位で、
+	// 優先が無ければの順位は rank_by の並び（gap_vol の日は rule_rank）。前向きの記録で
+	// 「優先で入れ替わった銘柄」の成績を追うための列。2026-09-26 より前には無い。
+	{Name: "rsi2", Type: history.TypeFloat64},
+	{Name: "stoch_rsi14", Type: history.TypeFloat64},
+	{Name: "preferred", Type: history.TypeBool},
 }
 
 // OpenRunSchema は open 1 回の要約。
@@ -216,6 +223,10 @@ var OpenRunSchema = []history.Column{
 	{Name: "short_paused", Type: history.TypeBool},
 	// rule_off は既存規則（gap_vol）なら建てない日（RankingSchema の rule_off と同じ意味）。
 	{Name: "rule_off", Type: history.TypeBool},
+	// prefer は選定の優先の設定（"stoch_rsi<=0.2/20" の形。掛けない日・見送りの日は null）、
+	// preferred_n は先に出した銘柄の数（順位表の preferred が真の行数）。2026-09-26 より前には無い。
+	{Name: "prefer", Type: history.TypeString},
+	{Name: "preferred_n", Type: history.TypeInt64},
 	{Name: "short_n", Type: history.TypeInt64},
 	{Name: "short_budget", Type: history.TypeFloat64},
 	{Name: "short_multiplier", Type: history.TypeFloat64},
@@ -407,6 +418,7 @@ func RankingFrame(ranking []selection.Ranked, picks, rulePicks []selection.Pick,
 			"reason":    nil,
 			"rule_rank": int64(r.RuleRank), "rule_picked": rulePicked[r.Symbol],
 			"score": floatOrNil(r.Score), "rule_off": false,
+			"rsi2": floatOrNil(r.RSI2), "stoch_rsi14": floatOrNil(r.StochRSI14), "preferred": r.Preferred,
 		}
 		if reason, ok := reasons[r.Symbol]; ok {
 			row["reason"] = reason

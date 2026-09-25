@@ -251,7 +251,37 @@ type Signal struct {
 	// 同業が揃って候補に載る日は業種まるごとの材料（セクター一括の格下げなど）で、
 	// 個別のパニック売りではないという読み（研究ノート 2026-09-jp-sector-crowding）。
 	MaxPerSector int `toml:"max_per_sector"`
+	// Prefer は並べた後に、オシレータで売られすぎの銘柄を上位の中で先に出す（[signal.prefer]）。
+	Prefer Prefer `toml:"prefer"`
 }
+
+// 選定の優先に使う指標（Prefer.Indicator）。
+const (
+	// PreferStochRSI はストキャス RSI(14,14)（0〜1）。universe.Candidate.StochRSI14。
+	PreferStochRSI = "stoch_rsi"
+	// PreferRSI2 は RSI(2)（0〜100）。universe.Candidate.RSI2。
+	PreferRSI2 = "rsi2"
+)
+
+// Prefer は選定の優先（[signal.prefer]）。並べ方（rank_by）で並べた後、業種の上限を通る銘柄の
+// 上位 Pool 位までの中で、指標が Max 以下の銘柄を先に出し、残りは元の順に並べる。
+// 並べ方が gap_vol の日も lgbm の日も掛かる。ロングだけ（ショートの並べ方には掛けない）。
+//
+// 直近数日の下振れが深い銘柄ほどギャップダウンから戻る。本番の形（寄る前の気配の誤差・規則 R÷7・
+// 業種 1・1,000 万）で、ストキャス RSI ≤ 0.2 の優先は OOS（2022〜）+1,348 円/日（t 2.60）、
+// IS +853（t 2.05）。RSI(2) ≤ 10 は OOS +654（t 1.84）。同じデータでの探索 6 本の最良なので
+// 割り引きが要る（研究ノート 2026-09-jp-daytrade-oscillator、2026-09-25 にユーザ判断で採用）。
+type Prefer struct {
+	// Indicator は指標（PreferStochRSI / PreferRSI2）。空なら優先しない（元の並びのまま）。
+	Indicator string `toml:"indicator"`
+	// Max はこの値**以下**を優先する。尺度は指標のまま（stoch_rsi は 0〜1、rsi2 は 0〜100）。
+	Max float64 `toml:"max"`
+	// Pool は優先を掛ける範囲（業種の上限を通る銘柄の上位何位まで）。検証は 20。
+	Pool int `toml:"pool"`
+}
+
+// Enabled は優先を掛ける設定か。
+func (p Prefer) Enabled() bool { return p.Indicator != "" }
 
 // UsesLGBM は LightGBM を使う日がある設定か（平常日か米国小幅高の日のどちらかで使う）。
 func (s Signal) UsesLGBM() bool {
@@ -907,6 +937,9 @@ func (c Config) Validate() error {
 	if c.Signal.MaxPerSector < 0 {
 		return fmt.Errorf("signal.max_per_sector は 0 以上（0 で無制限）")
 	}
+	if err := validatePrefer(c.Signal.Prefer); err != nil {
+		return err
+	}
 	if err := validateGap(c.Signal.MaxGap, "signal.max_gap"); err != nil {
 		return err
 	}
@@ -1154,6 +1187,29 @@ func validateSegments(v []string) error {
 func validateGap(v decimal.Decimal, name string) error {
 	if v.LessThan(decimal.NewFromInt(-1)) || v.GreaterThan(decimal.NewFromInt(1)) {
 		return fmt.Errorf("%s は −1〜1 の比率で書く", name)
+	}
+	return nil
+}
+
+// validatePrefer は [signal.prefer] の検査。指標ごとに Max の尺度が違うので、範囲の外は
+// 書き間違い（rsi2 の 10 を stoch_rsi に書いた等）として止める。
+func validatePrefer(p Prefer) error {
+	switch p.Indicator {
+	case "":
+		return nil
+	case PreferStochRSI:
+		if p.Max <= 0 || p.Max >= 1 {
+			return fmt.Errorf("signal.prefer.max は indicator = %q なら 0 より大きく 1 未満: %v", p.Indicator, p.Max)
+		}
+	case PreferRSI2:
+		if p.Max <= 0 || p.Max >= 100 {
+			return fmt.Errorf("signal.prefer.max は indicator = %q なら 0 より大きく 100 未満: %v", p.Indicator, p.Max)
+		}
+	default:
+		return fmt.Errorf("signal.prefer.indicator は %s / %s / 空: %q", PreferStochRSI, PreferRSI2, p.Indicator)
+	}
+	if p.Pool < 1 {
+		return fmt.Errorf("signal.prefer.pool は 1 以上: %d", p.Pool)
 	}
 	return nil
 }

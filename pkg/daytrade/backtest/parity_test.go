@@ -26,11 +26,16 @@ func TestPlanAndBacktestPickTheSame(t *testing.T) {
 	prevDay := days[len(days)-2]
 
 	for _, tc := range []struct {
-		name  string
-		short bool
-	}{{"ロング", false}, {"ショート", true}} {
+		name   string
+		short  bool
+		prefer bool
+	}{{"ロング", false, false}, {"ロング（選定の優先あり）", false, true}, {"ショート", true, false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := parityConfig()
+			if tc.prefer {
+				// 合成の足は最後の 10 日しか動かずストキャス RSI が出ないので、値の出る RSI(2) で経路を通す
+				cfg.Signal.Prefer = config.Prefer{Indicator: config.PreferRSI2, Max: 50, Pool: 20}
+			}
 			// 検証は 1 日だけ回す（その日の選定を突き合わせる）
 			panel, err := backtest.LoadPanel(arch, day, day, cfg)
 			if err != nil {

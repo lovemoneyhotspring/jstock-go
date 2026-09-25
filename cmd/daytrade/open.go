@@ -247,7 +247,33 @@ func (s *openState) rankLong(spill decimal.Decimal, spillNotes []execute.SizingN
 	// 順位を付けた後に落とす
 	ranking = selection.Keep(ranking, s.rankQuotes)
 	s.warnNoSector(ranking)
+	s.notePrefer(ranking)
 	return ranking, false
+}
+
+// notePrefer は選定の優先（signal.prefer）の設定と、先に出した銘柄の数を要約に残す。
+// 指標の値が 1 件も無ければ（列の無い古い plan を読んだ）優先は黙って効かないので鳴らす。
+func (s *openState) notePrefer(ranking []selection.Ranked) {
+	p := s.cfg.Signal.Prefer
+	if !p.Enabled() {
+		return
+	}
+	s.summary["prefer"] = fmt.Sprintf("%s<=%g/%d", p.Indicator, p.Max, p.Pool)
+	withValue, preferred := 0, 0
+	for _, r := range ranking {
+		if selection.PreferValue(r, p.Indicator) != nil {
+			withValue++
+		}
+		if r.Preferred {
+			preferred++
+		}
+	}
+	s.summary["preferred_n"] = preferred
+	if withValue == 0 && len(ranking) > 0 {
+		logWarn("daytrade.prefer", "指標の値が無いため signal.prefer が効かない（plan が古い）",
+			map[string]any{"indicator": p.Indicator, "ranked": len(ranking)})
+		fmt.Printf("%s の値が plan に無いため、選定の優先は効きません（plan を作り直す）\n", p.Indicator)
+	}
 }
 
 // warnNoSector は業種の取れない候補があれば鳴らす。業種の上限（signal.max_per_sector）を
@@ -1071,6 +1097,9 @@ func logRanking(day time.Time, side string, ranking []selection.Ranked, picks []
 		}
 		if r.Score != nil {
 			row["score"], row["rule_rank"] = *r.Score, r.RuleRank
+		}
+		if r.Preferred {
+			row["preferred"] = true
 		}
 		if p, ok := picked[r.Symbol]; ok {
 			row["picked"] = true

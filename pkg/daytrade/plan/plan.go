@@ -203,6 +203,9 @@ type record struct {
 	Ret20        *float64 `parquet:"ret20,optional"`
 	Pos20        *float64 `parquet:"pos20,optional"`
 	PrevIntraday *float64 `parquet:"prev_intraday,optional"`
+	// rsi2 / stoch_rsi14 は選定の優先（signal.prefer）の材料。この列の無い古い plan では nil（優先しない）
+	RSI2       *float64 `parquet:"rsi2,optional"`
+	StochRSI14 *float64 `parquet:"stoch_rsi14,optional"`
 	// CorpEvent は材料の印（TOB・MBO など。記録簿から付けた。無ければ空）。記録用で、
 	// open は読み戻さず朝の記録簿で付け直す。
 	CorpEvent         string `parquet:"corp_event"`
@@ -229,6 +232,7 @@ func Save(p Plan, directory string) (parquetPath, metaPath string, err error) {
 			MarginRatio: c.MarginRatio, ShortInterest: c.ShortInterest,
 			EarnYield: c.EarnYield,
 			Ret1:      c.Ret1, Ret5: c.Ret5, Ret20: c.Ret20, Pos20: c.Pos20, PrevIntraday: c.PrevIntraday,
+			RSI2: c.RSI2, StochRSI14: c.StochRSI14,
 			CorpEvent: c.CorpEvent, CorpEventHeadline: c.CorpEventHeadline, CorpEventAt: c.CorpEventAt,
 		})
 	}
@@ -285,6 +289,7 @@ func Load(directory string, day time.Time) (Plan, bool, error) {
 			MarginRatio: r.MarginRatio, ShortInterest: r.ShortInterest,
 			EarnYield: r.EarnYield,
 			Ret1:      r.Ret1, Ret5: r.Ret5, Ret20: r.Ret20, Pos20: r.Pos20, PrevIntraday: r.PrevIntraday,
+			RSI2: r.RSI2, StochRSI14: r.StochRSI14,
 		})
 	}
 	return Plan{Meta: meta, Candidates: candidates}, true, nil

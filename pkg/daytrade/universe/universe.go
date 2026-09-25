@@ -81,6 +81,11 @@ type Candidate struct {
 	Ret20        *float64
 	Pos20        *float64
 	PrevIntraday *float64
+	// RSI2 / StochRSI14 は前日の引けまでの RSI(2)（0〜100）とストキャス RSI(14,14)（0〜1）。
+	// 直近 OscBars 本の終値から Oscillators で作る。計算できなければ nil。
+	// **選定の優先（signal.prefer）**の材料で、母集団の判定には使わない。
+	RSI2       *float64
+	StochRSI14 *float64
 	// CorpEvent は価格の行き先が決まった材料の種類（news.Kind*。TOB・MBO など外す種類だけ）。
 	// 無ければ空。CorpEventHeadline / CorpEventAt は記録用（見出しと配信の日時 "YYYY-MM-DD HHMM"）。
 	// J-Quants からは作れず、plan / open が記録簿から付ける。バックテストでは常に空。

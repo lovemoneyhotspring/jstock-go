@@ -52,6 +52,10 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 	if len(features) == 0 {
 		return nil, fmt.Errorf("%s までの足がありません", prevDay.Format(archsql.DateLayout))
 	}
+	osc, err := loadOscillators(arch, prevDay)
+	if err != nil {
+		return nil, err
+	}
 
 	master, err := loadMaster(arch, day, prevDay)
 	if err != nil {
@@ -113,6 +117,8 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 			Ret20:         f.ret20,
 			Pos20:         f.pos20,
 			PrevIntraday:  f.prevIntraday,
+			RSI2:          osc[f.code].rsi2,
+			StochRSI14:    osc[f.code].stochRSI14,
 			EarnPrev:      earnPrev[f.code],
 			DiscToday:     discToday[f.code],
 			Alert:         alert[f.code],
@@ -254,6 +260,67 @@ GROUP BY code`, source, archsql.Lit(prevDay), cfg.TurnoverDays, VolDays, PosDays
 			out = append(out, a.f)
 		}
 	}
+	return out, nil
+}
+
+// oscValues は 1 銘柄の前日の引けまでのオシレータ（Candidate.RSI2 / StochRSI14）。
+type oscValues struct{ rsi2, stochRSI14 *float64 }
+
+// oscLookbackDays は OscBars 本の足を読むための暦日（営業日 120 本 ≒ 暦日 170 日。連休の余裕を足す）。
+const oscLookbackDays = 200
+
+// loadOscillators は前日までの直近 OscBars 本の終値から、銘柄ごとのオシレータを作る。
+//
+// 足の条件（始値・終値とも正）と係数で揃えた終値 z は backtest.oscillatorsByRow と同じ。
+// z の起点は窓の頭だが、RSI は比しか使わないので値は変わらない。
+func loadOscillators(arch *archive.Archive, prevDay time.Time) (map[string]oscValues, error) {
+	source, ok := archsql.Source(arch, EPBars, prevDay.AddDate(0, 0, -oscLookbackDays), prevDay)
+	if !ok {
+		return nil, archsql.MissingError(EPBars)
+	}
+	db, err := archsql.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rows, err := db.Query(fmt.Sprintf(`
+SELECT code, c / exp(sum(ln(af)) OVER (PARTITION BY code ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS z
+FROM (
+  SELECT "Date" AS d, CAST("Code" AS VARCHAR) AS code, TRY_CAST("C" AS DOUBLE) AS c,
+         coalesce(nullif(TRY_CAST("AdjFactor" AS DOUBLE), 0), 1) AS af
+  FROM %s
+  WHERE "Date" <= %s AND TRY_CAST("O" AS DOUBLE) > 0 AND TRY_CAST("C" AS DOUBLE) > 0
+)
+ORDER BY code, d`, source, archsql.Lit(prevDay)))
+	if err != nil {
+		return nil, fmt.Errorf("オシレータの足の読み込みに失敗しました: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]oscValues{}
+	var code string
+	var z []float64
+	flush := func() {
+		if code != "" {
+			r2, s14 := Oscillators(z)
+			out[code] = oscValues{r2, s14}
+		}
+	}
+	for rows.Next() {
+		var c string
+		var v float64
+		if err := rows.Scan(&c, &v); err != nil {
+			return nil, err
+		}
+		if c != code {
+			flush()
+			code, z = c, z[:0]
+		}
+		z = append(z, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	flush()
 	return out, nil
 }
 

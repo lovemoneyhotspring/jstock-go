@@ -101,6 +101,12 @@ type Ranked struct {
 	Score *float64
 	// Turnover は売買代金の 20 日中央値（円）。規則 R（PickOptions.TurnoverRatio）の 1 銘柄の上限に使う。
 	Turnover float64
+	// RSI2 / StochRSI14 は前日の引けまでのオシレータ（universe.Candidate と同じ。無ければ nil）。
+	// 選定の優先（config.Signal.Prefer）の材料。記録にも残す。
+	RSI2       *float64
+	StochRSI14 *float64
+	// Preferred は選定の優先で先に出した銘柄（config.Signal.Prefer）。
+	Preferred bool
 }
 
 // LimitDownPrice は前日終値を基準値段とするストップ安の値段。
@@ -140,6 +146,7 @@ func Rank(candidates []universe.Candidate, quotes map[string]Quote, cfg config.S
 		min: cfg.MinGap, max: cfg.MaxGap,
 		skipLimit: cfg.SkipLimitDown, limitDown: true,
 		rankBy: cfg.RankBy, model: cfg.Model,
+		prefer: cfg.Prefer, maxPerSector: cfg.MaxPerSector,
 	})
 }
 
@@ -182,6 +189,10 @@ type gapFilter struct {
 	rankBy string
 	// model は rankBy = lgbm のモデルのパス（config.Signal.Model）。
 	model string
+	// prefer は並べた後に売られすぎの銘柄を先に出す設定（config.Signal.Prefer）。
+	// maxPerSector はその範囲を数えるための業種の上限（config.Signal.MaxPerSector）。
+	prefer       config.Prefer
+	maxPerSector int
 }
 
 // RankKey は並べ替えの鍵。gap_vol はギャップ ÷ max(20 日ボラ, VolFloor)。
@@ -234,16 +245,18 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 			}
 		}
 		row := Ranked{
-			Symbol:    c.Symbol,
-			Code:      c.Code,
-			Name:      c.Name,
-			PrevClose: prev,
-			Price:     quote.Price,
-			Gap:       gap.Round(4),
-			Vol:       c.Vol20,
-			EarnYield: c.EarnYield,
-			Sector:    c.Sector,
-			Turnover:  c.TurnoverMed,
+			Symbol:     c.Symbol,
+			Code:       c.Code,
+			Name:       c.Name,
+			PrevClose:  prev,
+			Price:      quote.Price,
+			Gap:        gap.Round(4),
+			Vol:        c.Vol20,
+			EarnYield:  c.EarnYield,
+			Sector:     c.Sector,
+			Turnover:   c.TurnoverMed,
+			RSI2:       c.RSI2,
+			StochRSI14: c.StochRSI14,
 		}
 		key, ok := RankKey(f.rankBy, row.Gap.InexactFloat64(), row.Vol)
 		sr := scoredRow{row: row, key: key, ok: ok}
@@ -301,6 +314,60 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 		for i := range out {
 			out[i].Rank = i + 1
 		}
+	}
+	return preferOversold(out, f.prefer, f.maxPerSector)
+}
+
+// PreferValue は選定の優先に使う指標の値（config.Prefer.Indicator。無ければ nil）。
+func PreferValue(r Ranked, indicator string) *float64 {
+	switch indicator {
+	case config.PreferStochRSI:
+		return r.StochRSI14
+	case config.PreferRSI2:
+		return r.RSI2
+	}
+	return nil
+}
+
+// preferOversold は並べた順位の上位 p.Pool 位（業種の上限を通る銘柄だけを数える）の中で、
+// 指標が p.Max 以下の銘柄を先に出し、残りは元の順に並べ直す。Rank は付け直し、RuleRank は変えない。
+//
+// 範囲と対象を「業種の上限を通る銘柄」（その業種で上から maxPerSector 番目まで）に限るのは、
+// 検証（test/dt_rsi_family.py）が業種の上限を掛けた後の順位で優先したため。同じ業種の下位を
+// 繰り上げると、上限の判定（candidatePool）で業種の代表が入れ替わり、検証と違う銘柄を選ぶ。
+// 業種が空の銘柄は上限に数えない（candidatePool と同じ）。
+func preferOversold(ranked []Ranked, p config.Prefer, maxPerSector int) []Ranked {
+	if !p.Enabled() || p.Pool < 1 || len(ranked) == 0 {
+		return ranked
+	}
+	perSector := map[string]int{}
+	counted, end := 0, len(ranked)
+	head := make([]Ranked, 0, len(ranked))
+	var rest []Ranked
+	for i, r := range ranked {
+		passes := true
+		if maxPerSector > 0 && r.Sector != "" {
+			passes = perSector[r.Sector] < maxPerSector
+			perSector[r.Sector]++
+		}
+		if v := PreferValue(r, p.Indicator); passes && v != nil && *v <= p.Max {
+			r.Preferred = true
+			head = append(head, r)
+		} else {
+			rest = append(rest, r)
+		}
+		if passes {
+			counted++
+		}
+		if counted == p.Pool {
+			end = i + 1
+			break
+		}
+	}
+	out := append(head, rest...)
+	out = append(out, ranked[end:]...)
+	for i := range out {
+		out[i].Rank = i + 1
 	}
 	return out
 }
