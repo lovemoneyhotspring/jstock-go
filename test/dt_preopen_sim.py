@@ -52,7 +52,7 @@ v AS (
 q AS (
   SELECT CAST(Date AS DATE) d, CAST(Code AS VARCHAR) code, TRY_CAST(O AS DOUBLE) op
   FROM read_parquet('{BARS}', union_by_name=true) WHERE CAST(Date AS DATE) >= CAST(? AS DATE))
-SELECT v.d, (q.op / v.pc - 1) * 100 g, (v.vis / v.pc - 1) * 100 - (q.op / v.pc - 1) * 100 e
+SELECT v.d, v.symbol, (q.op / v.pc - 1) * 100 g, (v.vis / v.pc - 1) * 100 - (q.op / v.pc - 1) * 100 e
 FROM v JOIN q ON q.d = v.d AND q.code = v.symbol || '0' WHERE v.vis IS NOT NULL AND q.op > 0
 """
 
@@ -70,13 +70,13 @@ WITH v AS (
 q AS (
   SELECT CAST(Date AS DATE) d, CAST(Code AS VARCHAR) code, TRY_CAST(O AS DOUBLE) op
   FROM read_parquet('{BARS}', union_by_name=true) WHERE CAST(Date AS DATE) >= CAST(? AS DATE))
-SELECT v.d, (q.op / v.pc - 1) * 100 g, (v.vis / v.pc - 1) * 100 - (q.op / v.pc - 1) * 100 e
+SELECT v.d, v.symbol, (q.op / v.pc - 1) * 100 g, (v.vis / v.pc - 1) * 100 - (q.op / v.pc - 1) * 100 e
 FROM v JOIN q ON q.d = v.d AND q.code = v.symbol || '0' WHERE q.op > 0
 """
 
 
 def error_frame(slot, since):
-    """誤差の実測の行（d・始値のギャップ g・誤差 e、%pt）。slot = "order" なら発注時の気配、ほかは板の記録の時刻。"""
+    """誤差の実測の行（d・symbol・始値のギャップ g・誤差 e、%pt）。slot = "order" なら発注時の気配、ほかは板の記録の時刻。"""
     if slot == "order":
         return duckdb.sql(ORDER_ERR_SQL, params=[since, since]).df()
     return duckdb.sql(ERR_SQL, params=[slot, since, since]).df()

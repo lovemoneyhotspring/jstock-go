@@ -10,7 +10,11 @@
   回す日: 発注時の気配（history/quotes の 8:59 台）と始値がそろった日が **10 日**になってから（2026-09-24 から数えて
           10/7 の始値が入った後）。10 日に満たなければ止める（下の MIN_DAYS）。ユーザ判断で 10 日（2026-09-25）。
   誤差: 発注時の気配 − 始値（dt_preopen_sim.error_frame("order")）。ギャップの帯（BANDS）ごとに引く。
-        行が 30 未満の帯は、30 以上ある帯のうち帯の番号が最も近いものの行で代える（深い帯は候補が少ないため）。
+        行が 30 未満の帯（深い帯は候補が少ない）は、次の順で代える（2026-09-25 ユーザの提案で決め直し。結果はまだ見ていない）:
+          1) 同じ帯の 8:59:42 の snap（slot 085942、2026-09-25 から）のうちロングの候補（その日の発注時の気配にある銘柄）の行（30 以上なら）
+          2) 同じ帯の 8:59:42 の snap の全銘柄の行（30 以上なら）
+          3) 行が 30 以上ある発注時の気配の帯のうち、帯の番号が最も近いもの
+        記述: 最初の決め方（3 だけ）でも回して並べる。
     iid    帯ごとに全日の行から引く（主）
     block  模擬の 1 日ごとに記録の 1 日を選び、その日のその帯の行から引く（5 行未満ならその帯の全日の行）
     upper  誤差なし（記述）
@@ -18,7 +22,7 @@
   本番の形: 業種の上限 1、規則 R（p 0.2%・資金 ÷ 7・10 位まで＝max_positions）、1,000 万、I0 10 bp、12 月除く、10 シード。
   並べ方: L（M0 の予測値の高い順）、G（gap_vol）。
   日の区分: 平常日 = dt_nscale.day_rules で米国小幅高でない日（本番の平常日は rank_by = gap_vol）。
-  判定（平常日の L − G、シードで平均した日次の差）:
+  判定（平常日の L − G、シードで平均した日次の差。誤差の帯は上の「主」の代え方）:
     iid で t ≥ 2 かつ block で差 > 0 → 平常日を LightGBM にする案をユーザに出す（rank_by = "lgbm"）
     iid で t ≤ −2 かつ block で差 < 0 → gap_vol のままを確かめた
     それ以外                          → 判断しない（今のまま。記録が 20 日で測り直す）
@@ -40,25 +44,43 @@ MIN_BAND_ROWS = 30
 RMAX, CAP, I0 = 10, 1e7, 10e-4
 
 
-def band_pools(err):
-    """帯ごとの誤差の行（行の少ない帯は近い帯で代える）。err は d・g・e。"""
-    err = err.assign(band=np.digitize(err["g"], BANDS[1:-1], right=True))
+def band_pools(order, snap, neighbor_only=False):
+    """帯ごとの誤差の行（d・e）。order は発注時の気配、snap は 8:59:42 の snap（どちらも d・symbol・g・e）。
+    返すのは {帯: DataFrame(d, e)} と、帯ごとの出どころの説明。"""
     nb = len(BANDS) - 1
-    ok = [b for b in range(nb) if (err["band"] == b).sum() >= MIN_BAND_ROWS]
+    band_of = lambda x: np.digitize(x["g"], BANDS[1:-1], right=True)
+    order = order.assign(band=band_of(order))
+    snap = snap.assign(band=band_of(snap))
+    cand = set(zip(order["d"], order["symbol"]))
+    snap_cand = snap[[k in cand for k in zip(snap["d"], snap["symbol"])]]
+    ok = [b for b in range(nb) if (order["band"] == b).sum() >= MIN_BAND_ROWS]
     if not ok:
         raise SystemExit("誤差の行が足りない")
-    src = {b: (b if b in ok else min(ok, key=lambda o: (abs(o - b), o))) for b in range(nb)}
-    return err, src
+    pools, how = {}, {}
+    for b in range(nb):
+        if b in ok:
+            pools[b], how[b] = order.loc[order["band"] == b, ["d", "e"]], "発注時"
+            continue
+        if not neighbor_only:
+            for name, frame in (("snap 候補", snap_cand), ("snap 全銘柄", snap)):
+                rows = frame.loc[frame["band"] == b, ["d", "e"]]
+                if len(rows) >= MIN_BAND_ROWS:
+                    pools[b], how[b] = rows, name
+                    break
+            if b in pools:
+                continue
+        near = min(ok, key=lambda o: (abs(o - b), o))
+        pools[b], how[b] = order.loc[order["band"] == near, ["d", "e"]], f"発注時の帯 {near}"
+    return pools, how
 
 
-def draw(rng, err, src, band, day_idx, mode):
+def draw(rng, pools, band, day_idx, rec_days, mode):
     e = np.zeros(len(band))
     if mode == "upper":
         return e
-    rec_days = np.sort(err["d"].unique())
     pick = rng.integers(len(rec_days), size=day_idx.max() + 1)[day_idx] if mode == "block" else None
     for b in np.unique(band):
-        pool_all = err.loc[err["band"] == src[b], "e"].values
+        pool_all = pools[b]["e"].values
         if mode == "iid":
             e[band == b] = rng.choice(pool_all, size=int((band == b).sum()))
             continue
@@ -66,7 +88,7 @@ def draw(rng, err, src, band, day_idx, mode):
             m = (band == b) & (pick == k)
             if not m.any():
                 continue
-            pool = err.loc[(err["band"] == src[b]) & (err["d"] == rd), "e"].values
+            pool = pools[b].loc[pools[b]["d"] == rd, "e"].values
             e[m] = rng.choice(pool if len(pool) >= 5 else pool_all, size=int(m.sum()))
     return e
 
@@ -81,8 +103,13 @@ def main():
     print(f"発注時の気配の誤差: {ndays} 日（{err['d'].min()}〜{err['d'].max()}）、{len(err):,} 行", flush=True)
     if ndays < MIN_DAYS:
         raise SystemExit(f"{MIN_DAYS} 日に満たないので回さない（事前登録）")
-    err, src = band_pools(err)
-    print("帯の代え: " + "、".join(f"{b}→{s}" for b, s in src.items() if b != s))
+    snap = error_frame("085942", "2026-09-25")
+    print(f"8:59:42 の snap の誤差: {snap['d'].nunique()} 日、{len(snap):,} 行", flush=True)
+    rec_days = np.sort(err["d"].unique())
+    forms = {}
+    for form, neighbor in (("主", False), ("近い帯（記述）", True)):
+        forms[form], how = band_pools(err, snap, neighbor)
+        print(f"帯の出どころ（{form}）: " + "、".join(f"{b}={h}（{len(forms[form][b])} 行）" for b, h in how.items()))
 
     df = pd.read_parquet(CAND)
     last_day = df["d"].max()
@@ -104,9 +131,10 @@ def main():
     band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
     day_idx = te["d"].rank(method="dense").astype(int).values - 1
     acc = {}
-    for mode in ("iid", "block", "upper"):
+    runs = [("iid", "主"), ("block", "主"), ("upper", "主"), ("iid", "近い帯（記述）")]
+    for mode, form in runs:
         for seed in range(a.seeds if mode != "upper" else 1):
-            g = seen(te, draw(np.random.default_rng(seed), err, src, band, day_idx, mode))
+            g = seen(te, draw(np.random.default_rng(seed), forms[form], band, day_idx, rec_days, mode))
             gf = fold_of.loc[g.index].values
             X = feats(g, False)
             s = np.empty(len(g))
@@ -117,24 +145,24 @@ def main():
             for v, x in rk.items():
                 ser = pd.Series({d: pnl_day(y, *alloc_rule(y, 0.002, RMAX, CAP * rules.loc[d, "mult"], k=7), kappa)
                                  for d, y in x.groupby("d")})
-                acc.setdefault((mode, v), []).append(ser.reindex(alld).fillna(0.0))
-            print(f"{mode} seed {seed}", flush=True)
+                acc.setdefault((mode, form, v), []).append(ser.reindex(alld).fillna(0.0))
+            print(f"{mode}/{form} seed {seed}", flush=True)
 
     uslow = rules.reindex(alld)["skip"].fillna(False).values
     print(f"\n検証期間 {alld.min():%Y-%m-%d}〜{alld.max():%Y-%m-%d}、{len(alld)} 日（平常日 {(~uslow).sum()}・米国小幅高 {uslow.sum()}）、"
           f"資金 {CAP / 1e4:.0f} 万・{RMAX} 位まで・{a.seeds} シード（円/日）")
     print("| 誤差 | 日 | L | G | L − G（t） | L 年率・最大DD | G 年率・最大DD |")
     print("|---|---|---|---|---|---|---|")
-    for mode in ("iid", "block", "upper"):
-        L, G = (pd.concat(acc[(mode, v)], axis=1).mean(axis=1) for v in ("L", "G"))
+    for mode, form in runs:
+        L, G = (pd.concat(acc[(mode, form, v)], axis=1).mean(axis=1) for v in ("L", "G"))
         for name, m in (("平常日（判定）", ~uslow), ("米国小幅高の日", uslow)):
             d = (L - G)[m]
-            ann = lambda v: np.mean([x[m].mean() * 245 / CAP * 100 for x in acc[(mode, v)]])
-            dd = lambda v: np.mean([max_dd(x[m].values) / CAP * 100 for x in acc[(mode, v)]])
-            print(f"| {mode} | {name} | {L[m].mean():,.0f} | {G[m].mean():,.0f} | {d.mean():+,.0f}（{tstat(d):+.2f}） | "
+            ann = lambda v: np.mean([x[m].mean() * 245 / CAP * 100 for x in acc[(mode, form, v)]])
+            dd = lambda v: np.mean([max_dd(x[m].values) / CAP * 100 for x in acc[(mode, form, v)]])
+            print(f"| {mode}・{form} | {name} | {L[m].mean():,.0f} | {G[m].mean():,.0f} | {d.mean():+,.0f}（{tstat(d):+.2f}） | "
                   f"{ann('L'):.1f}%・{dd('L'):.1f}% | {ann('G'):.1f}%・{dd('G'):.1f}% |")
-    L, G = (pd.concat(acc[("iid", v)], axis=1).mean(axis=1) for v in ("L", "G"))
-    print("\n平常日の年ごとの L − G（iid、円/日）: " + " ".join(
+    L, G = (pd.concat(acc[("iid", "主", v)], axis=1).mean(axis=1) for v in ("L", "G"))
+    print("\n平常日の年ごとの L − G（iid・主、円/日）: " + " ".join(
         f"{y}:{(L - G)[(~uslow) & (alld.year == y)].mean():+,.0f}" for y in sorted(set(alld.year))))
 
 
