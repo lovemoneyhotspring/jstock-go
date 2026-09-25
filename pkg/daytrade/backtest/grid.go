@@ -87,7 +87,13 @@ func RunGrid(arch *archive.Archive, entries []GridEntry, start, end time.Time,
 			lower(e.Config.Margin.MinTurnover)
 		}
 	}
-	base, err := LoadPanelWith(arch, start, end, entries[0].Config, PanelOptions{KeepAll: true, TurnoverFloor: floor})
+	// パネルは 1 本目の設定で作るので、オシレータは「どれか 1 本でも signal.prefer を掛けるなら」付ける
+	// （1 本目が掛けない設定だと、2 本目以降の優先が黙って効かず基準と同じ成績が出る）
+	osc := false
+	for _, e := range entries {
+		osc = osc || e.Config.Signal.Prefer.Enabled()
+	}
+	base, err := LoadPanelWith(arch, start, end, entries[0].Config, PanelOptions{KeepAll: true, TurnoverFloor: floor, Oscillators: osc})
 	if err != nil {
 		return nil, err
 	}

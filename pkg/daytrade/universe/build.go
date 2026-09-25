@@ -3,6 +3,7 @@ package universe
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -52,9 +53,12 @@ func Build(arch *archive.Archive, day, prevDay time.Time, cfg config.Universe, m
 	if len(features) == 0 {
 		return nil, fmt.Errorf("%s までの足がありません", prevDay.Format(archsql.DateLayout))
 	}
+	// オシレータは選定の優先（signal.prefer）の材料と記録。読めなくても plan は止めない——値が nil なら
+	// 優先は掛からず元の並びになり、open が警告（daytrade.prefer）する。記録のための機能で翌日の取引を止めないため
 	osc, err := loadOscillators(arch, prevDay)
 	if err != nil {
-		return nil, err
+		fmt.Fprintf(os.Stderr, "警告: オシレータ（RSI(2)・ストキャス RSI）を作れません。値なしで続けます: %v\n", err)
+		osc = nil
 	}
 
 	master, err := loadMaster(arch, day, prevDay)

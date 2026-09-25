@@ -72,3 +72,35 @@ func TestPlanAndBacktestOscillatorsMatch(t *testing.T) {
 		t.Fatalf("突き合わせた銘柄 %d・ストキャス RSI のある銘柄 %d（テストが何も確かめていない）", compared, withStoch)
 	}
 }
+
+// 格子は 1 本目の設定でパネルを作る。1 本目が優先を掛けない設定でも、PanelOptions.Oscillators で値が付く
+// （付かないと 2 本目以降の優先が黙って効かない。2026-09-25 のレビュー）。
+func TestPanelOscillatorsForGrid(t *testing.T) {
+	days := fixture.BusinessDays(start, 60)
+	arch := buildArchive(t, days)
+	cfg := parityConfig() // 優先を掛けない設定
+	day := days[len(days)-1]
+	count := func(p *backtest.Panel) int {
+		n := 0
+		for _, r := range p.Rows {
+			if r.RSI2 != nil {
+				n++
+			}
+		}
+		return n
+	}
+	plain, err := backtest.LoadPanelWith(arch, day, day, cfg, backtest.PanelOptions{KeepAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := count(plain); n != 0 {
+		t.Fatalf("掛けない設定なのに値が %d 件付いた", n)
+	}
+	withOsc, err := backtest.LoadPanelWith(arch, day, day, cfg, backtest.PanelOptions{KeepAll: true, Oscillators: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count(withOsc) == 0 {
+		t.Fatal("Oscillators を渡しても値が付かない")
+	}
+}

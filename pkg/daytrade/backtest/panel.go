@@ -206,6 +206,9 @@ type PanelOptions struct {
 	// TurnoverFloor は残す売買代金 20 日中央値の下限（円）。0 なら PanelTurnoverFloor。
 	// 格子では「並べた設定の min_turnover の最小値」を渡して行数を抑える。
 	TurnoverFloor float64
+	// Oscillators が真ならオシレータ（Row.RSI2 / StochRSI14）を付ける。設定が signal.prefer を
+	// 掛けるなら付けるので、格子（1 本目の設定でパネルを作る）が「どれか 1 本でも掛けるなら」を渡すためのもの。
+	Oscillators bool
 }
 
 // LoadPanelWith は読み方を指定して LoadPanel する。
@@ -349,9 +352,19 @@ func LoadPanelWith(arch *archive.Archive, start, end time.Time, cfg config.Confi
 		}
 	}
 	panel.Days = days
-	if cfg.Signal.Prefer.Enabled() {
+	if cfg.Signal.Prefer.Enabled() || popts.Oscillators {
 		if err := attachOscillators(db, arch, panel, start, end); err != nil {
 			return nil, err
+		}
+		// 値が 1 件も付かなければ、優先は黙って効かず「掛けない」と同じ成績が出る。有効な比べに見えるので止める
+		withValue := 0
+		for i := range panel.Rows {
+			if panel.Rows[i].RSI2 != nil || panel.Rows[i].StochRSI14 != nil {
+				withValue++
+			}
+		}
+		if withValue == 0 && len(panel.Rows) > 0 {
+			return nil, fmt.Errorf("signal.prefer を掛ける設定ですが、オシレータの値が 1 件も付きません（足の取り込みを確認してください）")
 		}
 	}
 	if len(panel.Days) == 0 {
