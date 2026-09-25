@@ -136,13 +136,21 @@ check "snap の --max-run は必ず WITH_LOCK_TIMEOUT より手前（同じか�
   '[ "$snap_n" -ge 2 ] && [ "$snap_ok" = 1 ]'
 check "8:59 台の snap は KILL の猶予を詰めている（既定の 10 秒だと寄る前の open のロック待ちを越える）" \
   '! grep -v "^#" "$C" | grep -E -- "--slot 0859[0-9]{2}" | grep -qv "WITH_LOCK_KILL_AFTER="'
-# 寄る前の snap は固まっても寄る前の open の 1 秒前までにロックを手放す（開始 + 打ち切り + KILL ≤ DT_PREOPEN_AT − 1）
+# 寄る前の open は候補の外の板を DT_PRESNAP_UNTIL まで撮り、DT_QUOTES_AT に候補の気配を取る（open_presnap.go）。
+# 起動 < 打ち切り、打ち切り + 1 秒 ≤ 候補の時刻（時価問合の枠 8 回/秒を空ける）、候補の時刻 ≤ 8:59:55、
+# 起動 + ロックの打ち切り ≥ 9:00:05（最後の寄成の送信中に TERM を当てない）
 secs() { awk -F: '{printf "%.1f", $1*3600 + $2*60 + $3}' <<<"$1"; }
-pre=$(sed -n 's/^DT_PREOPEN_AT=//p' "$C"); presnap=$(sed -n 's/^DT_PRESNAP_AT=//p' "$C")
-sl=$(grep -v "^#" "$C" | grep -- "--slot 085942")
-st=$(sed -n 's/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p' <<<"$sl"); sk=$(sed -n 's/.*WITH_LOCK_KILL_AFTER=\([0-9]*\).*/\1/p' <<<"$sl")
-check "寄る前の snap（DT_PRESNAP_AT）は固まっても DT_PREOPEN_AT の 1 秒前までにロックを手放す" \
-  '[ -n "$pre" ] && [ -n "$presnap" ] && [ -n "$st" ] && [ -n "$sk" ] && grep -q "wait-until.sh \$DT_PRESNAP_AT" <<<"$sl" && awk -v a="$(secs "$presnap")" -v t="$st" -v k="$sk" -v b="$(secs "$pre")" "BEGIN{exit !(a + t + k <= b - 1)}"'
+pre=$(sed -n 's/^DT_PREOPEN_AT=//p' "$C"); until_=$(sed -n 's/^DT_PRESNAP_UNTIL=//p' "$C"); qat=$(sed -n 's/^DT_QUOTES_AT=//p' "$C")
+ol=$(grep -v "^#" "$C" | grep "wait-until.sh \$DT_PREOPEN_AT")
+ot=$(sed -n 's/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p' <<<"$ol")
+check "寄る前の open は --presnap-until \$DT_PRESNAP_UNTIL と --quotes-at \$DT_QUOTES_AT を渡している" \
+  'grep -q -- "--presnap-until \$DT_PRESNAP_UNTIL --quotes-at \$DT_QUOTES_AT" <<<"$ol"'
+check "起動 < 候補の外の打ち切り、打ち切り + 1 秒 ≤ 候補の気配、候補の気配 ≤ 8:59:55" \
+  '[ -n "$pre" ] && [ -n "$until_" ] && [ -n "$qat" ] && awk -v p="$(secs "$pre")" -v u="$(secs "$until_")" -v q="$(secs "$qat")" -v l="$(secs 08:59:55)" "BEGIN{exit !(p < u && u + 1 <= q && q <= l)}"'
+check "寄る前の open の起動 + ロックの打ち切り ≥ 9:00:05" \
+  '[ -n "$ot" ] && awk -v p="$(secs "$pre")" -v t="$ot" -v g="$(secs 09:00:05)" "BEGIN{exit !(p + t >= g)}"'
+check "8:59 台の snap は 8:59:00 の回だけ（寄る前の全銘柄の板は open の中で撮る）で、寄る前の open の 1 秒前までにロックを手放す" \
+  '! grep -v "^#" "$C" | grep -q "DT_PRESNAP_AT" && s59=$(grep -v "^#" "$C" | grep "^59 8" | grep "daytrade snap") && [ "$(wc -l <<<"$s59")" = 1 ] && t59=$(sed -n "s/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p" <<<"$s59") && awk -v t="$t59" -v p="$(secs "$pre")" -v z="$(secs 08:59:00)" "BEGIN{exit !(z + t + 10 <= p - 1)}"'
 
 echo
 [ "$fail" = 0 ] && echo "全部通った" || echo "失敗あり"

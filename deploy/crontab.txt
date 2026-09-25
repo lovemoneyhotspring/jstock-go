@@ -42,9 +42,13 @@ WBJP_HOME=/home/abobo/jstock-go
 # 9:00 の open の回を始める時刻（JST、0.1 秒刻み）。下の「9:00 の回だけは」を参照
 DT_OPEN_AT=09:00:01.2
 # 寄る前の open の回（寄成）を始める時刻。下の「2026-09-21 から開始は」を参照
-DT_PREOPEN_AT=08:59:52.0
-# 寄る前の snap（slot 085942）を始める時刻。DT_PREOPEN_AT とは組で動かす（下の「2026-09-24 に」を参照）
-DT_PRESNAP_AT=08:59:42.0
+DT_PREOPEN_AT=08:59:48.0
+# 寄る前の open は起動後、DT_PRESNAP_UNTIL まで候補の外の板を撮って記録し（slot は起動の時刻 = 085948）、
+# DT_QUOTES_AT まで待ってから候補の気配を取って発注する（2026-09-25〜、cmd/daytrade/open_presnap.go）。
+# 時価問合の送信枠（8 回/秒）はプロセスで 1 つなので **DT_PRESNAP_UNTIL + 1 秒 ≤ DT_QUOTES_AT** に保つ
+# （空けないと候補の取得が枠待ちで遅れる）。候補の気配は今までどおり 8:59:52 台。
+DT_PRESNAP_UNTIL=08:59:51.2
+DT_QUOTES_AT=08:59:52.2
 WBJP_BIN=/home/abobo/jstock-go/bin
 
 # --- データ ------------------------------------------------------------------
@@ -166,22 +170,11 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 打ち切りの秒数がそのまま上限になる（timeout の -k 10 の猶予まで伸びるのは TERM を握り潰す
 # プロセスだけで、snap は既定の動作でその場で終わる。TERM を受けるのは open だけ）。
 #
-# **2026-09-24 に寄る前の snap を 8:59:43 の 1 回（slot 085943）にまとめた**（ユーザ判断）。2026-09-25 に 8:59:40（slot 085940）・open 8:59:50 へ 3 秒前倒し（ユーザ判断）、同日朝に 8:59:42（slot 085942）・open 8:59:52 へ 2 秒遅らせた（ユーザ判断。注文の枠を 8 回/秒にしたので 10 本でも約 1.3 秒で送り切る）。それまでは
-# 8:59:35（085935）と 8:59:55（085955）の 2 回。085955 は寄る前の open の後に回るため --max-run 2 で毎回途中で切れ
-# （9/24 は 3,698 銘柄中 2,640）、open を遅らせる余地も塞いでいた。狙いは「snap を撮って演算してから寄る前に発注する」形の土台:
-# snap は寄る前の open（DT_PREOPEN_AT = 08:59:52.0）の**前**に全銘柄を取り切り、固まっても open の前にロックを手放す。
-#   ロックを待たず（wait 0）、取れなければ何もせず終わる（発注が優先）。必ず回る保証が無いので morning-check の
-#   必須スロットには入れない（deploy/morning-check.sh の EXPECTED_SLOTS）。
-#   秒の内訳（9/24 の実測）: 起動とログイン 1.8 秒 + 全銘柄の取得と書き出し 3.3〜3.6 秒 ⇒ ふだんは 8:59:48.4 ごろに終わる。
-#   --max-run 5（起動の後から数える。3.6 秒に 1.4 秒の余裕）/ WITH_LOCK_TIMEOUT=8（起動 1.8 + 5 + 書き出しの余裕 1）/
-#   WITH_LOCK_KILL_AFTER=1（snap は TERM でその場で終わる）⇒ 固まった朝でも 8:59:42 + 8 + 1 = **8:59:51 に手放し**、
-#   8:59:52 の open（ロック待ち 5 秒）を塞がない。開始は sleep でなく deploy/wait-until.sh（cron の揺れを経路から消す）。
-# **--max-run は必ず WITH_LOCK_TIMEOUT より手前に置く**（2026-09-21 のレビュー）。--max-run は snap が自分で切り上げる
-# 締め切りで、過ぎたら送信中の電文を切って**取れたバッチだけ記録して正常に終わる**。WITH_LOCK_TIMEOUT は外からの TERM で、
-# 当たると**何も記録せず** [timeout] が残る。締め切りの後に残るのは parquet の書き出しだけなので差は 1〜2 秒で足りる。
-# 遅い朝（9/21 より前の 7.3 秒の水準）は --max-run で切れて候補の外の銘柄が落ちる（対象の銘柄が先に並ぶ）。
-# これで [timeout] が出たら本当に固まった回。**DT_PRESNAP_AT・--max-run・打ち切り・DT_PREOPEN_AT は組で直す**:
-#   DT_PRESNAP_AT + WITH_LOCK_TIMEOUT + WITH_LOCK_KILL_AFTER ≤ DT_PREOPEN_AT − 1 秒
+# **寄る前の全銘柄の板は、2026-09-25 から寄る前の open の中で撮る**（上の DT_PRESNAP_UNTIL。候補の外は open が
+# 8:59:48〜51.2 に撮って history/book に slot 085948 で残し、候補は発注の判断に使った気配が history/quotes に残る）。
+# それまでは独立の snap（2026-09-24 から 8:59:43、9/25 朝は 8:59:42・slot 085942）で、open（8:59:52）の前にロックを
+# 明け渡す式（開始 + 打ち切り + KILL ≤ open − 1 秒）が要った。open を 8:59:48 に早めるとこの式を満たせないので、
+# 行ごと open に畳んだ（git の 2026-09-25 の crontab.txt に元の行と説明がある）。
 # 8:57 は 8:55 と 8:59 の間を埋める（気配の動く速さを特徴量にするため。2026-09-19 追加）
 30,45,55 8 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 # 8:57 だけは既定（170 秒 + KILL 10 秒）にしない。8:57:01 に起きると TERM が 08:59:51・KILL が 09:00:01 に当たり、
@@ -189,7 +182,6 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 60 + 5 で足り、遅くとも 08:58:06 にはロックを手放す
 57 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=60 WITH_LOCK_KILL_AFTER=5 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 59 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=25 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 20
-59 8 * * 1-5          cd $WBJP_HOME && WAIT_UNTIL_LOG=state/logs/daytrade-snap.log deploy/wait-until.sh $DT_PRESNAP_AT && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=8 WITH_LOCK_KILL_AFTER=1 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085942 --max-run 5
 0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=18 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 15
 2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 # 15:19 は 15:20 の close（ロック待ち 30 秒）の直前なので、固まっても 15:19:50 で手放すよう打ち切りを詰める
@@ -286,24 +278,24 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 9:00:00 に寄り、10 秒で始値 +14 bp、65 秒で +19 bp）。3 秒待つのは寄付を時価問合に反映させるため
 # （9:00:06 の snap では 9:00:00 台に寄った銘柄の 100% に始値が入っていた。9/16・9/17）。
 # 9:13 は us_stale_wait_until（09:12）の後に 1 回回すために残す
-# 8:59:52（DT_PREOPEN_AT）: 寄る前の回（execution.preopen_legs = long）。ここで出した注文だけが**寄成**になり、
+# DT_PREOPEN_AT（8:59:48）: 寄る前の回（execution.preopen_legs = long）。ここで出した注文だけが**寄成**になり、
 # 始値を決める板寄せで建つ。締め切りはコードが 9:00:00（板寄せ）に切る——過ぎてから届く寄成は
 # 既に寄った銘柄に約定しないため。実測 4〜9 秒で終わるので 15 秒あれば足りる。
 # 送れなかった分は下の 9:00:01.2 からの回が「残りの枚数」を従来のザラ場の成行で埋める。
-# 寄る前の snap は 8:59:42（slot 085942、DT_PRESNAP_AT）で、この回より前に取り終えてロックを明け渡す
+# 2026-09-25 から起動は 8:59:48 で、候補の外の板を 51.2 まで撮ってから 52.2 に候補の気配を取る（上の DT_PRESNAP_UNTIL）。
 # 2026-09-21 から開始は DT_PREOPEN_AT ちょうど（deploy/wait-until.sh）。それまでは sleep 45 で実際は 8:59:46〜47。
 # **遅いほど気配は始値に近いが、9:00:00 までに 4 本とも届かなければ意味が無い**ので刻んで遅らせている途中。
 # 順調な朝の所要の見積もりは約 2.8 秒（建玉 0.4・気配 0.6・判定 0.3・余力 0.2・注文 10 本 1.3。注文は 2026-09-25 から 8 回/秒の枠）。朝ごとに
 #   test/.venv/bin/python test/dt_preopen_timing.py
-# で「最後の注文から 9:00:00 までの余裕」を見る。さらに遅くするなら DT_PRESNAP_AT も組で動かす（上の式）。8:59:55 以降にする前に、遅れた寄成の
+# で「最後の注文から 9:00:00 までの余裕」を見る。さらに遅くするなら DT_QUOTES_AT を動かす（DT_PRESNAP_UNTIL は 1 秒手前に組で）。8:59:55 以降にする前に、遅れた寄成の
 # 行き先を 1 株で実機検証する（vault daytrade-open-latency）。戻すなら 2026-09-24 の前の crontab.txt（08:59:50.0、snap は 085935 と 085955）を git から
-# WITH_LOCK_TIMEOUT=15: 固まったら 9:00:07〜08 に手放す（既定の 170 秒だと 9:02:40 まで握り、9:00:01.2・9:00:25・
+# WITH_LOCK_TIMEOUT=18（8:59:48 起動。2026-09-25 までは 8:59:52 起動で 15）: 固まったら 9:00:06〜07 に手放す（既定の 170 秒だと 9:02:40 まで握り、9:00:01.2・9:00:25・
 # 9:01:03 の回が lock_busy で全部消えて建つのが 9:03 になる）。締め切りは 9:00:00 なので、切られて困る仕事は残っていない
 # **DT_PREOPEN_AT + WITH_LOCK_TIMEOUT は 09:00:05 以上に保つ**（08:59:45.0 に戻すなら 20）。9:00:00 ちょうどに切ると最後の寄成の送信中に当たる
 # WAIT_UNTIL_LOG: wait-until.sh が見送ったとき（時刻が空・読めない・120 秒より先）に 1 行残す先。ここで止まると
 # with-lock.sh に届かず、通知もログも無いまま回が消える。open と同じログに [error] [wait_skip] で書くので、
 # 9:22 の morning-check.sh が「時刻待ちの見送り」として ❌ に出す。下の DT_OPEN_AT の行も同じ
-59 8 * * 1-5          cd $WBJP_HOME && WAIT_UNTIL_LOG=state/logs/daytrade-open.log deploy/wait-until.sh $DT_PREOPEN_AT && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 WITH_LOCK_TIMEOUT=15 deploy/with-lock.sh /tmp/daytrade.lock 5 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes
+59 8 * * 1-5          cd $WBJP_HOME && WAIT_UNTIL_LOG=state/logs/daytrade-open.log deploy/wait-until.sh $DT_PREOPEN_AT && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_NOTIFY=1 WITH_LOCK_TIMEOUT=18 deploy/with-lock.sh /tmp/daytrade.lock 5 state/logs/daytrade-open.log $WBJP_BIN/daytrade open   --config-dir config/daytrade_margin --live --yes --presnap-until $DT_PRESNAP_UNTIL --quotes-at $DT_QUOTES_AT
 # 9:00 の回だけは DT_OPEN_AT ちょうどに始める（2026-09-20、それまでは sleep 3 で実際は 9:00:04 台）。
 # 8:59 の行から起こして deploy/wait-until.sh で待つので、cron の起動の揺れ（+1〜2 秒）が乗らない。
 # **時価問合に始値が入るのが何秒からかを刻んで確かめている途中**: 朝ごとに

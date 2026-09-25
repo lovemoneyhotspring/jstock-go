@@ -41,6 +41,8 @@ func newOpenCmd() *cobra.Command {
 		quoteFileFlag    string
 		dateFlag         string
 		brokerVerifyFlag bool
+		presnapUntilFlag string
+		quotesAtFlag     string
 	)
 	cmd := &cobra.Command{
 		Use:   "open",
@@ -52,6 +54,7 @@ func newOpenCmd() *cobra.Command {
 				live: liveFlag, yes: yesFlag, ignoreWindow: ignoreWindowFlag,
 				allowDelayed: allowDelayedFlag, quoteSource: quoteSourceFlag,
 				quoteFile: quoteFileFlag, date: dateFlag, brokerVerify: brokerVerifyFlag,
+				presnapUntil: presnapUntilFlag, quotesAt: quotesAtFlag,
 			}))
 		},
 	}
@@ -62,6 +65,10 @@ func newOpenCmd() *cobra.Command {
 	cmd.Flags().StringVar(&quoteSourceFlag, "quote-source", "", "気配の取得元を上書き（tachibana / csv）")
 	cmd.Flags().StringVar(&quoteFileFlag, "quote-file", "", "csv のときのファイル")
 	cmd.Flags().StringVar(&dateFlag, "date", "", "判定日（YYYY-MM-DD、既定は今日）")
+	cmd.Flags().StringVar(&presnapUntilFlag, "presnap-until", "",
+		"寄る前の回で、候補の外の板をこの時刻（HH:MM:SS.f、JST）まで撮って記録する（記録だけ。空なら撮らない）")
+	cmd.Flags().StringVar(&quotesAtFlag, "quotes-at", "",
+		"寄る前の回で、候補の気配をこの時刻（HH:MM:SS.f、JST）まで待ってから取る（空なら待たない）")
 	cmd.Flags().BoolVar(&brokerVerifyFlag, "broker-verify", false,
 		"発注経路の実機検証（docs/BROKER_VERIFY.md）。台帳・履歴・ログに印を付け、成績の集計から外す")
 	return cmd
@@ -73,6 +80,8 @@ type openOptions struct {
 	// brokerVerify は実機検証の実行か（--broker-verify）。建てる玉は本物だが、
 	// 戦略の判断ではないので成績の集計からは外す。
 	brokerVerify bool
+	// presnapUntil / quotesAt は寄る前の回の候補の外の板の打ち切りと、候補の気配を取る時刻（open_presnap.go）
+	presnapUntil, quotesAt string
 }
 
 // openState は runOpen の 1 回の実行で、段（準備・plan・台帳と接続・気配・判定・選定・発注）を
@@ -167,6 +176,9 @@ func runOpen(opts openOptions) error {
 	if done, err := s.countPlaced(); done || err != nil {
 		return err
 	}
+	// 寄る前の回だけ: 候補の外の板を撮って記録し（--presnap-until）、候補を撮る時刻まで待つ（--quotes-at）
+	s.presnapOthers()
+	s.waitQuotesAt()
 	if done := s.readQuotes(); done {
 		return nil
 	}
@@ -596,10 +608,11 @@ func (s *openState) finish(outcome string, extra map[string]any) {
 
 // readQuotes は候補（ロングとショートの和集合）の気配を取り、古い・遅延した気配を落とす。
 // 取れなければ見送りを記録して done を返す。
-func (s *openState) readQuotes() (done bool) {
-	eligible := s.p.Eligible()
-	symbols := s.p.Symbols(eligible)
-	shortUniverse := s.p.ShortEligible()
+// quoteSymbols は気配を取る銘柄（ロングの候補と、ショートの母集団の和集合）と、その元の 2 つの母集団。
+func (s *openState) quoteSymbols() (symbols []string, eligible, shortUniverse []universe.Candidate) {
+	eligible = s.p.Eligible()
+	symbols = s.p.Symbols(eligible)
+	shortUniverse = s.p.ShortEligible()
 	if s.corpStale != "" || s.cfg.Margin.Paused {
 		shortUniverse = nil
 	}
@@ -607,6 +620,11 @@ func (s *openState) readQuotes() (done bool) {
 		// ショートの母集団はロングと別なので、気配はその和集合で取る
 		symbols = mergeSymbols(symbols, s.p.Symbols(shortUniverse))
 	}
+	return symbols, eligible, shortUniverse
+}
+
+func (s *openState) readQuotes() (done bool) {
+	symbols, eligible, shortUniverse := s.quoteSymbols()
 
 	quotesStarted := clock.NowUTC()
 	received, err := fetchQuotes(s.cfg, s.b, symbols, s.opts.quoteSource, s.opts.quoteFile, s.deadline)

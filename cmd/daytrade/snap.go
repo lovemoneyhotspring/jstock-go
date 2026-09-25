@@ -87,8 +87,8 @@ func runSnap(symbolsFlag, slotFlag, columnsFlag string, maxRun int) error {
 	tachibana.Broker.SetLogger(run)
 	// snap は open / close とロックを共有する。遅い日にここで粘ると 9:01 の発注がロックを
 	// 取れずに消えるので、book.max_run_seconds で切る（記録は次の回で足りる。発注が優先）
-	// 寄る前の回（crontab の DT_PRESNAP_AT）は寄る前の open（寄成、DT_PREOPEN_AT）の直前なので、cron で --max-run を短くする（候補が先に並ぶので、
-	// 切れても落ちるのは候補の外の銘柄）
+	// 寄る前の全銘柄の板は 2026-09-25 から寄る前の open の中で撮る（open_presnap.go）。短い --max-run の回は
+	// 候補が先に並ぶので、切れても落ちるのは候補の外の銘柄
 	if maxRun <= 0 {
 		maxRun = cfg.Book.MaxRunSeconds
 	}

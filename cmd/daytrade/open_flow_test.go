@@ -304,6 +304,14 @@ func TestOpenFlow(t *testing.T) {
 			runs: []flowRun{{at: jstAt(8, 59, 50, 0), opts: liveOpts()}},
 		},
 		{
+			// 寄る前の回で候補の外の板も撮る（--presnap-until / --quotes-at）: 8:59:48 に起動し、候補の外を
+			// 51.2 まで撮って記録し、52.2 まで待ってから候補を撮る。選定と発注は preopen_long と同じになるはず
+			name: "preopen_presnap", knobs: flowKnobs{marginPaused: true, excludeCorpEvents: true},
+			calendar: tradingCalendar(), usRet: ret(-0.005), env: settings.EnvProd,
+			runs: []flowRun{{at: jstAt(8, 59, 48, 0), opts: openOptions{live: true, yes: true,
+				presnapUntil: "08:59:51.2", quotesAt: "08:59:52.2"}}},
+		},
+		{
 			// 9:00:01.2 の回: ザラ場の成行。ショートは paused
 			name: "open_0900_long", knobs: flowKnobs{marginPaused: true, excludeCorpEvents: true},
 			calendar: tradingCalendar(), usRet: ret(-0.005), env: settings.EnvProd,
@@ -517,6 +525,22 @@ func runFlowCase(t *testing.T, c flowCase) string {
 	appSettings, configDirFlag = s, configDir
 	fake := &flowClock{}
 	clock.Now = fake.Now
+	// 寄る前の回の候補の外の板（open_presnap.go）: 取得は偽物にし、待ちは偽の時計を進めるだけにする。
+	// 候補の外の最後の 1 銘柄は「打ち切りで取れなかった」ことにする
+	savedFetch, savedWait, savedSourceOK := presnapFetch, waitUntil, presnapSourceOK
+	t.Cleanup(func() { presnapFetch, waitUntil, presnapSourceOK = savedFetch, savedWait, savedSourceOK })
+	presnapSourceOK = func(string) bool { return true }
+	waitUntil = func(at time.Time) { fake.set(at) }
+	presnapFetch = func(symbols []string, _ string, until time.Time) ([]map[string]any, []time.Time, int, error) {
+		var rows []map[string]any
+		var received []time.Time
+		for _, sym := range symbols[:len(symbols)-1] {
+			rows = append(rows, map[string]any{"sIssueCode": sym, "pQAP": "101", "pQBP": "99"})
+			received = append(received, until.Add(-time.Second))
+		}
+		fake.set(until)
+		return rows, received, 1, nil
+	}
 
 	fb := &flowBroker{balance: domain.Balance{
 		BuyingPower: decimal.NewFromInt(50_000_000), MarginBuyingPower: ptrDecimal(decimal.NewFromInt(50_000_000)),
