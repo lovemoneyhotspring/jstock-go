@@ -3,13 +3,14 @@
 根拠: vault 20-research/2026-09-jp-daytrade-oscillator.md（ストキャス RSI の優先で Python と Go の向きが逆になった件）
 
   bin/daytrade backtest --config-dir config/daytrade_margin --since 2017-01-01 --trades-csv test/out/parity_go_trades.csv
-  PYTHONPATH=test test/.venv/bin/python test/dt_parity_go.py [--go test/out/parity_go_trades.csv] [--no-afford]
+  PYTHONPATH=test test/.venv/bin/python test/dt_parity_go.py [--go test/out/parity_go_trades.csv] [--no-afford] [--us nasdaq] [--keep-december]
 
 簡易検証で案を測るときは、先にこれを base（案なし）で回して、比べる日の層でずれが小さいことを確かめる。
 ずれが大きい層（日の種類）の結果は、Python の数字を判定に使わない。
 
 層:
-  1 日     Python の日の区分（day_rules の近似: 休み・ショック・平常）と Go のその日の並べ方（trades の rank_by）の対応
+  1 日     Python の日の区分（day_rules: 休み・ショック・平常）と Go のその日の並べ方（trades の rank_by）の対応。
+          --us spx（既定・本番と同じ判定）なら小幅高の日は Go の lgbm の日と一致する
   2 銘柄   Go が gap_vol で並べた日に、Go の建てた銘柄と Python の上位 n 本（n = Go のその日の本数、誤差なし・業種 1・
           単元の判定あり）の重なり。Go が lgbm で並べた日は Python の gap_vol の模擬では表せないので比べない
   3 値     同じ日・銘柄で、Go の建値→手仕舞い値の騰落と候補表の y_raw（始値→引け）の差
@@ -51,6 +52,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--go", default="test/out/parity_go_trades.csv")
     ap.add_argument("--no-afford", action="store_true", help="単元の判定を掛けない（従来の Python の形）")
+    ap.add_argument("--keep-december", action="store_true", help="12 月も取引する（従来の Python の形）")
+    ap.add_argument("--us", default="spx", choices=["spx", "nasdaq"], help="day_rules の米国小幅高の判定（nasdaq は従来の近似）")
     a = ap.parse_args()
 
     go = pd.read_csv(a.go, dtype={"code": str}, parse_dates=["date"])
@@ -61,13 +64,13 @@ def main():
     te = te[(te["d"] >= SINCE) & (te["d"] <= go["d"].max())].copy()
     te["code"] = te["code"].astype(str)
     from dt_preopen_sim import BANDS
-    rules = day_rules(te)
+    rules = day_rules(te, us=a.us, skip_months=() if a.keep_december else (12,))
     afford = None if a.no_afford else unit_affordable(rules["mult"])
     g = seen_ranked(te, [np.zeros(1)] * (len(BANDS) - 1), 0, afford=afford)  # 誤差なし
     print(f"単元の判定: {'なし' if afford is None else 'あり（総額 %.0f 万 ÷ %d、売買代金 × %.1f%%）' % (TOTAL / 1e4, NAME_DIVISOR, TURNOVER_RATIO * 100)}")
 
-    kind = pd.Series(np.where(rules["skip"], "小幅高（Python は休み）",
-                              np.where(rules["mult"] > 1, "ショック", "平常")), index=rules.index)
+    kind = pd.Series(np.where(rules["mult"] == 0, "休む月（12 月）", np.where(rules["skip"], "小幅高（Python は休み）",
+                              np.where(rules["mult"] > 1, "ショック", "平常"))), index=rules.index)
     alld = rules.index
     n_go = go.groupby("d").size().reindex(alld).fillna(0).astype(int)
 

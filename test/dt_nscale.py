@@ -203,23 +203,56 @@ def part_tail(c, lo=4, hi=30):
         print(f"   {rb:5s} 代金{'低中高'[int(tq)]}: {split(s)}  中央値 {g['turnover_med'].median()/1e8:5.1f} 億")
 
 
-def day_rules(te):
-    """日の規則の近似: ショック（候補表の全銘柄のギャップの中央値 ≤ −2%）で資金 ×1.5、米国小幅高（ナスダック 0〜+1%）で休み。
-    本番は 9:00 の市場ギャップと S&P500・VIX で判定するが、手元の ^TOPIX は始値が前日終値のままで使えず、
-    S&P・VIX の履歴も無いので代用する（VIX の例外も無し）。"""
+US_JSON = "data/daytrade/us.json"   # 本番・Go のバックテストと同じ米国の材料（S&P500 の終値・VIX）
+US_SKIP_LOW, US_SKIP_HIGH, US_VIX_OVERRIDE = 0.0, 0.01, 24.0   # config/daytrade/daytrade.toml の [regime]
+
+
+def us_low_spx(days):
+    """本番の米国小幅高の判定（regime.IsUsLow）: 前夜の S&P500 が 0〜+1% かつ VIX ≤ 24。
+    東証の日ごとに前日以前の最新の米国セッションを当てる（usmarket.AsOf。7 日より古いセッションは当てない）。"""
+    import json
+    u = pd.DataFrame(json.load(open(US_JSON)))
+    u["date"] = pd.to_datetime(u["date"]).astype("datetime64[ns]")
+    u = u.sort_values("date")
+    u["r"] = u["spx"] / u["spx"].shift(1) - 1
+    d = pd.DataFrame({"d": pd.to_datetime(sorted(days)).astype("datetime64[ns]")})
+    d = pd.merge_asof(d, u[["date", "r", "vix"]].rename(columns={"date": "ud"}), left_on="d", right_on="ud",
+                      allow_exact_matches=False, tolerance=pd.Timedelta(days=6))
+    vix_ok = d["vix"].isna() | (d["vix"] <= 0) | (d["vix"] <= US_VIX_OVERRIDE)   # VIX が取れない日は見ない（Go と同じ）
+    return pd.Series(((d["r"] >= US_SKIP_LOW) & (d["r"] < US_SKIP_HIGH) & vix_ok).values, index=d["d"])
+
+
+def day_rules(te, us="nasdaq", skip_months=()):
+    """日の規則の近似: ショック（候補表の全銘柄のギャップの中央値 ≤ −2%）で資金 ×1.5、米国小幅高で休み。
+    us は小幅高の判定:
+      "nasdaq"  従来の近似（ナスダック 0〜+1%、VIX なし）。2026-09-25 までの検証はこれ。再現するときはこのまま
+      "spx"     本番・Go と同じ（S&P500 0〜+1% かつ VIX ≤ 24、us_low_spx）。**新しい検証はこちら**
+                ナスダック版とは 2017〜2026 で 487 日食い違う（vault 20-research/2026-09-jp-daytrade-sim-parity.md）
+    skip_months はその月を丸ごと休む（本番・Go は regime.skip_months = [12]。従来の検証は休んでいない）。
+    休む月の日は mult = 0・skip = True。新しい検証は day_rules(te, us="spx", skip_months=(12,)) が本番の形。
+    本番のショックは 9:00 の市場ギャップで判定するが、手元の ^TOPIX は始値が前日終値のままで使えないので候補表で代用する。"""
     days = te["d"].unique()
     tp = te.groupby("d")["gap"].median().rename("tgap").reset_index().rename(columns={"d": "date"})
     tp["date"] = tp["date"].astype("datetime64[ns]")
-    us = pd.read_parquet("data/bars/^IXIC.parquet")
-    us["date"] = pd.to_datetime(us["date"]).dt.tz_localize(None).dt.normalize().astype("datetime64[ns]")
-    us["r"] = us["close"] / us["close"].shift(1) - 1
     d = pd.DataFrame({"d": pd.to_datetime(sorted(days)).astype("datetime64[ns]")})
-    d = pd.merge_asof(d, us[["date", "r"]].rename(columns={"date": "ud"}), left_on="d", right_on="ud",
-                      allow_exact_matches=False)
     d = d.merge(tp[["date", "tgap"]], left_on="d", right_on="date", how="left")
     d["mult"] = np.where(d["tgap"] <= -0.02, 1.5, 1.0)
-    d["skip"] = (d["r"] >= 0) & (d["r"] <= 0.01) & (d["mult"] == 1.0)
-    return d.set_index("d")[["mult", "skip"]]
+    if us == "spx":
+        low = us_low_spx(days).reindex(d["d"]).fillna(False).values
+    elif us == "nasdaq":
+        ix = pd.read_parquet("data/bars/^IXIC.parquet")
+        ix["date"] = pd.to_datetime(ix["date"]).dt.tz_localize(None).dt.normalize().astype("datetime64[ns]")
+        ix["r"] = ix["close"] / ix["close"].shift(1) - 1
+        x = pd.merge_asof(d[["d"]], ix[["date", "r"]].rename(columns={"date": "ud"}), left_on="d", right_on="ud",
+                          allow_exact_matches=False)
+        low = ((x["r"] >= 0) & (x["r"] <= 0.01)).values
+    else:
+        raise ValueError(f"us は nasdaq か spx: {us}")
+    d["us_low"] = low
+    d["skip"] = d["us_low"] & (d["mult"] == 1.0)
+    off = d["d"].dt.month.isin(list(skip_months)).values
+    d.loc[off, "mult"], d.loc[off, "skip"] = 0.0, True
+    return d.set_index("d")[["mult", "skip", "us_low"]]
 
 
 def alloc_fixed_iv(g, n, cap_total):
