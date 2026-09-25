@@ -276,6 +276,15 @@ def day_rules(te, us=None, skip_months=None):
     return d.set_index("d")[["mult", "skip", "us_low"]]
 
 
+def gapvol_days():
+    """本番で gap_vol で並べてロングを建てる日（米国小幅高でも 12 月でもない日。ショック日は含む）。
+    日の区分を使わない一次の横断（dt_oscillator・dt_three_day など）を本番の日に絞るため（2026-09-25）。
+    ショック日の判定は広い候補表（dt_candidates_wide）のギャップの中央値で、day_rules の本番の形と同じ。"""
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet", columns=["d", "gap"])
+    r = day_rules(te, us="spx", skip_months=(12,))
+    return r.index[~r["skip"].values]
+
+
 def afford_on():
     """環境変数 DT_AFFORD=1 なら、配分で 1 単元（100 株）が載らない銘柄を飛ばして次点を繰り上げる（Go の candidatePool）。
     未設定は従来どおり（連続の金額で配る）。業種の上限は seen_ranked で先に掛けてあるので、飛ばした銘柄と同じ業種の

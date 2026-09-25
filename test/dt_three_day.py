@@ -63,11 +63,17 @@ def lag_features():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--top", type=int, default=10)
+    ap.add_argument("--days", default="all", choices=["all", "gapvol"],
+                    help="gapvol は本番で gap_vol で建てる日だけ（米国小幅高・12 月を除く。2026-09-25 追加）。all は元の検証の形")
     a = ap.parse_args()
     n = a.top
 
     c = pd.read_parquet(CAND)
     c = c[np.isfinite(c["key_sort"])].copy()
+    if a.days == "gapvol":
+        from dt_nscale import gapvol_days
+        c = c[c["d"].isin(gapvol_days())].copy()
+        print(f"本番で gap_vol の日だけ: {c['d'].nunique()} 日")
     days = np.sort(c["d"].unique())
     c["d0"] = c["d"].map(pd.Series(days[:-1], index=days[1:]))
     c = c.merge(lag_features(), on=["code", "d0"], how="inner").dropna(subset=["r_d1", "r_d2", "c_over_c3", "low3_c"])
