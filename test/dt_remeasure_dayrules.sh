@@ -11,10 +11,11 @@ mkdir -p "$OUT"
 
 declare -A CMD=(
   [k]="test/dt_nscale.py --part k --ks 3 5 6 7 9 --i0 5"
-  [rule]="test/dt_nscale.py --part rule"
-  [prod]="test/dt_nscale.py --part prod"
+  [rule]="test/dt_nscale.py --part rule --i0 3 5 10"
+  [prod]="test/dt_nscale.py --part prod --i0 3 5 10"
   [sector_m]="test/dt_nscale.py --part sector_m --i0 5 3 --seeds 3"
   [ranker]="test/dt_nscale_ranker.py"
+  [ranker_liq]="test/dt_nscale_ranker.py --liq-cost"
   [prefer_lgbm_wf]="test/dt_prefer_lgbm_wf.py --seeds 10"
   [rsi_family]="test/dt_rsi_family.py --seeds 10"
   [rsi2_deep]="test/dt_rsi2_deep.py --seeds 10"
@@ -26,7 +27,7 @@ declare -A CMD=(
   [sector]="test/dt_nscale.py --part sector"
   [fixed]="test/dt_nscale.py --part fixed --caps 1e7 1.5e7 2e7"
 )
-ORDER=(k rule prod sector_m ranker prefer_lgbm_wf rsi_family rsi2_deep ext wilder now cap200 r200 sector fixed)
+ORDER=(k rule prod sector_m ranker ranker_liq prefer_lgbm_wf rsi_family rsi2_deep ext wilder now cap200 r200 sector fixed)
 [ $# -gt 0 ] && ORDER=("$@")
 
 for name in "${ORDER[@]}"; do
