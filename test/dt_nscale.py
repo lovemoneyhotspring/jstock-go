@@ -265,9 +265,21 @@ def day_rules(te, us=None, skip_months=None):
     return d.set_index("d")[["mult", "skip", "us_low"]]
 
 
+def afford_on():
+    """環境変数 DT_AFFORD=1 なら、配分で 1 単元（100 株）が載らない銘柄を飛ばして次点を繰り上げる（Go の candidatePool）。
+    未設定は従来どおり（連続の金額で配る）。業種の上限は seen_ranked で先に掛けてあるので、飛ばした銘柄と同じ業種の
+    次点は戻らない（Go は戻す）。その差は test/dt_parity_go.py の --approx で測る（2026-09-25）。"""
+    return os.environ.get("DT_AFFORD", "") == "1"
+
+
 def alloc_fixed_iv(g, n, cap_total):
-    """順位 1..n に 20 日ボラの逆数で配分（本番の sizing）。"""
-    sel = g[g["rank"] <= n]
+    """順位 1..n に 20 日ボラの逆数で配分（本番の sizing）。
+    DT_AFFORD=1 なら 1 単元が 1 注文の予算（資金 ÷ n）を超える銘柄を飛ばし、載る銘柄を順位順に n 本取る。"""
+    if afford_on():
+        g = g.sort_values("rank")
+        sel = g[g["price"].values * 100 <= cap_total / n].head(n)
+    else:
+        sel = g[g["rank"] <= n]
     iv = 1 / np.maximum(sel["vol20"].fillna(0.02).values, 0.02)
     return sel.index, cap_total * iv / iv.sum() if len(sel) else np.array([])
 
@@ -417,9 +429,25 @@ def part_prod(i0s, seeds, slot):
 def alloc_rule(g, p, rmax, cap_total, cap_name=np.inf, k=3, cap_top=None):
     """規則 R: 順位順に w = min(p × 売買代金, 資金 ÷ k, 1 銘柄の上限) を割り当て、資金か順位 rmax で止める。
     1 銘柄の上限は cap_name（cap_top を渡したら 1〜3 位だけ cap_top）。"""
-    sel = g[g["rank"] <= rmax]
+    if afford_on():
+        # Go と同じく、1 単元が載らない銘柄（min(p × 売買代金, 資金 ÷ k, 上限) < 100 株）を飛ばし、載る銘柄を rmax 本まで取る
+        g = g.sort_values("rank")
+        cap_g = np.where(g["rank"].values <= 3, cap_top, cap_name) if cap_top is not None else cap_name
+        w_g = np.minimum(np.minimum(p * g["turnover_med"].values, cap_total / k), cap_g)
+        sel = g[g["price"].values * 100 <= w_g].head(rmax)
+    else:
+        sel = g[g["rank"] <= rmax]
     cap_i = np.where(sel["rank"].values <= 3, cap_top, cap_name) if cap_top is not None else cap_name
     w = np.minimum(np.minimum(p * sel["turnover_med"].values, cap_total / k), cap_i)
+    if afford_on():
+        # Go の PickFrom: 順に min(上限, 残り) を 1 単元の倍数に切り捨て、0 株なら飛ばす（余りは現金）
+        unit = sel["price"].values * 100
+        out, left = np.zeros(len(w)), cap_total
+        for i in range(len(w)):
+            out[i] = np.floor(min(w[i], left) / unit[i]) * unit[i]
+            left -= out[i]
+        m = out > 0
+        return sel.index[m], out[m]
     cum = np.cumsum(w)
     w = np.where(cum <= cap_total, w, np.maximum(cap_total - (cum - w), 0.0))
     m = w > 0

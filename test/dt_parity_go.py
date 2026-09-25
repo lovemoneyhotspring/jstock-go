@@ -3,7 +3,7 @@
 根拠: vault 20-research/2026-09-jp-daytrade-oscillator.md（ストキャス RSI の優先で Python と Go の向きが逆になった件）
 
   bin/daytrade backtest --config-dir config/daytrade_margin --since 2017-01-01 --trades-csv test/out/parity_go_trades.csv
-  PYTHONPATH=test test/.venv/bin/python test/dt_parity_go.py [--go test/out/parity_go_trades.csv] [--no-afford] [--us nasdaq] [--keep-december]
+  PYTHONPATH=test test/.venv/bin/python test/dt_parity_go.py [--go test/out/parity_go_trades.csv] [--no-afford | --approx] [--us nasdaq] [--keep-december]
 
 簡易検証で案を測るときは、先にこれを base（案なし）で回して、比べる日の層でずれが小さいことを確かめる。
 ずれが大きい層（日の種類）の結果は、Python の数字を判定に使わない。
@@ -19,6 +19,7 @@
 """
 
 import argparse
+import os
 
 import numpy as np
 import pandas as pd
@@ -52,6 +53,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--go", default="test/out/parity_go_trades.csv")
     ap.add_argument("--no-afford", action="store_true", help="単元の判定を掛けない（従来の Python の形）")
+    ap.add_argument("--approx", action="store_true",
+                    help="Python の選定を alloc_rule（DT_AFFORD=1 の近似: 業種の上限の後で単元の判定）で作る。"
+                         "既定は seen_ranked の afford（Go と同じ順）で上位 n 本")
     ap.add_argument("--keep-december", action="store_true", help="12 月も取引する（従来の Python の形）")
     ap.add_argument("--us", default="spx", choices=["spx", "nasdaq"], help="day_rules の米国小幅高の判定（nasdaq は従来の近似）")
     a = ap.parse_args()
@@ -66,6 +70,9 @@ def main():
     from dt_preopen_sim import BANDS
     rules = day_rules(te, us=a.us, skip_months=() if a.keep_december else (12,))
     afford = None if a.no_afford else unit_affordable(rules["mult"])
+    if a.approx:
+        os.environ["DT_AFFORD"] = "1"
+        afford = None
     g = seen_ranked(te, [np.zeros(1)] * (len(BANDS) - 1), 0, afford=afford)  # 誤差なし
     print(f"単元の判定: {'なし' if afford is None else 'あり（総額 %.0f 万 ÷ %d、売買代金 × %.1f%%）' % (TOTAL / 1e4, NAME_DIVISOR, TURNOVER_RATIO * 100)}")
 
@@ -82,8 +89,14 @@ def main():
 
     # 層 2: 銘柄（Go が gap_vol で並べた日だけ）
     days = alld[(rb == "gap_vol").values]
-    py = g[g["d"].isin(days)].merge(n_go.rename("n"), left_on="d", right_index=True)
-    py = py[py["rank"] <= py["n"]]
+    if a.approx:
+        from dt_nscale import alloc_rule
+        idx = [i for d, x in g[g["d"].isin(days)].groupby("d")
+               for i in alloc_rule(x, TURNOVER_RATIO, 10, TOTAL * rules.loc[d, "mult"], k=NAME_DIVISOR)[0]]
+        py = g.loc[idx]
+    else:
+        py = g[g["d"].isin(days)].merge(n_go.rename("n"), left_on="d", right_index=True)
+        py = py[py["rank"] <= py["n"]]
     gs = go[go["d"].isin(days)]
     both = py.merge(gs[["d", "code"]], on=["d", "code"])
     jac = (both.groupby("d").size().reindex(days).fillna(0)

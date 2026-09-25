@@ -5,9 +5,11 @@
 # I0 は vault の古い記録と同じ値にそろえる（比べるのは同じ前提どうし）。実行中にこのファイルを書き換えない（bash は逐次読む）
 set -u
 cd "$(dirname "$0")/.."
+#   DT_AFFORD=1 bash test/dt_remeasure_dayrules.sh   # 単元の判定も Go に合わせる（出力は test/out/remeasure_afford/）
 export DT_DAY_RULES=prod PYTHONPATH=test
 PY=test/.venv/bin/python
 OUT=test/out/remeasure
+[ "${DT_AFFORD:-}" = "1" ] && OUT=test/out/remeasure_afford
 mkdir -p "$OUT"
 
 declare -A CMD=(
