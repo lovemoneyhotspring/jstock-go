@@ -22,6 +22,8 @@
   本番の形: 業種の上限 1、規則 R（p 0.2%・資金 ÷ 7・10 位まで＝max_positions）、1,000 万、I0 10 bp、12 月除く、10 シード。
   並べ方: L（M0 の予測値の高い順）、G（gap_vol）。
   日の区分: 平常日 = dt_nscale.day_rules で米国小幅高でない日（本番の平常日は rank_by = gap_vol）。
+    【2026-09-25 決め直し、結果を見る前】判定は本番と同じ S&P500 0〜+1% かつ VIX ≤ 24（day_rules の us="spx"）。
+    それまでの既定（ナスダック近似）は本番と 487 日食い違っていた（vault 20-research/2026-09-jp-daytrade-sim-parity.md）
   判定（平常日の L − G、シードで平均した日次の差。誤差の帯は上の「主」の代え方）:
     iid で t ≥ 2 かつ block で差 > 0 → 平常日を LightGBM にする案をユーザに出す（rank_by = "lgbm"）
     iid で t ≤ −2 かつ block で差 < 0 → gap_vol のままを確かめた
@@ -110,7 +112,7 @@ def main():
 
     te = df[(df["d"] >= bounds[0]) & (df["d"].dt.month != 12)].copy()
     fold_of = pd.Series(np.searchsorted(np.array(bounds[1:], dtype="datetime64[ns]"), te["d"].values, side="right"), index=te.index)
-    rules = day_rules(te)
+    rules = day_rules(te, us="spx", skip_months=(12,))   # 本番と同じ区分（2026-09-25、回す前に決め直し）
     alld = pd.DatetimeIndex(sorted(te["d"].unique()))
     band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
     day_idx = te["d"].rank(method="dense").astype(int).values - 1

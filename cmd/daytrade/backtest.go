@@ -262,14 +262,14 @@ func writeTradesCSV(path string, long, short []dtbacktest.Trade) error {
 	}
 	defer f.Close()
 	w := csv.NewWriter(f)
-	_ = w.Write([]string{"date", "side", "code", "rank", "gap", "shares", "entry", "exit", "amount", "fees", "pnl", "scale", "carried"})
+	_ = w.Write([]string{"date", "side", "code", "rank", "gap", "shares", "entry", "exit", "amount", "fees", "pnl", "scale", "carried", "rank_by"})
 	write := func(side string, ts []dtbacktest.Trade) {
 		for _, t := range ts {
 			_ = w.Write([]string{t.Date.Format(DateLayout), side, t.Code, strconv.Itoa(t.Rank),
 				strconv.FormatFloat(t.Gap, 'f', 6, 64), strconv.FormatFloat(t.Shares, 'f', 0, 64),
 				strconv.FormatFloat(t.Entry, 'f', 2, 64), strconv.FormatFloat(t.Exit, 'f', 2, 64),
 				strconv.FormatFloat(t.Amount, 'f', 0, 64), strconv.FormatFloat(t.Fees, 'f', 0, 64),
-				strconv.FormatFloat(t.PnL, 'f', 0, 64), strconv.FormatFloat(t.Scale, 'f', 2, 64), strconv.FormatBool(t.Carried)})
+				strconv.FormatFloat(t.PnL, 'f', 0, 64), strconv.FormatFloat(t.Scale, 'f', 2, 64), strconv.FormatBool(t.Carried), t.RankBy})
 		}
 	}
 	write("long", long)

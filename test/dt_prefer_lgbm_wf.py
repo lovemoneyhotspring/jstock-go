@@ -35,8 +35,8 @@ import pandas as pd
 from lightgbm import LGBMRegressor, early_stopping, log_evaluation
 
 from dt_lgbm_train import INNER_VALID_DAYS, KW, ranked, raw_features
-from dt_nscale import alloc_rule, calib_kappa, day_rules, max_dd, pnl_day, tstat
-from dt_preopen_sim import BANDS, error_pools, seen, with_rule_rank, SNAP_SLOT
+from dt_nscale import alloc_rule, calib_kappa, day_rules, max_dd, pnl_day, tstat, tstat_err
+from dt_preopen_sim import BANDS, SNAP_SLOT, draw_errors, error_pools, seen, with_rule_rank
 from dt_rsi_family import family_features
 from dt_wf_target import EMBARGO, FOLD_STARTS
 
@@ -111,12 +111,7 @@ def main():
     variants = ["L", "LP", "LF", "G", "GP"]
     acc = {v: [] for v in variants}
     for seed in range(a.seeds):
-        rng = np.random.default_rng(seed)
-        e = np.zeros(len(te))
-        for b, pool in enumerate(pools):
-            if (band == b).any():
-                e[band == b] = rng.choice(pool, size=int((band == b).sum()))
-        g = seen(te, e)
+        g = seen(te, draw_errors(pools, te, seed))
         gf = fold_of.loc[g.index].values
         sc = {}
         for name, extra in (("M0", False), ("MF", True)):
@@ -139,10 +134,10 @@ def main():
     uslow = rules.reindex(alld)["skip"].fillna(False).values
     print(f"\n検証期間 {alld.min():%Y-%m-%d}〜{alld.max():%Y-%m-%d}、{len(alld)} 日（米国小幅高の日 {uslow.sum()} 日）、"
           f"資金 {CAP / 1e4:.0f} 万・{RMAX} 位まで・{a.seeds} シード（円/日）")
-    print("| 日 | L | LP − L（t） | LF − L（t） | G | GP − G（t） | L − G（t） |")
+    print("| 日 | L | LP − L（t／誤差込み t） | LF − L（t／誤差込み） | G | GP − G（t／誤差込み） | L − G（t／誤差込み） |")
     print("|---|---|---|---|---|---|---|")
     for name, m in (("米国小幅高の日（主）", uslow), ("それ以外の日", ~uslow), ("全日", np.ones(len(alld), bool))):
-        c = lambda a_, b_: f"{(mean[a_] - mean[b_])[m].mean():+,.0f}（{tstat((mean[a_] - mean[b_])[m]):+.2f}）"
+        c = lambda a_, b_: f"{(mean[a_] - mean[b_])[m].mean():+,.0f}（{tstat((mean[a_] - mean[b_])[m]):+.2f}／{tstat_err(acc[a_], acc[b_], m):+.2f}）"
         print(f"| {name} | {mean['L'][m].mean():,.0f} | {c('LP', 'L')} | {c('LF', 'L')} | {mean['G'][m].mean():,.0f} | "
               f"{c('GP', 'G')} | {c('L', 'G')} |")
     yr = alld.year

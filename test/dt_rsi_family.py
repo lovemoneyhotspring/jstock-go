@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from dt_preopen_sim import SNAP_SLOT
-from dt_nscale import IS_END, SINCE, alloc_rule, calib_kappa, day_rules, max_dd, pnl_day, seen_ranked, tstat
+from dt_nscale import IS_END, SINCE, alloc_rule, calib_kappa, day_rules, max_dd, pnl_day, seen_ranked, tstat, tstat_err
 from dt_oscillator import rsi
 from dt_rsi2_deep import POOL
 
@@ -117,7 +117,7 @@ def main():
             c = f"{mean[v][m].mean():,.0f}"
             if v != "base":
                 db, do = mean[v] - mean["base"], mean[v] - mean["O2"]
-                c += f"（{db[m].mean():+,.0f}, {tstat(db[m]):+.2f}"
+                c += f"（{db[m].mean():+,.0f}, {tstat(db[m]):+.2f}, 誤差込み {tstat_err(acc[v], acc['base'], m):+.2f}"
                 c += "）" if v == "O2" else f" ／ {do[m].mean():+,.0f}, {tstat(do[m]):+.2f}）"
             cells.append(c)
         ann = np.mean([x[oos].mean() * 245 / C * 100 for x in acc[v]])

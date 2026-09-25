@@ -11,6 +11,7 @@
 """
 
 import argparse
+import os
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,17 @@ def load():
     c["sec_first"] = ~c.duplicated(["d", "sector"])
     c["rank"] = np.where(c["sec_first"], c[c["sec_first"]].groupby("d").cumcount().reindex(c.index) + 1, np.nan)
     return c
+
+
+def tstat_err(a, b, m):
+    """誤差の引き方の不確かさを入れた t。a・b はシードごとの日次系列のリスト（同じシード順）、m は日の絞り込み。
+    se = √(日の標本誤差² + シードごとの平均差のばらつき²)。*_boot の引き方ではシード間に「誤差の分布が数日分しかない」
+    不確かさが出るので、これが大きいと t は縮む。iid でもシード間の乱数の揺れの分だけ保守的になる。"""
+    D = pd.concat(a, axis=1).values[m] - pd.concat(b, axis=1).values[m]
+    x = D.mean(axis=1)
+    se_day = x.std(ddof=1) / np.sqrt(len(x))
+    sd_seed = D.mean(axis=0).std(ddof=1) if D.shape[1] > 1 else 0.0
+    return x.mean() / np.sqrt(se_day ** 2 + sd_seed ** 2)
 
 
 def tstat(x):
@@ -204,44 +216,113 @@ def part_tail(c, lo=4, hi=30):
         print(f"   {rb:5s} 代金{'低中高'[int(tq)]}: {split(s)}  中央値 {g['turnover_med'].median()/1e8:5.1f} 億")
 
 
-def day_rules(te):
-    """日の規則の近似: ショック（候補表の全銘柄のギャップの中央値 ≤ −2%）で資金 ×1.5、米国小幅高（ナスダック 0〜+1%）で休み。
-    本番は 9:00 の市場ギャップと S&P500・VIX で判定するが、手元の ^TOPIX は始値が前日終値のままで使えず、
-    S&P・VIX の履歴も無いので代用する（VIX の例外も無し）。"""
+US_JSON = "data/daytrade/us.json"   # 本番・Go のバックテストと同じ米国の材料（S&P500 の終値・VIX）
+US_SKIP_LOW, US_SKIP_HIGH, US_VIX_OVERRIDE = 0.0, 0.01, 24.0   # config/daytrade/daytrade.toml の [regime]
+
+
+def us_low_spx(days):
+    """本番の米国小幅高の判定（regime.IsUsLow）: 前夜の S&P500 が 0〜+1% かつ VIX ≤ 24。
+    東証の日ごとに前日以前の最新の米国セッションを当てる（usmarket.AsOf。7 日より古いセッションは当てない）。"""
+    import json
+    u = pd.DataFrame(json.load(open(US_JSON)))
+    u["date"] = pd.to_datetime(u["date"]).astype("datetime64[ns]")
+    u = u.sort_values("date")
+    u["r"] = u["spx"] / u["spx"].shift(1) - 1
+    d = pd.DataFrame({"d": pd.to_datetime(sorted(days)).astype("datetime64[ns]")})
+    d = pd.merge_asof(d, u[["date", "r", "vix"]].rename(columns={"date": "ud"}), left_on="d", right_on="ud",
+                      allow_exact_matches=False, tolerance=pd.Timedelta(days=6))
+    vix_ok = d["vix"].isna() | (d["vix"] <= 0) | (d["vix"] <= US_VIX_OVERRIDE)   # VIX が取れない日は見ない（Go と同じ）
+    return pd.Series(((d["r"] >= US_SKIP_LOW) & (d["r"] < US_SKIP_HIGH) & vix_ok).values, index=d["d"])
+
+
+def day_rules(te, us=None, skip_months=None):
+    """日の規則の近似: ショック（候補表の全銘柄のギャップの中央値 ≤ −2%）で資金 ×1.5、米国小幅高で休み。
+    us は小幅高の判定:
+      "nasdaq"  従来の近似（ナスダック 0〜+1%、VIX なし）。2026-09-25 までの検証はこれ。再現するときはこのまま
+      "spx"     本番・Go と同じ（S&P500 0〜+1% かつ VIX ≤ 24、us_low_spx）。**新しい検証はこちら**
+                ナスダック版とは 2017〜2026 で 487 日食い違う（vault 20-research/2026-09-jp-daytrade-sim-parity.md）
+    skip_months はその月を丸ごと休む（本番・Go は regime.skip_months = [12]。従来の検証は休んでいない）。
+    休む月の日は mult = 0・skip = True。新しい検証は day_rules(te, us="spx", skip_months=(12,)) が本番の形。
+    us・skip_months を渡さないときは環境変数 DT_DAY_RULES で決める: 未設定・"legacy" は従来（nasdaq・12 月あり）、
+    "prod" は本番の形（spx・12 月休み）。過去の検証を中身を変えずに本番の区分で測り直すため（2026-09-25）。
+    本番のショックは 9:00 の市場ギャップで判定するが、手元の ^TOPIX は始値が前日終値のままで使えないので候補表で代用する。"""
+    mode = os.environ.get("DT_DAY_RULES", "legacy")
+    if mode not in ("legacy", "prod"):
+        raise ValueError(f"DT_DAY_RULES は legacy か prod: {mode}")
+    if us is None:
+        us = "spx" if mode == "prod" else "nasdaq"
+    if skip_months is None:
+        skip_months = (12,) if mode == "prod" else ()
     days = te["d"].unique()
     tp = te.groupby("d")["gap"].median().rename("tgap").reset_index().rename(columns={"d": "date"})
     tp["date"] = tp["date"].astype("datetime64[ns]")
-    us = pd.read_parquet("data/bars/^IXIC.parquet")
-    us["date"] = pd.to_datetime(us["date"]).dt.tz_localize(None).dt.normalize().astype("datetime64[ns]")
-    us["r"] = us["close"] / us["close"].shift(1) - 1
     d = pd.DataFrame({"d": pd.to_datetime(sorted(days)).astype("datetime64[ns]")})
-    d = pd.merge_asof(d, us[["date", "r"]].rename(columns={"date": "ud"}), left_on="d", right_on="ud",
-                      allow_exact_matches=False)
     d = d.merge(tp[["date", "tgap"]], left_on="d", right_on="date", how="left")
     d["mult"] = np.where(d["tgap"] <= -0.02, 1.5, 1.0)
-    d["skip"] = (d["r"] >= 0) & (d["r"] <= 0.01) & (d["mult"] == 1.0)
-    return d.set_index("d")[["mult", "skip"]]
+    if us == "spx":
+        low = us_low_spx(days).reindex(d["d"]).fillna(False).values
+    elif us == "nasdaq":
+        ix = pd.read_parquet("data/bars/^IXIC.parquet")
+        ix["date"] = pd.to_datetime(ix["date"]).dt.tz_localize(None).dt.normalize().astype("datetime64[ns]")
+        ix["r"] = ix["close"] / ix["close"].shift(1) - 1
+        x = pd.merge_asof(d[["d"]], ix[["date", "r"]].rename(columns={"date": "ud"}), left_on="d", right_on="ud",
+                          allow_exact_matches=False)
+        low = ((x["r"] >= 0) & (x["r"] <= 0.01)).values
+    else:
+        raise ValueError(f"us は nasdaq か spx: {us}")
+    d["us_low"] = low
+    d["skip"] = d["us_low"] & (d["mult"] == 1.0)
+    off = d["d"].dt.month.isin(list(skip_months)).values
+    d.loc[off, "mult"], d.loc[off, "skip"] = 0.0, True
+    return d.set_index("d")[["mult", "skip", "us_low"]]
+
+
+def day_kind():
+    """日 → 本番の日の種類（"gapvol" / "uslow"＝米国小幅高で LightGBM の日 / "december"）。12 月が先。"""
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet", columns=["d", "gap"])
+    r = day_rules(te, us="spx", skip_months=())
+    k = np.where(r.index.month == 12, "december", np.where(r["skip"].values, "uslow", "gapvol"))
+    return pd.Series(k, index=r.index)
+
+
+def gapvol_days():
+    """本番で gap_vol で並べてロングを建てる日（米国小幅高でも 12 月でもない日。ショック日は含む）。
+    日の区分を使わない一次の横断（dt_oscillator・dt_three_day など）を本番の日に絞るため（2026-09-25）。
+    ショック日の判定は広い候補表（dt_candidates_wide）のギャップの中央値で、day_rules の本番の形と同じ。"""
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet", columns=["d", "gap"])
+    r = day_rules(te, us="spx", skip_months=(12,))
+    return r.index[~r["skip"].values]
+
+
+def afford_on():
+    """環境変数 DT_AFFORD=1 なら、配分で 1 単元（100 株）が載らない銘柄を飛ばして次点を繰り上げる（Go の candidatePool）。
+    未設定は従来どおり（連続の金額で配る）。業種の上限は seen_ranked で先に掛けてあるので、飛ばした銘柄と同じ業種の
+    次点は戻らない（Go は戻す）。その差は test/dt_parity_go.py の --approx で測る（2026-09-25）。"""
+    return os.environ.get("DT_AFFORD", "") == "1"
 
 
 def alloc_fixed_iv(g, n, cap_total):
-    """順位 1..n に 20 日ボラの逆数で配分（本番の sizing）。"""
-    sel = g[g["rank"] <= n]
+    """順位 1..n に 20 日ボラの逆数で配分（本番の sizing）。
+    DT_AFFORD=1 なら 1 単元が 1 注文の予算（資金 ÷ n）を超える銘柄を飛ばし、載る銘柄を順位順に n 本取る。"""
+    if afford_on():
+        g = g.sort_values("rank")
+        sel = g[g["price"].values * 100 <= cap_total / n].head(n)
+    else:
+        sel = g[g["rank"] <= n]
     iv = 1 / np.maximum(sel["vol20"].fillna(0.02).values, 0.02)
     return sel.index, cap_total * iv / iv.sum() if len(sel) else np.array([])
 
 
-def seen_ranked(te, pools, seed, sector_cap=True, per_sector=1):
+def seen_ranked(te, pools, seed, sector_cap=True, per_sector=1, afford=None):
     """気配の誤差を入れて見えるギャップで並べ直し、業種の上限を掛ける（y_raw は真の値）。
-    per_sector は 1 業種あたりの上限（本番の signal.max_per_sector）。業種が欠けた行は 1 つの業種として数える。"""
-    from dt_preopen_sim import BANDS, seen
-    band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
-    rng = np.random.default_rng(seed)
-    e = np.zeros(len(te))
-    for b, pool in enumerate(pools):
-        if (band == b).any():
-            e[band == b] = rng.choice(pool, size=int((band == b).sum()))
-    g = seen(te, e)
+    per_sector は 1 業種あたりの上限（本番の signal.max_per_sector）。業種が欠けた行は 1 つの業種として数える。
+    afford は見える候補の表 → 1 単元が載るか（bool の配列）。渡すと載らない銘柄を業種の上限の前に外す
+    （Go の candidatePool と同じ順番。test/dt_parity_go.py の unit_affordable）。既定の None は外さない（従来の形）。"""
+    from dt_preopen_sim import draw_errors, seen
+    g = seen(te, draw_errors(pools, te, seed))
     g = g.sort_values(["d", "key_sort", "code"], kind="mergesort")
+    if afford is not None:
+        g = g[afford(g)]
     if sector_cap:
         g = g[g.groupby(["d", "sector"], dropna=False).cumcount() < per_sector]
     g = g.copy()
@@ -371,9 +452,25 @@ def part_prod(i0s, seeds, slot):
 def alloc_rule(g, p, rmax, cap_total, cap_name=np.inf, k=3, cap_top=None):
     """規則 R: 順位順に w = min(p × 売買代金, 資金 ÷ k, 1 銘柄の上限) を割り当て、資金か順位 rmax で止める。
     1 銘柄の上限は cap_name（cap_top を渡したら 1〜3 位だけ cap_top）。"""
-    sel = g[g["rank"] <= rmax]
+    if afford_on():
+        # Go と同じく、1 単元が載らない銘柄（min(p × 売買代金, 資金 ÷ k, 上限) < 100 株）を飛ばし、載る銘柄を rmax 本まで取る
+        g = g.sort_values("rank")
+        cap_g = np.where(g["rank"].values <= 3, cap_top, cap_name) if cap_top is not None else cap_name
+        w_g = np.minimum(np.minimum(p * g["turnover_med"].values, cap_total / k), cap_g)
+        sel = g[g["price"].values * 100 <= w_g].head(rmax)
+    else:
+        sel = g[g["rank"] <= rmax]
     cap_i = np.where(sel["rank"].values <= 3, cap_top, cap_name) if cap_top is not None else cap_name
     w = np.minimum(np.minimum(p * sel["turnover_med"].values, cap_total / k), cap_i)
+    if afford_on():
+        # Go の PickFrom: 順に min(上限, 残り) を 1 単元の倍数に切り捨て、0 株なら飛ばす（余りは現金）
+        unit = sel["price"].values * 100
+        out, left = np.zeros(len(w)), cap_total
+        for i in range(len(w)):
+            out[i] = np.floor(min(w[i], left) / unit[i]) * unit[i]
+            left -= out[i]
+        m = out > 0
+        return sel.index[m], out[m]
     cum = np.cumsum(w)
     w = np.where(cum <= cap_total, w, np.maximum(cap_total - (cum - w), 0.0))
     m = w > 0

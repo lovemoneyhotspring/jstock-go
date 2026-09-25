@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from dt_preopen_sim import SNAP_SLOT
-from dt_nscale import IS_END, SINCE, alloc_rule, calib_kappa, day_rules, max_dd, pnl_day, seen_ranked, tstat
+from dt_nscale import IS_END, SINCE, alloc_rule, calib_kappa, day_rules, max_dd, pnl_day, seen_ranked, tstat, tstat_err
 from dt_oscillator import osc_features
 from dt_three_day import lag_features
 
@@ -107,7 +107,7 @@ def main():
         print("|---|" + "---|" * (len(per) + 1))
         for v in variants:
             s = pd.concat(acc[(v, C)], axis=1).mean(axis=1)
-            cells = [f"{s[m].mean():,.0f}" + ("" if v == "base" else f"（{(s - base)[m].mean():+,.0f}, {tstat((s - base)[m]):+.2f}）")
+            cells = [f"{s[m].mean():,.0f}" + ("" if v == "base" else f"（{(s - base)[m].mean():+,.0f}, {tstat((s - base)[m]):+.2f}, 誤差込み {tstat_err(acc[(v, C)], acc[('base', C)], m):+.2f}）")
                      for m in per.values()]
             oos = alld > IS_END
             ann = np.mean([x[oos].mean() * 245 / C * 100 for x in acc[(v, C)]])
