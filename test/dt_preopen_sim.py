@@ -5,7 +5,7 @@
 8:59:45 の記録が 20 営業日溜まったら、--slot 085945 で測り直す）
 
   test/.venv/bin/python test/dt_candidates.py --max-gap 0.03 --out test/out/dt_candidates_wide.parquet
-  test/.venv/bin/python test/dt_preopen_sim.py [--slot 0859] [--seeds 20] [--err-since 2026-09-11]
+  test/.venv/bin/python test/dt_preopen_sim.py [--slot 085930] [--seeds 20] [--err-since 2026-09-11]
 
 形:
   upper    誤差なし。始値のギャップで並べて始値で建てる（上限）
@@ -40,7 +40,12 @@ BOOK = "state/daytrade/history/book/*.parquet"
 BARS = "data/jquants/equities_bars_daily/*.parquet"
 TEST_START = "2024-09-02"
 HALF = "2025-10-01"
-BANDS = [-np.inf, -5.0, -3.0, -1.0, 0.0, 3.0, np.inf]  # 始値のギャップ（%）。元の検証と同じ区切り
+BANDS = [-np.inf, -5.0, -3.0, -1.0, 0.0, 3.0, np.inf]
+# snap を使う検証の既定の slot（2026-09-25 ユーザ判断で 8:59:30 へ。記録は 2026-09-28 から）。8:59:00（"0859"）は
+# 8:59:30 の蓄積が進んだらやめる。2026-09-25 までの結果（slot 0859 で測った数字）を回し直すときは --slot 0859。
+# SNAP_SLOT の記録が MIN_SNAP_DAYS に満たなければ error_frame が止める（旧い材料で黙って回さない）
+SNAP_SLOT = "085930"
+MIN_SNAP_DAYS = 10  # 始値のギャップ（%）。元の検証と同じ区切り
 
 ERR_SQL = f"""
 WITH b AS (
@@ -76,9 +81,9 @@ FROM v JOIN q ON q.d = v.d AND q.code = v.symbol || '0' WHERE q.op > 0
 
 
 # 寄り直前の全銘柄の板（slot "presnap"）: 9/25 の独立の snap（085942）と、2026-09-28 からは寄る前の open が撮る
-# 候補の外の板（slot は open が撮り始めた時刻 HHMMSS。例 085949）。どちらも 0859 で始まる 6 桁の slot で、
-# 9/25 より前にあった 6 桁の slot（085935・085945・085955）は since で落とす
-PRESNAP_ERR_SQL = ERR_SQL.replace("WHERE slot = ? AND", "WHERE regexp_matches(slot, '^0859[0-5][0-9]$') AND length(slot) = 6 AND ? = ? AND")
+# 候補の外の板（slot は open が撮り始めた時刻 HHMMSS。例 085949）。どちらも 8:59:40 以降の 6 桁の slot（085930 の
+# snap は入れない）。9/25 より前にあった 6 桁の slot（085945・085955）は since で落とす
+PRESNAP_ERR_SQL = ERR_SQL.replace("WHERE slot = ? AND", "WHERE regexp_matches(slot, '^0859[45][0-9]$') AND ? = ? AND")
 
 
 def error_frame(slot, since):
@@ -88,7 +93,11 @@ def error_frame(slot, since):
         return duckdb.sql(ORDER_ERR_SQL, params=[since, since]).df()
     if slot == "presnap":
         return duckdb.sql(PRESNAP_ERR_SQL, params=[1, 1, since, since]).df()
-    return duckdb.sql(ERR_SQL, params=[slot, since, since]).df()
+    df = duckdb.sql(ERR_SQL, params=[slot, since, since]).df()
+    if slot == SNAP_SLOT and df["d"].nunique() < MIN_SNAP_DAYS:
+        raise SystemExit(f"slot {slot}（8:59:30 の snap）の記録は {df['d'].nunique()} 日で {MIN_SNAP_DAYS} 日に満たない。"
+                         f"2026-09-25 までの材料で回すなら --slot 0859")
+    return df
 
 
 def error_pools(slot, since):
@@ -146,7 +155,7 @@ def run(model, g, form, ranker, seed, limit_on_open):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--slot", default="0859")
+    ap.add_argument("--slot", default=SNAP_SLOT)
     ap.add_argument("--seeds", type=int, default=20)
     ap.add_argument("--err-since", default="2026-09-11")
     ap.add_argument("--limit-on-open", action="store_true")

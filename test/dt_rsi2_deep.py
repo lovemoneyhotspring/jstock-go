@@ -29,6 +29,7 @@ import argparse
 import numpy as np
 import pandas as pd
 
+from dt_preopen_sim import SNAP_SLOT
 from dt_nscale import IS_END, SINCE, alloc_rule, calib_kappa, day_rules, max_dd, pnl_day, seen_ranked, tstat
 from dt_oscillator import osc_features
 from dt_three_day import lag_features
@@ -70,7 +71,7 @@ def main():
     ap.add_argument("--seeds", type=int, default=10)
     ap.add_argument("--i0", type=float, default=10.0)
     ap.add_argument("--caps", type=float, nargs="+", default=[1e7, 7e6])
-    ap.add_argument("--slot", default="0859")
+    ap.add_argument("--slot", default=SNAP_SLOT)
     a = ap.parse_args()
     from dt_preopen_sim import error_pools
 

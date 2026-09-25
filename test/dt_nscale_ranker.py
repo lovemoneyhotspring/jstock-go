@@ -18,7 +18,7 @@ import pandas as pd
 from dt_lgbm_train import ranked, raw_features
 from dt_nscale import (COST, FEE, IS_END, alloc_fixed_iv, alloc_rule, calib_kappa, day_rules, max_dd, pnl_day,
                        tstat)
-from dt_preopen_sim import BANDS, ERR_SQL, seen
+from dt_preopen_sim import BANDS, ERR_SQL, seen, SNAP_SLOT, error_frame
 from dt_rank_compare import CAND, EMBARGO, LAST_DAY, SEEN_FROM, draw, fit
 from dt_wf_target import FOLD_STARTS, liq_cost_bp
 
@@ -41,7 +41,7 @@ def main():
     ap.add_argument("--liq-cost", action="store_true",
                     help="流動性別コスト（dt_wf_target.liq_cost_bp）の 5.7 bp を超える分を上乗せする（感度）")
     a = ap.parse_args()
-    err = duckdb.sql(ERR_SQL, params=["0859", "2026-09-11", "2026-09-11"]).df()
+    err = error_frame(SNAP_SLOT, "2026-09-11")
     err["band"] = np.digitize(err["g"], BANDS[1:-1], right=True)
     df = pd.read_parquet(CAND)
     df = df[df["d"] <= LAST_DAY].copy()

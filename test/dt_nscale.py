@@ -14,6 +14,7 @@ import argparse
 
 import numpy as np
 import pandas as pd
+from dt_preopen_sim import SNAP_SLOT
 
 CAND = "test/out/dt_candidates.parquet"
 COST = 5.7e-4
@@ -747,7 +748,7 @@ def main():
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--caps", type=float, nargs="*", default=None, help="資金（円）。--part fixed / k")
     ap.add_argument("--ks", type=int, nargs="*", default=[3, 5, 6, 9], help="資金 ÷ k の k。--part k だけ（3 は必ず含める）")
-    ap.add_argument("--slot", default="0859")
+    ap.add_argument("--slot", default=SNAP_SLOT)
     a = ap.parse_args()
     c = load()
     print(f"候補 {len(c):,} 行 / {c['d'].nunique():,} 日（{c['d'].min():%Y-%m-%d}〜{c['d'].max():%Y-%m-%d}）")

@@ -3,7 +3,7 @@
 根拠・事前登録: vault 20-research/2026-09-jp-daytrade-rankby-preopen-fair.md
 
   test/.venv/bin/python test/dt_candidates.py --max-gap 0.03 --out test/out/dt_candidates_wide.parquet
-  test/.venv/bin/python test/dt_rank_compare.py [--seeds 20] [--side-seeds 10] [--slot 0859] [--err-since 2026-09-11]
+  test/.venv/bin/python test/dt_rank_compare.py [--seeds 20] [--side-seeds 10] [--slot 085930] [--err-since 2026-09-11]
 
 誤差の入れ方・候補の作り直しは test/dt_preopen_sim.py と同じ。違いは
   - 学習が walk-forward（1 年ずつ 7 本。dt_preopen_sim は 2024-09 で 1 分割）
@@ -19,14 +19,14 @@ import pandas as pd
 from lightgbm import LGBMRegressor, early_stopping, log_evaluation
 
 from dt_lgbm_train import INNER_VALID_DAYS, KW, ranked, raw_features
-from dt_preopen_sim import BANDS, ERR_SQL, seen, with_rule_rank
+from dt_preopen_sim import BANDS, ERR_SQL, seen, with_rule_rank, SNAP_SLOT, error_frame
 from dt_wf_target import EMBARGO, FOLD_STARTS, evaluate, liq_cost_bp
 
 CAND = "test/out/dt_candidates_wide.parquet"
 US = "test/out/mb_panel.parquet"
 LAST_DAY = "2026-09-15"  # 米国の値（mb_panel）がある最後の日
 SEEN_FROM = pd.Timestamp("2024-09-02")  # ここから先は事前登録の前に一度見ている
-SLOT, ERR_SINCE = "0859", "2026-09-11"
+SLOT, ERR_SINCE = SNAP_SLOT, "2026-09-11"
 OUT = "test/out/dt_rank_compare_daily.parquet"
 
 
@@ -95,7 +95,7 @@ def main():
         r = pd.read_parquet(OUT)
         report(r, pd.DatetimeIndex(sorted(r.loc[r["form"] == "upper", "d"].unique())))
         return
-    err = duckdb.sql(ERR_SQL, params=[a.slot, a.err_since, a.err_since]).df()
+    err = error_frame(a.slot, a.err_since)
     print(f"誤差の実測: slot {a.slot}、{err['d'].nunique()} 日、{len(err):,} 行", flush=True)
     err["band"] = np.digitize(err["g"], BANDS[1:-1], right=True)
     df = pd.read_parquet(CAND)

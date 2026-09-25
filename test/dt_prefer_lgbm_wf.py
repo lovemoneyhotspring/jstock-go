@@ -36,7 +36,7 @@ from lightgbm import LGBMRegressor, early_stopping, log_evaluation
 
 from dt_lgbm_train import INNER_VALID_DAYS, KW, ranked, raw_features
 from dt_nscale import alloc_rule, calib_kappa, day_rules, max_dd, pnl_day, tstat
-from dt_preopen_sim import BANDS, error_pools, seen, with_rule_rank
+from dt_preopen_sim import BANDS, error_pools, seen, with_rule_rank, SNAP_SLOT
 from dt_rsi_family import family_features
 from dt_wf_target import EMBARGO, FOLD_STARTS
 
@@ -106,7 +106,7 @@ def main():
     fold_of = pd.Series(np.searchsorted(np.array(bounds[1:], dtype="datetime64[ns]"), te["d"].values, side="right"), index=te.index)
     rules = day_rules(te)
     alld = pd.DatetimeIndex(sorted(te["d"].unique()))
-    pools = error_pools("0859", "2026-09-11")
+    pools = error_pools(SNAP_SLOT, "2026-09-11")
     band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
     variants = ["L", "LP", "LF", "G", "GP"]
     acc = {v: [] for v in variants}

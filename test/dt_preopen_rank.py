@@ -21,7 +21,7 @@ import duckdb
 
 BOOK = "state/daytrade/history/book/*.parquet"
 BARS = "data/jquants/equities_bars_daily/*.parquet"
-SLOTS = ("0830", "0845", "0855", "0859", "085945")
+SLOTS = ("0830", "0845", "0855", "0859", "085930", "085945")
 MIN_TURNOVER = 1e8
 DEEP = -3.0
 TOP = 20

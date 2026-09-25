@@ -2,7 +2,7 @@
 
 根拠: vault 20-research/2026-09-jp-daytrade-limit-on-open.md の「事前登録 3」（2026-09-21）
 
-  test/.venv/bin/python test/dt_limit_uslow.py [--seeds 20] [--side-seeds 10] [--slot 0859] [--err-since 2026-09-11]
+  test/.venv/bin/python test/dt_limit_uslow.py [--seeds 20] [--side-seeds 10] [--slot 085930] [--err-since 2026-09-11]
   test/.venv/bin/python test/dt_limit_uslow.py --report-only
 
 判定は 1 本: U = LightGBM 順・上位 3 本・指値 = 前日終値 −0.5%（始値のギャップ < −0.5% だけ約定、残りの枠は現金）。
@@ -20,6 +20,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from dt_preopen_sim import SNAP_SLOT, error_frame
 from dt_lgbm_train import VOL_FLOOR, ranked, raw_features
 from dt_limit_on_open import CAPITAL, N_BASE, select
 from dt_preopen_sim import BANDS, ERR_SQL, seen
@@ -122,7 +123,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=20)
     ap.add_argument("--side-seeds", type=int, default=10)
-    ap.add_argument("--slot", default="0859")
+    ap.add_argument("--slot", default=SNAP_SLOT)
     ap.add_argument("--err-since", default="2026-09-11")
     ap.add_argument("--report-only", action="store_true")
     a = ap.parse_args()
@@ -134,7 +135,7 @@ def main():
     n_all = df.loc[in_test, "d"].nunique()
 
     if not a.report_only:
-        err = duckdb.sql(ERR_SQL, params=[a.slot, a.err_since, a.err_since]).df()
+        err = error_frame(a.slot, a.err_since)
         print(f"誤差の実測: slot {a.slot}、{err['d'].nunique()} 日、{len(err):,} 行", flush=True)
         err["band"] = np.digitize(err["g"], BANDS[1:-1], right=True)
         df = df.copy()

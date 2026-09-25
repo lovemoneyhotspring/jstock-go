@@ -2,7 +2,7 @@
 
 根拠: vault 20-research/2026-09-jp-daytrade-limit-on-open.md（事前登録 2026-09-21）
 
-  test/.venv/bin/python test/dt_limit_on_open.py [--seeds 20] [--side-seeds 10] [--slot 0859] [--err-since 2026-09-11]
+  test/.venv/bin/python test/dt_limit_on_open.py [--seeds 20] [--side-seeds 10] [--slot 085930] [--err-since 2026-09-11]
   test/.venv/bin/python test/dt_limit_on_open.py --report-only [--detail b0_m0_k3_cap,b0.4_m1_k6_avg]
 
 土台は test/dt_rank_compare.py と同じ（候補表・誤差の引き方・米国小幅高の日は休む＝G0）。並べ方は gap_vol だけで、学習は無い。
@@ -19,6 +19,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from dt_preopen_sim import SNAP_SLOT, error_frame
 from dt_lgbm_train import VOL_FLOOR
 from dt_preopen_sim import BANDS, ERR_SQL, seen
 from dt_rank_compare import CAND, LAST_DAY, SEEN_FROM, US, draw, tstat
@@ -169,14 +170,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=20)
     ap.add_argument("--side-seeds", type=int, default=10)
-    ap.add_argument("--slot", default="0859")
+    ap.add_argument("--slot", default=SNAP_SLOT)
     ap.add_argument("--err-since", default="2026-09-11")
     ap.add_argument("--report-only", action="store_true")
     ap.add_argument("--detail", default="", help="探索の設定の内訳を出す（例: b0_m0_k3_cap,b0.4_m1_k6_avg）")
     a = ap.parse_args()
 
     if not a.report_only:
-        err = duckdb.sql(ERR_SQL, params=[a.slot, a.err_since, a.err_since]).df()
+        err = error_frame(a.slot, a.err_since)
         print(f"誤差の実測: slot {a.slot}、{err['d'].nunique()} 日、{len(err):,} 行", flush=True)
         err["band"] = np.digitize(err["g"], BANDS[1:-1], right=True)
         df = pd.read_parquet(CAND)

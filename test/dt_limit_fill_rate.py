@@ -2,7 +2,7 @@
 
 根拠: vault 20-research/2026-09-jp-daytrade-preopen-order.md（「寄指の約定率」の追記、2026-09-21）
 
-  test/.venv/bin/python test/dt_limit_fill_rate.py [--slot 0859] [--since 2026-09-11] [--top 10]
+  test/.venv/bin/python test/dt_limit_fill_rate.py [--slot 085930] [--since 2026-09-11] [--top 10]
 
 見える値段は寄る前の最良気配の中値（test/dt_preopen_rank.py と同じ）。指値 L = 見える値段 × (1 + m)。
 約定は「始値 < L」（m = 0）か「始値 <= L」（m > 0）。始値 = L は板寄せで約定が保証されないので m = 0 では数えない。
@@ -15,6 +15,7 @@
 import argparse
 
 import duckdb
+from dt_preopen_sim import SNAP_SLOT
 
 BOOK = "state/daytrade/history/book/*.parquet"
 BARS = "data/jquants/equities_bars_daily/*.parquet"
@@ -44,7 +45,7 @@ def fill(m):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--slot", default="0859")
+    ap.add_argument("--slot", default=SNAP_SLOT)
     ap.add_argument("--since", default="2026-09-11")
     ap.add_argument("--top", type=int, default=10, help="日ごとに、見えるギャップが深い順の上位何本で約定本数を数えるか")
     a = ap.parse_args()
