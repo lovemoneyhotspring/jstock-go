@@ -149,8 +149,18 @@ check "起動 < 候補の外の打ち切り、打ち切り + 1 秒 ≤ 候補の
   '[ -n "$pre" ] && [ -n "$until_" ] && [ -n "$qat" ] && awk -v p="$(secs "$pre")" -v u="$(secs "$until_")" -v q="$(secs "$qat")" -v l="$(secs 08:59:55)" "BEGIN{exit !(p < u && u + 1 <= q && q <= l)}"'
 check "寄る前の open の起動 + ロックの打ち切り ≥ 9:00:05" \
   '[ -n "$ot" ] && awk -v p="$(secs "$pre")" -v t="$ot" -v g="$(secs 09:00:05)" "BEGIN{exit !(p + t >= g)}"'
-check "8:59 台の snap は 8:59:00 の回だけ（寄る前の全銘柄の板は open の中で撮る）で、寄る前の open の 1 秒前までにロックを手放す" \
-  '! grep -v "^#" "$C" | grep -q "DT_PRESNAP_AT" && s59=$(grep -v "^#" "$C" | grep "^59 8" | grep "daytrade snap") && [ "$(wc -l <<<"$s59")" = 1 ] && t59=$(sed -n "s/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p" <<<"$s59") && k59=$(sed -n "s/.*WITH_LOCK_KILL_AFTER=\([0-9]*\).*/\1/p" <<<"$s59") && awk -v t="$t59" -v k="${k59:-10}" -v p="$(secs "$pre")" -v z="$(secs 08:59:00)" "BEGIN{exit !(z + t + k <= p - 1)}"'
+# 8:59 台の snap（8:59:00 と、DT_SNAP30_AT の 8:59:30）は、固まっても寄る前の open の 1 秒前までにロックを手放す
+s30=$(sed -n 's/^DT_SNAP30_AT=//p' "$C")
+snap59_ok=1; snap59_n=0
+while IFS= read -r line; do
+  snap59_n=$((snap59_n + 1))
+  t=$(sed -n 's/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p' <<<"$line"); k=$(sed -n 's/.*WITH_LOCK_KILL_AFTER=\([0-9]*\).*/\1/p' <<<"$line")
+  if grep -q 'wait-until.sh \$DT_SNAP30_AT' <<<"$line"; then st="$(secs "$s30")"; else st="$(secs 08:59:00)"; fi
+  awk -v a="$st" -v t="${t:-170}" -v k="${k:-10}" -v p="$(secs "$pre")" "BEGIN{exit !(a + t + k <= p - 1)}" || snap59_ok=0
+done < <(grep -v "^#" "$C" | grep "^59 8" | grep "daytrade snap")
+check "8:59 台の snap は 8:59:00 と 8:59:30 の 2 回で、どちらも寄る前の open の 1 秒前までにロックを手放す" \
+  '! grep -v "^#" "$C" | grep -q "DT_PRESNAP_AT" && [ -n "$s30" ] && [ "$snap59_n" = 2 ] && [ "$snap59_ok" = 1 ]'
+check "8:30・8:45・8:55 の snap はやめた（2026-09-25）" '! grep -v "^#" "$C" | grep -Eq "^(30|45|55)[, ].* 8 \* \* 1-5.*daytrade snap"'
 
 echo
 [ "$fail" = 0 ] && echo "全部通った" || echo "失敗あり"

@@ -48,6 +48,8 @@ DT_PREOPEN_AT=08:59:48.0
 # 時価問合の送信枠（8 回/秒）はプロセスで 1 つなので **DT_PRESNAP_UNTIL + 1 秒 ≤ DT_QUOTES_AT** に保つ
 # （空けないと候補の取得が枠待ちで遅れる）。候補の気配は今までどおり 8:59:52 台。
 DT_PRESNAP_UNTIL=08:59:51.2
+# 8:59:30 の snap（slot 085930）を始める時刻。下の「8:59:30」を参照
+DT_SNAP30_AT=08:59:30.0
 DT_QUOTES_AT=08:59:52.2
 WBJP_BIN=/home/abobo/jstock-go/bin
 
@@ -175,13 +177,19 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # それまでは独立の snap（2026-09-24 から 8:59:43、9/25 朝は 8:59:42・slot 085942）で、open（8:59:52）の前にロックを
 # 明け渡す式（開始 + 打ち切り + KILL ≤ open − 1 秒）が要った。open を 8:59:48 に早めるとこの式を満たせないので、
 # 行ごと open に畳んだ（git の 2026-09-25 の crontab.txt に元の行と説明がある）。
-# 8:57 は 8:55 と 8:59 の間を埋める（気配の動く速さを特徴量にするため。2026-09-19 追加）
-30,45,55 8 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
+# 8:30・8:45・8:55 の回は 2026-09-25 にやめた（ユーザ判断）。9/24 の候補で気配の誤差は 8:45 0.68%・8:55 0.78%・8:59:00 0.71%・
+# 8:59:35 0.66% と時刻でほぼ変わらず、発注時の気配（8:59:50）だけ 0.49% だった——寄る前の数十分の推移は選定にも誤差の模擬にも
+# 使っていない。8:57 は 8:55 と 8:59 の間を埋めるために足した回（気配の動く速さを特徴量にするため。2026-09-19 追加）で残す。
 # 8:57 だけは既定（170 秒 + KILL 10 秒）にしない。8:57:01 に起きると TERM が 08:59:51・KILL が 09:00:01 に当たり、
 # 8:59:52 の寄成（ロック待ち 5 秒）を [lock_busy] で弾く。snap の自己締め切りは 50 秒（book.max_run_seconds）なので
 # 60 + 5 で足り、遅くとも 08:58:06 にはロックを手放す
 57 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=60 WITH_LOCK_KILL_AFTER=5 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 59 8 * * 1-5          cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=25 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 20
+# 8:59:30（DT_SNAP30_AT、slot 085930。2026-09-25 追加）: 8:59:00 の代わり。蓄積が進んだら 8:59:00 をやめる（ユーザ判断）。
+# やめる条件は vault 30-projects/daytrade.md「snap の時刻の整理」（板の厚みの代理を 085930 で測り直してから）。
+# ロックは待たず（前の回が握っていれば見送る）、寄る前の open（DT_PREOPEN_AT）の 1 秒前までに手放す:
+#   8:59:30 + 打ち切り 12 + KILL 1 = 8:59:43 ≤ 8:59:47。全銘柄の実績は起動 1.8 + 取得 3.3〜3.6 秒なので --max-run 10 で足りる
+59 8 * * 1-5          cd $WBJP_HOME && WAIT_UNTIL_LOG=state/logs/daytrade-snap.log deploy/wait-until.sh $DT_SNAP30_AT && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=12 WITH_LOCK_KILL_AFTER=1 deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --slot 085930 --max-run 10
 0 9 * * 1-5           cd $WBJP_HOME && sleep 5 && WBJP_ENV=prod env $JQ_MEM WITH_LOCK_TIMEOUT=18 deploy/with-lock.sh /tmp/daytrade.lock 30 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin --max-run 15
 2,5,11 9 * * 1-5      cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM deploy/with-lock.sh /tmp/daytrade.lock 0 state/logs/daytrade-snap.log $WBJP_BIN/daytrade snap --config-dir config/daytrade_margin
 # 15:19 は 15:20 の close（ロック待ち 30 秒）の直前なので、固まっても 15:19:50 で手放すよう打ち切りを詰める
