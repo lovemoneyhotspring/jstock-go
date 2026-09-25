@@ -229,9 +229,11 @@ def alloc_fixed_iv(g, n, cap_total):
     return sel.index, cap_total * iv / iv.sum() if len(sel) else np.array([])
 
 
-def seen_ranked(te, pools, seed, sector_cap=True, per_sector=1):
+def seen_ranked(te, pools, seed, sector_cap=True, per_sector=1, afford=None):
     """気配の誤差を入れて見えるギャップで並べ直し、業種の上限を掛ける（y_raw は真の値）。
-    per_sector は 1 業種あたりの上限（本番の signal.max_per_sector）。業種が欠けた行は 1 つの業種として数える。"""
+    per_sector は 1 業種あたりの上限（本番の signal.max_per_sector）。業種が欠けた行は 1 つの業種として数える。
+    afford は見える候補の表 → 1 単元が載るか（bool の配列）。渡すと載らない銘柄を業種の上限の前に外す
+    （Go の candidatePool と同じ順番。test/dt_parity_go.py の unit_affordable）。既定の None は外さない（従来の形）。"""
     from dt_preopen_sim import BANDS, seen
     band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
     rng = np.random.default_rng(seed)
@@ -241,6 +243,8 @@ def seen_ranked(te, pools, seed, sector_cap=True, per_sector=1):
             e[band == b] = rng.choice(pool, size=int((band == b).sum()))
     g = seen(te, e)
     g = g.sort_values(["d", "key_sort", "code"], kind="mergesort")
+    if afford is not None:
+        g = g[afford(g)]
     if sector_cap:
         g = g[g.groupby(["d", "sector"], dropna=False).cumcount() < per_sector]
     g = g.copy()

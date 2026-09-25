@@ -76,6 +76,9 @@ type Trade struct {
 	// Carried は引けが制限値幅に張り付いて手仕舞えず、翌寄りに持ち越した
 	// （ショートは引けストップ高、ロングは引けストップ安）。
 	Carried bool
+	// RankBy はその日のロングの並べ方（signal.rank_by / rank_by_us_low の実効値。ショートは空）。
+	// Python の簡易検証との突き合わせ（test/dt_parity_go.py）で日の区分を Go から受け取るため。
+	RankBy string
 }
 
 // Daily は 1 営業日の集計。
@@ -312,6 +315,10 @@ func pickDay(rows []Row, p legParams, n int, budget decimal.Decimal) []Trade {
 		dayFee = f
 	}
 
+	rankBy := ""
+	if p.side != domain.SideSell {
+		rankBy = p.signal.RankBy
+	}
 	var trades []Trade
 	rank := 0
 	for i, pick := range picks {
@@ -332,7 +339,7 @@ func pickDay(rows []Row, p legParams, n int, budget decimal.Decimal) []Trade {
 			Date: row.Date, Code: pick.Code, Rank: rank, Gap: pick.Gap.InexactFloat64(),
 			Shares: shares[i], Entry: entries[i], Exit: exits[i],
 			Amount: amount, Fees: fee, Commission: commission,
-			Gross: gross, PnL: gross - fee, Scale: 1,
+			Gross: gross, PnL: gross - fee, Scale: 1, RankBy: rankBy,
 		})
 	}
 	return trades
