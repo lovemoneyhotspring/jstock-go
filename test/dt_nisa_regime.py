@@ -3,7 +3,8 @@
 根拠: vault 20-research/2026-09-jp-daytrade-nisa-regime.md（2026-09-26、ユーザの問い。採否を決める検証ではなく記述）
 
   test/.venv/bin/python test/dt_candidates.py --max-gap 0.03 --out test/out/dt_candidates_wide.parquet
-  test/.venv/bin/python test/dt_nisa_regime.py
+  test/.venv/bin/python test/dt_nisa_regime.py            # NISA の前後
+  test/.venv/bin/python test/dt_nisa_regime.py --rough    # 荒れた日の中身（市場か個別か・売買代金・ギャップの分解）
 
 見るもの（日ごとに畳んでから年・前後で平均。t は前後の日の平均の差を独立 2 標本で）:
   GD超過    ギャップ −1% 以下の銘柄の寄→引から、その日の候補全体の平均を引いたもの（bp）
@@ -11,6 +12,8 @@
   反転傾き  ギャップ（%pt）に対する寄→引（bp）の日ごとの傾き（負ほど深く下げた銘柄ほど戻る）
   GD2割合   ギャップ −2% 以下の銘柄の割合（%、地合いの荒れ）
 """
+
+import sys
 
 import numpy as np
 import pandas as pd
@@ -63,5 +66,36 @@ def main():
     print(day.groupby(["荒れ", "後"], observed=True)["top10_ex"].agg(["mean", "size"]).round(1).unstack().to_string())
 
 
+def rough():
+    """荒れた日（ギャップ −2% 以下の割合の 4 分位）の戻りの中身。2026-09-26 追記"""
+    df = pd.read_parquet(CAND, columns=["d", "gap", "y_raw", "key_sort", "turnover_med"])
+    df = df[(df["d"] >= "2017-01-01") & df["y_raw"].notna()].copy()
+    df["mg"] = df.groupby("d")["gap"].transform("median")      # 市場のギャップ
+    df["ig"] = df["gap"] - df["mg"]                              # 銘柄だけのギャップ
+    df["ex"] = df["y_raw"] - df.groupby("d")["y_raw"].transform("mean")
+    s2 = (df["gap"] <= -0.02).groupby(df["d"]).mean()
+    q = pd.qcut(s2.rank(method="first"), 4, labels=["静", "やや静", "やや荒", "荒"])
+    df["q"] = df["d"].map(q)
+    day = df.groupby("d").agg(mkt=("y_raw", "mean"), mg=("mg", "first"), q=("q", "first"))
+    print("1. 市場全体（日平均、bp）: 市場のギャップ mg と寄→引 mkt")
+    print((day.groupby("q", observed=True)[["mg", "mkt"]].mean() * 1e4).round(1).to_string())
+    for lab in ("静", "荒"):
+        m = day["q"] == lab
+        print(f"  {lab}: 市場のギャップ 1%pt あたりの市場の寄→引 {np.polyfit(day.mg[m] * 100, day.mkt[m] * 1e4, 1)[0]:+.1f} bp")
+    top = df[np.isfinite(df["key_sort"])].sort_values(["d", "key_sort"]).groupby("d").head(10).copy()
+    top["tq"] = pd.cut(np.log10(top["turnover_med"]), [0, 9, 10, 20], labels=["〜10億", "10〜100億", "100億〜"])
+    print("\n2. gap_vol 上位 10 本の超過（bp）を売買代金（20 日中央値）別に")
+    print((top.groupby(["q", "tq"], observed=True)["ex"].mean() * 1e4).round(1).unstack().to_string())
+    print(top.groupby(["q", "tq"], observed=True).size().unstack().to_string())
+
+    def coef(g):
+        g = g[g["gap"] < 0]
+        return np.polyfit(g["ig"] * 100, g["y_raw"] * 1e4, 1)[0] if len(g) >= 50 else np.nan
+
+    b = pd.DataFrame({"b": df.groupby("d")[["gap", "ig", "y_raw"]].apply(coef), "q": q})
+    print("\n3. 銘柄だけのギャップ 1%pt あたりの寄→引（bp、負ほど戻る）")
+    print(b.groupby("q", observed=True)["b"].mean().round(1).to_string())
+
+
 if __name__ == "__main__":
-    main()
+    rough() if "--rough" in sys.argv else main()
