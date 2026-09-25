@@ -606,8 +606,6 @@ func (s *openState) finish(outcome string, extra map[string]any) {
 	appendHistory(dthistory.KindOpenRun, dthistory.OpenRunFrame(row), s.day)
 }
 
-// readQuotes は候補（ロングとショートの和集合）の気配を取り、古い・遅延した気配を落とす。
-// 取れなければ見送りを記録して done を返す。
 // quoteSymbols は気配を取る銘柄（ロングの候補と、ショートの母集団の和集合）と、その元の 2 つの母集団。
 func (s *openState) quoteSymbols() (symbols []string, eligible, shortUniverse []universe.Candidate) {
 	eligible = s.p.Eligible()
@@ -623,6 +621,8 @@ func (s *openState) quoteSymbols() (symbols []string, eligible, shortUniverse []
 	return symbols, eligible, shortUniverse
 }
 
+// readQuotes は候補（ロングとショートの和集合）の気配を取り、古い・遅延した気配を落とす。
+// 取れなければ見送りを記録して done を返す。
 func (s *openState) readQuotes() (done bool) {
 	symbols, eligible, shortUniverse := s.quoteSymbols()
 

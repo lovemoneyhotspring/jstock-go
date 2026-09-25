@@ -134,7 +134,7 @@ while IFS= read -r line; do
 done < <(grep -v "^#" "$C" | grep "daytrade snap" | grep -- "--max-run")
 check "snap の --max-run は必ず WITH_LOCK_TIMEOUT より手前（同じか逆だと TERM が先に当たり何も記録しない）" \
   '[ "$snap_n" -ge 2 ] && [ "$snap_ok" = 1 ]'
-check "8:59 台の snap は KILL の猶予を詰めている（既定の 10 秒だと寄る前の open のロック待ちを越える）" \
+check "8:59 台の --slot 付きの snap（今は無い。足したら）は KILL の猶予を詰めている（既定の 10 秒だと寄る前の open のロック待ちを越える）" \
   '! grep -v "^#" "$C" | grep -E -- "--slot 0859[0-9]{2}" | grep -qv "WITH_LOCK_KILL_AFTER="'
 # 寄る前の open は候補の外の板を DT_PRESNAP_UNTIL まで撮り、DT_QUOTES_AT に候補の気配を取る（open_presnap.go）。
 # 起動 < 打ち切り、打ち切り + 1 秒 ≤ 候補の時刻（時価問合の枠 8 回/秒を空ける）、候補の時刻 ≤ 8:59:55、
@@ -150,7 +150,7 @@ check "起動 < 候補の外の打ち切り、打ち切り + 1 秒 ≤ 候補の
 check "寄る前の open の起動 + ロックの打ち切り ≥ 9:00:05" \
   '[ -n "$ot" ] && awk -v p="$(secs "$pre")" -v t="$ot" -v g="$(secs 09:00:05)" "BEGIN{exit !(p + t >= g)}"'
 check "8:59 台の snap は 8:59:00 の回だけ（寄る前の全銘柄の板は open の中で撮る）で、寄る前の open の 1 秒前までにロックを手放す" \
-  '! grep -v "^#" "$C" | grep -q "DT_PRESNAP_AT" && s59=$(grep -v "^#" "$C" | grep "^59 8" | grep "daytrade snap") && [ "$(wc -l <<<"$s59")" = 1 ] && t59=$(sed -n "s/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p" <<<"$s59") && awk -v t="$t59" -v p="$(secs "$pre")" -v z="$(secs 08:59:00)" "BEGIN{exit !(z + t + 10 <= p - 1)}"'
+  '! grep -v "^#" "$C" | grep -q "DT_PRESNAP_AT" && s59=$(grep -v "^#" "$C" | grep "^59 8" | grep "daytrade snap") && [ "$(wc -l <<<"$s59")" = 1 ] && t59=$(sed -n "s/.*WITH_LOCK_TIMEOUT=\([0-9]*\).*/\1/p" <<<"$s59") && k59=$(sed -n "s/.*WITH_LOCK_KILL_AFTER=\([0-9]*\).*/\1/p" <<<"$s59") && awk -v t="$t59" -v k="${k59:-10}" -v p="$(secs "$pre")" -v z="$(secs 08:59:00)" "BEGIN{exit !(z + t + k <= p - 1)}"'
 
 echo
 [ "$fail" = 0 ] && echo "全部通った" || echo "失敗あり"

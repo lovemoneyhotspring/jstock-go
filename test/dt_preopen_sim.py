@@ -76,7 +76,7 @@ FROM v JOIN q ON q.d = v.d AND q.code = v.symbol || '0' WHERE q.op > 0
 
 
 # 寄り直前の全銘柄の板（slot "presnap"）: 9/25 の独立の snap（085942）と、2026-09-28 からは寄る前の open が撮る
-# 候補の外の板（slot は open の起動の時刻 HHMMSS。例 085948）。どちらも 0859 で始まる 6 桁の slot で、
+# 候補の外の板（slot は open が撮り始めた時刻 HHMMSS。例 085949）。どちらも 0859 で始まる 6 桁の slot で、
 # 9/25 より前にあった 6 桁の slot（085935・085945・085955）は since で落とす
 PRESNAP_ERR_SQL = ERR_SQL.replace("WHERE slot = ? AND", "WHERE regexp_matches(slot, '^0859[0-5][0-9]$') AND length(slot) = 6 AND ? = ? AND")
 

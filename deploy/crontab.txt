@@ -43,7 +43,7 @@ WBJP_HOME=/home/abobo/jstock-go
 DT_OPEN_AT=09:00:01.2
 # 寄る前の open の回（寄成）を始める時刻。下の「2026-09-21 から開始は」を参照
 DT_PREOPEN_AT=08:59:48.0
-# 寄る前の open は起動後、DT_PRESNAP_UNTIL まで候補の外の板を撮って記録し（slot は起動の時刻 = 085948）、
+# 寄る前の open は起動後、DT_PRESNAP_UNTIL まで候補の外の板を撮って記録し（slot は撮り始めた時刻。起動の約 1 秒後で 085949 など）、
 # DT_QUOTES_AT まで待ってから候補の気配を取って発注する（2026-09-25〜、cmd/daytrade/open_presnap.go）。
 # 時価問合の送信枠（8 回/秒）はプロセスで 1 つなので **DT_PRESNAP_UNTIL + 1 秒 ≤ DT_QUOTES_AT** に保つ
 # （空けないと候補の取得が枠待ちで遅れる）。候補の気配は今までどおり 8:59:52 台。
@@ -171,7 +171,7 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # プロセスだけで、snap は既定の動作でその場で終わる。TERM を受けるのは open だけ）。
 #
 # **寄る前の全銘柄の板は、2026-09-25 から寄る前の open の中で撮る**（上の DT_PRESNAP_UNTIL。候補の外は open が
-# 8:59:48〜51.2 に撮って history/book に slot 085948 で残し、候補は発注の判断に使った気配が history/quotes に残る）。
+# 8:59:48〜51.2 に撮って history/book に残し（slot は撮り始めた時刻 0859xx）、候補は発注の判断に使った気配が history/quotes に残る）。
 # それまでは独立の snap（2026-09-24 から 8:59:43、9/25 朝は 8:59:42・slot 085942）で、open（8:59:52）の前にロックを
 # 明け渡す式（開始 + 打ち切り + KILL ≤ open − 1 秒）が要った。open を 8:59:48 に早めるとこの式を満たせないので、
 # 行ごと open に畳んだ（git の 2026-09-25 の crontab.txt に元の行と説明がある）。

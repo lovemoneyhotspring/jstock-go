@@ -15,7 +15,7 @@ import (
 // 気配の誤差（見えるギャップ − 始値のギャップ）の検証は、発注の判断に使った気配（history/quotes）が
 // 一番本番に近い。ただ open は候補（約 900 銘柄）しか取らないので、深いギャップの帯は行が足りない
 // （2026-09-25）。そこで寄る前の回だけ、候補を撮る前に候補の外（約 2,800 銘柄）の板を撮って
-// history/book に残す（slot は起動の時刻 HHMMSS）。**記録だけで、選定にも発注にも使わない。**
+// history/book に残す（slot は撮り始めた時刻 HHMMSS。起動の約 1 秒後で、日によって 085949 などにずれる）。**記録だけで、選定にも発注にも使わない。**
 //
 // 時価問合の送信枠（8 回/秒）はプロセスで 1 つなので、候補の外を撮り続けたまま候補を撮ると枠待ちで
 // 候補の取得が遅れる。候補の外は --presnap-until で打ち切り（別の接続に締め切りを掛ける。発注の接続の
@@ -23,6 +23,11 @@ import (
 // 枠は空く。例（crontab）: 起動 8:59:48.0、打ち切り 8:59:51.2、候補 8:59:52.2。
 //
 // 失敗しても発注は止めない（警告を残して続ける）。
+//
+// 候補の外の接続は発注の接続とセッションのファイルを共有する（新しくログインはしない。p_no はファイルの大きい方を
+// 引き継ぐ）。時価問合が「セッションが切れた」と読める p_errno を返すとファイルを消すので、そのときは発注の接続が
+// 候補の気配を取る時点でログインし直す（約 1 秒）。独立の snap のころも open の起動でログインし直していたので
+// 所要は同じ水準（2026-09-25 のレビュー）。
 
 // presnapFetch は候補の外の板を until まで取る（取れた行・行ごとの受信時刻・取れなかった銘柄数・誤り）。
 // テストで差し替える。
@@ -43,6 +48,9 @@ var presnapFetch = func(symbols []string, columns string, until time.Time) ([]ma
 
 // presnapSourceOK は候補の外の板を撮れる気配の取得元か（立花だけ。csv は板を取れない）。テストで差し替える。
 var presnapSourceOK = func(name string) bool { return name == "tachibana" }
+
+// quotesAtReserve は --quotes-at から締め切りまでに残す時間（気配 0.6 + 判定 0.3 + 余力 0.2 + 注文 10 本 1.3 秒に余裕）。
+const quotesAtReserve = 3 * time.Second
 
 // waitUntil は t まで寝る。テストで差し替える。
 var waitUntil = func(t time.Time) {
@@ -100,11 +108,8 @@ func (s *openState) presnapOthers() {
 	for _, sym := range quoteSyms {
 		candidates[sym] = true
 	}
-	all, _, err := snapSymbols(s.cfg.Book.Scope, "", s.day, s.cfg.Book.ExtraSymbols)
-	if err != nil {
-		logWarn("daytrade.presnap", "候補の外の銘柄を集められない", map[string]any{"error": err.Error()})
-		return
-	}
+	// plan は読み込み済み（s.p）。snapSymbols はディスクから読み直すので使わない（撮る時間が削れる）
+	all, _ := mergeExtraSymbols(s.cfg.Book.ExtraSymbols, orderSnapSymbols(s.p.Candidates, s.cfg.Book.Scope == "universe"))
 	var others []string
 	for _, sym := range all {
 		if !candidates[sym] {
@@ -143,9 +148,11 @@ func (s *openState) waitQuotesAt() {
 	if !ok || !s.env.Preopen {
 		return
 	}
-	// 締め切り（寄る前の回は 9:00:00）より後まで寝て発注を逃さない
-	if !s.deadline.IsZero() && !at.Before(s.deadline) {
-		logWarn("daytrade.presnap", "--quotes-at が締め切りより後なので待たない", map[string]any{"value": s.opts.quotesAt})
+	// 締め切り（寄る前の回は 9:00:00）の間際まで寝て発注を逃さない。気配の取得と発注に要る時間
+	// （順調な朝で約 2.4 秒）を残せない時刻なら待たない
+	if !s.deadline.IsZero() && !at.Before(s.deadline.Add(-quotesAtReserve)) {
+		logWarn("daytrade.presnap", "--quotes-at が締め切りに近すぎるので待たない",
+			map[string]any{"value": s.opts.quotesAt, "deadline": s.deadline.In(jst).Format("15:04:05")})
 		return
 	}
 	waitUntil(at)
