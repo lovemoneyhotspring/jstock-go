@@ -276,6 +276,14 @@ def day_rules(te, us=None, skip_months=None):
     return d.set_index("d")[["mult", "skip", "us_low"]]
 
 
+def day_kind():
+    """日 → 本番の日の種類（"gapvol" / "uslow"＝米国小幅高で LightGBM の日 / "december"）。12 月が先。"""
+    te = pd.read_parquet("test/out/dt_candidates_wide.parquet", columns=["d", "gap"])
+    r = day_rules(te, us="spx", skip_months=())
+    k = np.where(r.index.month == 12, "december", np.where(r["skip"].values, "uslow", "gapvol"))
+    return pd.Series(k, index=r.index)
+
+
 def gapvol_days():
     """本番で gap_vol で並べてロングを建てる日（米国小幅高でも 12 月でもない日。ショック日は含む）。
     日の区分を使わない一次の横断（dt_oscillator・dt_three_day など）を本番の日に絞るため（2026-09-25）。
