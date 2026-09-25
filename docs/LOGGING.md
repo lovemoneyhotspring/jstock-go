@@ -175,7 +175,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `daytrade.plan` | 前夜に候補を作った | `day`, `prev_day`, `candidates`（全銘柄）, `eligible`（対象）, `positions`, `budget`, `iv_prev`, `path` |
 | `daytrade.quotes` | 気配を取った／使えない気配を除外した | `source`, `requested`, `received`, `missing`, `missing_sample`（取れなかった銘柄、最大 20）, `elapsed_ms`, `from_book`（値段を板＝最良気配から取った銘柄の数。まだ寄っていない銘柄で、利益源はここに集まる）/ `stale`, `stale_sample`（`銘柄@時刻 年齢秒`）, `delayed`, `delayed_sample`, `future`（時刻が 1 分以上先の気配の数。寄り前に前日の時刻が返る罠の観測用）, `future_sample`, `max_age_sec` |
 | `daytrade.regime` | 危険信号を評価した（毎朝） | `day`, `trade`, `reasons`, `month`, `iv_prev`, `drift_bp`, `market_gap_bp`, `recent_pnl`, `us_ret_bp`, `vix` |
-| `daytrade.ranking` | 順位表（N と次点 5 件） | `day`, `n`, `budget`, `scale`, `weighting`, `quotes`, `rows`（`rank`, `symbol`, `gap`, `price`, `vol`, `quantity`, `picked`。`rank_by = "lgbm"` の日は `score`（予測値）と `rule_rank`（gap_vol での順位）も） |
+| `daytrade.ranking` | 順位表（N と次点 5 件） | `day`, `n`, `budget`, `scale`, `weighting`, `quotes`, `rows`（`rank`, `symbol`, `gap`, `price`, `vol`, `quantity`, `picked`。`rank_by = "lgbm"` の日は `score`（予測値）と `rule_rank`（gap_vol での順位）も。選定の優先で先に出した銘柄は `preferred`） |
 | `daytrade.rerank`（warn） | `rank_by = "lgbm"` なのに LightGBM で並べられない（plan が古い版・モデルが読めない・当日の気配で試しに並べて失敗）。その回は gap_vol で並べ、`us_skip_legs` を `all` に戻す（米国小幅高の日は両脚とも休む）。異常（digest）にも載る | `rank_by`, `fallback`, `reason`, `plan_features`, `us_skip_legs`（寄付の判定の後に失敗した回は `error`, `short_off`。`short_off` が真ならロングも建てない） |
 | `daytrade.order` | 注文にした結果（1 件ごと。買いも売りも） | `day`, `symbol`, `side`, `client_order_id`, `quantity`, `price`, `amount`, `live`, `outcome`（`発注` / `dry-run` / `見送り 余力不足 …` / `見送り 締め切り …` / `見送り 余力を照会できない …` / `失敗 …`） |
 | `daytrade.balance_failed` | 余力を照会できず、その銘柄だけ見送った（実行は止めない。次の銘柄へ進む） | `symbol`, `trade`, `error` |
@@ -215,6 +215,7 @@ Go 版のログは `routine` を付けない（「動いただけ」の行も他
 | `daytrade.ref_price`（info / warn） | 執行時の時価（滑りの基準）を選定の気配で代用した／まとめて取れず記録を諦めて発注を優先した | `age_ms`, `reused`, `picks` / `day`, `symbol(s)`, `error` |
 | `daytrade.execution` / `daytrade.history` / `daytrade.evaluate_unmatched`（warn） | 実行品質の記録・履歴の追記に失敗した／順位表に無い約定があり評価から落ちる | `error` / `kind`, `error` / `day`, `orders` |
 | `daytrade.sector`（warn） | 業種が取れない候補があり `max_per_sector` がその分効かない | `no_sector`, `ranked`, `max_per_sector` |
+| `daytrade.prefer`（warn） | `signal.prefer` を掛ける設定なのに `plan` に指標の値が 1 件も無い（古い plan）。優先は効かず元の並び | `indicator`, `ranked` |
 | `daytrade.margin_warm`（info / warn） | 8:53 の `warm-margin` が委託保証金をキャッシュに焼いた／取れなかった・応答に無い項目・不足額（追証。通知も送る） | 保証金の内訳（`sonota_kousokukin` など） |
 | `daytrade.margin_cap`（warn / error） | `open` が保証金で建玉の上限を導いた。キャッシュが無い／当日ぶんでないときは設定の値で建てる（warn）。規則 R（`margin.capacity_ratio`）では、当日の保証金が読めない朝は設定の固定値と前日のキャッシュで決め直した値の**小さい方**（ショック日も同額で頭打ち。前日が追証か建可能額 0 なら建てない。本文が `規則 R: 保証金が読めない（…）`、通知は 1 日 1 回）。決め直した設定が検証を通らない朝は**その日は建てない**（error。WatchOnly に倒して通知も送る。2026-09-25 まで設定の値で建てていた）。N が 0 に落ちた朝も建てない（warn・通知）。[DAYTRADE.md](DAYTRADE.md) の保証金の節 | 導いた上限、`cached_day`、`fallback_total`・`stale_total`・`shock_total_cap`（読めない朝）、`error` |
 | `daytrade.corp_event` / `daytrade.corp_note` | ニュースの材料でショートの対象から外した（TOB など）／記録だけで外さなかった（`open`・`plan`） | `symbol`, `name`, `kind`, `at`, `headline` |

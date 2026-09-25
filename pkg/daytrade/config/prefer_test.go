@@ -30,19 +30,21 @@ func TestValidatePrefer(t *testing.T) {
 	}
 }
 
-// 本番の設定（信用版は extends で土台を継ぐ）はストキャス RSI ≤ 0.2・上位 20 位で優先する。
-func TestRepoConfigPrefersStochRSI(t *testing.T) {
+// 本番の設定（信用版は extends で土台を継ぐ）は 2026-09-25 から記録だけ（優先を掛けない）。
+// 有効にするときはこのテストの期待値も替える（うっかり有効・無効が入れ替わらないため）。
+func TestRepoConfigPreferRecordOnly(t *testing.T) {
 	for _, dir := range []string{"../../../config/daytrade", "../../../config/daytrade_margin"} {
 		cfg, err := Load(dir)
 		if err != nil {
 			t.Fatalf("%s: %v", dir, err)
 		}
-		want := Prefer{Indicator: PreferStochRSI, Max: 0.2, Pool: 20}
-		if cfg.Signal.Prefer != want {
-			t.Errorf("%s: signal.prefer = %+v, want %+v", dir, cfg.Signal.Prefer, want)
+		if cfg.Signal.Prefer.Enabled() {
+			t.Errorf("%s: signal.prefer が有効になっている: %+v", dir, cfg.Signal.Prefer)
 		}
-		// 米国小幅高の日（lgbm）にも掛かる: 日ごとの設定・gap_vol へ戻す設定でも消えない
-		if cfg.Signal.ForDay(true).Prefer != want || cfg.FallbackToGapVol().Signal.Prefer != want {
+		// 有効にしたときに日ごとの設定・gap_vol へ戻す設定で消えないこと
+		p := Prefer{Indicator: PreferStochRSI, Max: 0.2, Pool: 20}
+		cfg.Signal.Prefer = p
+		if cfg.Signal.ForDay(true).Prefer != p || cfg.FallbackToGapVol().Signal.Prefer != p {
 			t.Errorf("%s: 日ごとの設定で signal.prefer が落ちた", dir)
 		}
 	}
