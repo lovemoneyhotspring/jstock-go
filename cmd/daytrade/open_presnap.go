@@ -94,6 +94,13 @@ func (s *openState) presnapOthers() {
 	if !s.env.Preopen {
 		return // 寄る前の回だけ（9:00 以降の回は候補を撮るのが遅れるだけ）
 	}
+	// 打ち切りを締め切りの手前（候補の気配と発注に残す quotesAtReserve ＋ 1 秒）に抑える。crontab の
+	// DT_PRESNAP_UNTIL を書き間違えて締め切りに寄せても、候補の気配の取得と寄成が間に合うように
+	if limit := s.deadline.Add(-quotesAtReserve - time.Second); !s.deadline.IsZero() && until.After(limit) {
+		logWarn("daytrade.presnap", "--presnap-until が締め切りに近すぎるので手前に抑える",
+			map[string]any{"value": until.In(jst).Format("15:04:05.000"), "used": limit.In(jst).Format("15:04:05.000")})
+		until = limit
+	}
 	if name := s.quoteSourceName(); !presnapSourceOK(name) {
 		return // csv（検証・テスト）は板を取れない
 	}
