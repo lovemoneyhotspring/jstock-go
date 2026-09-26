@@ -3,7 +3,7 @@
   test/.venv/bin/python test/tdnet_fetch.py 2016-08-01 2026-09-25
 
 出力: test/out/tdnet/<YYYYMMDD>.json（取れた日は上書きしない）と test/out/tdnet.parquet（全日を束ねたもの）。
-1 日 1 回の要求で、要求の間は 1 秒あける。公募増資・市場区分の変更などの発表日を拾う材料。
+1 日 1 回の要求で、要求の間は 0.7 秒あける。公募増資・市場区分の変更などの発表日を拾う材料。
 """
 import json
 import os
@@ -32,7 +32,7 @@ def fetch(day):
             time.sleep(2 ** (i + 1))
     else:
         return True
-    items = [x['Tdnet'] for x in d.get('items', [])]
+    items = [x.get('Tdnet', x) for x in d.get('items', [])]
     if len(items) != d.get('total_count', len(items)):
         print(day.date(), '件数の不一致', len(items), d.get('total_count'), flush=True)
     with open(p, 'w') as f:
@@ -46,7 +46,7 @@ def main():
     a, b = pd.Timestamp(sys.argv[1]), pd.Timestamp(sys.argv[2])
     for day in pd.date_range(a, b):
         if fetch(day):
-            time.sleep(1.0)
+            time.sleep(0.7)
     rows = []
     for f in sorted(os.listdir(DIR)):
         rows += json.load(open(os.path.join(DIR, f)))
