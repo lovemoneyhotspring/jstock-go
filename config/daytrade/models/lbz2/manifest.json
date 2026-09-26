@@ -29,5 +29,5 @@
   ],
   "plan_features": 2,
   "min_turnover": 500000000.0,
-  "note": "LBZ2: 順位の特徴量 16 ＋ 前々日の騰落・2 日続落、教師データは寄→引の日ごとの頑健な z（±3）、bagging 5 本（random_state 0〜4）、並べる前に売買代金 5 億未満を外す。平常日用。根拠 vault 20-research/2026-09-jp-daytrade-raw-feats.md（test/dt_lgbm_bag.py・dt_lbz2_floor.py）。学習 2016-08-30〜2026-09-18（2,455 日・849,480 行）、木 42 本。test/dt_lgbm_train_spec.py lbz2 で作成"
+  "note": "LBZ2: 順位の特徴量 16 ＋ 前々日の騰落・2 日続落、教師データは寄→引の日ごとの頑健な z（±3）、bagging 5 本（random_state 0〜4）、並べる前に売買代金 5 億未満を外す。平常日用。根拠 vault 20-research/2026-09-jp-daytrade-raw-feats.md（test/dt_lgbm_bag.py・dt_lbz2_floor.py）。学習 2016-08-30〜2026-09-25（2,457 日・850,081 行）、木 95 本。test/dt_lgbm_train_spec.py lbz2 で作成"
 }
