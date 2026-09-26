@@ -69,7 +69,7 @@ def load():
         prior = [d for d in mdays if d <= me]
         if prior:
             elig.loc[(tdays > me) & (tdays <= nx), elig.columns.isin(msnap[prior[-1]])] = True
-    mg = c.execute("SELECT Date, Code, TRY_CAST(LongStdVol AS DOUBLE) L FROM markets_margin_interest").df()
+    mg = c.execute(f"SELECT Date, Code, TRY_CAST(LongStdVol AS DOUBLE) L FROM read_parquet('{ROOT}/markets_margin_interest/*.parquet', union_by_name=true)").df()
     mg['Date'] = pd.to_datetime(mg.Date).dt.tz_localize(None)
     return tdays, W, elig, mg
 
