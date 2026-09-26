@@ -12,6 +12,9 @@
 事前登録（2026-09-26、結果を見る前に固定。この docstring を commit してから回す）:
   当てはまりの確認（--fit）: 実測の行そのものに誤差を引き直し（50 シード）、帯ごとの |e| の平均・5/25/50/75/95% 分位・日ごとの log MAD の
     ばらつきを実測と並べる。帯 2〜4（銘柄を選ぶ帯）で |e| の平均と分位が実測の ±15% に入れば「形は合う」とする。
+  v2（2026-09-26 追記、回す前）: v1（3f34bf6）は当てはまりの基準を欠いた（帯 2 の 95% 分位 4.1 対 実測 1.7、|e| 平均 1.73 対 1.20）。
+    残差を帯 2〜4 でまとめたため、幅の狭い帯 3 の裾の重い残差が帯 2 に掛かった。v2 は残差を帯ごとにする（深い帯 0〜1 だけまとめる）。
+    基準（帯 2〜4 で ±15%）と後の手順は同じ。v2 も欠けば LBZ2 − G は回さない。
   LBZ2 − G（平常日）: 材料は予備と同じ slot 0859・9/24 まで。day_boot・model・model_boot を同じシード数で回し、差・日の標本誤差・
     シード間のばらつき・t を並べる（記述）。model_boot の差が day_boot の差の ±30% に入らなければ、モデルは誤差の効き方を変えてしまう
     （偏る）として、10/22 の判定の副には使わない。入れば、10/22 の判定で model_boot の t を副として並べる（主は day_boot のまま）。
@@ -68,6 +71,8 @@ def check_fit(slot, n_sim=50):
         worst = (r[cols] / o[cols] - 1).abs().max().max()
         print(f"  {mode}: 帯 2〜4 の |e| 平均と分位（中央値を除く）の実測との差の最大 {worst * 100:.1f}% → "
               + ("形は合う" if worst <= 0.15 else "合わない"))
+        ok = worst <= 0.15 if mode == "model" else ok and worst <= 0.15
+    return ok
 
 
 def compare(slot, seeds):
@@ -133,8 +138,8 @@ def main():
     ap.add_argument("--fit", action="store_true", help="当てはまりだけ")
     a = ap.parse_args()
     os.environ["DT_ERR_UNTIL"] = PRELIM_UNTIL
-    check_fit("0859")
-    if not a.fit:
+    fit_ok = check_fit("0859")
+    if not a.fit and fit_ok:
         compare("0859", a.seeds)
 
 
