@@ -28,6 +28,13 @@ type FillModel interface {
 	Fill(r Row) (entry, exit float64, ok bool)
 }
 
+// ExitTimer は手仕舞い値がその時刻の分足の約定（15:20 の成行）から来たかを答える
+// （FillModel の任意の拡張）。持ち越しの判定を 15:20 の値で見るために使う——15:20 に
+// 制限値幅に張り付いていなければ成行はその場で約定し、引けが張り付いても持ち越さない。
+type ExitTimer interface {
+	ExitTimed(r Row) bool
+}
+
 // OpenCloseFill は寄付で建てて引けで手仕舞う（日足だけの近似。滑りなし）。
 type OpenCloseFill struct{}
 
@@ -76,6 +83,9 @@ type Trade struct {
 	// Carried は引けが制限値幅に張り付いて手仕舞えず、翌寄りに持ち越した
 	// （ショートは引けストップ高、ロングは引けストップ安）。
 	Carried bool
+	// ExitTimed は手仕舞い値が分足の約定（exit_window の成行）から来た（ExitTimer）。
+	// 偽なら日足の引けで手仕舞った扱い。
+	ExitTimed bool
 	// RankBy はその日のロングの並べ方（signal.rank_by / rank_by_us_low の実効値。ショートは空）。
 	// Python の簡易検証との突き合わせ（test/dt_parity_go.py）で日の区分を Go から受け取るため。
 	RankBy string
@@ -294,6 +304,8 @@ func pickDay(rows []Row, p legParams, n int, budget decimal.Decimal) []Trade {
 	shares := make([]float64, len(picks))
 	entries := make([]float64, len(picks))
 	exits := make([]float64, len(picks))
+	timed := make([]bool, len(picks))
+	timer, _ := fill.(ExitTimer)
 	for i, pick := range picks {
 		entry, exit, ok := fill.Fill(byCode[pick.Code])
 		if !ok || entry <= 0 || exit <= 0 {
@@ -301,6 +313,7 @@ func pickDay(rows []Row, p legParams, n int, budget decimal.Decimal) []Trade {
 		}
 		shares[i] = pick.Quantity.InexactFloat64()
 		entries[i], exits[i] = entry, exit
+		timed[i] = timer != nil && timer.ExitTimed(byCode[pick.Code])
 	}
 
 	// 定額コースは 1 日の合計（買い＋売り）で段階が決まるので、
@@ -340,32 +353,55 @@ func pickDay(rows []Row, p legParams, n int, budget decimal.Decimal) []Trade {
 			Shares: shares[i], Entry: entries[i], Exit: exits[i],
 			Amount: amount, Fees: fee, Commission: commission,
 			Gross: gross, PnL: gross - fee, Scale: 1, RankBy: rankBy,
+			ExitTimed: timed[i],
 		})
 	}
 	return trades
 }
 
-// applyCarry は引けが制限値幅に張り付いて手仕舞えなかった取引を「翌営業日の寄付で
+// applyCarry は制限値幅に張り付いて手仕舞えなかった取引を「翌営業日の寄付で
 // 手仕舞った」ことにする。
 //
-// ショート（sign −1）は引けストップ高——買い気配に張り付いて返済買いが約定しない。
-// ロング（sign +1）は引けストップ安——売り気配に張り付いて売りが約定しない。
+// ショート（sign −1）はストップ高——買い気配に張り付いて返済買いが約定しない。
+// ロング（sign +1）はストップ安——売り気配に張り付いて売りが約定しない。
 // 損益は penalty の割合だけ翌寄りに置き換える（1 で全額、0 で無視）——実際に
 // 約定しない割合は日足からは分からない。
+//
+// 手仕舞い値が 15:20 の分足（ExitTimed）なら、判定は 15:20 の値で見る:
+//   - 15:20 の約定値が張り付いていない → 成行はその場で約定。引けが張り付いても持ち越さない
+//   - 15:20 に張り付き、引けで外れた → 成行は引けの板寄せで約定した（手仕舞い値を引けに置き換える）
+//   - 15:20 も引けも張り付き → 持ち越し
+//
+// 日足の引けで手仕舞った取引は、引けが張り付いていれば持ち越し（従来どおり）。
 func applyCarry(trades []Trade, byKey map[string]Row, sign, penalty float64) []Trade {
+	// 浮動小数の丸めで制限値幅をわずかに外すことがあるので 1e-6 の余裕を持つ
+	atLimit := func(px float64, row Row) bool {
+		if sign < 0 {
+			return px >= row.LimitHigh-1e-6
+		}
+		return px <= row.LimitLow+1e-6
+	}
 	for i := range trades {
 		row, ok := byKey[trades[i].Date.Format(dayLayout)+"|"+trades[i].Code]
-		if !ok || row.NextOpen == nil {
+		if !ok {
 			continue
 		}
-		// 浮動小数の丸めで制限値幅をわずかに外すことがあるので 1e-6 の余裕を持つ
-		pinned := false
-		if sign < 0 {
-			pinned = row.Close >= row.LimitHigh-1e-6
-		} else {
-			pinned = row.Close <= row.LimitLow+1e-6
+		if trades[i].ExitTimed {
+			if !atLimit(trades[i].Exit, row) {
+				continue
+			}
+			if !atLimit(row.Close, row) {
+				if row.Close > 0 {
+					trades[i].Gross += trades[i].Shares * sign * (row.Close - trades[i].Exit)
+					trades[i].Exit = row.Close
+					trades[i].PnL = trades[i].Gross - trades[i].Fees
+				}
+				continue
+			}
+		} else if !atLimit(row.Close, row) {
+			continue
 		}
-		if !pinned {
+		if row.NextOpen == nil {
 			continue
 		}
 		trades[i].Carried = true

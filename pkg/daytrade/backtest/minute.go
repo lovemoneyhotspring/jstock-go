@@ -141,6 +141,16 @@ func (m *MinuteBars) Fill(r Row) (float64, float64, bool) {
 	return entry, exit, entry > 0 && exit > 0
 }
 
+// ExitTimed は手仕舞い値が exit_at 以降の分足の約定から来たか（ExitTimer）。
+// 分足の無い日・時刻の指定が無い・その時刻以降に約定が無い（引けの扱い）なら偽。
+func (m *MinuteBars) ExitTimed(r Row) bool {
+	if m.exitAt == "" || !m.covers(r.Date) {
+		return false
+	}
+	row, ok := m.rows[m.key(r.Date, r.Code)]
+	return ok && row.exit > 0
+}
+
 // Opened は 09:00 の板寄せで寄ったか。known が偽なら分足が無く判定できない。
 //
 // 実運用の signal.skip_opened（9:01 の時点で既に寄っている銘柄を候補から外す）を

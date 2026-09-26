@@ -68,6 +68,36 @@ func TestApplyCarryBothLegs(t *testing.T) {
 	}
 }
 
+func TestApplyCarryJudgesAtExitTime(t *testing.T) {
+	day := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
+	nextOpen := 1400.0
+	rows := map[string]Row{
+		// 前日終値 1000 → ストップ高 1300。C は引けで張り付き、D は引けで外れた
+		"2026-01-05|C": {Date: day, Code: "C", Open: 1080, Close: 1300, LimitLow: 700, LimitHigh: 1300, NextOpen: &nextOpen},
+		"2026-01-05|D": {Date: day, Code: "D", Open: 1080, Close: 1250, LimitLow: 700, LimitHigh: 1300, NextOpen: &nextOpen},
+	}
+	// 15:20 は 1200 で張り付いていない: その場で返済できたので、引けがストップ高でも持ち越さない
+	free := applyCarry([]Trade{{Date: day, Code: "C", Shares: 100, Entry: 1080, Exit: 1200, Gross: -12_000, ExitTimed: true}}, rows, -1, 1)
+	if free[0].Carried || free[0].Gross != -12_000 || free[0].Exit != 1200 {
+		t.Errorf("15:20 に張り付いていないのに触っている: %+v", free[0])
+	}
+	// 15:20 も引けも張り付き: 持ち越し（翌寄り 1400 で返済）
+	stuck := applyCarry([]Trade{{Date: day, Code: "C", Shares: 100, Entry: 1080, Exit: 1300, Gross: -22_000, ExitTimed: true}}, rows, -1, 1)
+	if !stuck[0].Carried || stuck[0].Gross != -32_000 {
+		t.Errorf("15:20 も引けも張り付きの持ち越し = %+v, want Carried・Gross -32000", stuck[0])
+	}
+	// 15:20 に張り付き、引けで外れた: 引けの板寄せで 1250 で返済
+	late := applyCarry([]Trade{{Date: day, Code: "D", Shares: 100, Entry: 1080, Exit: 1300, Gross: -22_000, Fees: 50, PnL: -22_050, ExitTimed: true}}, rows, -1, 1)
+	if late[0].Carried || late[0].Exit != 1250 || late[0].Gross != -17_000 || late[0].PnL != -17_050 {
+		t.Errorf("引けで外れた返済 = %+v, want Exit 1250・Gross -17000", late[0])
+	}
+	// 日足の引けで手仕舞った取引は従来どおり引けで判定
+	daily := applyCarry([]Trade{{Date: day, Code: "C", Shares: 100, Entry: 1080, Exit: 1300, Gross: -22_000}}, rows, -1, 1)
+	if !daily[0].Carried {
+		t.Error("日足の引けで張り付いたショートが持ち越しになっていない")
+	}
+}
+
 func TestScaleTradesAppliesDailyScale(t *testing.T) {
 	day := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
 	off := day.AddDate(0, 0, 1)
