@@ -126,28 +126,33 @@ def st(daily):
                 dd=(eq - eq.cummax()).min() / CAP * 100)
 
 
-t = pd.read_csv('out/trades_10y.csv')
-t['date'] = pd.to_datetime(t.date)
-dtm = t.groupby('date').pnl.sum().resample('ME').sum()
-rows = []
-for d, w, condor in itertools.product([0.05, 0.07], [0.03, 0.05], [False, True]):
-    daily, m = run(d, w, condor)
-    s = st(daily)
-    si, so = st(daily[daily.index <= IS_END]), st(daily[daily.index > IS_END])
-    mm = daily.resample('ME').sum()
-    mc = np.corrcoef(mm.values, dtm.reindex(mm.index).fillna(0).values)[0, 1]
-    worst = m.nsmallest(2, 'pnl')
-    lab = f"d{int(d * 100)} w{int(w * 100)} {'コンドル' if condor else 'プット'}"
-    print(f"{lab:14s} 年率 {s['annual']:6.1f}%  Sharpe {s['sharpe']:5.2f}  DD {s['dd']:6.1f}%  IS {si['annual']:6.1f}%  "
-          f"OOS {so['annual']:6.1f}%  月次相関 {mc:+.2f}  月 {len(m)}  最悪 "
-          f"{[(str(r.sq)[:7], round(r.pnl / CAP * 100, 1)) for r in worst.itertuples()]}", flush=True)
-    rows.append(dict(label=lab, **s, is_annual=si['annual'], oos_annual=so['annual'], mcorr=mc))
-g = pd.DataFrame(rows)
-g.to_csv('out/opt_spread.csv', index=False)
-mid = g.iloc[(g.sharpe - g.sharpe.median()).abs().argsort()[:2]]
-c1 = g.sharpe.median() >= 0.6
-c2 = -g.dd.median() <= 40
-c3 = bool((mid.is_annual > 0).all() and (mid.oos_annual > 0).all())
-c4 = g.mcorr.median() <= 0.1
-print(f"\n中央値: Sharpe {g.sharpe.median():.2f}  DD {g.dd.median():.1f}%  月次相関 {g.mcorr.median():+.2f}  中央の格子 {list(mid.label)}")
-print(f"判定: 1 {c1}  2 {c2}  3 {c3}  4 {c4}  → {'採用候補' if c1 and c2 and c3 and c4 else '不採用'}")
+def main():
+    t = pd.read_csv('out/trades_10y.csv')
+    t['date'] = pd.to_datetime(t.date)
+    dtm = t.groupby('date').pnl.sum().resample('ME').sum()
+    rows = []
+    for d, w, condor in itertools.product([0.05, 0.07], [0.03, 0.05], [False, True]):
+        daily, m = run(d, w, condor)
+        s = st(daily)
+        si, so = st(daily[daily.index <= IS_END]), st(daily[daily.index > IS_END])
+        mm = daily.resample('ME').sum()
+        mc = np.corrcoef(mm.values, dtm.reindex(mm.index).fillna(0).values)[0, 1]
+        worst = m.nsmallest(2, 'pnl')
+        lab = f"d{int(d * 100)} w{int(w * 100)} {'コンドル' if condor else 'プット'}"
+        print(f"{lab:14s} 年率 {s['annual']:6.1f}%  Sharpe {s['sharpe']:5.2f}  DD {s['dd']:6.1f}%  IS {si['annual']:6.1f}%  "
+              f"OOS {so['annual']:6.1f}%  月次相関 {mc:+.2f}  月 {len(m)}  最悪 "
+              f"{[(str(r.sq)[:7], round(r.pnl / CAP * 100, 1)) for r in worst.itertuples()]}", flush=True)
+        rows.append(dict(label=lab, **s, is_annual=si['annual'], oos_annual=so['annual'], mcorr=mc))
+    g = pd.DataFrame(rows)
+    g.to_csv('out/opt_spread.csv', index=False)
+    mid = g.iloc[(g.sharpe - g.sharpe.median()).abs().argsort()[:2]]
+    c1 = g.sharpe.median() >= 0.6
+    c2 = -g.dd.median() <= 40
+    c3 = bool((mid.is_annual > 0).all() and (mid.oos_annual > 0).all())
+    c4 = g.mcorr.median() <= 0.1
+    print(f"\n中央値: Sharpe {g.sharpe.median():.2f}  DD {g.dd.median():.1f}%  月次相関 {g.mcorr.median():+.2f}  中央の格子 {list(mid.label)}")
+    print(f"判定: 1 {c1}  2 {c2}  3 {c3}  4 {c4}  → {'採用候補' if c1 and c2 and c3 and c4 else '不採用'}")
+
+
+if __name__ == '__main__':
+    main()
