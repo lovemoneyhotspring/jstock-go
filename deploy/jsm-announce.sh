@@ -27,7 +27,13 @@ RC=$?
 echo "$OUT"
 case $RC in
   0) ;;
-  3) exit 0 ;;   # まだ発表が無い
+  3) # まだ発表が無い。例年は 8/5〜8/7 なので、8/12 以降も見つからなければ JPX のページの形が変わった疑い。
+     # 1 日 1 回（19 時台の回）だけ知らせる
+     if [ "$(date +%-d)" -ge 12 ] && [ "$(date +%H)" = "19" ]; then
+       post "中小型株指数の採用: 発表が見つからない" "8/12 を過ぎても ${YEAR} 年の定期入替の発表が見つからない。JPX のページ（www.jpx.co.jp/markets/indices/jpx-nikkei400/）を人が確かめ、
+見つけたら test/.venv/bin/python test/jsm_announce.py --url <発表ページ> で一覧を作る"
+     fi
+     exit 0 ;;
   2) post "中小型株指数の採用: 人が確かめる" "発表は見つかったが、PDF の件数が本文と合わないか PDF が無い。${OUT}
 手で読むなら test/jsm_announce.py --url <発表ページ> --dry-run"; exit 1 ;;
   *) post "中小型株指数の採用: 失敗" "test/jsm_announce.py が失敗（終了コード $RC）。$(tail -5 "$ERR")"; exit 1 ;;
