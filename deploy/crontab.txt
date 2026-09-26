@@ -138,6 +138,8 @@ JQ_MEM=JQUANTS_READ_BUDGET_MB=2048 GOMEMLIMIT=4GiB GOGC=400 WBJP_DUCKDB_MEMORY_L
 # 17:13 に入った日は無く（16:43 が 11 日、18:43 が 1 日）、毎回評価し直して履歴を書き足すだけだった
 5 17 * * 1-5    cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
 20 20 * * 1-5  cd $WBJP_HOME && WBJP_ENV=prod env $JQ_MEM flock -n /tmp/daytrade-eval.lock $WBJP_BIN/daytrade evaluate --config-dir config/daytrade_margin >> state/logs/daytrade-evaluate.log 2>&1
+# 影の記録（LBZ2 / gap_vol × F6 / R7 の 4 通り）を vault へ。2026-09-28 に LBZ2 と F6 を同時に入れたので後から切り分ける（deploy/daytrade-shadow.sh）
+40 20 * * 1-5   cd $WBJP_HOME && WBJP_ENV=prod flock -n /tmp/daytrade-eval.lock deploy/daytrade-shadow.sh >> state/logs/daytrade-shadow.log 2>&1
 
 # --- 板・気配の記録（docs/OPENING_DATA.md）----------------------------------------
 # 発注しない。今の選定はギャップ 1 変数しか見ておらず、「どんな気配なら勝率が上がるか」に
