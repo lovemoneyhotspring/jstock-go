@@ -11,7 +11,7 @@
 
   bash test/heavy.sh ./bin/daytrade backtest --config-dir test/out/cfg_wide_lb --trades-csv test/out/wide_lb.csv
   bash test/heavy.sh ./bin/daytrade backtest --config-dir test/out/cfg_wide_gv --trades-csv test/out/wide_gv.csv
-  test/.venv/bin/python test/dt_rank_allocation.py [名前=wide.csv:本物.csv ...]
+  test/.venv/bin/python test/dt_rank_allocation.py [名前=wide.csv:本物.csv ...] [--ratios 0.001,0.002,0.003,0.005]
 
 本物の R7（test/out/mon_trades.csv・gv_trades.csv）と日次で突き合わせてから比べる。
 """
@@ -43,11 +43,10 @@ FORMS = {
 }
 SETS = {"LBZ2（インサンプル）": ("test/out/wide_lb.csv", "test/out/mon_trades.csv"),
         "gap_vol": ("test/out/wide_gv.csv", "test/out/gv_trades.csv")}
-if len(sys.argv) > 1:
-    SETS = {a.split("=", 1)[0]: tuple(a.split("=", 1)[1].split(":")) for a in sys.argv[1:]}
+RATIOS = [0.002]   # 売買代金に対する 1 銘柄の上限（今は 0.2%）。--ratios で足す（Go は値動きの κ を入れないので参考）
 
 
-def simulate(w, weights):
+def simulate(w, weights, ratio=0.002):
     """1 日ごとに順位順に埋める。上限 = min(売買代金 × 0.2%, 総額 × 重み, 残り)。1 単元が載らなければ次点。"""
     out = {}
     for day, g in w.groupby("date", sort=True):
@@ -58,7 +57,7 @@ def simulate(w, weights):
         for r in g.itertuples():
             if k >= len(weights):
                 break
-            lim = min(r.cap, total * weights[k])
+            lim = min(r.cap * ratio / 0.002, total * weights[k])
             if np.floor(lim / (r.entry * LOT)) < 1:
                 continue  # 1 単元が上限に載らない: 次点を繰り上げる（順位の枠は使わない）
             if isinstance(r.sector, str) and r.sector:
@@ -97,6 +96,13 @@ def tstat(d):
 
 
 def main():
+    global SETS, RATIOS
+    args = [a for a in sys.argv[1:] if not a.startswith("--ratios")]
+    for a in sys.argv[1:]:
+        if a.startswith("--ratios"):
+            RATIOS = [float(x) for x in a.split("=", 1)[1].split(",")]
+    if args:
+        SETS = {a.split("=", 1)[0]: tuple(a.split("=", 1)[1].split(":")) for a in args}
     pd.set_option("display.width", 200)
     for name, (wide, real) in SETS.items():
         w = pd.read_csv(wide, parse_dates=["date"])
@@ -105,6 +111,10 @@ def main():
         w = w.merge(sectors(w), on=["date", "code"], how="left")
         w["bp"] = w.pnl / w.amount * 1e4
         res = {f: simulate(w, ws) for f, ws in FORMS.items()}
+        for ratio in RATIOS:
+            if ratio != 0.002:
+                for f, ws in FORMS.items():
+                    res[f"{f}@{ratio * 100:g}%"] = simulate(w, ws, ratio)
         idx = res["R7"].index
 
         rl = pd.read_csv(real, parse_dates=["date"])
