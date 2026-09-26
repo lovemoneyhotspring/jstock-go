@@ -54,13 +54,14 @@ max_order = 2500000        # 1 銘柄の上限（1 注文予算の 1.5 倍）。
 # （[margin] capacity_ratio が毎朝の建可能額から決め直す）。max_order は規則 R では総額 ÷ name_divisor が先に効く
 # **2026-09-28〜 F6（前寄せ）: name_divisor = 4・max_positions = 6。** 事前登録の本判定（気配の誤差の材料 20 日）の前に入れた。
 # 理由: 比べる R7 も本番 1 日だけで実績が無く、今ある証拠（下の walk-forward と誤差込みの予備）はすべて F6 が上、
-# 待てば予備の差で 10/22 まで約 5 万を捨て、外れても戻すのはこの 2 行。どちらが効いたかは影の記録（deploy/daytrade-shadow.sh）で比べる。
-# 弱い前提と戻す条件は研究ノートの冒頭（誤差の材料が 7 日、1 銘柄 175 万の滑りは板で未確認）。
+# 待てば予備の差で 10/22 まで約 5 万を捨て、外れても替えるのはこの 2 行。どちらが効いたかは影の記録（deploy/daytrade-shadow.sh）で比べる。
+# 弱い前提と本判定での選び方は研究ノートの冒頭（誤差の材料が 7 日、1 銘柄 175 万の滑りは板で未確認）。
 # 順位の効きは 1〜5 位が有意で 7〜10 位はコスト後ほぼ 0（walk-forward の LBZ2 でも同じ）なので、6 本に絞り上から総額 ÷ 4 ずつ埋める。
 # walk-forward の LBZ2・誤差なしで OOS 損益 1,150 → 1,574 万・Sharpe 2.36 → 2.74（日次差 t 3.41）、
 # 気配の誤差・注文の値動き込みの予備（材料 7 日）で +2,720 円/日（t 2.06、10/10 シード）。6 本で等分（÷ 6）は R7 に勝たない。
 # turnover_ratio は 0.2% のまま（0.1% は悪化、0.3・0.5% は F6 では値動きで悪化）。
-# 10/22 前後に test/dt_rank_allocation_err.py F6 T6 --ratios 0.002 で本判定。× なら name_divisor = 7・max_positions = 10 に戻す。
+# 10/22 前後に test/dt_rank_allocation_err.py --ratios 0.001,0.002,0.003,0.005 で本判定し、誤差込みの全日の平均が最も高い形・比率を採る
+# （R7 を既定にしない。R7 なら name_divisor = 7・max_positions = 10）。
 # 研究ノート 20-research/2026-09-jp-daytrade-rank-allocation.md
 weighting = "turnover"
 turnover_ratio = 0.002

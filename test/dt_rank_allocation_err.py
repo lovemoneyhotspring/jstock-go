@@ -146,7 +146,13 @@ def main():
     for f in forms:
         m = mean[f]
         print(f"  {f}: 平常日 {m[normal].mean():+,.0f}・全日 {m.mean():+,.0f}（誤差なし {upper[f].mean():+,.0f}）")
-    print("\n平常日の − 基準（形の比較は R7、比率の比較は同じ形の 0.2%）")
+    # 本判定の選び方（2026-09-26 に改めた。vault ノートの「本判定での選び方」）: どの形も実績が無いので R7 を既定にせず、
+    # 形 × 比率の組のうち誤差込みの全日の平均（20 シード平均）が最も高いものを採る。有意差は参考に出すだけ
+    cand = list(forms)
+    best = max(cand, key=lambda f: mean[f].mean())
+    print("\n全日の平均（誤差込み、高い順）: " + "・".join(f"{f} {mean[f].mean():+,.0f}" for f in sorted(cand, key=lambda f: -mean[f].mean())))
+    print(("（予備）" if a.prelim else "採用: ") + best)
+    print("\n参考: 平常日の − 基準（形の比較は R7、比率の比較は同じ形の 0.2%）")
     for f in forms:
         if f == "R7":
             continue
