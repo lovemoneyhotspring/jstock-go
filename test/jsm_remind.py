@@ -20,8 +20,8 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(__file__))
 from common import *  # noqa: E402,F403
 
-BUDGET = float(os.environ.get('JSM_BUDGET_PER_NAME', 500000))
-MAX_NAMES = int(os.environ.get('JSM_MAX_NAMES', 20))
+BUDGET = float(os.environ.get('JSM_BUDGET_PER_NAME', 1000000))
+MAX_NAMES = int(os.environ.get('JSM_MAX_NAMES', 10))
 
 
 def schedule(year, c=None):
@@ -58,7 +58,7 @@ def message(today, s):
         return ('中小型株指数の採用: 1 か月前のお知らせ',
                 f'{ann.year} 年の JPX日経中小型株指数の定期入替まであと 1 か月。\n{dates}\n'
                 f'買うのは売買代金の大きい順に {MAX_NAMES} 銘柄、1 銘柄 {BUDGET / 1e4:.0f} 万円で合計 約 {cap / 1e4:,.0f} 万円'
-                '（1 単元が予算を超える銘柄は 1 単元）。\n準備: 別の証券会社の口座に資金を入れる／寄成・引成を 20 銘柄出せるか確かめる／'
+                f'（1 単元が予算を超える銘柄は 1 単元）。\n準備: 別の証券会社の口座に資金を入れる／寄成・引成を {MAX_NAMES} 銘柄出せるか確かめる／'
                 '8 月の買う日と売る日に注文を入れられるか予定を空ける。\n根拠と手順: vault 30-projects/季節性イベント.md')
     if 1 <= days <= 14:
         return (f'中小型株指数の採用: 発表まであと {days} 日',

@@ -10,7 +10,7 @@
 2. 発表の PDF を jpx_rebalance_pdf.parse で読む。件数が本文と合わなければ止まる（終了コード 2、人が確かめる）。
 3. 対象 = 中小型の採用のうち、同じ回の JPX日経400 の採用・除外と重ならない銘柄（検証と同じ）。
 4. 入口 = 発表の翌営業日の寄成、出口 = 組み入れの日（実施日の前営業日）の引成。
-   買うのは売買代金（20 日中央値）の大きい順に上位 --max-names（既定 20）銘柄（vault 20-research/2026-09-jp-jsm-rank.md の R1）。
+   買うのは売買代金（20 日中央値）の大きい順に上位 --max-names（既定 10、1 銘柄 100 万円）銘柄（vault 20-research/2026-09-jp-jsm-rank.md の R1 と「何銘柄に絞るか」）。
    単元数 = max(1, round(予算 ÷ 1 単元の金額))。ただし金額が売買代金 20 日中央値の 1% を超えるなら 1% に収まる単元数まで減らす（最低 1）。
 5. vault の 20-research/<年>-08-jsm-adds.md に注文一覧・記入欄・検証用の EVENTS の行を書く。
 """
@@ -49,8 +49,8 @@ def main():
     ap.add_argument('--year', type=int, default=date.today().year)
     ap.add_argument('--url', default='')
     ap.add_argument('--vault', default=os.path.expanduser('~/obsidian-vault'))
-    ap.add_argument('--budget', type=float, default=float(os.environ.get('JSM_BUDGET_PER_NAME', 500000)))
-    ap.add_argument('--max-names', type=int, default=int(os.environ.get('JSM_MAX_NAMES', 20)))
+    ap.add_argument('--budget', type=float, default=float(os.environ.get('JSM_BUDGET_PER_NAME', 1000000)))
+    ap.add_argument('--max-names', type=int, default=int(os.environ.get('JSM_MAX_NAMES', 10)))
     ap.add_argument('--dry-run', action='store_true', help='vault と状態に書かず、一覧を標準出力に出す')
     a = ap.parse_args()
     os.makedirs(STATE, exist_ok=True)
