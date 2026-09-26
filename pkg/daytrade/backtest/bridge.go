@@ -24,6 +24,7 @@ func candidateOf(r Row) universe.Candidate {
 		Sector:        r.Sector,
 		ShortInterest: r.ShortInterest,
 		Ret1:          r.Ret1,
+		RetD2:         r.RetD2,
 		Ret5:          r.Ret5,
 		Ret20:         r.Ret20,
 		Pos20:         r.Pos20,

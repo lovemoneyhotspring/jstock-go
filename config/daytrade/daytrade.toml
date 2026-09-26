@@ -99,13 +99,22 @@ skip_opened = false
 #   test/.venv/bin/python test/dt_live_shadow.py           # 本番の記録から lgbm / gap_vol を並べ直して比べる
 #   test/.venv/bin/python test/dt_rank_compare.py          # 20 営業日溜まったら実測の誤差で測り直す
 # vault 20-research/2026-09-jp-daytrade-rankby-preopen-fair。
-rank_by = "gap_vol"
+# **2026-09-28〜 "lgbm"（LBZ2、model の束）。** 平常日を順位の特徴量 16 ＋ 2 日続落・教師データは寄→引の日ごとの
+# 頑健な z・bagging 5 本・売買代金 5 億未満を外す形で並べる。平常日 1,017 日の walk-forward（8:59:00 の気配の誤差込み）で
+# gap_vol に +6,239 円/日（t 2.60、入れ子の t 3.6〜3.8）、後半（2023〜）+4,450、流動性コスト込み +7,519。
+# 予備の材料で入れた（2026-09-26 ユーザ判断）。10/22 ごろ材料 20 日で test/dt_lbz2_floor.py を 1 度回し、欠けたら
+# "gap_vol" に戻す。vault 20-research/2026-09-jp-daytrade-raw-feats.md・30-projects/daytrade-judge-1022.md。
+rank_by = "lgbm"
 # 米国小幅高の日だけ使う並べ方（空 = rank_by と同じ）。平常日 gap_vol・小幅高だけ lgbm を**寄成で**出す形は上の検証で −0.92 bp/日。
 # 2026-09-21 から "lgbm"（execution.preopen_limit_pct_us_low = 1.5 と us_skip_legs = "short" と組）。この日は寄指を付ければ
 # どの指値でも lgbm が gap_vol より上（vault 2026-09-jp-daytrade-limit-on-open の事前登録 3）。戻すのは us_skip_legs = "all" の 1 行（下）。
 rank_by_us_low = "lgbm"
-# lgbm のモデル（このファイルからの相対パス）。
-model = "models/lgbm_rank.txt"
+# lgbm のモデル（このファイルからの相対パス）。.json はモデルの束のマニフェスト（特徴量の並び・モデル・plan の版・
+# 売買代金の下限。学習し直すときは test/dt_lgbm_train_spec.py で束ごと作る）。.txt は従来の 1 本。
+# model は平常日、model_us_low は米国小幅高の日（空なら model）。小幅高の日は従来の 1 本のまま
+# （LBZ2 は小幅高の日に今のモデルを超えない。vault 2026-09-jp-daytrade-raw-feats の bagging の追記）。
+model = "models/lbz2/manifest.json"
+model_us_low = "models/lgbm_rank.txt"
 # 2 段階選定: ギャップ順の上位 N × value_pool から益回り（直近本決算の純利益 ÷ 時価総額）の
 # 高い順に N 銘柄。**検証したが採用しない（既定 0 = 無効）。**
 # 横断では割安なほど強い（益回り 3 分位で 割高 +16.7 / 中位 +31.6 / 割安 +40.9 bp、差 +24.3・t 2.7）が、

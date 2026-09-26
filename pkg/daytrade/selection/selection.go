@@ -180,7 +180,7 @@ type gapFilter struct {
 	descending bool
 	// rankBy は並べる鍵（config.RankByGap / RankByGapVol / RankByLGBM。空は gap）。
 	rankBy string
-	// model は rankBy = lgbm のモデルのパス（config.Signal.Model）。
+	// model は rankBy = lgbm のモデルの束のパス（config.Signal.Model。その日の分を ForDay で入れたもの）。
 	model string
 }
 
@@ -251,7 +251,7 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 			sr.in = rerank.Input{
 				Gap: gap.InexactFloat64(), Price: quote.Price.InexactFloat64(),
 				TurnoverMed: c.TurnoverMed, MktCap: c.MktCap,
-				Vol20: c.Vol20, Ret1: c.Ret1, Ret5: c.Ret5, Ret20: c.Ret20,
+				Vol20: c.Vol20, Ret1: c.Ret1, RetD2: c.RetD2, Ret5: c.Ret5, Ret20: c.Ret20,
 				Pos20: c.Pos20, PrevIntraday: c.PrevIntraday,
 				ShortInterest: c.ShortInterest, EarnYield: c.EarnYield,
 			}
@@ -287,14 +287,20 @@ func rankBy(candidates []universe.Candidate, quotes map[string]Quote, f gapFilte
 			inputs[i] = scored[i].in
 			inputs[i].RuleRank = i + 1
 		}
-		model, err := rerank.Cached(f.model)
+		spec, err := rerank.CachedSpec(f.model)
 		if err != nil {
 			// 黙って別の並べ方にせず止める。open は TryRank で受けて gap_vol に戻す
 			// （plan.RankConfig がモデルを先に確かめるので、ふつうはここに来ない）
 			panic(fmt.Sprintf("並べ替えのモデルを読めません: %v", err))
 		}
-		for i, v := range model.Scores(inputs) {
+		// 特徴量（順位・候補数・既存規則の順位）は下限で外す前の全候補で作る（学習・検証と同じ順）
+		for i, v := range spec.Scores(inputs) {
 			out[i].Score = &v
+		}
+		if spec.MinTurnover > 0 {
+			// モデルの束の下限より売買代金の小さい候補は建てない（LBZ2 は小さい銘柄に寄り、
+			// 規則 R の建玉が小さくなって資金を使い切らない。vault 2026-09-jp-daytrade-raw-feats）
+			out = slices.DeleteFunc(out, func(r Ranked) bool { return r.Turnover < spec.MinTurnover })
 		}
 		// 予測値の高い順。同値は既存規則の順位
 		slices.SortStableFunc(out, func(a, b Ranked) int { return cmp.Compare(*b.Score, *a.Score) })

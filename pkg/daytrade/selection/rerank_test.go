@@ -101,3 +101,34 @@ func TestTryRankReportsFailure(t *testing.T) {
 		t.Errorf("候補 0 件で誤り: %v", err)
 	}
 }
+
+// モデルの束の売買代金の下限（LBZ2 は 5 億）より小さい候補は並べた後に外し、特徴量は外す前の全候補で作る。
+func TestRankBySpecDropsBelowMinTurnover(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	sig := lgbmSignal(t)
+	sig.Model = filepath.Join(filepath.Dir(file), "..", "..", "..", "config", "daytrade", "models", "lbz2", "manifest.json")
+	vol := 0.02
+	var candidates []universe.Candidate
+	quotes := map[string]Quote{}
+	for i, s := range []string{"1000", "2000", "3000", "4000", "5000", "6000"} {
+		ret, rd2 := -0.01, float64(i-3)*0.01
+		c := candidate(s, 1000, &vol)
+		c.TurnoverMed, c.MktCap = float64(i+1)*2e8, 1e5 // 2・4・6・8・10・12 億
+		c.Ret1, c.RetD2 = &ret, &rd2
+		candidates = append(candidates, c)
+		quotes[s] = quote(s, 1000*(1-0.01*float64(i+1)))
+	}
+	ranked := Rank(candidates, quotes, sig)
+	if len(ranked) != 4 {
+		t.Fatalf("順位表 %d 件、5 億以上の 4 件のはず", len(ranked))
+	}
+	for i, r := range ranked {
+		if r.Turnover < 5e8 || r.Rank != i+1 || r.Score == nil {
+			t.Errorf("%d 行目 %s: 売買代金 %v・順位 %d・予測値 %v", i, r.Symbol, r.Turnover, r.Rank, r.Score)
+		}
+		// 既存規則の順位は外す前の 6 件の中の順位のまま
+		if r.RuleRank < 1 || r.RuleRank > 6 {
+			t.Errorf("%s の既存規則の順位 %d", r.Symbol, r.RuleRank)
+		}
+	}
+}

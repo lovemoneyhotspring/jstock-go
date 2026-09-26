@@ -15,12 +15,12 @@ import (
 // 並べ替えの特徴量と益回りは plan を保存して読み戻しても残る（open は plan しか見ない）。
 func TestSaveLoadKeepsRerankFeatures(t *testing.T) {
 	day, _ := time.Parse(plan.DateLayout, "2026-09-18")
-	ey, r1, r5, r20, pos, pi := 0.05, -0.01, 0.02, -0.08, 0.3, 0.004
+	ey, r1, rd2, r5, r20, pos, pi := 0.05, -0.01, -0.02, 0.02, -0.08, 0.3, 0.004
 	p := plan.Plan{
 		Meta: plan.Meta{Day: "2026-09-18", PrevDay: "2026-09-17", RerankFeatures: plan.RerankFeaturesVersion},
 		Candidates: []universe.Candidate{
 			{Code: "10000", Symbol: "1000", PrevClose: 1000, Eligible: true,
-				EarnYield: &ey, Ret1: &r1, Ret5: &r5, Ret20: &r20, Pos20: &pos, PrevIntraday: &pi},
+				EarnYield: &ey, Ret1: &r1, RetD2: &rd2, Ret5: &r5, Ret20: &r20, Pos20: &pos, PrevIntraday: &pi},
 			{Code: "20000", Symbol: "2000", PrevClose: 500, Eligible: true},
 		},
 	}
@@ -37,7 +37,7 @@ func TestSaveLoadKeepsRerankFeatures(t *testing.T) {
 	}
 	c := loaded.Candidates[0]
 	for name, pair := range map[string][2]*float64{
-		"earn_yield": {c.EarnYield, &ey}, "ret1": {c.Ret1, &r1}, "ret5": {c.Ret5, &r5},
+		"earn_yield": {c.EarnYield, &ey}, "ret1": {c.Ret1, &r1}, "ret_d2": {c.RetD2, &rd2}, "ret5": {c.Ret5, &r5},
 		"ret20": {c.Ret20, &r20}, "pos20": {c.Pos20, &pos}, "prev_intraday": {c.PrevIntraday, &pi},
 	} {
 		if pair[0] == nil || *pair[0] != *pair[1] {

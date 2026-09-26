@@ -866,10 +866,13 @@ func prepareOpen(opts openOptions) (s *openState, done bool, err error) {
 // 取引は止めない。戻した日は異常として残す（日次レポートと night-repair が拾う）。
 func resolveRankBy(cfg dtconfig.Config, p dtplan.Plan, eligible []universe.Candidate, quotes map[string]selection.Quote) dtconfig.Config {
 	resolved, reason := p.RankConfig(cfg)
-	// 米国小幅高の日だけ LightGBM を使う設定（rank_by_us_low）でも、当日の気配で試し並べしておく。
-	// 小幅高の日の朝になって初めて失敗するより、毎朝 1 回試して落ちる日を先に見つけるほうがよい
-	if reason == "" && resolved.Signal.UsesLGBM() {
-		if _, err := selection.TryRank(eligible, quotes, resolved.Signal.ForDay(true)); err != nil {
+	// 平常日・米国小幅高の日のどちらか一方だけ LightGBM を使う設定でも、使う日のモデルを当日の気配で
+	// 試し並べしておく。小幅高の日の朝になって初めて失敗するより、毎朝 1 回試して落ちる日を先に見つけるほうがよい
+	for _, usLow := range []bool{false, true} {
+		if reason != "" || resolved.Signal.RankForDay(usLow) != dtconfig.RankByLGBM {
+			continue
+		}
+		if _, err := selection.TryRank(eligible, quotes, resolved.Signal.ForDay(usLow)); err != nil {
 			resolved, reason = cfg.FallbackToGapVol(), err.Error()
 		}
 	}

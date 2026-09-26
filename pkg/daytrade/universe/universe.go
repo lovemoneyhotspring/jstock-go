@@ -76,7 +76,10 @@ type Candidate struct {
 	// 直近 20 本の終値レンジ内の位置（0〜1）、PrevIntraday は前日の始値→終値。
 	// 分割・併合は AdjFactor で揃える。足が足りなければ nil。
 	// **並べ替えの機械学習（signal.rank_by = "lgbm"）の特徴量**で、母集団の判定には使わない。
-	Ret1         *float64
+	Ret1 *float64
+	// RetD2 は前々日の終値の騰落率（2 本前 ÷ 3 本前 − 1）。Ret1 と合わせて 2 日続落の特徴量になる
+	// （plan の特徴量の版 2 から）。
+	RetD2        *float64
 	Ret5         *float64
 	Ret20        *float64
 	Pos20        *float64

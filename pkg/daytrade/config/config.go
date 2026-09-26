@@ -222,7 +222,14 @@ type Signal struct {
 	// Model は rank_by = "lgbm" のモデル（LightGBM のテキスト形式）。相対パスは
 	// **この項目を書いた設定ファイルのディレクトリから**（読み込み時に絶対パスにする。
 	// extends で継いだ子の設定からも同じファイルを指すため）。
+	//
+	// .json ならモデルの束のマニフェスト（特徴量の並び・モデル（複数なら予測の平均）・plan の版・
+	// 並べる前の売買代金の下限。rerank.Spec）。学習し直したモデルは束ごと差し替える。
 	Model string `toml:"model"`
+	// ModelUsLow は**米国小幅高の日**に rank_by_us_low = "lgbm" で使うモデル（空なら model）。
+	// 平常日と小幅高の日で別のモデルを使うため（2026-09-26〜、平常日は LBZ2、小幅高の日は従来の 1 本）。
+	// 相対パスの扱いは model と同じ。
+	ModelUsLow string `toml:"model_us_low"`
 	// SkipOpened は 9:01 の時点で**既に寄っている**銘柄を候補から外す。
 	// ロング・ショートの**両方**に効く（気配そのものを落とすため）。
 	//
@@ -266,21 +273,59 @@ func (s Signal) RankForDay(usLow bool) string {
 	return s.RankBy
 }
 
-// ForDay はその日の並べ方を RankBy に入れた設定。選定（selection）にはこれを渡す。
+// ModelForDay はその日に使うモデル。米国小幅高の日だけ model_us_low（空なら model）。
+func (s Signal) ModelForDay(usLow bool) string {
+	if usLow && s.ModelUsLow != "" {
+		return s.ModelUsLow
+	}
+	return s.Model
+}
+
+// ForDay はその日の並べ方を RankBy に、モデルを Model に入れた設定。選定（selection）にはこれを渡す。
 func (s Signal) ForDay(usLow bool) Signal {
 	s.RankBy = s.RankForDay(usLow)
+	s.Model = s.ModelForDay(usLow)
 	return s
+}
+
+// lgbmModels は LightGBM で並べる日に使うモデル（設定の項目名つき）。平常日・小幅高の日の順。
+func (s Signal) lgbmModels() [][2]string {
+	var out [][2]string
+	if s.RankBy == RankByLGBM {
+		out = append(out, [2]string{"signal.model", s.Model})
+	}
+	if s.RankForDay(true) == RankByLGBM {
+		key := "signal.model"
+		if s.ModelUsLow != "" {
+			key = "signal.model_us_low"
+		}
+		if len(out) == 0 || s.ModelForDay(true) != out[0][1] {
+			out = append(out, [2]string{key, s.ModelForDay(true)})
+		}
+	}
+	return out
 }
 
 // ModelError は LightGBM を使う設定でモデルが読めなければその誤り（使わないなら nil）。
 func (s Signal) ModelError() error {
-	if !s.UsesLGBM() {
-		return nil
-	}
-	if _, err := rerank.Cached(s.Model); err != nil {
-		return fmt.Errorf("signal.model: %w", err)
+	for _, m := range s.lgbmModels() {
+		if _, err := rerank.CachedSpec(m[1]); err != nil {
+			return fmt.Errorf("%s: %w", m[0], err)
+		}
 	}
 	return nil
+}
+
+// PlanFeaturesNeeded は LightGBM で並べる日のモデルが要る plan の特徴量の版の最大（使わないなら 0）。
+// 読めないモデルは数えない（ModelError で先に弾く）。
+func (s Signal) PlanFeaturesNeeded() int {
+	need := 0
+	for _, m := range s.lgbmModels() {
+		if spec, err := rerank.CachedSpec(m[1]); err == nil && spec.PlanFeatures > need {
+			need = spec.PlanFeatures
+		}
+	}
+	return need
 }
 
 // FallbackToGapVol は LightGBM で並べられない日の設定（rank_by = gap_vol）。
@@ -830,21 +875,32 @@ func load(configDir string, visited []string) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
-	// signal.model はこのファイルに書かれていたときだけ、このディレクトリから解決する
+	// signal.model / model_us_low はこのファイルに書かれていたときだけ、このディレクトリから解決する
 	var own struct {
 		Signal struct {
-			Model string `toml:"model"`
+			Model      string `toml:"model"`
+			ModelUsLow string `toml:"model_us_low"`
 		} `toml:"signal"`
 	}
 	if err := toml.Unmarshal(raw, &own); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
-	if own.Signal.Model != "" && !filepath.IsAbs(own.Signal.Model) {
-		model, err := filepath.Abs(filepath.Join(configDir, own.Signal.Model))
-		if err != nil {
-			return Config{}, fmt.Errorf("%s: signal.model: %w", path, err)
+	for _, m := range []struct {
+		key      string
+		own      string
+		resolved *string
+	}{
+		{"signal.model", own.Signal.Model, &cfg.Signal.Model},
+		{"signal.model_us_low", own.Signal.ModelUsLow, &cfg.Signal.ModelUsLow},
+	} {
+		if m.own == "" || filepath.IsAbs(m.own) {
+			continue
 		}
-		cfg.Signal.Model = model
+		abs, err := filepath.Abs(filepath.Join(configDir, m.own))
+		if err != nil {
+			return Config{}, fmt.Errorf("%s: %s: %w", path, m.key, err)
+		}
+		*m.resolved = abs
 	}
 	return cfg, nil
 }
@@ -888,8 +944,8 @@ func (c Config) Validate() error {
 	}
 	switch c.Signal.RankBy {
 	case RankByGap, RankByGapVol:
-		if c.Signal.RankByUsLow == RankByLGBM && c.Signal.Model == "" {
-			return fmt.Errorf("signal.rank_by_us_low = %q には signal.model（モデルのファイル）が要る", RankByLGBM)
+		if c.Signal.RankByUsLow == RankByLGBM && c.Signal.ModelForDay(true) == "" {
+			return fmt.Errorf("signal.rank_by_us_low = %q には signal.model か model_us_low（モデルのファイル）が要る", RankByLGBM)
 		}
 	case RankByLGBM:
 		if c.Signal.Model == "" {

@@ -44,7 +44,7 @@ func TestPlanAndPanelRerankFeaturesMatch(t *testing.T) {
 			name        string
 			plan, panel *float64
 		}{
-			{"ret1", c.Ret1, r.Ret1}, {"ret5", c.Ret5, r.Ret5}, {"ret20", c.Ret20, r.Ret20},
+			{"ret1", c.Ret1, r.Ret1}, {"ret_d2", c.RetD2, r.RetD2}, {"ret5", c.Ret5, r.Ret5}, {"ret20", c.Ret20, r.Ret20},
 			{"pos20", c.Pos20, r.Pos20}, {"prev_intraday", c.PrevIntraday, r.PrevIntraday},
 		} {
 			if (f.plan == nil) != (f.panel == nil) {

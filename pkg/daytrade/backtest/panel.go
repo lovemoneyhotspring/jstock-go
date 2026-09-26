@@ -50,6 +50,8 @@ type Row struct {
 	Gap    float64
 	// Ret1 ほかは並べ替えの機械学習の特徴量（universe.Candidate と同じ定義。無ければ nil）。
 	Ret1, Ret5, Ret20, Pos20, PrevIntraday *float64
+	// RetD2 は前々日の騰落（universe.Candidate.RetD2 と同じ定義）。
+	RetD2 *float64
 	// ShortInterest は空売り残高（発行済に対する比。報告が無ければ nil）。
 	// ショートの母集団の条件（margin.max_short_interest）に使う。
 	ShortInterest *float64
@@ -186,7 +188,7 @@ func floorOf(popts PanelOptions, cfg config.Config) float64 {
 // ——前夜の plan と同じ関数（universe）を使うため。
 const panelSelectColumns = `d, code, o, c, prev_close, next_open, vol20, earn_yield, sector,
        segment, shortable, turnover_med, mkt_cap, earn_prev, disc_today, alert, jsf_stop, is_loss,
-       short_interest, ret1, ret5, ret20, pos20, prev_intraday`
+       short_interest, ret1, ret5, ret20, pos20, prev_intraday, ret_d2`
 
 // LoadPanel は (Date, Code) ごとの特徴量と当日の寄付・終値を作る。
 // eligible / short_eligible のどちらかに入る行だけを返す（全銘柄 × 10 年を持つと
@@ -278,13 +280,14 @@ func LoadPanelWith(arch *archive.Archive, start, end time.Time, cfg config.Confi
 				shortInterest     sql.NullFloat64
 				ret1, ret5, ret20 sql.NullFloat64
 				pos20, prevIntra  sql.NullFloat64
+				retD2             sql.NullFloat64
 				gap               sql.NullFloat64
 				limitLow, limitHi sql.NullFloat64
 			)
 			if err := rows.Scan(&r.Date, &r.Code, &r.Open, &r.Close, &prevClose,
 				&nextOpen, &vol20, &earnYield, &sector, &segment, &r.Shortable,
 				&r.TurnoverMed, &mktCap, &r.EarnPrev, &r.DiscToday, &r.Alert, &r.JsfStop, &r.Loss,
-				&shortInterest, &ret1, &ret5, &ret20, &pos20, &prevIntra,
+				&shortInterest, &ret1, &ret5, &ret20, &pos20, &prevIntra, &retD2,
 				&gap, &limitLow, &limitHi); err != nil {
 				return err
 			}
@@ -308,6 +311,7 @@ func LoadPanelWith(arch *archive.Archive, start, end time.Time, cfg config.Confi
 			r.ShortInterest = nullable(shortInterest)
 			r.Ret1, r.Ret5, r.Ret20 = nullable(ret1), nullable(ret5), nullable(ret20)
 			r.Pos20, r.PrevIntraday = nullable(pos20), nullable(prevIntra)
+			r.RetD2 = nullable(retD2)
 			r.Sector, r.Segment = sector.String, segment.String
 			r.LimitLow, r.LimitHigh = limitLow.Float64, limitHi.Float64
 			day = append(day, r)
@@ -444,6 +448,7 @@ rolled AS (
          CASE WHEN count(l.va) OVER win = %d THEN median(l.va) OVER win END AS turnover_med,
          CASE WHEN count(l.ret) OVER vwin = %d THEN stddev_samp(l.ret) OVER vwin END AS vol20,
          lag(l.z, 1) OVER w / lag(l.z, 2) OVER w - 1 AS ret1,
+         lag(l.z, 2) OVER w / lag(l.z, 3) OVER w - 1 AS ret_d2,
          lag(l.z, 1) OVER w / lag(l.z, 5) OVER w - 1 AS ret5,
          lag(l.z, 1) OVER w / lag(l.z, {{pos_days}}) OVER w - 1 AS ret20,
          CASE WHEN count(l.z) OVER pwin = {{pos_days}}
@@ -587,7 +592,7 @@ valued AS (
 // 設定に依存する判定（eligible / short_eligible・ギャップ・制限値幅）は読み出し側で当てる。
 const panelCacheColumns = `SELECT d, code, o, c, prev_close, next_open, next_open_d, vol20, earn_yield,
        sector, segment, shortable, turnover_med, mkt_cap, earn_prev, disc_today, alert, jsf_stop, is_loss,
-       short_interest, ret1, ret5, ret20, pos20, prev_intraday`
+       short_interest, ret1, ret5, ret20, pos20, prev_intraday, ret_d2`
 
 // buildCacheQuery はキャッシュに落とす行を作る SQL。期間は切らず（読み出し側で切る）、
 // 流動性の下限だけで絞る——下限を満たさない行はどの設定でも母集団に入らないため。
@@ -619,7 +624,7 @@ func buildCachedPanelQuery(cachePath string, start, end time.Time, floor float64
        CASE WHEN next_open_d > %[2]s THEN NULL ELSE next_open END AS next_open,
        vol20, earn_yield, sector, segment, shortable, turnover_med, mkt_cap,
        earn_prev, disc_today, alert, jsf_stop, is_loss, short_interest,
-       ret1, ret5, ret20, pos20, prev_intraday,
+       ret1, ret5, ret20, pos20, prev_intraday, ret_d2,
        o / prev_close - 1 AS gap,
        prev_close - (%[3]s) AS limit_low,
        prev_close + (%[3]s) AS limit_high

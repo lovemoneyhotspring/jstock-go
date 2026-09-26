@@ -46,7 +46,9 @@ type Meta struct {
 }
 
 // RerankFeaturesVersion は plan に書く特徴量の版（Meta.RerankFeatures）。
-const RerankFeaturesVersion = 1
+// 1: Ret1 ほか・EarnYield。2: RetD2（前々日の騰落、2 日続落の特徴量）を足した。
+// モデルが要る版はモデルの束（rerank.Spec.PlanFeatures）が持つ。
+const RerankFeaturesVersion = 2
 
 // Plan は候補と要約。
 type Plan struct {
@@ -105,11 +107,14 @@ func (p Plan) RankConfig(cfg config.Config) (config.Config, string) {
 	if !cfg.Signal.UsesLGBM() {
 		return cfg, ""
 	}
-	if p.Meta.RerankFeatures < RerankFeaturesVersion {
+	if p.Meta.RerankFeatures < 1 {
 		return cfg.FallbackToGapVol(), fmt.Sprintf("plan に並べ替えの特徴量が無い（版 %d）", p.Meta.RerankFeatures)
 	}
 	if err := cfg.Signal.ModelError(); err != nil {
 		return cfg.FallbackToGapVol(), err.Error()
+	}
+	if need := cfg.Signal.PlanFeaturesNeeded(); p.Meta.RerankFeatures < need {
+		return cfg.FallbackToGapVol(), fmt.Sprintf("plan に並べ替えの特徴量が無い（版 %d、モデルが要るのは %d）", p.Meta.RerankFeatures, need)
 	}
 	return cfg, ""
 }
@@ -199,6 +204,7 @@ type record struct {
 	// 古い plan には無い列で、読むと nil になる。
 	EarnYield    *float64 `parquet:"earn_yield,optional"`
 	Ret1         *float64 `parquet:"ret1,optional"`
+	RetD2        *float64 `parquet:"ret_d2,optional"`
 	Ret5         *float64 `parquet:"ret5,optional"`
 	Ret20        *float64 `parquet:"ret20,optional"`
 	Pos20        *float64 `parquet:"pos20,optional"`
@@ -228,7 +234,7 @@ func Save(p Plan, directory string) (parquetPath, metaPath string, err error) {
 			Eligible: c.Eligible, ShortEligible: c.ShortEligible,
 			MarginRatio: c.MarginRatio, ShortInterest: c.ShortInterest,
 			EarnYield: c.EarnYield,
-			Ret1:      c.Ret1, Ret5: c.Ret5, Ret20: c.Ret20, Pos20: c.Pos20, PrevIntraday: c.PrevIntraday,
+			Ret1:      c.Ret1, RetD2: c.RetD2, Ret5: c.Ret5, Ret20: c.Ret20, Pos20: c.Pos20, PrevIntraday: c.PrevIntraday,
 			CorpEvent: c.CorpEvent, CorpEventHeadline: c.CorpEventHeadline, CorpEventAt: c.CorpEventAt,
 		})
 	}
@@ -284,7 +290,7 @@ func Load(directory string, day time.Time) (Plan, bool, error) {
 			Eligible: r.Eligible, ShortEligible: r.ShortEligible,
 			MarginRatio: r.MarginRatio, ShortInterest: r.ShortInterest,
 			EarnYield: r.EarnYield,
-			Ret1:      r.Ret1, Ret5: r.Ret5, Ret20: r.Ret20, Pos20: r.Pos20, PrevIntraday: r.PrevIntraday,
+			Ret1:      r.Ret1, RetD2: r.RetD2, Ret5: r.Ret5, Ret20: r.Ret20, Pos20: r.Pos20, PrevIntraday: r.PrevIntraday,
 		})
 	}
 	return Plan{Meta: meta, Candidates: candidates}, true, nil

@@ -44,9 +44,14 @@ func TestLoadRealConfigs(t *testing.T) {
 		if cfg.Regime.UsSkipHigh == nil {
 			t.Errorf("%s: us_skip_high が読めていない", dir)
 		}
-		// 2026-09-20 から平常日は gap_vol で並べる
-		if cfg.Signal.RankBy != RankByGapVol {
-			t.Errorf("%s: rank_by = %q, want %q", dir, cfg.Signal.RankBy, RankByGapVol)
+		// 2026-09-28 から平常日は LBZ2（モデルの束）、米国小幅高の日は従来の 1 本で並べる
+		if cfg.Signal.RankBy != RankByLGBM || filepath.Base(filepath.Dir(cfg.Signal.ModelForDay(false))) != "lbz2" ||
+			filepath.Base(cfg.Signal.ModelForDay(true)) != "lgbm_rank.txt" {
+			t.Errorf("%s: rank_by = %q・平常日 %s・小幅高の日 %s", dir, cfg.Signal.RankBy,
+				cfg.Signal.ModelForDay(false), cfg.Signal.ModelForDay(true))
+		}
+		if err := cfg.Signal.ModelError(); err != nil || cfg.Signal.PlanFeaturesNeeded() != 2 {
+			t.Errorf("%s: モデルを読めない（%v）か plan の版 %d", dir, err, cfg.Signal.PlanFeaturesNeeded())
 		}
 		// 2026-09-21 から米国小幅高の日は「LightGBM・前日終値 −1.5% の寄指・寄る前の回だけ」（この 3 つは組で変える）
 		if cfg.Signal.RankByUsLow != RankByLGBM || cfg.Regime.UsSkipLegs != UsSkipLegsShort ||
@@ -406,5 +411,22 @@ func TestTurnoverMaxPositionsFitsPreopenWindow(t *testing.T) {
 	}
 	if cfg.Capital.Weighting == WeightingTurnover && cfg.Capital.MaxPositions > 10 {
 		t.Errorf("capital.max_positions = %d: 寄成を 9:00 の 1 秒前までに余裕を持って送れるのは 10 本まで", cfg.Capital.MaxPositions)
+	}
+}
+
+// 平常日と米国小幅高の日でモデルを分ける（model_us_low が空なら model）。
+func TestModelForDay(t *testing.T) {
+	s := Signal{RankBy: RankByLGBM, RankByUsLow: RankByLGBM, Model: "a.json"}
+	if s.ModelForDay(true) != "a.json" || s.ForDay(true).Model != "a.json" || len(s.lgbmModels()) != 1 {
+		t.Errorf("model_us_low が空なのに小幅高の日のモデルが %s・%d 本", s.ModelForDay(true), len(s.lgbmModels()))
+	}
+	s.ModelUsLow = "b.txt"
+	if s.ForDay(false).Model != "a.json" || s.ForDay(true).Model != "b.txt" || len(s.lgbmModels()) != 2 {
+		t.Errorf("平常日 %s・小幅高の日 %s・%d 本", s.ForDay(false).Model, s.ForDay(true).Model, len(s.lgbmModels()))
+	}
+	// 平常日が gap_vol なら確かめるのは小幅高の日のモデルだけ
+	s.RankBy = RankByGapVol
+	if m := s.lgbmModels(); len(m) != 1 || m[0] != [2]string{"signal.model_us_low", "b.txt"} {
+		t.Errorf("小幅高の日だけ lgbm の確かめる先 %v", m)
 	}
 }
