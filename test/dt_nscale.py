@@ -46,6 +46,22 @@ def tstat_err(a, b, m):
     return x.mean() / np.sqrt(se_day ** 2 + sd_seed ** 2)
 
 
+def tstat_nested(a, b, m):
+    """入れ子の引き直しの t。a・b は [シード][rep] の日次系列（rep は 2 つ以上、draw_errors の rep）。
+    シード間のばらつきを、同じ材料の中の乱数の揺れ（rep 間）と材料の不確かさに分け、乱数の揺れは引いた本数で割る。
+    se = √(日の標本誤差² + 材料の不確かさ² + 乱数の揺れ² ÷ 本数)。tstat_err（乱数の揺れも丸ごと足す）と日だけの t の間に入る。
+    返り値は (t, 差, 日の標本誤差, 材料の sd, 乱数の sd)。"""
+    D = np.stack([np.stack([ai.values[m] - bi.values[m] for ai, bi in zip(ra, rb)]) for ra, rb in zip(a, b)])  # [S, R, 日]
+    S, R = D.shape[:2]
+    x = D.mean(axis=(0, 1))
+    se_day = x.std(ddof=1) / np.sqrt(len(x))
+    ms = D.mean(axis=2)                                   # [S, R] 引いた 1 本ごとの平均差
+    sd_mc = np.sqrt(ms.var(axis=1, ddof=1).mean())        # 同じ材料の中の乱数の揺れ（1 本あたり）
+    sd_param = np.sqrt(max(0.0, ms.mean(axis=1).var(ddof=1) - sd_mc ** 2 / R))
+    se = np.sqrt(se_day ** 2 + sd_param ** 2 + sd_mc ** 2 / (S * R))
+    return x.mean() / se, x.mean(), se_day, sd_param, sd_mc
+
+
 def tstat(x):
     x = np.asarray(x, dtype=float)
     x = x[~np.isnan(x)]

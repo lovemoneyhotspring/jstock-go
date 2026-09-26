@@ -180,8 +180,9 @@ def fit_error_model(err):
     return m
 
 
-def draw_model(m, te, band, rng, boot):
-    """fit_error_model の形で誤差を引く。boot なら帯の中心・幅・日の揺れの大きさを推定の不確かさから引き直す。"""
+def draw_model(m, te, band, rng, boot, rep=0):
+    """fit_error_model の形で誤差を引く。boot なら帯の中心・幅・日の揺れの大きさを推定の不確かさから引き直す。
+    rep ≥ 1 なら推定の引き直しの後の乱数を [seed, rep] に替える（seed は rng の元の値を引けないので呼び手の rng から派生させる）"""
     B, n = len(BANDS) - 1, m["n_days"]
     mu, s, omega, tau = m["mu"].copy(), m["s"].copy(), m["omega"].copy(), m["tau"].copy()
     if boot:
@@ -189,6 +190,8 @@ def draw_model(m, te, band, rng, boot):
         s += rng.normal(0, np.sqrt(m["vlmad"] / n))
         omega *= np.sqrt(rng.chisquare(n - 1, size=B) / (n - 1))
         tau *= np.sqrt(rng.chisquare(n - 1, size=B) / (n - 1))
+    if rep:
+        rng = np.random.default_rng([int(rng.integers(2**31)), rep])
     di, _ = pd.factorize(te["d"].values)
     nd = di.max() + 1
     delta, v = rng.normal(0, omega, size=(nd, B)), rng.normal(0, tau, size=(nd, B))
@@ -216,11 +219,15 @@ def error_pools(slot, since, mode=None):
     return pools
 
 
-def draw_errors(pools, te, seed):
+def draw_errors(pools, te, seed, rep=0):
     """seed の乱数で、候補 te（gap は小数、d は日付）の気配の誤差 e（%pt）を引く。
-    iid（従来の list も）は各スクリプトにあったループと同じ乱数の流れ（過去の数字を再現する）。"""
+    iid（従来の list も）は各スクリプトにあったループと同じ乱数の流れ（過去の数字を再現する）。
+    rep ≥ 1 は入れ子の引き直し: *_boot の材料の復元抽出（model_boot は推定の引き直し）は seed のまま同じにし、
+    その後の誤差の引きだけ別の乱数にする（tstat_nested が乱数の揺れと材料の不確かさを分けるため）。rep 0 は従来と同じ流れ"""
     band = np.digitize(te["gap"].values * 100, BANDS[1:-1], right=True)
     rng = np.random.default_rng(seed)
+    if rep and not getattr(pools, "mode", "iid").endswith("_boot"):
+        rng = np.random.default_rng([seed, rep])   # 抽出の無い引き方は全部を別の乱数に
     e = np.zeros(len(te))
     mode = getattr(pools, "mode", "iid")
     if mode == "iid":
@@ -229,11 +236,13 @@ def draw_errors(pools, te, seed):
                 e[band == b] = rng.choice(pool, size=int((band == b).sum()))
         return e
     if mode.startswith("model"):
-        return draw_model(pools.model, te, band, rng, mode == "model_boot")
+        return draw_model(pools.model, te, band, rng, mode == "model_boot", rep)
     err = pools.err
     days = pools.days
     if mode.endswith("_boot"):
         days = rng.choice(days, size=len(days), replace=True)
+        if rep:
+            rng = np.random.default_rng([seed, rep])
     rows = pd.concat([err[err["d"] == d] for d in days], ignore_index=True)  # 復元抽出の重複は行の重複として残す
     if mode == "iid_boot":
         for b in range(len(BANDS) - 1):
