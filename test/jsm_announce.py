@@ -10,6 +10,7 @@
 2. 発表の PDF を jpx_rebalance_pdf.parse で読む。件数が本文と合わなければ止まる（終了コード 2、人が確かめる）。
 3. 対象 = 中小型の採用のうち、同じ回の JPX日経400 の採用・除外と重ならない銘柄（検証と同じ）。
 4. 入口 = 発表の翌営業日の寄成、出口 = 組み入れの日（実施日の前営業日）の引成。
+   買うのは売買代金（20 日中央値）の大きい順に上位 --max-names（既定 20）銘柄（vault 20-research/2026-09-jp-jsm-rank.md の R1）。
    単元数 = max(1, round(予算 ÷ 1 単元の金額))。ただし金額が売買代金 20 日中央値の 1% を超えるなら 1% に収まる単元数まで減らす（最低 1）。
 5. vault の 20-research/<年>-08-jsm-adds.md に注文一覧・記入欄・検証用の EVENTS の行を書く。
 """
@@ -49,6 +50,7 @@ def main():
     ap.add_argument('--url', default='')
     ap.add_argument('--vault', default=os.path.expanduser('~/obsidian-vault'))
     ap.add_argument('--budget', type=float, default=float(os.environ.get('JSM_BUDGET_PER_NAME', 500000)))
+    ap.add_argument('--max-names', type=int, default=int(os.environ.get('JSM_MAX_NAMES', 20)))
     ap.add_argument('--dry-run', action='store_true', help='vault と状態に書かず、一覧を標準出力に出す')
     a = ap.parse_args()
     os.makedirs(STATE, exist_ok=True)
@@ -104,8 +106,11 @@ def main():
             capped, n = n2 < n, n2
         rows.append(dict(code=k, name=nm.nm.get(code, ''), mkt=nm.mk.get(code, ''), close=p, unit=unit, units=n,
                          amount=n * unit if n else np.nan, va_oku=v / 1e8 if np.isfinite(v) else np.nan, capped=capped))
-    df = pd.DataFrame(rows).sort_values('code')
-    total = df.amount.sum()
+    df = pd.DataFrame(rows).sort_values('va_oku', ascending=False, na_position='last').reset_index(drop=True)
+    df['rank'] = np.arange(1, len(df) + 1)
+    df['buy'] = df['rank'] <= a.max_names
+    total = df[df.buy].amount.sum()
+    nb = int(df.buy.sum())
     L = ['---', 'type: research', 'domain: 需給', 'project: 新戦術', 'market: 日本株', 'system: wbjp', 'status: 前向き',
          f'date: {date.today()}', f'updated: {date.today()}', 'tags:', '  - 検証', '  - 季節性', '---', '',
          f'# {a.year} 年 8 月 JPX日経中小型株指数の採用（注文一覧）', '',
@@ -115,14 +120,19 @@ def main():
          f'| 入口 | **{entry.date()}**（発表の翌営業日） | 寄成で買う |',
          f'| 出口 | **{exit_.date()}**（組み入れの日 = 実施日 {eff.date()} の前営業日） | 引成で売る |', '',
          f'対象 {len(df)} 銘柄（中小型の採用 {len(r["jsm"]["adds"])} のうち、JPX日経400 の入替と重なる '
-         f'{len(r["jsm"]["adds"]) - len(target)} を除く）。1 銘柄の予算 {a.budget / 1e4:.0f} 万円、'
+         f'{len(r["jsm"]["adds"]) - len(target)} を除く）。**買うのは売買代金の大きい順に上位 {nb} 銘柄**'
+         f'（[[2026-09-jp-jsm-rank]] の R1）。1 銘柄の予算 {a.budget / 1e4:.0f} 万円、'
          f'合計 **{total / 1e4:,.0f} 万円**（{last} の終値で計算。寄りの値で変わる）。',
          '単元数 = 予算 ÷ 1 単元の金額を丸めたもの（最低 1）。売買代金 20 日中央値の 1% を超える銘柄は 1% に収まるまで減らした（印 ※）。', '',
-         '| コード | 銘柄 | 市場 | 終値 | 1 単元（万円） | 単元数 | 金額（万円） | 売買代金（億円/日） | 約定（買い） | 約定（売り） |',
-         '|---|---|---|--:|--:|--:|--:|--:|--:|--:|']
-    for _, x in df.iterrows():
-        L.append(f"| {x.code} | {x['name']} | {x.mkt} | {x.close:,.0f} | {x.unit / 1e4:.1f} | {x.units}{' ※' if x.capped else ''} | "
+         '| 順位 | コード | 銘柄 | 市場 | 終値 | 1 単元（万円） | 単元数 | 金額（万円） | 売買代金（億円/日） | 約定（買い） | 約定（売り） |',
+         '|--:|---|---|---|--:|--:|--:|--:|--:|--:|--:|']
+    for _, x in df[df.buy].iterrows():
+        L.append(f"| {x['rank']} | {x.code} | {x['name']} | {x.mkt} | {x.close:,.0f} | {x.unit / 1e4:.1f} | {x.units}{' ※' if x.capped else ''} | "
                  f"{x.amount / 1e4:.1f} | {x.va_oku:.2f} |  |  |")
+    rest = df[~df.buy]
+    if len(rest):
+        L += ['', f'買わない {len(rest)} 銘柄（{a.max_names + 1} 位以下。検証では全銘柄を測る）: '
+              + '、'.join(f"{x.code} {x['name']}" for _, x in rest.iterrows())]
     L += ['', '## 検証用（組み入れの後に足す）', '',
           '9 月上旬、J-Quants に出口の日の日足が入ったら、下の行を `test/jsm_rebalance.py` と `test/j400_rebalance.py` の EVENTS に足し、'
           '`test/jsm_add_control.py`・`test/jsm_add_bias.py` を回して [[2026-09-jp-jsm-rebalance]] の「前向きの記録」に書く。', '',
@@ -131,7 +141,8 @@ def main():
           f"# j400_rebalance.py\n    ('{ann.date()}', '{eff.date()}', '''\n        {' '.join(sorted(r['j400']['adds']))}\n     ''', '''\n        {' '.join(sorted(r['j400']['dels']))}\n     '''),",
           '```', '']
     text = '\n'.join(L)
-    summary = (f'{a.year} 年の JPX日経中小型株指数の採用: 対象 {len(df)} 銘柄・合計 {total / 1e4:,.0f} 万円（1 銘柄 {a.budget / 1e4:.0f} 万円）。'
+    summary = (f'{a.year} 年の JPX日経中小型株指数の採用: 対象 {len(df)} 銘柄のうち売買代金の上位 {nb} 銘柄を買う。'
+               f'合計 {total / 1e4:,.0f} 万円（1 銘柄 {a.budget / 1e4:.0f} 万円）。'
                f'{entry.date()} の寄成で買い、{exit_.date()} の引成で売る。一覧は vault {note_rel}')
     if a.dry_run:
         print(text)
@@ -139,7 +150,7 @@ def main():
         return 0
     open(os.path.join(a.vault, note_rel), 'w').write(text)
     json.dump(dict(url=url, ann=str(ann.date()), eff=r['eff'], entry=str(entry.date()), exit=str(exit_.date()),
-                   n=len(df), total=total, summary=summary), open(os.path.join(STATE, f'{a.year}.json'), 'w'), ensure_ascii=False)
+                   n=len(df), n_buy=nb, total=total, summary=summary), open(os.path.join(STATE, f'{a.year}.json'), 'w'), ensure_ascii=False)
     print(summary)
     return 0
 
