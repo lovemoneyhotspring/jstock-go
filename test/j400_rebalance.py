@@ -15,6 +15,9 @@
   2015〜2019・2021〜2026 の 11 回（採用 408・除外 380）。2014 年（初回）と 2020 年の発表資料は JPX のサイトにも
   Web Archive にも見つからず、入れていない。非定期の除外（上場廃止など）は入れない。
   実施日は各資料の「定期入替実施日」。指数への組み入れは実施日の前営業日の引け。
+  （回した後の注記: 調整後の株価は 2016-09 から、TOPIX の始値は 2016-08 からしか無く、2015・2016 の 2 回は
+   測れなかった。有効な標本は 2017〜2019・2021〜2026 の 9 回（IS 5・OOS 4）。基準は変えていない。
+   発表前 20 日が無い回で負の添字が末尾を読んでいたのを直した（P0 の報告だけに影響）)
 ■ 窓（発表は引け後とみなす）
   R1（本命）: 発表日の翌営業日の寄りで、採用を売り・除外を買う → 実施日の前営業日（組み入れの日）の引けで返す。
       日経平均で見えた「発表の後は組み入れへ向けて巻き戻る」向き。
@@ -171,6 +174,8 @@ def main():
         b = pos_before(eff)          # 実施日の前営業日（組み入れの日）
         z = b + W2_DAYS
         p = a0 - P0_DAYS
+        if p < 0:                    # 発表前の 20 日がデータに無い（負の添字で末尾を読まない）
+            p = None
         for side, codes in ((1, adds.split()), (-1, dels.split())):
             for k in codes:
                 code = k + '0'
@@ -187,7 +192,7 @@ def main():
                     r['r1_ex'] = ex
                     r['r1'] = -side * ex - cost - (BORROW * hold / 245 if side > 0 else 0)
                     r['f1'] = side * ex - cost - (BORROW * hold / 245 if side < 0 else 0)
-                if np.isfinite(C[p]) and np.isfinite(C[a0]):
+                if p is not None and np.isfinite(C[p]) and np.isfinite(C[a0]):
                     r['p0_ex'] = (C[a0] / C[p] - 1) - (tp.close.iloc[a0] / tp.close.iloc[p] - 1)
                 if z < len(tdays) and np.isfinite(C[b]) and np.isfinite(C[z]):
                     ex2 = (C[z] / C[b] - 1) - (tp.close.iloc[z] / tp.close.iloc[b] - 1)
@@ -230,7 +235,8 @@ def main():
     print('全回の平均:', (g.mean()).round(1).to_dict())
     ns = df[(df.side > 0) & ~df.shortable.astype(bool)].shape[0]
     print(f'\nR1 で売る採用銘柄のうち貸借でないもの: {ns}/{int((df.side > 0).sum())}')
-    print('時価総額の中央値（億円）:', (df.groupby('side').mcap.median() / 1e8).round(0).to_dict())
+    mc = df[df.mcap > 0]
+    print('時価総額の中央値（億円）:', (mc.groupby('side').mcap.median() / 100).round(0).to_dict(), f'（値のある {len(mc)} 件）')
 
 
 if __name__ == '__main__':
