@@ -248,14 +248,14 @@ func TestSizeDayLiveConfigPaused(t *testing.T) {
 		wantBudget, wantSpill int64
 		wantTotalAtMost       int64
 	}{
-		// 規則 R（weighting = turnover）: N = max_positions = 10 で、N × 1 注文が総額。
+		// 規則 R（weighting = turnover）: N = max_positions（2026-09-28〜 F6 の 6）で、N × 1 注文が総額。
 		// 枠 200 万がロングに回って総額 700 万（長短合計は停止前と同じ）。保証金の比
 		// （margin.capacity_ratio）は open の applyMarginCap が当てるので、ここは設定の値のまま
-		{name: "通常の日", verdict: normal, wantN: 10, wantBudget: 699_999, wantSpill: 1_999_998, wantTotalAtMost: 6_999_990},
+		{name: "通常の日", verdict: normal, wantN: 6, wantBudget: 1_166_666, wantSpill: 1_999_998, wantTotalAtMost: 6_999_996},
 		// 米国小幅高の日もショートは停止のまま倍率を残すので、通常日と同じ形
-		{name: "米国小幅高の日", verdict: shortOff, wantN: 10, wantBudget: 699_999, wantSpill: 1_999_998, wantTotalAtMost: 6_999_990},
-		// ショック日はショート ×0 なので回す枠が無い（ロング 500 万 × 1.5 = 750 万を 10 位まで）
-		{name: "ショック日", verdict: shock, wantN: 10, wantBudget: 750_000, wantSpill: 0, wantTotalAtMost: 7_500_000},
+		{name: "米国小幅高の日", verdict: shortOff, wantN: 6, wantBudget: 1_166_666, wantSpill: 1_999_998, wantTotalAtMost: 6_999_996},
+		// ショック日はショート ×0 なので回す枠が無い（ロング 500 万 × 1.5 = 750 万を 6 位まで）
+		{name: "ショック日", verdict: shock, wantN: 6, wantBudget: 1_250_000, wantSpill: 0, wantTotalAtMost: 7_500_000},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			d := SizeDay(SizingInput{Cfg: cfg, Verdict: c.verdict})
@@ -294,13 +294,13 @@ func TestSizeDayRatioStaysWithinCapacity(t *testing.T) {
 	}{
 		// 平日: ロング 494 万 + 回したショート 198 万 = 691 万（上限 = 建可能額 11,150,590 × 62% = 6,913,365）
 		{name: "平日", sinkidate: 11_150_590, verdict: regime.Verdict{Trade: true, Scale: 1},
-			wantTotal: 6_913_350, atMost: 6_913_365},
+			wantTotal: 6_913_362, atMost: 6_913_365},
 		// ショック日: ロング 494 万 × 1.5 = 741 万 < 上限 803 万（ショートは ×0 で回す枠なし）
 		{name: "ショック日", sinkidate: 11_150_590, verdict: regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: 1.5},
-			wantTotal: 7_407_170, atMost: 8_028_424},
+			wantTotal: 7_407_174, atMost: 8_028_424},
 		// 天井に達した口座のショック日: ロング 800 万 × 1.5 = 1,200 万 → 天井 1,000 万で頭打ち
 		{name: "天井のショック日", sinkidate: 20_000_000, verdict: regime.Verdict{Trade: true, Scale: 1, Shock: true, ShockLong: 1.5},
-			wantTotal: 10_000_000, atMost: 10_000_000},
+			wantTotal: 9_999_996, atMost: 10_000_000},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cfg, res := margincap.Apply(base, margincap.Snapshot{Day: "2026-09-24", SinyouSinkidate: yenOf(c.sinkidate)})

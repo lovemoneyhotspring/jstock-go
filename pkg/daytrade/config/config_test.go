@@ -26,10 +26,10 @@ func TestLoadRealConfigs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", dir, err)
 		}
-		// 信用版は規則 R（weighting = turnover）で N = max_positions = 10（2026-09-25〜）
+		// 信用版は規則 R（weighting = turnover）で N = max_positions。2026-09-25〜 10、2026-09-28〜 F6 の 6
 		wantN := 3
 		if cfg.Capital.Weighting == WeightingTurnover {
-			wantN = 10
+			wantN = 6
 		}
 		if cfg.Capital.Positions() != wantN {
 			t.Errorf("%s: N = %d, want %d", dir, cfg.Capital.Positions(), wantN)
@@ -380,7 +380,7 @@ func TestValidateTurnoverAndCapacity(t *testing.T) {
 		{"turnover_ratio が 0", func(c *Config) { c.Capital.TurnoverRatio = decimal.Zero }},
 		{"turnover_ratio が大きすぎる", func(c *Config) { c.Capital.TurnoverRatio = decimal.RequireFromString("0.1") }},
 		{"name_divisor が 0", func(c *Config) { c.Capital.NameDivisor = 0 }},
-		{"max_positions が name_divisor より小さい", func(c *Config) { c.Capital.MaxPositions = 5 }},
+		{"max_positions が name_divisor より小さい", func(c *Config) { c.Capital.MaxPositions = c.Capital.NameDivisor - 1 }},
 		{"ショートに turnover", func(c *Config) { c.Margin.Weighting = WeightingTurnover }},
 		{"現物（margin 無効）に turnover", func(c *Config) {
 			c.Margin.Enabled = false

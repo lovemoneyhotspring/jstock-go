@@ -49,13 +49,20 @@ max_order = 2500000        # 1 銘柄の上限（1 注文予算の 1.5 倍）。
 # （12 本が境目）のときに 1 秒の余裕で決めた値のまま。資金 700 万では 1 日の銘柄数は
 # 中央値 9・90% 点 10 で、10 本で止めて使えない資金は平均 0.46%（11 本 0.09%・12 本 0.02%）。
 # test/dt_preopen_timing.py の margin_s を見て 11〜12 へ上げてよい（上げたら config_test.go の上限も直す）
-# ÷ 7 は 1 銘柄が総額の 14% まで（÷ 5〜÷ 9 は差が無く、集中を避ける好みで選んだ）。
+# ÷ 7 は 1 銘柄が総額の 14% まで（÷ 5〜÷ 9 は差が無く、集中を避ける好みで選んだ）——2026-09-27 までの R7 の話。今は下の F6。
 # 研究ノート 20-research/2026-09-jp-daytrade-nscale.md。上の max_capital は保証金が読めない朝の値
-# （[margin] capacity_ratio が毎朝の建可能額から決め直す）。max_order は規則 R では総額 ÷ 7 が先に効く
+# （[margin] capacity_ratio が毎朝の建可能額から決め直す）。max_order は規則 R では総額 ÷ name_divisor が先に効く
+# **2026-09-28〜 F6（前寄せ）: name_divisor = 4・max_positions = 6（ユーザ判断。事前登録の本判定＝気配の誤差の材料 20 日を待たずに入れた）。**
+# 順位の効きは 1〜5 位が有意で 7〜10 位はコスト後ほぼ 0（walk-forward の LBZ2 でも同じ）なので、6 本に絞り上から総額 ÷ 4 ずつ埋める。
+# walk-forward の LBZ2・誤差なしで OOS 損益 1,150 → 1,574 万・Sharpe 2.36 → 2.74（日次差 t 3.41）、
+# 気配の誤差・注文の値動き込みの予備（材料 7 日）で +2,720 円/日（t 2.06、10/10 シード）。6 本で等分（÷ 6）は R7 に勝たない。
+# turnover_ratio は 0.2% のまま（0.1% は悪化、0.3・0.5% は F6 では値動きで悪化）。
+# 10/22 前後に test/dt_rank_allocation_err.py F6 T6 --ratios 0.002 で本判定。× なら name_divisor = 7・max_positions = 10 に戻す。
+# 研究ノート 20-research/2026-09-jp-daytrade-rank-allocation.md
 weighting = "turnover"
 turnover_ratio = 0.002
-name_divisor = 7
-max_positions = 10
+name_divisor = 4
+max_positions = 6
 
 # [signal]（rank_by = lgbm とモデルを含む）は土台 config/daytrade をそのまま継ぐ。
 # ロングの規則は土台と子で同一であること（config_test の TestMarginConfigMatchesBaseLongRules）。
