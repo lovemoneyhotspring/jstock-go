@@ -127,7 +127,9 @@ def error_frame(slot, since):
     return err
 
 
-ERR_MODES = ("iid", "day", "iid_boot", "day_boot")
+ERR_MODES = ("iid", "day", "iid_boot", "day_boot", "model", "model_boot")
+# model の残差をまとめる帯の組（深い 0〜1・中 2〜4・上 5）。帯ごとだと深い帯の行が数百しかない
+RESID_GROUPS = [(0, 1), (2, 3, 4), (5,)]
 MIN_ERR_DAYS = 10   # これより少ない日数の誤差で出した数字は、判定に使わない（2026-09-25、vault 2026-09-jp-daytrade-sim-parity）
 
 
@@ -136,12 +138,65 @@ class ErrorPools(list):
       iid       帯ごとに銘柄ごと独立に引く（従来）
       day       過去の日ごとに実測の 1 日を当て、その日の同じ帯の行から引く（同じ日の銘柄の誤差の相関を残す）
       iid_boot  シードごとに実測の日を復元抽出し直してから iid（誤差の分布が数日分しかない不確かさをシード間に出す）
-      day_boot  同じく復元抽出してから day"""
+      day_boot  同じく復元抽出してから day
+      model     誤差を「帯の中心 + 日の中心のずれ + 幅 × exp(日の幅のゆれ) × 標準化残差」に分けて引く（fit_error_model）。
+                日の揺れは帯ごとの正規分布（標本の揺れを引いた分散）、残差は帯の組ごとに全日をまとめた実測
+      model_boot  同じく、シードごとに帯の中心・幅・日の揺れの大きさを推定の不確かさ（日数 n）から引き直してから model"""
 
     def __init__(self, err, mode):
         super().__init__(err.loc[err["band"] == b, "e"].values for b in range(len(BANDS) - 1))
         self.err, self.mode = err, mode
         self.days = np.array(sorted(err["d"].unique()))
+        self.model = fit_error_model(err) if mode.startswith("model") else None
+
+
+def fit_error_model(err):
+    """帯ごとの日の中央値・log MAD（×1.4826）から、中心 mu・幅 s・日の中心のずれの sd omega・日の幅のゆれの sd tau を推定する。
+    omega・tau は日ごとの値の分散から標本の揺れ（中央値 1.2533·MAD/√n、log MAD 1.1/√n）を引いた分（負なら 0）。
+    残差は (e − その日その帯の中央値) ÷ その日その帯の MAD を帯の組（RESID_GROUPS）でまとめる。"""
+    B = len(BANDS) - 1
+    mad = lambda x: (x - x.median()).abs().median() * 1.4826  # noqa: E731
+    t = err.groupby(["d", "band"])["e"].agg(n="size", med="median", mad=mad)
+    t = t[t["mad"] > 0]
+    t["lmad"] = np.log(t["mad"])
+    m = {k: np.zeros(B) for k in ("mu", "s", "omega", "tau", "vmed", "vlmad")}
+    for b in range(B):
+        x = t.xs(b, level="band") if b in t.index.get_level_values("band") else t.iloc[:0]
+        if len(x) < 2:
+            continue
+        m["mu"][b], m["s"][b] = x["med"].mean(), x["lmad"].mean()
+        m["vmed"][b], m["vlmad"][b] = x["med"].var(), x["lmad"].var()
+        m["omega"][b] = np.sqrt(max(0.0, m["vmed"][b] - np.mean((1.2533 * x["mad"]) ** 2 / x["n"])))
+        m["tau"][b] = np.sqrt(max(0.0, m["vlmad"][b] - np.mean(1.1 ** 2 / x["n"])))
+    key = pd.MultiIndex.from_arrays([err["d"], err["band"]])
+    r = (err["e"].values - t["med"].reindex(key).values) / t["mad"].reindex(key).values
+    ok = np.isfinite(r)
+    m["resid"] = [r[ok & err["band"].isin(grp).values] for grp in RESID_GROUPS]
+    m["group"] = np.zeros(B, dtype=int)
+    for k, grp in enumerate(RESID_GROUPS):
+        m["group"][list(grp)] = k
+    m["n_days"] = err["d"].nunique()
+    return m
+
+
+def draw_model(m, te, band, rng, boot):
+    """fit_error_model の形で誤差を引く。boot なら帯の中心・幅・日の揺れの大きさを推定の不確かさから引き直す。"""
+    B, n = len(BANDS) - 1, m["n_days"]
+    mu, s, omega, tau = m["mu"].copy(), m["s"].copy(), m["omega"].copy(), m["tau"].copy()
+    if boot:
+        mu += rng.normal(0, np.sqrt(m["vmed"] / n))
+        s += rng.normal(0, np.sqrt(m["vlmad"] / n))
+        omega *= np.sqrt(rng.chisquare(n - 1, size=B) / (n - 1))
+        tau *= np.sqrt(rng.chisquare(n - 1, size=B) / (n - 1))
+    di, _ = pd.factorize(te["d"].values)
+    nd = di.max() + 1
+    delta, v = rng.normal(0, omega, size=(nd, B)), rng.normal(0, tau, size=(nd, B))
+    r = np.empty(len(te))
+    for k, pool in enumerate(m["resid"]):
+        sel = m["group"][band] == k
+        if sel.any():
+            r[sel] = rng.choice(pool, size=int(sel.sum()))
+    return mu[band] + delta[di, band] + np.exp(s[band] + v[di, band]) * r
 
 
 def error_pools(slot, since, mode=None):
@@ -172,6 +227,8 @@ def draw_errors(pools, te, seed):
             if (band == b).any():
                 e[band == b] = rng.choice(pool, size=int((band == b).sum()))
         return e
+    if mode.startswith("model"):
+        return draw_model(pools.model, te, band, rng, mode == "model_boot")
     err = pools.err
     days = pools.days
     if mode.endswith("_boot"):
