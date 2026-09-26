@@ -66,6 +66,7 @@ def monthly():
         md = np.nonzero((tdays.year == p.year) & (tdays.month == p.month))[0]
         if len(md) < 10:
             continue
+        md = md[np.isfinite(O[md]).any(axis=1)]  # 終日止まった日（2020-10-01）は個別株の値が無い
         a, b = md[0], md[-1]
         prior = [d for d in sdays if d < tdays[a]]
         g = snaps[prior[-1]]
