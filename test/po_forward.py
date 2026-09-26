@@ -75,7 +75,8 @@ def main():
         d = pd.Timestamp(ts.date())
         return bdays[int(np.searchsorted(bdays, d, side='left' if ts.hour < 9 else 'right')) - 1]
 
-    old = pd.read_csv(os.path.join(STATE, 'state.csv'), dtype={'code': str}) if os.path.exists(os.path.join(STATE, 'state.csv')) else pd.DataFrame()
+    sp = os.path.join(STATE, 'state.csv')
+    old = pd.read_csv(sp, dtype={'code': str}) if os.path.exists(sp) and os.path.getsize(sp) > 1 else pd.DataFrame()
     rows = []
     for _, e in po.iterrows():
         code, ts = e.code, e.pubdate
@@ -107,12 +108,14 @@ def main():
                 r['p1_ex_bp'] = ex * 1e4
                 r['p1_real_bp'] = (-ex - cost - BORROW * hold / 245 - r.get('fee_mean', 0.0) / 100 * cal_days / 365) * 1e4
         rows.append(r)
-    new = pd.DataFrame(rows)
+    COLS = ['code', 'name', 'ann', 'shortable', 'entry', 'price_at', 'exit', 'flags', 'fee_mean', 'p1_ex_bp', 'p1_real_bp']
+    new = pd.DataFrame(rows, columns=COLS) if not rows else pd.DataFrame(rows)
     for d in (old, new):
         if len(d):
             d['ann'] = pd.to_datetime(d['ann']).dt.strftime('%Y-%m-%d %H:%M:%S')
             d['code'] = d['code'].astype(str)
     st = pd.concat([old, new]).drop_duplicates(['code', 'ann'], keep='last') if len(old) else new
+    st = st.reindex(columns=list(dict.fromkeys(COLS + list(st.columns))))
     st.to_csv(os.path.join(STATE, 'state.csv'), index=False)
     write_note(st, args.vault)
     print(f'前向きの事象 {len(st)} 件（今回見た {len(new)} 件）')
